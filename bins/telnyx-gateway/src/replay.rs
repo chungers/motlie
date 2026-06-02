@@ -1,24 +1,99 @@
 use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{bail, Context};
 use motlie_model::typed::{AudioBuf, Mono};
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::pipeline::convert::{downmix_to_mono, f32_to_i16_clamped};
 use motlie_voice::wav::decode_streaming_wav_to_f32;
+use serde::Deserialize;
 
 use crate::adapter::{AsrTranscriptEvent, SharedAsrFactory};
-use crate::cli::ReplayCaptureArgs;
+use crate::cli::{ReplayCaptureArgs, ReplayCorpusArgs};
 
 const ASR_INPUT_WAV: &str = "asr-input-16khz.wav";
 const ASR_SAMPLE_RATE_HZ: u32 = 16_000;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReplayReport {
+#[derive(Clone)]
+pub struct ReplayBackend {
+    label: String,
+    asr: SharedAsrFactory,
+}
+
+impl ReplayBackend {
+    pub fn new(label: impl Into<String>, asr: SharedAsrFactory) -> Self {
+        Self {
+            label: label.into(),
+            asr,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CorpusReplayReport {
+    pub manifest_path: String,
+    pub entries: Vec<CorpusEntryReplayReport>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CorpusEntryReplayReport {
+    pub id: String,
+    pub description: Option<String>,
+    pub codec: String,
+    pub media_sample_rate_hz: u32,
+    pub direction: String,
     pub capture_dir: String,
     pub wav_path: String,
+    pub baseline: Option<CorpusBaselineReport>,
+    pub notes: Option<String>,
+    pub reports: Vec<ReplayReport>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CorpusBaselineReport {
+    pub backend: String,
+    pub wer_percent: f64,
+    pub errors: usize,
+    pub reference_words: usize,
+    pub hypothesis_words: Option<usize>,
+    pub substitutions: Option<usize>,
+    pub deletions: Option<usize>,
+    pub insertions: Option<usize>,
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayReport {
+    pub backend: String,
+    pub capture_dir: String,
+    pub wav_path: String,
+    pub wav_sample_rate_hz: u32,
+    pub wav_channels: u16,
     pub sample_count: usize,
+    pub chunk_ms: u32,
     pub transcript: String,
     pub wer: Option<WerReport>,
+    pub latency: ReplayLatencyReport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayLatencyReport {
+    pub audio_ms: u64,
+    pub chunk_count: usize,
+    pub ingest_total_ms: u128,
+    pub ingest_max_ms: u128,
+    pub finish_ms: u128,
+    pub wall_ms: u128,
+}
+
+impl ReplayLatencyReport {
+    pub fn ingest_avg_ms(&self) -> f64 {
+        if self.chunk_count == 0 {
+            return 0.0;
+        }
+        self.ingest_total_ms as f64 / self.chunk_count as f64
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,8 +130,59 @@ pub enum WerTokenError {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct GoldenCorpusManifest {
+    schema_version: u32,
+    entries: Vec<GoldenCorpusEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct GoldenCorpusEntry {
+    id: String,
+    description: Option<String>,
+    capture_dir: PathBuf,
+    asr_input_wav: Option<PathBuf>,
+    reference_text: Option<String>,
+    reference_file: Option<PathBuf>,
+    codec: String,
+    media_sample_rate_hz: u32,
+    direction: String,
+    baseline: Option<GoldenCorpusBaseline>,
+    notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct GoldenCorpusBaseline {
+    backend: String,
+    wer_percent: f64,
+    errors: usize,
+    reference_words: usize,
+    hypothesis_words: Option<usize>,
+    substitutions: Option<usize>,
+    deletions: Option<usize>,
+    insertions: Option<usize>,
+    source: Option<String>,
+}
+
+impl From<&GoldenCorpusBaseline> for CorpusBaselineReport {
+    fn from(baseline: &GoldenCorpusBaseline) -> Self {
+        Self {
+            backend: baseline.backend.clone(),
+            wer_percent: baseline.wer_percent,
+            errors: baseline.errors,
+            reference_words: baseline.reference_words,
+            hypothesis_words: baseline.hypothesis_words,
+            substitutions: baseline.substitutions,
+            deletions: baseline.deletions,
+            insertions: baseline.insertions,
+            source: baseline.source.clone(),
+        }
+    }
+}
+
 pub async fn replay_capture(
     args: &ReplayCaptureArgs,
+    backend_label: &str,
     asr: SharedAsrFactory,
 ) -> anyhow::Result<ReplayReport> {
     if args.chunk_ms == 0 {
@@ -64,8 +190,136 @@ pub async fn replay_capture(
     }
 
     let wav_path = args.capture_dir.join(ASR_INPUT_WAV);
-    let file = File::open(&wav_path)
-        .with_context(|| format!("open capture WAV {}", wav_path.display()))?;
+    let reference = reference_text(args)?;
+    replay_capture_wav(
+        &args.capture_dir,
+        &wav_path,
+        reference.as_deref(),
+        args.chunk_ms,
+        backend_label,
+        asr,
+    )
+    .await
+}
+
+pub async fn replay_corpus(
+    args: &ReplayCorpusArgs,
+    backends: Vec<ReplayBackend>,
+) -> anyhow::Result<CorpusReplayReport> {
+    if args.chunk_ms == 0 {
+        bail!("--chunk-ms must be greater than zero");
+    }
+    if backends.is_empty() {
+        bail!("at least one replay backend is required");
+    }
+
+    let manifest = load_manifest(&args.manifest)?;
+    let manifest_dir = args.manifest.parent().unwrap_or_else(|| Path::new("."));
+    let mut entries = Vec::new();
+
+    for entry in &manifest.entries {
+        let capture_dir = resolve_manifest_path(manifest_dir, &entry.capture_dir);
+        let wav_path = resolve_entry_wav_path(&capture_dir, entry);
+        let reference = entry_reference_text(entry, manifest_dir)?;
+        let mut reports = Vec::new();
+
+        for backend in &backends {
+            let report = replay_capture_wav(
+                &capture_dir,
+                &wav_path,
+                Some(&reference),
+                args.chunk_ms,
+                &backend.label,
+                backend.asr.clone(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "replay corpus entry '{}' with backend '{}'",
+                    entry.id, backend.label
+                )
+            })?;
+            reports.push(report);
+        }
+
+        entries.push(CorpusEntryReplayReport {
+            id: entry.id.clone(),
+            description: entry.description.clone(),
+            codec: entry.codec.clone(),
+            media_sample_rate_hz: entry.media_sample_rate_hz,
+            direction: entry.direction.clone(),
+            capture_dir: capture_dir.display().to_string(),
+            wav_path: wav_path.display().to_string(),
+            baseline: entry.baseline.as_ref().map(CorpusBaselineReport::from),
+            notes: entry.notes.clone(),
+            reports,
+        });
+    }
+
+    Ok(CorpusReplayReport {
+        manifest_path: args.manifest.display().to_string(),
+        entries,
+    })
+}
+
+fn load_manifest(path: &Path) -> anyhow::Result<GoldenCorpusManifest> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read golden corpus manifest {}", path.display()))?;
+    let manifest: GoldenCorpusManifest = serde_json::from_str(&raw)
+        .with_context(|| format!("parse golden corpus manifest {}", path.display()))?;
+    if manifest.schema_version != 1 {
+        bail!(
+            "unsupported golden corpus manifest schema_version {}; expected 1",
+            manifest.schema_version
+        );
+    }
+    if manifest.entries.is_empty() {
+        bail!("golden corpus manifest must contain at least one entry");
+    }
+    Ok(manifest)
+}
+
+fn entry_reference_text(entry: &GoldenCorpusEntry, manifest_dir: &Path) -> anyhow::Result<String> {
+    if let Some(reference) = &entry.reference_text {
+        return Ok(reference.clone());
+    }
+    if let Some(path) = &entry.reference_file {
+        let path = resolve_manifest_path(manifest_dir, path);
+        return std::fs::read_to_string(&path)
+            .with_context(|| format!("read reference transcript {}", path.display()));
+    }
+    bail!(
+        "golden corpus entry '{}' must set reference_text or reference_file",
+        entry.id
+    )
+}
+
+fn resolve_manifest_path(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+fn resolve_entry_wav_path(capture_dir: &Path, entry: &GoldenCorpusEntry) -> PathBuf {
+    match &entry.asr_input_wav {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => capture_dir.join(path),
+        None => capture_dir.join(ASR_INPUT_WAV),
+    }
+}
+
+async fn replay_capture_wav(
+    capture_dir: &Path,
+    wav_path: &Path,
+    reference: Option<&str>,
+    chunk_ms: u32,
+    backend_label: &str,
+    asr: SharedAsrFactory,
+) -> anyhow::Result<ReplayReport> {
+    let file =
+        File::open(wav_path).with_context(|| format!("open capture WAV {}", wav_path.display()))?;
     let (spec, samples) = decode_streaming_wav_to_f32(file)
         .with_context(|| format!("decode capture WAV {}", wav_path.display()))?;
     if spec.sample_rate != ASR_SAMPLE_RATE_HZ {
@@ -76,26 +330,33 @@ pub async fn replay_capture(
     }
     let mono = downmix_to_mono(&samples, spec.channels)?;
     let i16_samples = f32_to_i16_clamped(&mono);
-    let transcript = replay_samples(&i16_samples, args.chunk_ms, asr).await?;
-    let reference = reference_text(args)?;
-    let wer = reference
-        .as_deref()
-        .map(|reference| compute_wer(reference, &transcript));
+    let run = replay_samples(&i16_samples, chunk_ms, asr).await?;
+    let wer = reference.map(|reference| compute_wer(reference, &run.transcript));
 
     Ok(ReplayReport {
-        capture_dir: args.capture_dir.display().to_string(),
+        backend: backend_label.to_string(),
+        capture_dir: capture_dir.display().to_string(),
         wav_path: wav_path.display().to_string(),
+        wav_sample_rate_hz: spec.sample_rate,
+        wav_channels: spec.channels,
         sample_count: i16_samples.len(),
-        transcript,
+        chunk_ms,
+        transcript: run.transcript,
         wer,
+        latency: run.latency,
     })
+}
+
+struct ReplayRun {
+    transcript: String,
+    latency: ReplayLatencyReport,
 }
 
 async fn replay_samples(
     samples: &[i16],
     chunk_ms: u32,
     asr: SharedAsrFactory,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ReplayRun> {
     let chunk_samples = ((u64::from(ASR_SAMPLE_RATE_HZ) * u64::from(chunk_ms)) / 1_000) as usize;
     if chunk_samples == 0 {
         bail!("--chunk-ms is too small for {ASR_SAMPLE_RATE_HZ} Hz audio");
@@ -103,17 +364,43 @@ async fn replay_samples(
 
     let mut session = asr.open_session().await?;
     let mut transcript = TranscriptAssembler::default();
+    let wall_start = Instant::now();
+    let mut chunk_count = 0usize;
+    let mut ingest_total_ms = 0u128;
+    let mut ingest_max_ms = 0u128;
+
     for chunk in samples.chunks(chunk_samples) {
+        chunk_count += 1;
+        let ingest_start = Instant::now();
         let events = session
             .ingest(AudioBuf::<i16, ASR_SAMPLE_RATE_HZ, Mono>::new(
                 chunk.to_vec(),
             ))
             .await?;
+        let ingest_ms = ingest_start.elapsed().as_millis();
+        ingest_total_ms += ingest_ms;
+        ingest_max_ms = ingest_max_ms.max(ingest_ms);
         transcript.record_events(events);
     }
+
+    let finish_start = Instant::now();
     let events = session.finish().await?;
+    let finish_ms = finish_start.elapsed().as_millis();
     transcript.record_events(events);
-    Ok(transcript.assembled())
+    let wall_ms = wall_start.elapsed().as_millis();
+    let audio_ms = (samples.len() as u64).saturating_mul(1_000) / u64::from(ASR_SAMPLE_RATE_HZ);
+
+    Ok(ReplayRun {
+        transcript: transcript.assembled(),
+        latency: ReplayLatencyReport {
+            audio_ms,
+            chunk_count,
+            ingest_total_ms,
+            ingest_max_ms,
+            finish_ms,
+            wall_ms,
+        },
+    })
 }
 
 fn reference_text(args: &ReplayCaptureArgs) -> anyhow::Result<Option<String>> {
@@ -299,7 +586,11 @@ enum EditOp {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::adapter::EchoAsrFactory;
+    use crate::cli::ReplayBackendArg;
 
     #[test]
     fn wer_counts_substitution_deletion_and_insertion() {
@@ -352,5 +643,106 @@ mod tests {
             normalize_tokens("whate'er John's"),
             vec!["WHATEER".to_string(), "JOHNS".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn replay_capture_reports_backend_wer_and_latency() {
+        let capture_dir = test_capture_dir("single");
+        write_test_wav(&capture_dir.join(ASR_INPUT_WAV), 16_000);
+        let args = ReplayCaptureArgs {
+            capture_dir: capture_dir.clone(),
+            reference: Some("received 16000 samples".to_string()),
+            reference_file: None,
+            chunk_ms: 20,
+            backend: ReplayBackendArg::Echo,
+        };
+
+        let report = replay_capture(&args, "echo", Arc::new(EchoAsrFactory))
+            .await
+            .expect("replay capture");
+
+        assert_eq!(report.backend, "echo");
+        assert_eq!(report.wav_sample_rate_hz, ASR_SAMPLE_RATE_HZ);
+        assert_eq!(report.wav_channels, 1);
+        assert_eq!(report.sample_count, 16_000);
+        assert_eq!(report.chunk_ms, 20);
+        assert_eq!(report.latency.audio_ms, 1_000);
+        assert_eq!(report.latency.chunk_count, 50);
+        let wer = report.wer.expect("WER report");
+        assert_eq!(wer.errors, 0);
+        std::fs::remove_dir_all(capture_dir).expect("remove test capture dir");
+    }
+
+    #[tokio::test]
+    async fn replay_corpus_runs_manifest_entries_against_backends() {
+        let capture_dir = test_capture_dir("corpus");
+        write_test_wav(&capture_dir.join(ASR_INPUT_WAV), 16_000);
+        let manifest_path = capture_dir.join("asr-golden.json");
+        std::fs::write(
+            &manifest_path,
+            r#"{
+              "schema_version": 1,
+              "entries": [
+                {
+                  "id": "echo-fixture",
+                  "description": "synthetic echo replay fixture",
+                  "capture_dir": ".",
+                  "asr_input_wav": "asr-input-16khz.wav",
+                  "reference_text": "received 16000 samples",
+                  "codec": "PCMU",
+                  "media_sample_rate_hz": 8000,
+                  "direction": "inbound"
+                }
+              ]
+            }"#,
+        )
+        .expect("write manifest");
+        let args = ReplayCorpusArgs {
+            manifest: manifest_path.clone(),
+            backend: vec![ReplayBackendArg::Echo],
+            chunk_ms: 20,
+        };
+
+        let report = replay_corpus(
+            &args,
+            vec![ReplayBackend::new("echo", Arc::new(EchoAsrFactory))],
+        )
+        .await
+        .expect("replay corpus");
+
+        assert_eq!(report.entries.len(), 1);
+        let entry = &report.entries[0];
+        assert_eq!(entry.id, "echo-fixture");
+        assert_eq!(entry.codec, "PCMU");
+        assert_eq!(entry.media_sample_rate_hz, 8000);
+        assert_eq!(entry.direction, "inbound");
+        assert_eq!(entry.reports.len(), 1);
+        assert_eq!(entry.reports[0].backend, "echo");
+        assert_eq!(entry.reports[0].wer.as_ref().expect("WER").errors, 0);
+        std::fs::remove_dir_all(capture_dir).expect("remove test capture dir");
+    }
+
+    fn test_capture_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "motlie-telnyx-replay-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test capture dir");
+        dir
+    }
+
+    fn write_test_wav(path: &Path, sample_count: usize) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: ASR_SAMPLE_RATE_HZ,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create test wav");
+        for _ in 0..sample_count {
+            writer.write_sample::<i16>(0).expect("write test sample");
+        }
+        writer.finalize().expect("finalize test wav");
     }
 }
