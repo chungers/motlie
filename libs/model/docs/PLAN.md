@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-31 | @codex-364-impl | Replaced the source-built ORT policy with the Cargo `ort/download-binaries` static archive path; ORT-backed builds should need no ORT env vars or source build. |
+| 2026-05-31 | @codex-364-impl | Added the general ORT/ONNX backend policy to `libs/model`; this entry is superseded by the `ort/download-binaries` static-link policy above. |
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/model` vertical slice support. Covers contract finalization for the first embedding example, including capability introspection, request/response envelopes, lifecycle traits, and lightweight `model::eval` vocabulary. |
 | 2026-04-07 | @codex-researcher | Marked the completed contract and test work for the first embedding slice after `cargo check`/`cargo test` verification. | Phases 1-5 |
 | 2026-04-08 | @codex-researcher | Closed the missing capability-ordering and eval-track mapping gaps after PR review. Added explicit `CapabilityDescriptor` -> `EvalTrack` helpers/tests and a minimal `libs/model-eval` cross-crate consumption proof so the remaining unchecked items are true deferrals rather than silent omissions. | Phases 1, 4, 5 |
@@ -15,6 +17,11 @@
 | 2026-05-11 | @codex-tool-calling | Added a focused tool-calling design and staged plan for the Gemma 4 and Qwen3/Qwen3.6 chat bundles. | Phase 6 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN covers the contract work needed to support the first end-to-end embedding vertical slice while preserving the longer-term curated-bundle architecture.
+
+Global backend policy: all ORT/ONNX backend work must follow
+[ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md). Do not add backend plans, examples,
+or validation tasks that rely on dynamic ONNX Runtime linkage, manual
+`ORT_LIB_PATH`, vendored ONNX Runtime, or source-built ONNX Runtime.
 
 ---
 
@@ -78,6 +85,15 @@ Define the actual contract backends and curated bundles must satisfy.
   `chat()` and `completion()` return `UnsupportedCapability`,
   while `embeddings()` succeeds.
   DESIGN reference: `Lifecycle Rules`, `Testing Scope for PLAN`
+
+### 2.3 — Backend-family operational policies
+
+- [x] Document the general ORT/ONNX backend policy under `libs/model/docs/ORT_ONNX_POLICY.md`.
+  DESIGN reference: `Backend Operational Policies`
+- [x] Require static ONNX Runtime linkage for all ORT-backed model crates and reject dynamic-link runbooks.
+  DESIGN reference: `Backend Operational Policies`
+- [x] Require ORT-backed model crates to use the workspace `ort` dependency with `download-binaries` so Cargo statically links the downloaded `libonnxruntime.a` archive without ORT env vars.
+  DESIGN reference: `Backend Operational Policies`
 
 ## Phase 3: Request/Response Envelopes
 

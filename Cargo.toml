@@ -19,6 +19,7 @@ members = [
     "libs/tmux",
     "libs/driver",
     "bins/voice-agent",
+    "bins/telnyx-gateway",
     "bins/tmux/driver",
     "bins/mmux",
     "bins/mstream",
@@ -42,6 +43,7 @@ anyhow = "1.0.102"
 thiserror = "2.0.18"
 csv = "1.3"
 env_logger = "0.10"
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "api-24"] }
 
 # Root package for examples
 [package]

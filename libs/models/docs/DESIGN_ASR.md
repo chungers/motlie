@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Reframed the implemented Sherpa backend around the upstream `sherpa-onnx` Rust crate, including its `OnlineRecognizer` endpointing and downloaded static native archive, instead of Motlie's former hand-rolled Pyke `ort` decoder. | Overview, Phase 2 Extension: `sherpa-onnx`, Generic Backend Design, Feature Flag Design |
 | 2026-04-17 | @codex-asr: Renamed the ASR example paths to `asr_whisper`, `asr_sherpa_onnx`, and `asr_moonshine` and updated the design references accordingly. | API Sketch, Testing Scope for PLAN |
 | 2026-04-14 | @codex-asr: Documented the implemented Phase 2 `sherpa-onnx` backend slice, including explicit ONNX Runtime provisioning, curated bundle wiring, and feature-flag status alongside the original `whisper.cpp` recommendation. | Overview, Research Summary, Recommended Vertical Slice, Generic Backend Design, Feature Flag Design, Alternatives Considered |
 | 2026-04-13 | @codex-asr: Addressed R1 review feedback by stream-scoping `AudioSpec`, changing `push_chunk()` to return `Option`, documenting `Send`/not-`Sync` stream ownership, making quantization explicit, tightening edge-case semantics, and narrowing the first implementation slice to the `.wav` path. | Core Contract Changes in `libs/model`, Generic Backend Design, Curated Bundle Design in `libs/models`, Streaming PCM API Contract, Migration and Compatibility Strategy, API Sketch, Testing Scope for PLAN |
@@ -65,7 +66,7 @@ The rollout is:
 2. `libs/model/backends/whisper_cpp`
    Provide the CPU-first Phase 1 backend adapter and bundle implementation over `whisper.cpp`.
 3. `libs/model/backends/sherpa_onnx`
-   Provide the true-streaming Phase 2 backend adapter and bundle implementation over ONNX Runtime.
+   Provide the true-streaming Phase 2 backend adapter and bundle implementation over the upstream `sherpa-onnx` Rust runtime.
 4. `libs/models`
    Add an `asr/` namespace with curated bundle files, one direct enum family, one selector family, and bundle-local artifact resolution and feature gating.
 
@@ -172,11 +173,11 @@ Recommended first bundle:
 The follow-on backend slice uses the same `TranscriptionModel` and `TranscriptionStream` contract but swaps the runtime strategy:
 
 - logical model: streaming Zipformer via `sherpa-onnx`
-- backend/runtime: `ort` with explicit operator-provided ONNX Runtime linkage and persistent stream state
+- backend/runtime: upstream `sherpa-onnx` `OnlineRecognizer` / `OnlineStream` with persistent stream state and built-in endpointing
 - curated artifact set: encoder, decoder, joiner, and `tokens.txt`
 - capability surface: streaming transcription only
 - primary deployment target: Linux and macOS CPU
-- optional acceleration target: CUDA-enabled builds via ONNX Runtime execution providers
+- optional acceleration target: deferred until upstream `sherpa-onnx` publishes or documents the required static CUDA archive path for Motlie targets
 
 This second slice exists because it is a better fit for true incremental decode than the rolling-window `whisper.cpp` implementation. It does not replace the Phase 1 recommendation; it broadens the backend menu while keeping the stable PCM contract unchanged.
 
@@ -435,7 +436,7 @@ Follow the current backend-local pattern:
 - CUDA support is enabled by Cargo feature on the backend crate
 - runtime still honors the existing `MOTLIE_MODEL_FORCE_CPU` convention where practical
 
-For the `sherpa-onnx` backend specifically, ONNX Runtime provisioning should be explicit. Do not enable `ort` build-time binary download inside the library crate. Require operators to provide ONNX Runtime through `ORT_LIB_PATH`, `pkg-config`, or another explicit system installation path, then layer the backend-local CUDA execution-provider selection on top of that runtime.
+For the `sherpa-onnx` backend specifically, runtime ownership belongs to the upstream `sherpa-onnx` Rust crate. It statically links by default and downloads a matching prebuilt `sherpa-onnx` native archive when `SHERPA_ONNX_LIB_DIR` is not set. Motlie should not reimplement Sherpa's online recognizer over Pyke `ort`, and runbooks must not require `ORT_LIB_PATH`, `LD_LIBRARY_PATH`, or a local ONNX Runtime source build.
 
 This avoids expanding `StartOptions` in the first ASR slice. If multiple backends later need explicit accelerator selection, that can be added as a generic model-layer startup option.
 
@@ -596,7 +597,7 @@ Optional later:
 - `openvino`
 - `metal`
 
-For the implemented backends, this maps to `whisper.cpp`'s `cuda` feature and `sherpa-onnx`'s `cuda` feature.
+For the implemented backends, this maps to `whisper.cpp`'s `cuda` feature. The `sherpa-onnx-cuda` feature is retained as a catalog compatibility hook, but the current upstream-backed Sherpa path is CPU/static-archive first until a supported CUDA archive path is selected.
 
 ### `libs/models`
 

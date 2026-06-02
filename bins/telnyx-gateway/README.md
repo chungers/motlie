@@ -1,0 +1,265 @@
+# Telnyx Gateway
+
+Milestone 1 is inbound call transcription in the operator TUI.
+
+## Sherpa Runtime
+
+The Sherpa-backed gateway uses the upstream `sherpa-onnx` Rust crate. That
+crate statically links its downloaded prebuilt `sherpa-onnx` native archive,
+including the ONNX Runtime library used internally by Sherpa.
+
+This follows the Sherpa exception in the general Motlie ORT/ONNX backend policy
+in [`../../libs/model/docs/ORT_ONNX_POLICY.md`](../../libs/model/docs/ORT_ONNX_POLICY.md).
+
+The gateway runbook does not use ORT-specific environment variables. Do not set
+`ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and do not build
+ONNX Runtime from source for the gateway.
+
+## Run
+
+### Agent-Assisted Headless Test
+
+For live tests with an agent operator, run the gateway without the TUI and expose
+a local Unix-domain command socket:
+
+```sh
+cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
+rm -f /tmp/motlie-telnyx-gateway.sock
+: > /home/dchung/telnyx-gateway-live.log
+
+env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
+  TELNYX_API_KEY="$TELNYX_API_KEY" \
+  cargo run -p motlie-telnyx-gateway --features sherpa -- \
+    --bind 127.0.0.1:8080 \
+    --load /home/dchung/telnyx-test/config.repl \
+    --socket /tmp/motlie-telnyx-gateway.sock \
+    --log-file /home/dchung/telnyx-gateway-live.log \
+    --capture-dir /home/dchung/telnyx-test/captures
+```
+
+The socket accepts one gateway REPL command per line and returns one JSON object
+per line:
+
+```sh
+python3 - <<'PY'
+import json, socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/tmp/motlie-telnyx-gateway.sock")
+for command in ["status", "inbound enable --manual", "calls", "call show"]:
+    sock.sendall((command + "\n").encode())
+    print(json.loads(sock.recv(65536)))
+PY
+```
+
+During a shared live test the agent can start the gateway, enable manual
+inbound handling, ask the human to dial the Telnyx number, run `calls`, run
+`answer`, and then poll `call show` plus the structured log file for transcript
+quality. Stop the gateway with:
+
+```sh
+python3 - <<'PY'
+import json, socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/tmp/motlie-telnyx-gateway.sock")
+sock.sendall(b"shutdown\n")
+print(json.loads(sock.recv(65536)))
+PY
+```
+
+The milestone 1 default media request is the known-good live path:
+
+```text
+config set media-codec PCMU
+config set media-sample-rate 8000
+```
+
+To compare ASR quality against Telnyx linear PCM, enable capture and request
+`L16` before answering the next call:
+
+```text
+config set capture-dir /home/dchung/telnyx-test/captures
+config set media-codec L16
+config set media-sample-rate 16000
+```
+
+The gateway decodes Telnyx `L16` WebSocket payloads as little-endian PCM. The
+first captured `L16` live call showed clipped, unusable audio when interpreted as
+big-endian and normal speech levels when interpreted as little-endian.
+
+Each accepted media stream creates:
+
+- `telnyx-media.jsonl`: raw Telnyx WebSocket events after `start`
+- `decoded-inbound.wav`: decoded inbound media at the observed Telnyx format
+- `asr-input-16khz.wav`: samples fed into Sherpa after gating and resampling
+- `transcripts.jsonl`: partial/final transcript events, including suppressed events
+- `manifest.json`: call, stream, codec, sample-rate, and file metadata
+
+The WAV files are finalized with finite RIFF/data sizes so standard tools can
+read their duration and sample count. Older captures written before that fix can
+still be replayed through Motlie's permissive decoder.
+
+For WER checks, read this exact reference text at a steady pace after the call is
+answered:
+
+```text
+The quick brown fox jumps over the lazy dog. Motlie is testing inbound speech through Telnyx. Please record every word in this sentence clearly. The final answer should contain numbers one two three and the phrase blue copper river.
+```
+
+Replay a capture and compute WER without another phone call:
+
+```sh
+cargo run -p motlie-telnyx-gateway --features sherpa -- \
+  --no-asr-download \
+  replay-capture /home/dchung/telnyx-test/captures/<gateway-call-id>/<stream-id> \
+  --reference-file /home/dchung/telnyx-test/reference.txt
+```
+
+The replay command reads `asr-input-16khz.wav`, feeds it through the same Sherpa
+streaming backend in fixed chunks, and prints the assembled transcript, WER,
+substitution/deletion/insertion counts, and token-level errors.
+
+### Live Validation Notes
+
+On 2026-06-01, after fixing the Telnyx `L16` byte order, the gateway completed
+two manual inbound calls with `L16 16000Hz` media and capture enabled.
+
+- Call `gwc_7fec3c0fa50d49ceafd08638c4c51edb`, stream
+  `e0084c78-905f-4939-999c-023a305957e6`, captured under
+  `/home/dchung/telnyx-test/captures/gwc_7fec3c0fa50d49ceafd08638c4c51edb/e0084c78-905f-4939-999c-023a305957e6`.
+  The reference-section WER was `17.9%` (`7 / 39` words). Main errors:
+  `Motlie -> MOTLEY`, `inbound -> BOWED` with inserted `IN GROUNDS IN`,
+  `Telnyx -> TONICS`, and `this -> THE`.
+- Call `gwc_cbbe4d99f1394bd0a96c5103a33592ea`, stream
+  `42271dff-afc5-4ddf-b67b-08ffd517d0b3`, captured under
+  `/home/dchung/telnyx-test/captures/gwc_cbbe4d99f1394bd0a96c5103a33592ea/42271dff-afc5-4ddf-b67b-08ffd517d0b3`.
+  The intended-snippet WER was `16.2%` (`6 / 37` words). Main errors:
+  `Sherpa -> SHIRBA`, inserted `TO`, `Today -> DAY`, `are -> RE`,
+  `whether -> WEATHER`, and `improve -> IMPROVED`.
+
+The second run also exposed an operator-control issue: when an ended call stayed
+selected, bare `answer` targeted that old call instead of the single new waiting
+call. The command now prefers the single `waiting` inbound call when no explicit
+call id is provided.
+
+### ASR-Only Outbound Test
+
+For human-assisted ASR testing without waiting for an inbound call, the gateway
+can place a test outbound call and transcribe the callee. This is not milestone 2
+TTS: the gateway sends only silence keepalive frames on the outbound RTP path.
+
+```text
+config set media-codec L16
+config set media-sample-rate 16000
+config set capture-dir /home/dchung/telnyx-test/captures
+test dial-transcribe +14155097294 --from +14159148777
+```
+
+The command uses the selected Telnyx application, public media URL, and same
+Sherpa ASR/media capture pipeline as inbound calls. If `--from` is omitted, the
+gateway uses `config set from-number <e164>`, then the selected Telnyx number.
+After the callee answers, `call show` displays the transcript and the capture
+directory contains the raw media JSONL, decoded WAV, ASR input WAV, and
+transcript JSONL.
+
+The latest prepared outbound `L16 16000Hz` ASR-only call on 2026-06-01 measured
+`29.2%` WER on a `65`-word reference using `replay-capture`. The main errors
+were phonetic/domain terms such as `outbound -> ALBAN/ALBOW`, `Telnyx -> TAL
+NICHS`, `Sherpa -> SHARPA`, and `voice -> BOYS`; issue #370 tracks Sherpa-only
+quality tuning with hotwords, model/decoder A/B, and separately scored
+normalization.
+
+Telnyx outbound calls require the Call Control application to be assigned to an
+Outbound Voice Profile. If Telnyx returns `403 D38` with `Connection has no
+Outbound Profile assigned`, create or select an Outbound Voice Profile in the
+Telnyx portal and add the Call Control application to that profile before
+running `test dial-transcribe` again.
+
+1. Expose the local listener with Tailscale Funnel:
+
+   ```sh
+   tailscale funnel --bg 8080
+   ```
+
+   Use the Funnel hostname to form:
+
+   - webhook URL: `https://<host>/telnyx/webhooks`
+   - media URL: `wss://<host>/telnyx/media`
+
+2. Start the gateway:
+
+   ```sh
+   export TELNYX_API_KEY=...
+   cargo run -p motlie-telnyx-gateway --features sherpa -- --tui --bind 127.0.0.1:8080
+   ```
+
+   The gateway starts idle. Inbound handling is disabled until the operator enables it.
+   The M1 command surface intentionally keeps public webhook/media URLs in
+   REPL state via `config set`; startup flags for `--webhook-url`,
+   `--webhook-path`, and `--media-path` remain deferred until the external
+   integration milestone.
+
+3. In the left TUI pane, configure Telnyx:
+
+   ```text
+   config set webhook-url https://<host>/telnyx/webhooks
+   config set media-url wss://<host>/telnyx/media
+   telnyx app list
+   telnyx app use <connection-id>
+   telnyx app webhook set https://<host>/telnyx/webhooks
+   telnyx number list
+   telnyx number bind +15551234567 <connection-id>
+   inbound enable --manual
+   ```
+
+4. Place an inbound call to the bound number.
+
+   The pending call appears in the top-right roster. Select it if needed:
+
+   ```text
+   calls
+   call use <gateway-call-id>
+   answer
+   ```
+
+5. Watch the bottom-right selected-call detail pane.
+
+   It shows call state, Telnyx IDs, media metadata, stream ID, partial transcript events, final transcript events, terminal state, and errors.
+
+## Logs
+
+Structured logs include:
+
+- gateway call id
+- `call_control_id`
+- `call_session_id`
+- `call_leg_id`
+- `stream_id`
+- observed codec
+- observed sample rate
+- transcript partial/final events
+
+Use `RUST_LOG=debug` for more detail.
+
+Media frame reordering starts from the first observed Telnyx `media.chunk` for
+each stream instead of assuming a fixed initial chunk number. If a live call
+shows stale chunk warnings, preserve the structured logs so the stream-order
+assumption can be revisited with observed Telnyx payloads.
+
+## ASR Artifacts
+
+Sherpa ONNX is the live M1 ASR backend. Build the gateway with `--features sherpa`
+with no ORT-specific environment variables before running the live test.
+
+Artifacts are loaded from:
+
+1. `--asr-artifact-root <path>`
+2. `MOTLIE_VOICE_ARTIFACT_ROOT`
+3. `.agents/skills/voice/artifacts/hf-cache`
+
+By default, missing Sherpa artifacts are downloaded through the curated `motlie-models` catalog. Pass `--no-asr-download` to fail closed instead.
+
+For local protocol testing without model startup:
+
+```sh
+MOTLIE_TELNYX_ECHO_ASR=1 cargo run -p motlie-telnyx-gateway -- --tui --dry-run-telnyx
+```
