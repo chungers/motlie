@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Fixed capture WAV finalization, added a `replay-capture` WER harness over `asr-input-16khz.wav`, and split Sherpa-only ASR quality tuning into milestone 1.5 (#370) for hotwords, model/decoder A/B, and separately scored normalization. |
 | 2026-06-01 | @codex-364-impl | Recorded the first outbound ASR-only live attempt blocker: Telnyx returned `403 D38` because the Call Control application has no Outbound Voice Profile assignment; live validation resumes after Telnyx account setup. |
 | 2026-06-01 | @codex-364-impl | Added an ASR-only outbound live-test command, `test dial-transcribe <to> [--from <from>]`, that reuses Telnyx outbound dial setup, bidirectional RTP media, silence keepalive, capture, and Sherpa transcription while leaving TTS for milestone 2. |
 | 2026-06-01 | @codex-364-impl | Recorded post-fix live validation for two `L16 16 kHz` inbound calls, with measured WER around `16-18%`, and fixed bare `answer` to prefer the single waiting inbound call when stale ended calls remain selected. |
@@ -50,6 +51,7 @@ Execution policy for the initial implementation:
 - the gateway starts as an idle operator-controlled application with an HTTP/WebSocket listener; `--tui` enables the local TUI, `--socket <path>` enables headless Unix-domain command control, and the gateway does not answer inbound calls until an operator command source enables inbound mode or runs `answer`
 - in milestone 4 (#367), local agents must be able to drive the gateway through the Unix-domain socket using NDJSON command requests, structured command results, call snapshots, and cursor-based event polling; authenticated Gateway Control API and gateway application webhooks remain separate appserver integration surfaces
 - milestone 1 (#364) is inbound calls answered and managed in the TUI, with ASR transcription in the selected-call detail pane
+- milestone 1.5 (#370) is Sherpa-only ASR quality tuning using captured audio replay, WER reports, hotwords/context bias, and model/decoder A/B before considering non-Sherpa ASR
 - milestone 2 (#365) is outbound dialing plus TTS driven by the TUI command surface and selected-call detail text input
 - milestone 3 (#366) is full-duplex conversation driven by a TUI chat interface over the selected call
 - milestone 4 (#367) is external integration: local agent socket tooling, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
@@ -450,6 +452,23 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Open Concerns`
 - [ ] Add operator-configurable capture for ASR quality debugging: raw Telnyx media JSONL, decoded inbound WAV at observed format, `16 kHz` Sherpa input WAV, transcript-event JSONL, and a manifest under a per-call/per-stream directory.
   DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
+- [ ] Finalize captured WAV files with finite RIFF/data sizes so standard readers can inspect duration/sample counts; keep the Motlie decoder tolerant of older indefinite-length streaming captures.
+  DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
+
+### 8.1.5 - Milestone 1.5 Sherpa ASR quality tuning (#370)
+
+- [ ] Use `replay-capture <capture-dir> --reference-file <path>` against captured `asr-input-16khz.wav` artifacts to produce deterministic transcript, WER, substitution, deletion, insertion, and token-error reports without another phone call.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Recommended ASR/TTS Stack`
+- [ ] Keep a small captured-audio corpus covering inbound and ASR-only outbound calls, with fixed read-aloud references checked into an operator note or test fixture location.
+  DESIGN reference: `Testing Scope for PLAN`, `Getting Started: Local Deployment`
+- [ ] Add configurable Sherpa hotwords/context bias for transducer recognizers using upstream `hotwords_file`, `hotwords_buf`, `hotwords_score`, or per-stream hotwords, seeded with Motlie/Telnyx/operator vocabulary.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Recommended ASR/TTS Stack`
+- [ ] Benchmark Sherpa-only streaming candidates on the same replay corpus: current English Zipformer, alternate English Zipformer artifacts, the English Nemotron streaming model, and decoder settings such as `modified_beam_search`, `max_active_paths`, and endpoint rules.
+  DESIGN reference: `Recommended ASR/TTS Stack`
+- [ ] Evaluate offline Sherpa/NeMo models only as second-pass or post-call comparators until a live streaming path is validated.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`
+- [ ] Keep raw ASR transcript, normalized transcript, and agent/LLM-corrected transcript as separate outputs. WER acceptance must score raw ASR separately from any normalized-output metric.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`
 
 ### 8.2 - Milestone 2 outbound TUI dialer/TTS flow (#365)
 
@@ -512,6 +531,8 @@ Make each milestone reviewable and runnable independently before combining them.
   transcript updates,
   session teardown.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
+- [ ] Add replay/WER checks over finalized `asr-input-16khz.wav` capture artifacts using `replay-capture`, including transcript output, WER percentage, substitution/deletion/insertion counts, and token-level error rows.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Testing Scope for PLAN`
 - [ ] Add a provider-free adaptation test that feeds synthetic Telnyx-like `PCMU 8 kHz mono` payloads through G.711 decode, typed PCM, anti-aliased `8 kHz -> 16 kHz` resample, and a fake `StreamingTranscriber<Input = AudioBuf<i16, 16_000, Mono>>`.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
 - [ ] Add milestone 2 outbound loopback tests from Piper-shaped `AudioBuf<i16, 22_050, Mono>` through anti-aliased resample, packetization, and `L16` or `PCMU` transport encoding, verifying TTS packet emission and session teardown.
@@ -570,7 +591,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`
 - [ ] Capture and review the exact observed `start.media_format` values from Telnyx.
   DESIGN reference: `Open Concerns`
-- [ ] Use captured WAV/JSONL artifacts to compare `PCMU 8 kHz` against `L16 16 kHz`, verify the observed L16 byte order, and tune Sherpa decoding/endpointing without requiring a fresh phone call for every ASR experiment.
+- [ ] Use captured WAV/JSONL artifacts and `replay-capture` WER reports to compare `PCMU 8 kHz` against `L16 16 kHz`, verify the observed L16 byte order, and tune Sherpa decoding/endpointing without requiring a fresh phone call for every ASR experiment.
   DESIGN reference: `Inbound Call Handler Design`, `Recommended ASR/TTS Stack`
 - [ ] Verify conversational latency for the Sherpa + Piper duplex path once milestone 3 exists, and document measured numbers nearby in this PLAN or a follow-up note.
   DESIGN reference: `Real-Time Latency Requirements`

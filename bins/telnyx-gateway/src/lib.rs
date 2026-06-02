@@ -7,6 +7,7 @@ pub mod events;
 pub mod logging;
 pub mod media;
 pub mod operator;
+pub mod replay;
 pub mod serve;
 pub mod webhook;
 

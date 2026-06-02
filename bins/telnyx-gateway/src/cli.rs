@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Clone, Debug, Parser)]
 #[command(author, version, about = "Operator-driven Telnyx voice gateway")]
@@ -38,4 +38,31 @@ pub struct Cli {
 
     #[arg(long)]
     pub capture_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum CliCommand {
+    /// Replay a captured ASR-input WAV and optionally compute WER.
+    ReplayCapture(ReplayCaptureArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ReplayCaptureArgs {
+    /// Capture directory containing asr-input-16khz.wav.
+    pub capture_dir: PathBuf,
+
+    /// Reference transcript text for WER.
+    #[arg(long, conflicts_with = "reference_file")]
+    pub reference: Option<String>,
+
+    /// File containing the reference transcript text for WER.
+    #[arg(long)]
+    pub reference_file: Option<PathBuf>,
+
+    /// Audio chunk size to feed into the streaming recognizer.
+    #[arg(long, default_value_t = 20)]
+    pub chunk_ms: u32,
 }

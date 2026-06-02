@@ -49,4 +49,5 @@ urlencoding = "2.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+hound = "3.5"
 tower = "0.5"
