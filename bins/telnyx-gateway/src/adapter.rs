@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "sherpa")]
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono};
 #[cfg(feature = "sherpa")]

@@ -8,20 +8,30 @@ use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
 use crate::operator::persistence::write_state_dump;
+use crate::operator::session::OperatorSession;
 use crate::operator::state::{CallStatus, GatewayState, InboundMode, LogLevel, SharedState};
 
 #[derive(Clone)]
 pub struct GatewayContext {
     pub state: SharedState,
     pub telnyx: TelnyxClient,
+    pub session: OperatorSession,
 }
 
 impl GatewayContext {
     pub fn new(state: SharedState, telnyx: TelnyxClient) -> Self {
-        Self { state, telnyx }
+        Self {
+            state,
+            telnyx,
+            session: OperatorSession::default(),
+        }
     }
 
-    async fn answer_call(&self, target: Option<String>) -> DriverResult<CommandOutput> {
+    pub fn for_new_source(&self) -> Self {
+        Self::new(self.state.clone(), self.telnyx.clone())
+    }
+
+    async fn answer_call(&mut self, target: Option<String>) -> DriverResult<CommandOutput> {
         let (gateway_call_id, call_control_id, stream_url, media) = {
             let mut guard = self.state.write().await;
             let media_url = guard
@@ -30,7 +40,11 @@ impl GatewayContext {
                 .clone()
                 .ok_or_else(|| DriverError::message("config set media-url <wss-url> first"))?;
             let media = guard.config.telnyx_media;
-            let call_id = resolve_answer_call_id(&guard, target.as_deref())?;
+            let call_id = resolve_answer_call_id(
+                &guard,
+                target.as_deref(),
+                self.session.selected_call.as_deref(),
+            )?;
             let (gateway_call_id, call_control_id) = {
                 let call = guard
                     .calls
@@ -53,9 +67,9 @@ impl GatewayContext {
                     call.ids.call_control_id.clone(),
                 )
             };
-            guard.selected_call = Some(gateway_call_id.clone());
             (gateway_call_id, call_control_id, media_url, media)
         };
+        self.session.selected_call = Some(gateway_call_id.clone());
 
         {
             let mut guard = self.state.write().await;
@@ -776,6 +790,7 @@ async fn dial_transcribe(
         );
         gateway_call_id
     };
+    context.session.selected_call = Some(gateway_call_id.clone());
 
     tracing::info!(
         gateway_call_id,
@@ -825,27 +840,30 @@ async fn call_command(
     command: CallCommand,
 ) -> DriverResult<CommandOutput> {
     match command {
-        CallCommand::Show { call } => call_show(&context.state, call).await,
+        CallCommand::Show { call } => call_show(context, call).await,
         CallCommand::Use { call } => {
             let mut guard = context.state.write().await;
-            if !guard.calls.contains_key(&call) {
+            if !context.session.select_call(&mut guard, &call) {
                 return Err(DriverError::NotFound {
                     kind: "call",
                     name: call,
                 });
-            }
-            guard.selected_call = Some(call.clone());
-            if let Some(session) = guard.calls.get_mut(&call) {
-                session.unread_events = 0;
             }
             Ok(CommandOutput::line(format!("selected call {call}")))
         }
     }
 }
 
-async fn call_show(state: &SharedState, target: Option<String>) -> DriverResult<CommandOutput> {
-    let guard = state.read().await;
-    let id = resolve_call_id(&guard, target.as_deref())?;
+async fn call_show(
+    context: &GatewayContext,
+    target: Option<String>,
+) -> DriverResult<CommandOutput> {
+    let guard = context.state.read().await;
+    let id = resolve_call_id(
+        &guard,
+        target.as_deref(),
+        context.session.selected_call.as_deref(),
+    )?;
     let call = guard.calls.get(&id).ok_or_else(|| DriverError::NotFound {
         kind: "call",
         name: id.clone(),
@@ -885,7 +903,7 @@ async fn call_show(state: &SharedState, target: Option<String>) -> DriverResult<
         lines.push(format!("ended: {reason}"));
     }
     lines.push("assembled transcript:".to_string());
-    lines.push(assembled_transcript_text(call));
+    lines.push(call.assembled_transcript_text());
     lines.push("recent events:".to_string());
     for transcript in call.transcripts.iter().rev().take(12).rev() {
         let prefix = match transcript.kind {
@@ -900,20 +918,6 @@ async fn call_show(state: &SharedState, target: Option<String>) -> DriverResult<
     })
 }
 
-fn assembled_transcript_text(call: &crate::operator::state::CallSession) -> String {
-    match (
-        call.final_transcript.trim(),
-        call.current_partial.as_deref().map(str::trim),
-    ) {
-        ("", Some(partial)) if !partial.is_empty() => partial.to_string(),
-        (final_text, Some(partial)) if !final_text.is_empty() && !partial.is_empty() => {
-            format!("{final_text} {partial}")
-        }
-        (final_text, _) if !final_text.is_empty() => final_text.to_string(),
-        _ => "<none>".to_string(),
-    }
-}
-
 enum CallControlOp {
     Reject,
     Hangup,
@@ -926,7 +930,11 @@ async fn call_control(
 ) -> DriverResult<CommandOutput> {
     let (gateway_call_id, call_control_id) = {
         let mut guard = context.state.write().await;
-        let call = resolve_call_mut(&mut guard, target.as_deref())?;
+        let call = resolve_call_mut(
+            &mut guard,
+            target.as_deref(),
+            context.session.selected_call.as_deref(),
+        )?;
         call.push_timeline(match op {
             CallControlOp::Reject => "operator requested reject",
             CallControlOp::Hangup => "operator requested hangup",
@@ -968,13 +976,12 @@ async fn transcript_command(
         TranscriptCommand::Follow { call } => {
             if let Some(call) = call {
                 let mut guard = context.state.write().await;
-                if !guard.calls.contains_key(&call) {
+                if !context.session.select_call(&mut guard, &call) {
                     return Err(DriverError::NotFound {
                         kind: "call",
                         name: call,
                     });
                 }
-                guard.selected_call = Some(call.clone());
             }
             Ok(CommandOutput::line(
                 "selected-call detail follows transcript",
@@ -982,7 +989,11 @@ async fn transcript_command(
         }
         TranscriptCommand::Clear { call } => {
             let mut guard = context.state.write().await;
-            let session = resolve_call_mut(&mut guard, call.as_deref())?;
+            let session = resolve_call_mut(
+                &mut guard,
+                call.as_deref(),
+                context.session.selected_call.as_deref(),
+            )?;
             session.transcripts.clear();
             session.final_transcript.clear();
             session.current_partial = None;
@@ -1007,8 +1018,9 @@ async fn log_command(
 fn resolve_call_mut<'a>(
     state: &'a mut GatewayState,
     target: Option<&str>,
+    selected_call: Option<&str>,
 ) -> DriverResult<&'a mut crate::operator::state::CallSession> {
-    let id = resolve_call_id(state, target)?;
+    let id = resolve_call_id(state, target, selected_call)?;
     state
         .calls
         .get_mut(&id)
@@ -1018,12 +1030,16 @@ fn resolve_call_mut<'a>(
         })
 }
 
-fn resolve_call_id(state: &GatewayState, target: Option<&str>) -> DriverResult<String> {
+fn resolve_call_id(
+    state: &GatewayState,
+    target: Option<&str>,
+    selected_call: Option<&str>,
+) -> DriverResult<String> {
     let id = match target {
         Some(value) => value.to_string(),
-        None => state
-            .selected_call
-            .clone()
+        None => selected_call
+            .filter(|call_id| state.calls.contains_key(*call_id))
+            .map(str::to_string)
             .or_else(|| {
                 if state.calls.len() == 1 {
                     state.calls.keys().next().cloned()
@@ -1036,7 +1052,11 @@ fn resolve_call_id(state: &GatewayState, target: Option<&str>) -> DriverResult<S
     Ok(id)
 }
 
-fn resolve_answer_call_id(state: &GatewayState, target: Option<&str>) -> DriverResult<String> {
+fn resolve_answer_call_id(
+    state: &GatewayState,
+    target: Option<&str>,
+    selected_call: Option<&str>,
+) -> DriverResult<String> {
     if let Some(value) = target {
         return Ok(value.to_string());
     }
@@ -1047,7 +1067,7 @@ fn resolve_answer_call_id(state: &GatewayState, target: Option<&str>) -> DriverR
         .filter(|call| call.status == CallStatus::PendingInbound)
         .map(|call| call.gateway_call_id.clone());
     let Some(first_waiting) = waiting.next() else {
-        return resolve_call_id(state, None);
+        return resolve_call_id(state, None, selected_call);
     };
     if waiting.next().is_some() {
         return Err(DriverError::message(
@@ -1076,7 +1096,7 @@ mod tests {
 
     use super::*;
     use crate::call_control::TelnyxClient;
-    use crate::operator::state::{CallStatus, TelnyxIds, shared_state};
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
 
     #[tokio::test]
     async fn inbound_is_disabled_by_default() {
@@ -1111,7 +1131,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
-            let gateway_call_id = guard.add_or_update_inbound_call(
+            let _gateway_call_id = guard.add_or_update_inbound_call(
                 TelnyxIds {
                     call_control_id: "call-1".to_string(),
                     call_session_id: Some("sess-1".to_string()),
@@ -1122,7 +1142,6 @@ mod tests {
                 None,
                 CallStatus::PendingInbound,
             );
-            guard.selected_call = Some(gateway_call_id);
         }
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
         let context = GatewayContext::new(state.clone(), telnyx);
@@ -1142,7 +1161,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
-            let gateway_call_id = guard.add_or_update_inbound_call(
+            let _gateway_call_id = guard.add_or_update_inbound_call(
                 TelnyxIds {
                     call_control_id: "call-1".to_string(),
                     call_session_id: Some("sess-1".to_string()),
@@ -1153,7 +1172,6 @@ mod tests {
                 None,
                 CallStatus::Answered,
             );
-            guard.selected_call = Some(gateway_call_id);
         }
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
         let context = GatewayContext::new(state.clone(), telnyx);
@@ -1173,7 +1191,7 @@ mod tests {
     #[tokio::test]
     async fn answer_prefers_single_waiting_call_over_selected_ended_call() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
-        let waiting_call_id = {
+        let (waiting_call_id, ended_call_id) = {
             let mut guard = state.write().await;
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
             let ended_call_id = guard.add_or_update_inbound_call(
@@ -1198,11 +1216,11 @@ mod tests {
                 None,
                 CallStatus::PendingInbound,
             );
-            guard.selected_call = Some(ended_call_id);
-            waiting_call_id
+            (waiting_call_id, ended_call_id)
         };
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
-        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut context = GatewayContext::new(state.clone(), telnyx);
+        context.session.selected_call = Some(ended_call_id);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine.run_line("answer").await.expect("answer");
@@ -1213,7 +1231,7 @@ mod tests {
         );
         let guard = state.read().await;
         assert_eq!(
-            guard.selected_call.as_deref(),
+            engine.context().session.selected_call.as_deref(),
             Some(waiting_call_id.as_str())
         );
         assert_eq!(
@@ -1250,7 +1268,9 @@ mod tests {
 
         assert!(output.lines[0].starts_with("dial-transcribe requested for gwc_"));
         let guard = state.read().await;
-        let call_id = guard
+        let call_id = engine
+            .context()
+            .session
             .selected_call
             .as_deref()
             .expect("outbound call should be selected");
@@ -1268,7 +1288,7 @@ mod tests {
     #[tokio::test]
     async fn call_show_returns_assembled_transcript() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
-        {
+        let gateway_call_id = {
             let mut guard = state.write().await;
             let gateway_call_id = guard.add_or_update_inbound_call(
                 TelnyxIds {
@@ -1281,7 +1301,6 @@ mod tests {
                 Some("+15550000002".to_string()),
                 CallStatus::Answered,
             );
-            guard.selected_call = Some(gateway_call_id.clone());
             guard.add_transcript(
                 &gateway_call_id,
                 crate::operator::state::TranscriptKind::Final,
@@ -1292,21 +1311,87 @@ mod tests {
                 crate::operator::state::TranscriptKind::Partial,
                 "WORLD".to_string(),
             );
-        }
+            gateway_call_id
+        };
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
-        let context = GatewayContext::new(state, telnyx);
+        let mut context = GatewayContext::new(state, telnyx);
+        context.session.selected_call = Some(gateway_call_id);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine.run_line("call show").await.expect("call show");
 
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "assembled transcript:")
-        );
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "assembled transcript:"));
         assert!(output.lines.iter().any(|line| line == "HELLO WORLD"));
         assert!(output.lines.iter().any(|line| line == "final: HELLO"));
         assert!(output.lines.iter().any(|line| line == "partial: WORLD"));
+    }
+
+    #[tokio::test]
+    async fn command_sources_keep_selected_calls_isolated() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let (call_one, call_two) = {
+            let mut guard = state.write().await;
+            let _ = add_test_call(&mut guard, "call-1");
+            let _ = add_test_call(&mut guard, "call-2");
+            let ordered = crate::operator::session::ordered_call_ids(&guard);
+            (ordered[0].clone(), ordered[1].clone())
+        };
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let mut tui_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(
+            GatewayContext::new(state.clone(), telnyx.clone()),
+        );
+        let mut socket_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(
+            GatewayContext::new(state.clone(), telnyx),
+        );
+
+        tui_engine
+            .run_line(&format!("call use {call_one}"))
+            .await
+            .expect("TUI call use");
+        socket_engine
+            .run_line(&format!("call use {call_one}"))
+            .await
+            .expect("socket call use");
+        {
+            let mut guard = state.write().await;
+            let moved = tui_engine
+                .context_mut()
+                .session
+                .move_selection(&mut guard, 1)
+                .expect("TUI cursor move should select another call");
+            assert_eq!(moved, call_two);
+        }
+
+        let tui_show = tui_engine.run_line("call show").await.expect("TUI show");
+        let socket_show = socket_engine
+            .run_line("call show")
+            .await
+            .expect("socket show");
+
+        assert!(tui_show
+            .lines
+            .iter()
+            .any(|line| line == &format!("call: {call_two}")));
+        assert!(socket_show
+            .lines
+            .iter()
+            .any(|line| line == &format!("call: {call_one}")));
+    }
+
+    fn add_test_call(state: &mut GatewayState, call_control_id: &str) -> String {
+        state.add_or_update_inbound_call(
+            TelnyxIds {
+                call_control_id: call_control_id.to_string(),
+                call_session_id: None,
+                call_leg_id: None,
+                stream_id: None,
+            },
+            None,
+            None,
+            CallStatus::PendingInbound,
+        )
     }
 }
