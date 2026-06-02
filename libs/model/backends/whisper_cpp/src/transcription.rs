@@ -13,8 +13,8 @@ use motlie_model::{
 };
 
 use crate::common::{
-    RuntimeMetricState, configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_ggml_model_path,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_ggml_model_path, RuntimeMetricState,
 };
 
 const WHISPER_CPP_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Ggml];
@@ -328,6 +328,7 @@ fn decode_samples(
     whisper_params.set_print_progress(false);
     whisper_params.set_print_realtime(false);
     whisper_params.set_print_timestamps(false);
+    whisper_params.set_debug_mode(false);
     whisper_params.set_single_segment(false);
 
     state
@@ -415,11 +416,9 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Ggml]);
         assert_eq!(adapter.backend_kind(), BackendKind::WhisperCpp);
-        assert!(
-            adapter
-                .capabilities()
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(adapter
+            .capabilities()
+            .supports(CapabilityKind::Transcription));
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 
@@ -429,11 +428,9 @@ mod tests {
             WhisperCppTranscriptionBundle::new(WhisperCppTranscriptionSpec::whisper_base_en());
 
         assert_eq!(bundle.id().as_str(), "whisper_base_en");
-        assert!(
-            bundle
-                .capabilities()
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(bundle
+            .capabilities()
+            .supports(CapabilityKind::Transcription));
         assert_eq!(bundle.metadata().quantization, QuantizationSupport::none());
     }
 }

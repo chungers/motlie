@@ -16,9 +16,22 @@ path = "src/main.rs"
 
 [features]
 default = []
+golden-ab = ["sherpa", "moonshine", "whisper", "qwen3-tts-cpp"]
 sherpa = [
     "dep:motlie-model-sherpa-onnx",
     "motlie-models/model-sherpa-onnx-streaming",
+]
+moonshine = [
+    "dep:motlie-model-moonshine",
+    "motlie-models/model-moonshine-streaming",
+]
+whisper = [
+    "dep:motlie-model-whisper-cpp",
+    "motlie-models/model-whisper-base-en",
+]
+qwen3-tts-cpp = [
+    "dep:motlie-model-qwen3-tts-cpp",
+    "motlie-models/model-qwen3-tts-cpp",
 ]
 
 [dependencies]
@@ -33,7 +46,10 @@ futures-util = "0.3"
 hound = "3.5"
 motlie-driver = { path = "../../libs/driver" }
 motlie-model = { path = "../../libs/model" }
+motlie-model-moonshine = { path = "../../libs/model/backends/moonshine", optional = true }
+motlie-model-qwen3-tts-cpp = { path = "../../libs/model/backends/qwen3_tts_cpp", optional = true }
 motlie-model-sherpa-onnx = { path = "../../libs/model/backends/sherpa_onnx", optional = true }
+motlie-model-whisper-cpp = { path = "../../libs/model/backends/whisper_cpp", optional = true }
 motlie-models = { path = "../../libs/models", default-features = false }
 motlie-voice = { path = "../../libs/voice" }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

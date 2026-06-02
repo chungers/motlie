@@ -4,6 +4,7 @@ pub mod call_control;
 pub mod cli;
 pub mod error;
 pub mod events;
+pub mod golden_ab;
 pub mod logging;
 pub mod media;
 pub mod operator;

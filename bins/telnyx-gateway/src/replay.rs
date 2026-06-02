@@ -7,7 +7,7 @@ use motlie_model::typed::{AudioBuf, Mono};
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::pipeline::convert::{downmix_to_mono, f32_to_i16_clamped};
 use motlie_voice::wav::decode_streaming_wav_to_f32;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::adapter::{AsrTranscriptEvent, SharedAsrFactory};
 use crate::cli::{ReplayCaptureArgs, ReplayCorpusArgs};
@@ -27,6 +27,14 @@ impl ReplayBackend {
             label: label.into(),
             asr,
         }
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub(crate) fn asr(&self) -> SharedAsrFactory {
+        self.asr.clone()
     }
 }
 
@@ -63,7 +71,7 @@ pub struct CorpusBaselineReport {
     pub source: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ReplayReport {
     pub backend: String,
     pub capture_dir: String,
@@ -77,7 +85,7 @@ pub struct ReplayReport {
     pub latency: ReplayLatencyReport,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ReplayLatencyReport {
     pub audio_ms: u64,
     pub chunk_count: usize,
@@ -96,7 +104,7 @@ impl ReplayLatencyReport {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WerReport {
     pub reference_words: usize,
     pub hypothesis_words: usize,
@@ -116,7 +124,7 @@ impl WerReport {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum WerTokenError {
     Substitution {
         reference: String,
@@ -347,12 +355,12 @@ async fn replay_capture_wav(
     })
 }
 
-struct ReplayRun {
-    transcript: String,
-    latency: ReplayLatencyReport,
+pub(crate) struct ReplayRun {
+    pub(crate) transcript: String,
+    pub(crate) latency: ReplayLatencyReport,
 }
 
-async fn replay_samples(
+pub(crate) async fn replay_samples(
     samples: &[i16],
     chunk_ms: u32,
     asr: SharedAsrFactory,
