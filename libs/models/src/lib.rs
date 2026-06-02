@@ -338,6 +338,8 @@ pub enum CuratedBundle {
     WhisperBaseEn,
     #[cfg(feature = "model-sherpa-onnx-streaming")]
     SherpaOnnxStreamingEn,
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    SherpaOnnxStreamingEnKroko2025,
     #[cfg(feature = "model-moonshine-streaming")]
     MoonshineStreamingEn,
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -376,6 +378,10 @@ impl CuratedBundle {
             Self::WhisperBaseEn => asr::whisper_base_en::descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::descriptor(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => {
+                asr::sherpa_onnx_streaming_en_kroko_2025::descriptor()
+            }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -438,6 +444,12 @@ impl CuratedBundle {
             Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::start_typed(options)
                 .await
                 .map(CuratedHandle::SherpaOnnxStreamingEn),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => {
+                asr::sherpa_onnx_streaming_en_kroko_2025::start_typed(options)
+                    .await
+                    .map(CuratedHandle::SherpaOnnxStreamingEnKroko2025)
+            }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::start_typed(options)
                 .await
@@ -481,6 +493,8 @@ pub enum CuratedHandle {
     WhisperBaseEn(WhisperCppHandle),
     #[cfg(feature = "model-sherpa-onnx-streaming")]
     SherpaOnnxStreamingEn(SherpaOnnxHandle),
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    SherpaOnnxStreamingEnKroko2025(SherpaOnnxHandle),
     #[cfg(feature = "model-moonshine-streaming")]
     MoonshineStreamingEn(MoonshineHandle),
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -520,6 +534,8 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.descriptor(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.descriptor(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -555,6 +571,8 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.capabilities(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.capabilities(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -590,6 +608,8 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -676,6 +696,8 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.shutdown().await,
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -1340,6 +1362,10 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "whisper_base_en" => Some(CuratedBundle::WhisperBaseEn),
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         "sherpa_onnx_streaming_zipformer_en" => Some(CuratedBundle::SherpaOnnxStreamingEn),
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        "sherpa_onnx_streaming_zipformer_en_kroko_2025" => {
+            Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)
+        }
         #[cfg(feature = "model-moonshine-streaming")]
         "moonshine_streaming_en" => Some(CuratedBundle::MoonshineStreamingEn),
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -1400,6 +1426,12 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         ("sherpa_onnx_streaming_zipformer_en", BackendKind::SherpaOnnx, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::SherpaOnnxStreamingEn)
         }
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        (
+            "sherpa_onnx_streaming_zipformer_en_kroko_2025",
+            BackendKind::SherpaOnnx,
+            CheckpointFormat::Onnx,
+        ) => Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025),
         #[cfg(feature = "model-moonshine-streaming")]
         ("moonshine_streaming_en", BackendKind::Ort, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::MoonshineStreamingEn)
@@ -1462,6 +1494,8 @@ impl Catalog {
         asr::moonshine_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         asr::sherpa_onnx_streaming_en::register(&mut catalog);
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        asr::sherpa_onnx_streaming_en_kroko_2025::register(&mut catalog);
         #[cfg(feature = "model-whisper-base-en")]
         asr::whisper_base_en::register(&mut catalog);
         catalog
@@ -1789,9 +1823,11 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1810,9 +1846,11 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1831,9 +1869,11 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_6_27b_gguf");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Chat)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Chat)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -2150,9 +2190,11 @@ mod tests {
         #[cfg(feature = "model-whisper-base-en")]
         {
             let descriptor = crate::asr::whisper_base_en::descriptor();
-            assert!(descriptor
-                .capabilities
-                .supports(CapabilityKind::Transcription));
+            assert!(
+                descriptor
+                    .capabilities
+                    .supports(CapabilityKind::Transcription)
+            );
             assert!(!descriptor.capabilities.supports(CapabilityKind::VoiceClone));
             assert_eq!(
                 descriptor.capabilities.descriptors(),

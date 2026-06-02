@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "sherpa")]
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono};
 #[cfg(feature = "sherpa")]
@@ -106,6 +106,32 @@ pub trait InboundAsrFactory: Send + Sync {
 // justification: media WebSocket tasks share one process-selected ASR factory without coupling Telnyx wiring to a concrete model backend.
 pub type SharedAsrFactory = Arc<dyn InboundAsrFactory>;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SherpaAsrArtifact {
+    #[default]
+    ZipformerEn20230626,
+    ZipformerEnKroko20250806,
+}
+
+impl SherpaAsrArtifact {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ZipformerEn20230626 => "sherpa-zipformer-en-2023-06-26",
+            Self::ZipformerEnKroko20250806 => "sherpa-zipformer-en-kroko-2025-08-06",
+        }
+    }
+
+    #[cfg(feature = "sherpa")]
+    fn asr_model(self) -> motlie_models::AsrModels {
+        match self {
+            Self::ZipformerEn20230626 => motlie_models::AsrModels::SherpaOnnxStreamingEn,
+            Self::ZipformerEnKroko20250806 => {
+                motlie_models::AsrModels::SherpaOnnxStreamingEnKroko2025
+            }
+        }
+    }
+}
+
 pub struct UnavailableAsrFactory {
     message: &'static str,
 }
@@ -127,15 +153,25 @@ impl InboundAsrFactory for UnavailableAsrFactory {
 pub struct SherpaAsrFactory {
     artifact_root: PathBuf,
     allow_download: bool,
+    artifact: SherpaAsrArtifact,
     handle: Mutex<Option<Arc<motlie_model_sherpa_onnx::SherpaOnnxHandle>>>,
 }
 
 #[cfg(feature = "sherpa")]
 impl SherpaAsrFactory {
     pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+        Self::with_artifact(artifact_root, allow_download, SherpaAsrArtifact::default())
+    }
+
+    pub fn with_artifact(
+        artifact_root: PathBuf,
+        allow_download: bool,
+        artifact: SherpaAsrArtifact,
+    ) -> Self {
         Self {
             artifact_root,
             allow_download,
+            artifact,
             handle: Mutex::new(None),
         }
     }
@@ -146,7 +182,8 @@ impl SherpaAsrFactory {
             return Ok(Arc::clone(handle));
         }
 
-        let handle = Arc::new(start_sherpa(&self.artifact_root, self.allow_download).await?);
+        let handle =
+            Arc::new(start_sherpa(&self.artifact_root, self.allow_download, self.artifact).await?);
         *guard = Some(Arc::clone(&handle));
         Ok(handle)
     }
@@ -210,39 +247,59 @@ impl InboundAsrSession for SherpaAsrSession {
 async fn start_sherpa(
     artifact_root: &Path,
     allow_download: bool,
+    artifact: SherpaAsrArtifact,
 ) -> anyhow::Result<motlie_model_sherpa_onnx::SherpaOnnxHandle> {
-    use motlie_models::asr::sherpa_onnx_streaming_en;
-    use motlie_models::{AsrModels, Catalog, LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX};
+    use motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 
     let options = local_only_options(artifact_root);
-    match sherpa_onnx_streaming_en::start_typed(options).await {
+    match start_sherpa_artifact(artifact, options).await {
         Ok(handle) => Ok(handle),
         Err(err) if allow_download && missing_local_artifacts(&err) => {
             tracing::info!(
                 artifact_root = %artifact_root.display(),
+                artifact = artifact.label(),
                 "downloading Sherpa ONNX artifacts"
             );
-            let catalog = Catalog::with_defaults();
-            motlie_models::download_bundle_artifacts(
-                &catalog,
-                &AsrModels::SherpaOnnxStreamingEn.bundle_id(),
-                artifact_root,
-            )
-            .map_err(anyhow::Error::from)
-            .context("download Sherpa ONNX artifacts")?;
-            sherpa_onnx_streaming_en::start_typed(local_only_options(artifact_root))
+            download_sherpa_artifact(artifact, artifact_root)?;
+            start_sherpa_artifact(artifact, local_only_options(artifact_root))
                 .await
                 .map_err(anyhow::Error::from)
-                .context("start Sherpa after downloading artifacts")
+                .with_context(|| format!("start {} after downloading artifacts", artifact.label()))
         }
         Err(err) if !allow_download && missing_local_artifacts(&err) => {
             bail!(
-                "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} missing under '{}'; rerun without --no-asr-download or preinstall artifacts",
+                "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} missing for {} under '{}'; rerun without --no-asr-download or preinstall artifacts",
+                artifact.label(),
                 artifact_root.display()
             )
         }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Sherpa ONNX"),
+        Err(err) => Err(anyhow::Error::from(err))
+            .with_context(|| format!("start {} Sherpa ONNX", artifact.label())),
     }
+}
+
+#[cfg(feature = "sherpa")]
+async fn start_sherpa_artifact(
+    artifact: SherpaAsrArtifact,
+    options: StartOptions,
+) -> Result<motlie_model_sherpa_onnx::SherpaOnnxHandle, ModelError> {
+    match artifact.asr_model().bundle().start(options).await? {
+        motlie_models::CuratedHandle::SherpaOnnxStreamingEn(handle)
+        | motlie_models::CuratedHandle::SherpaOnnxStreamingEnKroko2025(handle) => Ok(handle),
+    }
+}
+
+#[cfg(feature = "sherpa")]
+fn download_sherpa_artifact(
+    artifact: SherpaAsrArtifact,
+    artifact_root: &Path,
+) -> anyhow::Result<()> {
+    let catalog = motlie_models::Catalog::with_defaults();
+    let model = artifact.asr_model();
+    motlie_models::download_bundle_artifacts(&catalog, &model.bundle_id(), artifact_root)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("download {} Sherpa ONNX artifacts", artifact.label()))
 }
 
 #[cfg(feature = "sherpa")]
@@ -404,6 +461,18 @@ mod tests {
         assert!(!event.is_suppressed());
         assert!(!event.requires_session_reset());
         assert_eq!(event.suppression_reason(), None);
+    }
+
+    #[test]
+    fn sherpa_artifact_labels_are_stable_for_replay_reports() {
+        assert_eq!(
+            SherpaAsrArtifact::ZipformerEn20230626.label(),
+            "sherpa-zipformer-en-2023-06-26"
+        );
+        assert_eq!(
+            SherpaAsrArtifact::ZipformerEnKroko20250806.label(),
+            "sherpa-zipformer-en-kroko-2025-08-06"
+        );
     }
 
     #[cfg(feature = "sherpa")]
