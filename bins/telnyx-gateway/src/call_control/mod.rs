@@ -1,4 +1,4 @@
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

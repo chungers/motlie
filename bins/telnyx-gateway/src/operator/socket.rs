@@ -5,11 +5,10 @@ use motlie_driver::{CommandEffect, CommandEngine};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
 
-pub type SharedCommandEngine = Arc<Mutex<CommandEngine<GatewayContext, GatewayCommand>>>;
+pub type SharedCommandContext = Arc<GatewayContext>;
 
 #[derive(Debug, Serialize)]
 struct SocketCommandResponse {
@@ -47,16 +46,19 @@ fn effect_label(effect: CommandEffect) -> &'static str {
     }
 }
 
-pub async fn run_command_socket(path: PathBuf, engine: SharedCommandEngine) -> anyhow::Result<()> {
+pub async fn run_command_socket(
+    path: PathBuf,
+    context: SharedCommandContext,
+) -> anyhow::Result<()> {
     prepare_socket_path(&path)?;
     let listener = UnixListener::bind(&path)?;
     tracing::info!(socket = %path.display(), "operator.socket.listening");
 
     loop {
         let (stream, _) = listener.accept().await?;
-        let engine = Arc::clone(&engine);
+        let context = Arc::clone(&context);
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, engine).await {
+            if let Err(error) = handle_connection(stream, context).await {
                 tracing::warn!(error = %error, "operator.socket.connection_failed");
             }
         });
@@ -78,9 +80,13 @@ fn prepare_socket_path(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_connection(stream: UnixStream, engine: SharedCommandEngine) -> anyhow::Result<()> {
+async fn handle_connection(
+    stream: UnixStream,
+    context: SharedCommandContext,
+) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
+    let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.for_new_source());
     let mut line = String::new();
 
     loop {
@@ -94,12 +100,9 @@ async fn handle_connection(stream: UnixStream, engine: SharedCommandEngine) -> a
             continue;
         }
 
-        let response = {
-            let mut guard = engine.lock().await;
-            match guard.run_line(command).await {
-                Ok(output) => SocketCommandResponse::ok(output.lines, output.effects),
-                Err(error) => SocketCommandResponse::error(error.to_string()),
-            }
+        let response = match engine.run_line(command).await {
+            Ok(output) => SocketCommandResponse::ok(output.lines, output.effects),
+            Err(error) => SocketCommandResponse::error(error.to_string()),
         };
         let encoded = serde_json::to_string(&response)?;
         writer.write_all(encoded.as_bytes()).await?;
@@ -112,7 +115,7 @@ async fn handle_connection(stream: UnixStream, engine: SharedCommandEngine) -> a
 mod tests {
     use super::*;
     use crate::call_control::TelnyxClient;
-    use crate::operator::state::shared_state;
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
 
     #[tokio::test]
     async fn command_socket_runs_driver_commands() {
@@ -122,12 +125,8 @@ mod tests {
         ));
         let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
         let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
-        let engine = Arc::new(Mutex::new(
-            CommandEngine::<GatewayContext, GatewayCommand>::new(GatewayContext::new(
-                state, telnyx,
-            )),
-        ));
-        let socket_task = tokio::spawn(run_command_socket(path.clone(), engine));
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
 
         let mut stream = connect_with_retry(&path).await;
         stream
@@ -144,12 +143,49 @@ mod tests {
             serde_json::from_str(&response).expect("response should be JSON");
 
         assert_eq!(response["ok"], true);
-        assert!(
-            response["lines"][0]
-                .as_str()
-                .expect("line should be a string")
-                .starts_with("listener:")
-        );
+        assert!(response["lines"][0]
+            .as_str()
+            .expect("line should be a string")
+            .starts_with("listener:"));
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn socket_connections_keep_source_local_selection() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let (call_one, call_two) = {
+            let mut guard = state.write().await;
+            let call_one = add_test_call(&mut guard, "call-1");
+            let call_two = add_test_call(&mut guard, "call-2");
+            (call_one, call_two)
+        };
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
+
+        let mut client_one = SocketTestClient::connect(&path).await;
+        let mut client_two = SocketTestClient::connect(&path).await;
+
+        let first_use = client_one.command(&format!("call use {call_one}")).await;
+        let second_use = client_two.command(&format!("call use {call_two}")).await;
+        assert_eq!(first_use["ok"], true);
+        assert_eq!(second_use["ok"], true);
+
+        let first_show = client_one.command("call show").await;
+        let second_show = client_two.command("call show").await;
+
+        assert!(response_lines(&first_show)
+            .iter()
+            .any(|line| line == &format!("call: {call_one}")));
+        assert!(response_lines(&second_show)
+            .iter()
+            .any(|line| line == &format!("call: {call_two}")));
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);
@@ -165,5 +201,58 @@ mod tests {
         UnixStream::connect(path)
             .await
             .expect("socket should become available")
+    }
+
+    fn add_test_call(state: &mut crate::operator::state::GatewayState, control_id: &str) -> String {
+        state.add_or_update_inbound_call(
+            TelnyxIds {
+                call_control_id: control_id.to_string(),
+                call_session_id: None,
+                call_leg_id: None,
+                stream_id: None,
+            },
+            None,
+            None,
+            CallStatus::PendingInbound,
+        )
+    }
+
+    struct SocketTestClient {
+        reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+        writer: tokio::net::unix::OwnedWriteHalf,
+    }
+
+    impl SocketTestClient {
+        async fn connect(path: &Path) -> Self {
+            let stream = connect_with_retry(path).await;
+            let (reader, writer) = stream.into_split();
+            Self {
+                reader: BufReader::new(reader),
+                writer,
+            }
+        }
+
+        async fn command(&mut self, command: &str) -> serde_json::Value {
+            self.writer
+                .write_all(format!("{command}\n").as_bytes())
+                .await
+                .expect("write socket command");
+            let mut response = String::new();
+            self.reader
+                .read_line(&mut response)
+                .await
+                .expect("read socket response");
+            serde_json::from_str(&response).expect("socket response should be JSON")
+        }
+    }
+
+    fn response_lines(response: &serde_json::Value) -> Vec<String> {
+        assert_eq!(response["ok"], true);
+        response["lines"]
+            .as_array()
+            .expect("lines should be an array")
+            .iter()
+            .map(|line| line.as_str().expect("line should be a string").to_string())
+            .collect()
     }
 }
