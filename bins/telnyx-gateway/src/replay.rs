@@ -6,7 +6,7 @@ use motlie_voice::app::TranscriptEvent;
 use motlie_voice::pipeline::convert::{downmix_to_mono, f32_to_i16_clamped};
 use motlie_voice::wav::decode_streaming_wav_to_f32;
 
-use crate::adapter::SharedAsrFactory;
+use crate::adapter::{AsrTranscriptEvent, SharedAsrFactory};
 use crate::cli::ReplayCaptureArgs;
 
 const ASR_INPUT_WAV: &str = "asr-input-16khz.wav";
@@ -135,9 +135,9 @@ struct TranscriptAssembler {
 }
 
 impl TranscriptAssembler {
-    fn record_events(&mut self, events: Vec<TranscriptEvent>) {
+    fn record_events(&mut self, events: Vec<AsrTranscriptEvent>) {
         for event in events {
-            match event {
+            match event.event {
                 TranscriptEvent::Partial { text, .. } => self.current_partial = Some(text),
                 TranscriptEvent::Final { text, .. } => {
                     append_fragment(&mut self.final_text, &text);
@@ -329,20 +329,20 @@ mod tests {
     #[test]
     fn transcript_assembler_uses_finals_plus_current_partial() {
         let mut assembler = TranscriptAssembler::default();
-        assembler.record_events(vec![TranscriptEvent::Partial {
+        assembler.record_events(vec![AsrTranscriptEvent::emit(TranscriptEvent::Partial {
             text: "HEL".to_string(),
             update: Default::default(),
-        }]);
+        })]);
         assert_eq!(assembler.assembled(), "HEL");
 
-        assembler.record_events(vec![TranscriptEvent::Final {
+        assembler.record_events(vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
             text: "HELLO".to_string(),
             update: Default::default(),
-        }]);
-        assembler.record_events(vec![TranscriptEvent::Partial {
+        })]);
+        assembler.record_events(vec![AsrTranscriptEvent::emit(TranscriptEvent::Partial {
             text: "WOR".to_string(),
             update: Default::default(),
-        }]);
+        })]);
         assert_eq!(assembler.assembled(), "HELLO WOR");
     }
 
