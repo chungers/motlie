@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
-use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
 use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
@@ -14,7 +13,9 @@ use motlie_voice::VoiceError;
 use serde::Deserialize;
 use tokio::time::{self, MissedTickBehavior};
 
-use crate::adapter::{InboundAsrSession, SharedAsrFactory};
+use crate::adapter::{
+    AsrTranscriptEvent, AsrTranscriptSuppressionReason, InboundAsrSession, SharedAsrFactory,
+};
 use crate::operator::state::{
     CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
 };
@@ -26,8 +27,6 @@ use capture::MediaCapture;
 const SPEECH_RMS_THRESHOLD: f32 = 180.0;
 const SPEECH_PEAK_THRESHOLD: i16 = 900;
 const LOW_ENERGY_HANGOVER_FRAMES: usize = 75;
-const REPEATED_TOKEN_RUN_THRESHOLD: usize = 16;
-const REPEATED_Q_RUN_THRESHOLD: usize = 8;
 const PCMU_SILENCE_BYTE: u8 = 0xff;
 const PCMA_SILENCE_BYTE: u8 = 0xd5;
 const SILENCE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(20);
@@ -722,32 +721,6 @@ impl AsrGate {
     }
 }
 
-fn looks_like_repeated_token_hallucination(text: &str) -> bool {
-    let mut previous = None;
-    let mut run = 0usize;
-    let mut max_run = 0usize;
-    let mut chars = 0usize;
-    let mut q_count = 0usize;
-
-    for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
-        chars += 1;
-        if ch == 'Q' {
-            q_count += 1;
-        }
-        if previous == Some(ch) {
-            run += 1;
-        } else {
-            previous = Some(ch);
-            run = 1;
-        }
-        max_run = max_run.max(run);
-    }
-
-    max_run >= REPEATED_TOKEN_RUN_THRESHOLD
-        || (q_count >= REPEATED_Q_RUN_THRESHOLD
-            && q_count.saturating_mul(3) >= chars.saturating_mul(2))
-}
-
 fn transcript_preview(text: &str) -> String {
     const PREVIEW_CHARS: usize = 48;
 
@@ -814,23 +787,24 @@ async fn record_transcript_events(
     stream_id: Option<&str>,
     media_format: Option<&MediaFormat>,
     mut capture: Option<&mut MediaCapture>,
-    events: Vec<TranscriptEvent>,
+    events: Vec<AsrTranscriptEvent>,
 ) -> bool {
     let mut guard = state.write().await;
-    let mut suppressed_repeated_token = false;
+    let mut reset_requested = false;
     for event in events {
-        let kind = if event.is_final() {
+        let kind = if event.event.is_final() {
             TranscriptKind::Final
         } else {
             TranscriptKind::Partial
         };
-        let kind_label = if event.is_final() {
+        let kind_label = if event.event.is_final() {
             "transcript.final"
         } else {
             "transcript.partial"
         };
-        let text = event.text().to_string();
-        let suppressed = looks_like_repeated_token_hallucination(&text);
+        let text = event.event.text().to_string();
+        let suppressed = event.is_suppressed();
+        reset_requested |= event.requires_session_reset();
         if let Some(capture) = capture.as_deref_mut() {
             record_transcript_capture(capture, kind_label, &text, suppressed);
         }
@@ -849,7 +823,9 @@ async fn record_transcript_events(
             .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
 
         if suppressed {
-            suppressed_repeated_token = true;
+            let suppression_reason = event
+                .suppression_reason()
+                .map(AsrTranscriptSuppressionReason::label);
             tracing::warn!(
                 gateway_call_id,
                 call_control_id = call_control_id.as_deref(),
@@ -859,6 +835,7 @@ async fn record_transcript_events(
                 codec = codec.as_deref(),
                 sample_rate_hz,
                 transcript_kind = kind_label,
+                suppression_reason,
                 transcript_chars = text.chars().count(),
                 transcript_preview = transcript_preview(&text),
                 "transcript.suppressed_repeated_token"
@@ -880,7 +857,7 @@ async fn record_transcript_events(
             "{kind_label}"
         );
     }
-    suppressed_repeated_token
+    reset_requested
 }
 
 async fn log_media_error(state: &SharedState, gateway_call_id: Option<&str>, error: anyhow::Error) {
@@ -923,6 +900,7 @@ mod tests {
 
     use async_trait::async_trait;
     use motlie_model::typed::{AudioBuf, Mono};
+    use motlie_voice::app::TranscriptEvent;
 
     use crate::adapter::{EchoAsrFactory, InboundAsrFactory};
     use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
@@ -1310,7 +1288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_token_transcripts_are_suppressed_from_call_detail() {
+    async fn adapter_suppressed_transcripts_are_suppressed_from_call_detail() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let format = MediaFormat {
@@ -1326,14 +1304,18 @@ mod tests {
             Some(&format),
             None,
             vec![
-                TranscriptEvent::Partial {
-                    text: "MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ".to_string(),
-                    update: motlie_model::TranscriptionUpdate::default(),
-                },
-                TranscriptEvent::Final {
+                AsrTranscriptEvent::suppress(
+                    TranscriptEvent::Partial {
+                        text: "MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ".to_string(),
+                        update: motlie_model::TranscriptionUpdate::default(),
+                    },
+                    AsrTranscriptSuppressionReason::RepeatedTokenHallucination,
+                    true,
+                ),
+                AsrTranscriptEvent::emit(TranscriptEvent::Final {
                     text: "hello there".to_string(),
                     update: motlie_model::TranscriptionUpdate::default(),
-                },
+                }),
             ],
         )
         .await;
@@ -1345,16 +1327,35 @@ mod tests {
         assert_eq!(call.transcripts[0].text, "hello there");
     }
 
-    #[test]
-    fn repeated_token_detector_ignores_normal_transcripts() {
-        assert!(looks_like_repeated_token_hallucination(
-            "MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
-        ));
-        assert!(looks_like_repeated_token_hallucination("GOODQQQQQQQQ"));
-        assert!(!looks_like_repeated_token_hallucination(
-            "meet me at the front desk"
-        ));
-        assert!(!looks_like_repeated_token_hallucination("queue"));
+    #[tokio::test]
+    async fn non_sherpa_pass_through_transcripts_are_not_suppressed_by_media_loop() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let format = MediaFormat {
+            encoding: "PCMU".to_string(),
+            sample_rate_hz: 8_000,
+            channels: 1,
+        };
+        let repeated_text = "MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ";
+
+        let needs_reset = record_transcript_events(
+            &state,
+            &gateway_call_id,
+            Some("stream-1"),
+            Some(&format),
+            None,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: repeated_text.to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+        )
+        .await;
+        assert!(!needs_reset);
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.transcripts.len(), 1);
+        assert_eq!(call.transcripts[0].text, repeated_text);
     }
 
     #[tokio::test]
@@ -1529,12 +1530,12 @@ mod tests {
         async fn ingest(
             &mut self,
             _audio: AudioBuf<i16, 16_000, Mono>,
-        ) -> anyhow::Result<Vec<TranscriptEvent>> {
+        ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
             self.ingests.fetch_add(1, Ordering::SeqCst);
             Ok(Vec::new())
         }
 
-        async fn finish(self: Box<Self>) -> anyhow::Result<Vec<TranscriptEvent>> {
+        async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
             Ok(Vec::new())
         }
     }
