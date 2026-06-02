@@ -1,0 +1,367 @@
+{
+  "schema_version": 1,
+  "name": "qwen3-call-center-golden",
+  "description": "Short Qwen3-TTS source texts for offline call-center ASR A/B scoring. @codex-191-impl 2026-06-02 PDT -- Ground truth is the text field; digit strings are written as spoken words for stable WER.",
+  "samples": [
+    {
+      "id": "greeting-001",
+      "category": "greeting",
+      "text": "Thanks for calling Motlie support, how can I help today?"
+    },
+    {
+      "id": "greeting-002",
+      "category": "greeting",
+      "text": "Good morning, this is billing support, may I verify your account?"
+    },
+    {
+      "id": "greeting-003",
+      "category": "greeting",
+      "text": "Hi, I am calling about the appointment reminder."
+    },
+    {
+      "id": "greeting-004",
+      "category": "greeting",
+      "text": "Hello, I need help with my recent order."
+    },
+    {
+      "id": "greeting-005",
+      "category": "greeting",
+      "text": "Good evening, please connect me with customer care."
+    },
+    {
+      "id": "greeting-006",
+      "category": "greeting",
+      "text": "This is Alex from Motlie returning your support call."
+    },
+    {
+      "id": "greeting-007",
+      "category": "greeting",
+      "text": "Thanks for calling, I can help with that request."
+    },
+    {
+      "id": "greeting-008",
+      "category": "greeting",
+      "text": "Hello, I am checking on my ticket status."
+    },
+    {
+      "id": "phone-digits-001",
+      "category": "phone_digits",
+      "text": "My phone number is four one five five five five zero one two three."
+    },
+    {
+      "id": "phone-digits-002",
+      "category": "phone_digits",
+      "text": "Please call me back at six five zero two one nine eight eight zero zero."
+    },
+    {
+      "id": "phone-digits-003",
+      "category": "phone_digits",
+      "text": "The callback number is two zero six three three four seven seven one nine."
+    },
+    {
+      "id": "phone-digits-004",
+      "category": "phone_digits",
+      "text": "You can reach my office at three one two four four zero nine nine nine nine."
+    },
+    {
+      "id": "phone-digits-005",
+      "category": "phone_digits",
+      "text": "My mobile number is nine one seven zero zero eight six four two one."
+    },
+    {
+      "id": "phone-digits-006",
+      "category": "phone_digits",
+      "text": "The best number is seven one eight five zero three two two two two."
+    },
+    {
+      "id": "phone-digits-007",
+      "category": "phone_digits",
+      "text": "Text updates to eight five eight seven seven seven one zero one zero."
+    },
+    {
+      "id": "phone-digits-008",
+      "category": "phone_digits",
+      "text": "Use the alternate line four two five six six six four zero zero five."
+    },
+    {
+      "id": "account-digits-001",
+      "category": "account_digits",
+      "text": "My account number is one zero zero four two seven nine."
+    },
+    {
+      "id": "account-digits-002",
+      "category": "account_digits",
+      "text": "The service ticket is eight six three zero one five."
+    },
+    {
+      "id": "account-digits-003",
+      "category": "account_digits",
+      "text": "Please look up case number two two nine seven four."
+    },
+    {
+      "id": "account-digits-004",
+      "category": "account_digits",
+      "text": "The invoice number is seven zero four four one eight."
+    },
+    {
+      "id": "account-digits-005",
+      "category": "account_digits",
+      "text": "My member identifier is five five zero zero nine three one."
+    },
+    {
+      "id": "account-digits-006",
+      "category": "account_digits",
+      "text": "The confirmation code is nine eight two one six."
+    },
+    {
+      "id": "account-digits-007",
+      "category": "account_digits",
+      "text": "Reference number three one three five eight seven is on the email."
+    },
+    {
+      "id": "account-digits-008",
+      "category": "account_digits",
+      "text": "The order code is zero zero six four seven two."
+    },
+    {
+      "id": "card-digits-001",
+      "category": "card_digits",
+      "text": "The card ends in four four two one."
+    },
+    {
+      "id": "card-digits-002",
+      "category": "card_digits",
+      "text": "Use the card ending in zero nine eight seven."
+    },
+    {
+      "id": "card-digits-003",
+      "category": "card_digits",
+      "text": "My security code is three seven five."
+    },
+    {
+      "id": "card-digits-004",
+      "category": "card_digits",
+      "text": "The expiration date is zero eight twenty seven."
+    },
+    {
+      "id": "card-digits-005",
+      "category": "card_digits",
+      "text": "The last four digits are six two zero zero."
+    },
+    {
+      "id": "card-digits-006",
+      "category": "card_digits",
+      "text": "Please charge the card ending one two three four."
+    },
+    {
+      "id": "card-digits-007",
+      "category": "card_digits",
+      "text": "The verification code is nine one one."
+    },
+    {
+      "id": "card-digits-008",
+      "category": "card_digits",
+      "text": "The billing zip is nine four one zero seven."
+    },
+    {
+      "id": "spelled-name-001",
+      "category": "spelled_name",
+      "text": "My last name is Chung, spelled C H U N G."
+    },
+    {
+      "id": "spelled-name-002",
+      "category": "spelled_name",
+      "text": "The company name is Motlie, spelled M O T L I E."
+    },
+    {
+      "id": "spelled-name-003",
+      "category": "spelled_name",
+      "text": "My first name is Priya, spelled P R I Y A."
+    },
+    {
+      "id": "spelled-name-004",
+      "category": "spelled_name",
+      "text": "The patient name is Ellis, spelled E L L I S."
+    },
+    {
+      "id": "spelled-name-005",
+      "category": "spelled_name",
+      "text": "My street is Pine, spelled P I N E."
+    },
+    {
+      "id": "spelled-name-006",
+      "category": "spelled_name",
+      "text": "The agent name is Omar, spelled O M A R."
+    },
+    {
+      "id": "spelled-name-007",
+      "category": "spelled_name",
+      "text": "My email name is Avery, spelled A V E R Y."
+    },
+    {
+      "id": "spelled-name-008",
+      "category": "spelled_name",
+      "text": "The city is Tempe, spelled T E M P E."
+    },
+    {
+      "id": "address-001",
+      "category": "address",
+      "text": "The address is one two Main Street, apartment five."
+    },
+    {
+      "id": "address-002",
+      "category": "address",
+      "text": "Send it to four zero eight Cedar Avenue."
+    },
+    {
+      "id": "address-003",
+      "category": "address",
+      "text": "My office is at nine hundred Market Street."
+    },
+    {
+      "id": "address-004",
+      "category": "address",
+      "text": "The delivery address is seven one Lake Drive."
+    },
+    {
+      "id": "address-005",
+      "category": "address",
+      "text": "Use suite two hundred at fifteen Oak Plaza."
+    },
+    {
+      "id": "address-006",
+      "category": "address",
+      "text": "The billing address is thirty North First Street."
+    },
+    {
+      "id": "address-007",
+      "category": "address",
+      "text": "Please update the address to six Pine Circle."
+    },
+    {
+      "id": "address-008",
+      "category": "address",
+      "text": "Mail the form to eighty two River Road."
+    },
+    {
+      "id": "yes-no-001",
+      "category": "yes_no",
+      "text": "Yes, that is the correct account."
+    },
+    {
+      "id": "yes-no-002",
+      "category": "yes_no",
+      "text": "No, I did not authorize that payment."
+    },
+    {
+      "id": "yes-no-003",
+      "category": "yes_no",
+      "text": "Yes, please send the confirmation by text."
+    },
+    {
+      "id": "yes-no-004",
+      "category": "yes_no",
+      "text": "No, the appointment time does not work."
+    },
+    {
+      "id": "yes-no-005",
+      "category": "yes_no",
+      "text": "Yes, I can hold for the next agent."
+    },
+    {
+      "id": "yes-no-006",
+      "category": "yes_no",
+      "text": "No, please cancel the second order."
+    },
+    {
+      "id": "yes-no-007",
+      "category": "yes_no",
+      "text": "Yes, my address has changed recently."
+    },
+    {
+      "id": "yes-no-008",
+      "category": "yes_no",
+      "text": "No, I need to speak with support."
+    },
+    {
+      "id": "short-command-001",
+      "category": "short_command",
+      "text": "Please repeat the last message."
+    },
+    {
+      "id": "short-command-002",
+      "category": "short_command",
+      "text": "Transfer me to billing support."
+    },
+    {
+      "id": "short-command-003",
+      "category": "short_command",
+      "text": "Send the receipt to my email."
+    },
+    {
+      "id": "short-command-004",
+      "category": "short_command",
+      "text": "Update my callback number now."
+    },
+    {
+      "id": "short-command-005",
+      "category": "short_command",
+      "text": "Hold the line for one minute."
+    },
+    {
+      "id": "short-command-006",
+      "category": "short_command",
+      "text": "Cancel the appointment for Friday."
+    },
+    {
+      "id": "short-command-007",
+      "category": "short_command",
+      "text": "Read back the confirmation code."
+    },
+    {
+      "id": "short-command-008",
+      "category": "short_command",
+      "text": "Please mark this case urgent."
+    },
+    {
+      "id": "short-question-001",
+      "category": "short_question",
+      "text": "What is the balance due today?"
+    },
+    {
+      "id": "short-question-002",
+      "category": "short_question",
+      "text": "When will the technician arrive?"
+    },
+    {
+      "id": "short-question-003",
+      "category": "short_question",
+      "text": "Can you hear me clearly now?"
+    },
+    {
+      "id": "short-question-004",
+      "category": "short_question",
+      "text": "Why was my payment declined?"
+    },
+    {
+      "id": "short-question-005",
+      "category": "short_question",
+      "text": "Where can I upload the document?"
+    },
+    {
+      "id": "short-question-006",
+      "category": "short_question",
+      "text": "Do you need my date of birth?"
+    },
+    {
+      "id": "short-question-007",
+      "category": "short_question",
+      "text": "Is the refund already approved?"
+    },
+    {
+      "id": "short-question-008",
+      "category": "short_question",
+      "text": "May I schedule a morning callback?"
+    }
+  ]
+}
