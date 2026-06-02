@@ -8,7 +8,7 @@ use motlie_driver::CommandEngine;
 use motlie_telnyx_gateway::adapter::default_artifact_root;
 #[cfg(not(feature = "sherpa"))]
 use motlie_telnyx_gateway::adapter::UnavailableAsrFactory;
-use motlie_telnyx_gateway::adapter::{EchoAsrFactory, SharedAsrFactory};
+use motlie_telnyx_gateway::adapter::{EchoAsrFactory, SharedAsrFactory, SherpaAsrArtifact};
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
@@ -235,7 +235,12 @@ fn build_asr_factory(cli: &Cli, backend: ReplayBackendArg) -> SharedAsrFactory {
     match backend {
         ReplayBackendArg::Auto => build_auto_asr_factory(cli),
         ReplayBackendArg::Echo => Arc::new(EchoAsrFactory),
-        ReplayBackendArg::Sherpa => build_sherpa_asr_factory(cli),
+        ReplayBackendArg::Sherpa | ReplayBackendArg::SherpaZipformer2023 => {
+            build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEn20230626)
+        }
+        ReplayBackendArg::SherpaZipformerKroko2025 => {
+            build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEnKroko20250806)
+        }
     }
 }
 
@@ -243,20 +248,23 @@ fn build_auto_asr_factory(cli: &Cli) -> SharedAsrFactory {
     if std::env::var_os("MOTLIE_TELNYX_ECHO_ASR").is_some() {
         return Arc::new(EchoAsrFactory);
     }
-    build_sherpa_asr_factory(cli)
+    build_sherpa_asr_factory(cli, SherpaAsrArtifact::default())
 }
 
 #[cfg(feature = "sherpa")]
-fn build_sherpa_asr_factory(cli: &Cli) -> SharedAsrFactory {
+fn build_sherpa_asr_factory(cli: &Cli, artifact: SherpaAsrArtifact) -> SharedAsrFactory {
     let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
-    Arc::new(motlie_telnyx_gateway::adapter::SherpaAsrFactory::new(
-        artifact_root,
-        !cli.no_asr_download,
-    ))
+    Arc::new(
+        motlie_telnyx_gateway::adapter::SherpaAsrFactory::with_artifact(
+            artifact_root,
+            !cli.no_asr_download,
+            artifact,
+        ),
+    )
 }
 
 #[cfg(not(feature = "sherpa"))]
-fn build_sherpa_asr_factory(_cli: &Cli) -> SharedAsrFactory {
+fn build_sherpa_asr_factory(_cli: &Cli, _artifact: SherpaAsrArtifact) -> SharedAsrFactory {
     Arc::new(UnavailableAsrFactory::new(
         "gateway was built without a live ASR backend; rebuild with --features sherpa or use --backend echo for replay protocol testing",
     ))

@@ -103,6 +103,10 @@ pub enum ReplayBackendArg {
     Auto,
     Echo,
     Sherpa,
+    #[value(name = "sherpa-zipformer-2023")]
+    SherpaZipformer2023,
+    #[value(name = "sherpa-zipformer-kroko-2025")]
+    SherpaZipformerKroko2025,
 }
 
 impl ReplayBackendArg {
@@ -111,6 +115,8 @@ impl ReplayBackendArg {
             Self::Auto => "auto",
             Self::Echo => "echo",
             Self::Sherpa => "sherpa",
+            Self::SherpaZipformer2023 => "sherpa-zipformer-en-2023-06-26",
+            Self::SherpaZipformerKroko2025 => "sherpa-zipformer-en-kroko-2025-08-06",
         }
     }
 }
