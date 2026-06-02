@@ -307,7 +307,7 @@ fn payload_value_string(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operator::state::{InboundMode, shared_state};
+    use crate::operator::state::{shared_state, InboundMode};
 
     #[tokio::test]
     async fn inbound_disabled_does_not_create_pending_call() {
@@ -367,7 +367,7 @@ mod tests {
             .next()
             .expect("call should be recorded");
         assert_eq!(call.status, CallStatus::PendingInbound);
-        assert!(guard.selected_call.is_some());
+        assert_eq!(guard.calls.len(), 1);
     }
 
     #[tokio::test]
@@ -399,10 +399,7 @@ mod tests {
             .expect("call should be recorded");
         assert_eq!(call.direction, CallDirection::Outbound);
         assert_eq!(call.status, CallStatus::Dialing);
-        assert_eq!(
-            guard.selected_call.as_deref(),
-            Some(call.gateway_call_id.as_str())
-        );
+        assert_eq!(guard.calls.len(), 1);
     }
 
     #[tokio::test]

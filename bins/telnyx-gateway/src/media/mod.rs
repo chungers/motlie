@@ -1,16 +1,16 @@
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
-use motlie_voice::VoiceError;
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
-use motlie_voice::pipeline::resample::{WindowedSincResampler, resample_i16_mono};
+use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
+use motlie_voice::VoiceError;
 use serde::Deserialize;
 use tokio::time::{self, MissedTickBehavior};
 
@@ -918,14 +918,14 @@ fn validate_media_format(format: &MediaFormat) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use motlie_model::typed::{AudioBuf, Mono};
 
     use crate::adapter::{EchoAsrFactory, InboundAsrFactory};
-    use crate::operator::state::{CallStatus, TelnyxIds, shared_state};
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
 
     #[test]
     fn pcma_and_pcmu_decode_to_i16_audio() {
@@ -1044,16 +1044,14 @@ mod tests {
         handle_text(&media_one, &state, &asr, &mut media_state)
             .await
             .expect("first non-one media chunk should establish reorder base");
-        assert!(
-            state
-                .read()
-                .await
-                .calls
-                .get(&gateway_call_id)
-                .expect("call exists")
-                .transcripts
-                .is_empty()
-        );
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .transcripts
+            .is_empty());
 
         let media_two = media_event("stream-1", "8", &chunk);
         handle_text(&media_two, &state, &asr, &mut media_state)
@@ -1183,16 +1181,14 @@ mod tests {
         )
         .await
         .expect("silence should be accepted by transport");
-        assert!(
-            state
-                .read()
-                .await
-                .calls
-                .get(&gateway_call_id)
-                .expect("call exists")
-                .transcripts
-                .is_empty()
-        );
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .transcripts
+            .is_empty());
 
         let speech = STANDARD.encode(l16_samples(16_000, 4_000));
         handle_text(
@@ -1431,11 +1427,9 @@ mod tests {
         .await
         .expect_err("unsupported codec should fail at start");
 
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported inbound media encoding")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported inbound media encoding"));
         assert!(media_state.session.is_none());
         assert!(media_state.gateway_call_id.is_none());
         assert!(media_state.media_format.is_none());

@@ -189,6 +189,24 @@ impl CallSession {
             message: message.into(),
         });
     }
+
+    pub fn updated_at(&self) -> Option<DateTime<Utc>> {
+        self.timeline.last().map(|entry| entry.at)
+    }
+
+    pub fn assembled_transcript_text(&self) -> String {
+        match (
+            self.final_transcript.trim(),
+            self.current_partial.as_deref().map(str::trim),
+        ) {
+            ("", Some(partial)) if !partial.is_empty() => partial.to_string(),
+            (final_text, Some(partial)) if !final_text.is_empty() && !partial.is_empty() => {
+                format!("{final_text} {partial}")
+            }
+            (final_text, _) if !final_text.is_empty() => final_text.to_string(),
+            _ => "<none>".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,7 +240,6 @@ pub struct GatewayState {
     pub calls: BTreeMap<String, CallSession>,
     pub call_control_index: BTreeMap<String, String>,
     pub stream_index: BTreeMap<String, String>,
-    pub selected_call: Option<String>,
     pub logs: VecDeque<LogEntry>,
     pub shutdown_requested: bool,
 }
@@ -251,7 +268,6 @@ impl GatewayState {
             calls: BTreeMap::new(),
             call_control_index: BTreeMap::new(),
             stream_index: BTreeMap::new(),
-            selected_call: None,
             logs: VecDeque::new(),
             shutdown_requested: false,
         }
@@ -289,9 +305,6 @@ impl GatewayState {
         let gateway_call_id = call.gateway_call_id.clone();
         self.call_control_index
             .insert(ids.call_control_id, gateway_call_id.clone());
-        if self.selected_call.is_none() && status == CallStatus::PendingInbound {
-            self.selected_call = Some(gateway_call_id.clone());
-        }
         self.calls.insert(gateway_call_id.clone(), call);
         gateway_call_id
     }
@@ -323,17 +336,8 @@ impl GatewayState {
         let gateway_call_id = call.gateway_call_id.clone();
         self.call_control_index
             .insert(ids.call_control_id, gateway_call_id.clone());
-        self.selected_call = Some(gateway_call_id.clone());
         self.calls.insert(gateway_call_id.clone(), call);
         gateway_call_id
-    }
-
-    pub fn call_by_target_mut(&mut self, target: Option<&str>) -> Option<&mut CallSession> {
-        let id = match target {
-            Some(value) => value.to_string(),
-            None => self.selected_call.clone()?,
-        };
-        self.calls.get_mut(&id)
     }
 
     pub fn call_by_control_id_mut(&mut self, call_control_id: &str) -> Option<&mut CallSession> {
