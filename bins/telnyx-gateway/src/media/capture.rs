@@ -4,17 +4,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use chrono::Utc;
-use motlie_voice::wav::StreamingWavWriter;
 use serde_json::json;
 
 use super::MediaFormat;
+
+type CaptureWavWriter = hound::WavWriter<BufWriter<File>>;
 
 pub(super) struct MediaCapture {
     dir: PathBuf,
     raw_jsonl: BufWriter<File>,
     transcript_jsonl: BufWriter<File>,
-    decoded_wav: StreamingWavWriter<File, i16>,
-    asr_wav: StreamingWavWriter<File, i16>,
+    decoded_wav: CaptureWavWriter,
+    asr_wav: CaptureWavWriter,
 }
 
 impl MediaCapture {
@@ -32,15 +33,15 @@ impl MediaCapture {
 
         let raw_jsonl = BufWriter::new(create_file(&dir, "telnyx-media.jsonl")?);
         let transcript_jsonl = BufWriter::new(create_file(&dir, "transcripts.jsonl")?);
-        let decoded_wav = StreamingWavWriter::<_, i16>::new(
-            create_file(&dir, "decoded-inbound.wav")?,
+        let decoded_wav = create_wav(
+            &dir,
+            "decoded-inbound.wav",
             format.sample_rate_hz,
             format.channels,
         )
         .context("create decoded inbound WAV capture")?;
-        let asr_wav =
-            StreamingWavWriter::<_, i16>::new(create_file(&dir, "asr-input-16khz.wav")?, 16_000, 1)
-                .context("create ASR input WAV capture")?;
+        let asr_wav = create_wav(&dir, "asr-input-16khz.wav", 16_000, 1)
+            .context("create ASR input WAV capture")?;
 
         fs::write(
             dir.join("manifest.json"),
@@ -82,12 +83,12 @@ impl MediaCapture {
     }
 
     pub(super) fn record_decoded_samples(&mut self, samples: &[i16]) -> anyhow::Result<()> {
-        self.decoded_wav.write_chunk(samples)?;
+        write_wav_samples(&mut self.decoded_wav, samples)?;
         Ok(())
     }
 
     pub(super) fn record_asr_samples(&mut self, samples: &[i16]) -> anyhow::Result<()> {
-        self.asr_wav.write_chunk(samples)?;
+        write_wav_samples(&mut self.asr_wav, samples)?;
         Ok(())
     }
 
@@ -123,6 +124,33 @@ impl MediaCapture {
 fn create_file(dir: &Path, file_name: &str) -> anyhow::Result<File> {
     let path = dir.join(file_name);
     File::create(&path).with_context(|| format!("create media capture file {}", path.display()))
+}
+
+fn create_wav(
+    dir: &Path,
+    file_name: &str,
+    sample_rate_hz: u32,
+    channels: u16,
+) -> anyhow::Result<CaptureWavWriter> {
+    let path = dir.join(file_name);
+    let file = create_file(dir, file_name)?;
+    hound::WavWriter::new(
+        BufWriter::new(file),
+        hound::WavSpec {
+            channels,
+            sample_rate: sample_rate_hz,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .with_context(|| format!("create media capture WAV {}", path.display()))
+}
+
+fn write_wav_samples(writer: &mut CaptureWavWriter, samples: &[i16]) -> anyhow::Result<()> {
+    for &sample in samples {
+        writer.write_sample(sample)?;
+    }
+    Ok(())
 }
 
 fn sanitize_path_component(value: &str) -> String {
