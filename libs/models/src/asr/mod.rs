@@ -15,12 +15,16 @@ use motlie_model::BundleId;
 
 pub const MOONSHINE_STREAMING_SELECTOR: &str = "moonshine/streaming_en";
 pub const SHERPA_ONNX_STREAMING_SELECTOR: &str = "sherpa-onnx/streaming_zipformer_en";
+pub const SHERPA_ONNX_STREAMING_KROKO_2025_SELECTOR: &str =
+    "sherpa-onnx/streaming_zipformer_en_kroko_2025";
 pub const WHISPER_BASE_EN_SELECTOR: &str = "openai/whisper_base_en";
 
 #[cfg(feature = "model-moonshine-streaming")]
 pub mod moonshine_streaming_en;
 #[cfg(feature = "model-sherpa-onnx-streaming")]
 pub mod sherpa_onnx_streaming_en;
+#[cfg(feature = "model-sherpa-onnx-streaming")]
+pub mod sherpa_onnx_streaming_en_kroko_2025;
 #[cfg(feature = "model-whisper-base-en")]
 pub mod whisper_base_en;
 
