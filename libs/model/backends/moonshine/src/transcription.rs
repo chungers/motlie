@@ -19,9 +19,9 @@ use ort::value::TensorRef;
 use serde_json::Value;
 
 use crate::common::{
-    MoonshineArtifactPaths, MoonshineArtifactSpec, RuntimeMetricState, StagedModelDir,
     configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_onnx_artifacts,
+    resolve_onnx_artifacts, MoonshineArtifactPaths, MoonshineArtifactSpec, RuntimeMetricState,
+    StagedModelDir,
 };
 
 const MOONSHINE_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];

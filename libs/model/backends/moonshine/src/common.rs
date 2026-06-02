@@ -7,7 +7,7 @@ use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpo
 use tokenizers::Tokenizer;
 
 pub(crate) use motlie_model::metrics_runtime::{
-    RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
+    lock_metrics, observe_latency, observe_memory, RuntimeMetricState,
 };
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
