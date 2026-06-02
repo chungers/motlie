@@ -6,6 +6,26 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Fixed media capture WAV finalization so standard readers see finite durations, added `replay-capture` for deterministic captured-audio WER checks, and split Sherpa-only ASR quality tuning into milestone 1.5 (#370) covering hotwords, model/decoder A/B, and optional marked normalization. | Staged Build Strategy, Inbound Call Handler Design, Recommended ASR/TTS Stack, Testing Scope, Getting Started: Local Deployment |
+| 2026-06-01 | @codex-364-impl: Recorded the first outbound ASR-only dial attempt blocker: Telnyx rejected `POST /v2/calls` with `403 D38` because the Call Control application has no Outbound Voice Profile assignment; the gateway command is ready, but live outbound validation requires Telnyx account setup. | Outbound Call Handler Design, Testing Scope, Getting Started: Local Deployment |
+| 2026-06-01 | @codex-364-impl: Added an ASR-only outbound live-test command, `test dial-transcribe <to> [--from <from>]`, that reuses the Telnyx dial API, bidirectional RTP media attach, silence keepalive, capture, and Sherpa transcription paths without implementing milestone 2 outbound TTS. | Outbound Call Handler Design, Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
+| 2026-06-01 | @codex-364-impl: Recorded post-fix live validation for two `L16 16 kHz` inbound calls: transcription is now usable enough to measure, with reference-section WER around `16-18%`, but remaining errors concentrate on proper nouns and telephony homophones; also tightened bare `answer` behavior so it selects the single waiting inbound call instead of a stale ended selection. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
+| 2026-06-01 | @codex-364-impl: Updated the milestone 1 `L16` comparison path after capture analysis showed Telnyx WebSocket `L16` payloads must be decoded as little-endian PCM for the tested account/carrier path; big-endian interpretation produced clipped, unusable ASR input. | Audio Codecs and Formats, Inbound Call Handler Design, Testing Scope |
+| 2026-06-01 | @codex-364-impl: Added the post-live-test ASR quality loop for milestone 1: keep `PCMU 8 kHz` as the safe default, make the Telnyx answer media request configurable for `L16 16 kHz` comparison runs, and capture raw Telnyx JSONL, decoded WAV, Sherpa input WAV, transcript JSONL, and manifests for offline replay/tuning. | Audio Codecs and Formats, Inbound Call Handler Design, Testing Scope, Getting Started: Local Deployment |
+| 2026-06-01 | @codex-364-impl: Updated the milestone 1 ASR design to prefer upstream `sherpa-onnx` over Motlie's former hand-rolled ONNX decoder; the gateway now preserves normal speech pauses for Sherpa endpointing and uses the upstream crate's static native archive download/link path instead of the workspace Pyke `ort` path. | Recommended ASR/TTS Stack, Inbound Call Handler Design, Getting Started: Local Deployment |
+| 2026-06-01 | @codex-364-impl: Added a milestone 1 local command-socket subset for agent-assisted live testing: headless startup can load known config, accept line-oriented Motlie driver commands, return JSON command responses, answer inbound calls, expose `call show` transcript snapshots, and shut down without scraping the TUI; richer event polling and mux validation remain milestone 4. | Staged Build Strategy, Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API, Getting Started: Local Deployment |
+| 2026-06-01 | @codex-364-impl: Updated milestone 1 live ASR handling after long-call logs showed continuous Telnyx media delivery but Sherpa getting stuck in repeated-token output; the gateway now treats speech gaps and repeated-token detection as ASR-session reset boundaries while keeping one assembled call transcript for the operator. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
+| 2026-06-01 | @codex-364-impl: Updated milestone 1 live-call behavior from receive-only PCMU to bidirectional PCMU RTP with outbound silence keepalive after Telnyx reported provider-normal caller hangups while the gateway was only listening; added assembled transcript display so raw partial/final fragments do not replace readable call-level transcript text. | Audio Codecs and Formats, Inbound Call Handler Design, Operator REPL and TUI Control Surface |
+| 2026-06-01 | @codex-364-impl: Added live-call termination diagnostics to milestone 1 so Telnyx `call.hangup`/`call.ended`/stream termination fields are preserved in structured logs and selected-call detail instead of reducing every provider-side close to `ended`. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
+| 2026-06-01 | @codex-364-impl: Refined live milestone 1 handling so the ASR path gates both initial silence and sustained low-energy tails, suppresses repeated-token Sherpa hallucinations from the operator transcript stream while logging them as suppressed events, and keeps the shell prompt cursor aligned by rendered rows when command output wraps. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
+| 2026-06-01 | @codex-364-impl: Merged the TUI command input and REPL history into one shell-style left pane so operator commands, output, and the active prompt share one terminal-like surface. | Operator REPL and TUI Control Surface |
+| 2026-06-01 | @codex-364-impl: Added an explicit ASR start-of-speech gate for milestone 1 so low-energy initial telephony frames are logged but not fed into Sherpa, preventing silence-driven partial transcript growth during live inbound tests. | Inbound Call Handler Design, Testing Scope |
+| 2026-06-01 | @codex-364-impl: Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path, so logs cannot corrupt the alternate-screen TUI. | Operator REPL and TUI Control Surface, Getting Started: Local Deployment |
+| 2026-06-01 | @codex-364-impl: Recorded the now-superseded receive-only `PCMU` live-test attempt after the first live `L16` ASR output was unusable; later live evidence required bidirectional `PCMU` RTP silence keepalive for milestone 1. | Audio Codecs and Formats, Inbound Call Handler Design |
+| 2026-05-31 | @codex-364-impl: Clarified that the Unix-domain socket is the local agent-tooling interface: it can provide command execution, call snapshots, cursor-based event polling, and optional tmux/mstream-style wake-up notifications without depending on appserver webhooks or the HTTP Control API. | Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API |
+| 2026-05-31 | @codex-364-impl: Updated the gateway ORT policy to use Cargo's `ort/download-binaries` static `libonnxruntime.a` path with no `ORT_LIB_PATH`, dynamic-link, vendored ORT, or source-build runbook. | Recommended ASR/TTS Stack, Getting Started: Local Deployment |
+| 2026-05-31 | @codex-364-impl: Clarified that static ONNX Runtime builds should build ORT's own C/C++ dependencies from source through FetchContent; operators only provision host build tools, not ORT internal libraries. | Recommended ASR/TTS Stack |
+| 2026-05-31 | @codex-364-impl: Made static ONNX Runtime linkage the required Sherpa/Piper operational policy for gateway live tests and deployments; dynamic `ORT_PREFER_DYNAMIC_LINK` runbooks are explicitly rejected. | Recommended ASR/TTS Stack, Getting Started: Local Deployment |
 | 2026-05-30 | @codex-358-research: Addressed PR #363 review round 1 by moving M4, the design-quality assessment, and the recommended v1 pipelines under the staged build strategy; marking Control API and application webhook flows as milestone 4 work; aligning M1 structured logging with #364; adding operator session/socket/mux modules; and matching M3 prose to `ConversationCommand::{Say, Call, Noop}`. | Staged Build Strategy, Application Webhooks and Gateway Control API, Operator REPL and TUI Control Surface, Inbound Call Handler Design, Crate Hierarchy and API Surfaces |
 | 2026-05-30 | @codex-358-research: Reviewed the overall design quality and split tracking into four milestone issues: M1 inbound TUI transcription (#364), M2 outbound TUI dialer/TTS (#365), M3 full-duplex TUI chat conversation (#366), and M4 external socket/webhook/appserver integration (#367). | Staged Build Strategy, Recommended Telnyx v1 Pipelines, Operator REPL and TUI Control Surface |
 | 2026-05-30 | @codex-358-research: Added startup-selected operator input modes: `--tui` enables the local TUI, `--socket <path>` enables a Unix-domain command socket for headless control, and both sources are multiplexed through one command dispatcher when enabled together. | Operator REPL and TUI Control Surface, Staged Build Strategy, Gateway Configuration Requirement |
@@ -218,7 +238,10 @@ Important details:
 
 Implications for Motlie:
 
-- the most direct fit to existing ASR/TTS contracts is `L16` bidirectional RTP at `16 kHz`
+- the most direct fit to the later duplex ASR/TTS contracts is `L16` bidirectional RTP at `16 kHz`
+- milestone 1 live inbound transcription defaults to `PCMU` at `8 kHz` for inbound media and enables bidirectional RTP in the same codec so the gateway can send outbound silence keepalive while it is otherwise only transcribing
+- after the first successful upstream Sherpa live test, the gateway should expose an operator-controlled `L16 16 kHz` comparison mode; `PCMU 8 kHz` remains the rollback/default path until captured evidence shows `L16` is both stable and higher quality on the active Telnyx account/carrier path
+- milestone 1 live capture showed Telnyx WebSocket `L16` payloads decoding correctly as little-endian PCM on the tested account/carrier path; provider-neutral codec helpers should support both byte orders, but the Telnyx gateway must use the observed Telnyx byte order for inbound `L16`
 - PSTN-originated inbound audio may still start as `PCMU` or `PCMA` at `8 kHz`
 - the gateway must be able to decode G.711 and possibly other Telnyx codecs if the inbound stream format is not already linear PCM
 
@@ -349,6 +372,7 @@ Primary gateway subsystems:
 Build the gateway in four independently useful milestones. Each milestone should expose a narrow control surface that can later compose with the others. Tracking issues:
 
 - M1 inbound TUI transcription: #364
+- M1.5 Sherpa ASR quality tuning: #370
 - M2 outbound TUI dialer/TTS: #365
 - M3 full-duplex TUI chat conversation: #366
 - M4 external integration socket/webhook/appserver harness: #367
@@ -382,9 +406,29 @@ operator provisions Telnyx application and phone number
 -> selected-call detail pane transcript
 ```
 
-No TTS, outbound audio, external appserver, socket client, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls in the roster, answer on operator command, stream, normalize, transcribe, and render transcript events in the selected-call detail pane.
+No TTS, outbound audio, external appserver, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls in the roster, answer on operator command, stream, normalize, transcribe, and render transcript events in the selected-call detail pane. The TUI remains the primary M1 operator UI, but a minimal local command socket may drive the same command set for agent-assisted live tests where an agent starts the gateway, asks the human to dial, answers the pending call, and polls transcript state without scraping terminal UI output.
 
-Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, and transcript partial/final events.
+Milestone 1 ASR input should suppress low-energy initial media until speech is detected, allow only a short low-energy hangover after speech, and suppress sustained low-energy tails so silence does not keep advancing the streaming decoder. Because the current Sherpa backend has known repeated-token failure modes, the gateway should suppress pathological repeated-token transcript text from the operator transcript stream, emit a structured `transcript.suppressed_repeated_token` log with the same call, stream, codec, and sample-rate metadata, and reset the ASR session before feeding subsequent speech. A sustained silence gap followed by resumed speech should also finalize the previous ASR session and open a fresh one; this keeps long calls from depending on one stale decoder state for the whole call.
+
+Current Sherpa `final` events are word-level rather than sentence-level. The selected-call detail should therefore keep an assembled call transcript that appends accepted final fragments and overlays the current partial, while the raw recent partial/final event list remains available for debugging.
+
+Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, transcript partial/final events, and Telnyx termination details such as hangup cause/source or SIP cause when the provider sends them.
+
+### Milestone 1.5: Sherpa ASR Quality Tuning
+
+Milestone 1.5 (#370) is a follow-on quality milestone for the already-runnable M1 ASR path. It must stay inside the Sherpa ecosystem: improve the current Sherpa-based transcript quality before considering non-Sherpa ASR replacements.
+
+The latest prepared outbound `L16 16 kHz` capture measured `29.2%` WER against a `65`-word reference. The failure pattern is mostly phonetic and domain-specific rather than random media corruption: `outbound` became `ALBAN`/`ALBOW`, `Telnyx` became `TAL NICHS`, `Sherpa` became `SHARPA`, `Motlie` became `MOTLEY`, `voice` became `BOYS`, and `id` became `IDEED`. That suggests the recognizer hears the approximate phonemes but lacks the desired domain/context prior.
+
+M1.5 should proceed in this order:
+
+1. Use the captured `asr-input-16khz.wav` artifacts as the deterministic tuning input. The gateway's `replay-capture` command should report the assembled transcript, WER, substitutions, insertions, deletions, and token-level errors for a fixed reference text.
+2. Add Sherpa hotwords/context bias for operator/domain vocabulary such as `Motlie`, `Telnyx`, `Sherpa`, `inbound`, `outbound`, `voice profile id`, `call control`, and `gateway`.
+3. A/B Sherpa-only streaming model and decoder variants against the same capture corpus. The initial candidate set is current English streaming Zipformer, other English streaming Zipformer variants including non-int8/larger artifacts where available, Sherpa's English Nemotron streaming model, and decoder settings such as `modified_beam_search`, `max_active_paths`, and endpoint rules.
+4. Treat offline Sherpa models, for example NeMo Parakeet converted through Sherpa ONNX, as optional second-pass quality comparators only. They may inform future transcript cleanup or post-call review, but they do not replace the live M1 streaming backend.
+5. Add optional transcript normalization only as a marked post-ASR layer. Raw ASR events and WER reports must remain available; an agent/LLM may normalize `TAL NICHS -> Telnyx`, but that is semantic correction, not raw ASR improvement.
+
+An agent-operated gateway can use its LLM context for transcript normalization and intent recovery after ASR. It does not replace decoder-time context bias. Decoder-time hotwords improve the actual ASR token choice before final transcript emission; LLM normalization can clean up displayed/service text after the fact but may hallucinate, hide model regressions, and should not be used for WER acceptance unless explicitly scored as a separate normalized-output metric.
 
 Recommended inbound surface:
 
@@ -621,23 +665,69 @@ These pipelines align with what currently works while allowing useful validation
 The gateway should expose the same `motlie-driver` command family through startup-selected input sources:
 
 - `--tui` enables the local terminal UI with a left REPL pane and right call roster/detail area
-- `--socket <path>` enables a Unix-domain command socket for headless local control
+- `--socket <path>` enables a Unix-domain command socket for headless local agent/tooling control
 - `--load <dump_path>` replays durable configuration commands during startup before live command sources are accepted
 - the authenticated HTTP Control API remains the remote application-server control surface for call reads, attachments, answer/reject/hangup, dial, and say
 
-`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still operator-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--load` and/or the authenticated HTTP Control API for configuration and control.
+`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still locally agent-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--load` and/or the authenticated HTTP Control API for configuration and control.
 
-The Unix-domain socket should use the same command grammar as the TUI REPL. A simple v1 protocol can be newline-delimited UTF-8 command text with one structured response per command; later versions can add a JSON request envelope if multiple clients need request IDs, capabilities, or event streaming:
+The Unix-domain socket is the preferred interface for local agent tooling. It should be sufficient for an agent to configure the gateway, poll call/event state, answer or hang up calls, dial outbound calls, and send `say` text without using application webhooks or the HTTP Control API. Appserver webhooks and the Control API remain separate integration surfaces for other processes and services.
 
-```text
-/run/motlie/telnyx-gateway.sock
-> status
-< {"ok":true,"command_id":"cmd_01HZ...","summary":"listener ready"}
-> answer call_01HZ...
-< {"ok":true,"command_id":"cmd_01HZ...","summary":"answering call_01HZ..."}
+The milestone 1 socket subset can be line-oriented for immediate local testing: each input line is Motlie driver command text such as `status`, `inbound enable --manual`, `calls`, `answer`, `call show`, or `shutdown`, and each output line is a JSON command result with `ok`, `lines`, `effects`, and `error`.
+
+Milestone 4 should generalize this into newline-delimited JSON request/response frames around the same `motlie-driver` command grammar as the TUI REPL:
+
+```json
+{"id":"req-1","command":"status"}
+{"id":"req-1","ok":true,"command_id":"cmd_01HZ...","lines":["listener ready"],"data":{"listener":"ready"}}
+{"id":"req-2","command":"answer call_01HZ..."}
+{"id":"req-2","ok":true,"command_id":"cmd_01HZ...","lines":["answering call_01HZ..."]}
 ```
 
+Each response must carry the request `id`, a stable success/error shape, command output lines for human-readable parity with the TUI, and structured `data` for machine use when the command has a natural resource representation. Errors should include a machine-readable code and a human-readable message.
+
 The socket is a local privileged control surface. It should bind only to a filesystem path chosen by `--socket`, set restrictive permissions by default, unlink stale socket files only after verifying they are sockets, and avoid accepting remote TCP traffic. Authentication can be filesystem-permission based for v1, with optional peer credential checks where available.
+
+Agent event access should be polling-first. Some agents cannot receive pushed events; they can only run commands and inspect responses. The socket therefore needs command-level snapshots plus cursor polling over the gateway event journal:
+
+```text
+calls --json
+call get <call_id> --json
+events poll --after <cursor> [--call <call_id>] [--types <event,...>] [--limit <n>]
+```
+
+Recommended polling response:
+
+```json
+{
+  "id": "req-3",
+  "ok": true,
+  "data": {
+    "events": [
+      {
+        "seq": 101,
+        "type": "call.inbound.pending",
+        "call_id": "call_01HZ...",
+        "created_at": "2026-05-31T21:08:12Z",
+        "summary": "inbound call waiting"
+      }
+    ],
+    "next_cursor": 101
+  }
+}
+```
+
+The event journal should be an in-memory ring buffer at minimum. Every event needs a monotonic `seq`, stable `type`, timestamp, gateway call id when applicable, and enough provider diagnostic fields for troubleshooting. If an agent polls with a cursor older than the retained journal, the socket should return a structured `cursor_expired` error and the agent should recover by calling `calls --json` and resuming from the latest cursor.
+
+Socket event polling is the authoritative agent event path. Optional wake-up notifications may be layered on top for agents that sit inside a tmux session or mstream-driven prompt:
+
+```text
+agent notify tmux --target <target> --types call.inbound.pending,transcript.final
+agent notify mstream --channel <channel> --types call.inbound.pending,call.ended
+agent notify disable
+```
+
+These notifications are hints, not delivery guarantees. They should carry only a short wake-up message such as "motlie event: call.inbound.pending call_01HZ..." so the agent can decide to poll the socket. They must be opt-in, local-only, rate-limited, and avoid secrets or raw transcript text unless explicitly enabled by the operator.
 
 The command-source mux should convert every command into a common envelope:
 
@@ -669,7 +759,7 @@ Mux rules:
 
 When `--tui` is enabled, the TUI should have one command pane and one call/status area:
 
-- left pane: `motlie-driver` REPL input, command history, and completions/help
+- left pane: shell-style `motlie-driver` REPL surface combining command history, command output, and the active prompt in one pane; prompt placement and cursor position must be based on rendered terminal rows so wrapped or multi-line command output cannot leave the cursor detached from the `>` prompt
 - right area: split vertically into a top call roster and a bottom selected-call detail pane
 
 Right top call roster:
@@ -682,8 +772,9 @@ Right top call roster:
 Right bottom selected-call detail:
 
 - shows the currently selected call's full state, provider IDs, webhook/media status, codec, sample rate, and latest errors
+- shows Telnyx termination reason/cause when the call ends or the media stream stops
 - shows timeline events for that call
-- shows milestone 1 ASR partials/finals as a transcript stream
+- shows milestone 1 ASR as an assembled transcript plus recent raw partial/final transcript events for debugging
 - shows milestone 2 TTS playback state and the latest `say` requests
 - shows context-aware action hints such as `answer`, `reject`, `hangup`, `say <text>`, `transcript follow`, or `conversation attach`
 
@@ -961,6 +1052,7 @@ The gateway should support external automation in addition to the operator TUI. 
 - Telnyx webhooks come into `bins/telnyx-gateway` from Telnyx.
 - Gateway application webhooks go out from `bins/telnyx-gateway` to a user's application server.
 - The Gateway Control API is called by that application server to list current calls, inspect one call, attach to a call's event/transcript stream, answer, reject, hang up, dial, and say text.
+- The Unix-domain socket is not an appserver webhook/control API substitute; it is the local agent-tooling interface and can provide command execution, snapshots, event polling, and optional local wake-up notifications without exposing HTTP control routes.
 
 This lets the gateway act as a telephony edge service. Another server can subscribe to call events, decide what to do, reconcile current state through `GET` endpoints, then call back into the gateway without embedding Telnyx protocol logic, media adaptation, ASR, or TTS.
 
@@ -2366,6 +2458,18 @@ Recommended design rule:
 
 - Telnyx v1 should treat `sherpa-onnx` as the default recommended ASR backend for the real-time conversational flow
 - the gateway itself should still accept any injected typed ASR that implements `StreamingTranscriber`
+- gateway live-test and deployment runbooks must use the upstream `sherpa-onnx` Rust crate for Sherpa; Cargo downloads and statically links the upstream prebuilt `sherpa-onnx` native archive, including the ONNX Runtime library Sherpa uses internally
+- gateway runbooks must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not require building ONNX Runtime from source or vendoring ONNX Runtime
+
+Milestone 1.5 (#370) keeps ASR quality work inside the Sherpa ecosystem. Current Sherpa model docs list multiple English-capable online transducer candidates, including `csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26`, `2023-06-21`, `2023-02-21`, `en-20M-2023-02-17`, and an English LSTM transducer. They also list a newer English `sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25` path under Nemotron ASR Streaming. M1.5 should add curated catalog entries only after replay WER shows a candidate is worth keeping.
+
+Recommended Sherpa-only quality order:
+
+1. Keep the current upstream Rust `sherpa-onnx` streaming Zipformer path as the baseline because it is already integrated and live-call validated.
+2. Add hotword/context-bias configuration for transducer models first. Sherpa documents hotwords as transducer-only; expose hotwords file/buffer and score without hiding raw ASR output.
+3. Benchmark current Zipformer, alternate English Zipformer variants, and the English Nemotron streaming model on the same capture corpus before changing the default.
+4. Treat online Paraformer and online CTC families as secondary for the initial English telephony target unless the curated model catalog identifies a live English candidate with equal or better streaming support.
+5. Use offline Sherpa/NeMo models, including Parakeet-family artifacts, only for post-call second-pass comparison or review until a live streaming configuration is selected and proven.
 
 ### Recommended TTS: Piper
 
@@ -2390,6 +2494,7 @@ Current Piper limitations:
 - one pre-trained voice per model
 - less flexibility than future expressive or clone-capable TTS stacks
 - CUDA execution is currently gated by issue #230: Piper defaults to CPU-only ONNX Runtime for shutdown stability on the GB10 validation host, and advanced users can opt back into CUDA probing with `MOTLIE_PIPER_ALLOW_CUDA=1`
+- gateway live-test and deployment runbooks must use the same static ONNX Runtime linkage policy for Piper once outbound TTS is enabled; dynamic ONNX Runtime linkage is not an accepted operator path
 
 Current TTS status:
 
@@ -2456,17 +2561,23 @@ Recommended inbound flow:
 8. The answer action attaches media streaming with:
    - `stream_url=wss://.../telnyx/media`
    - `stream_track=inbound_track`
+   - `stream_codec=PCMU` for the milestone 1 default live path, or `L16` for an explicit ASR quality comparison run
    - `stream_bidirectional_mode=rtp`
-   - `stream_bidirectional_codec=L16`
-   - `stream_bidirectional_sampling_rate=16000`
+   - `stream_bidirectional_codec` matching the requested stream codec
+   - `stream_bidirectional_sampling_rate=8000` for `PCMU`, or `16000` for `L16`
    - `stream_bidirectional_target_legs=self`
 9. Telnyx opens the WebSocket.
 10. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
-11. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
-12. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
-13. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.
-14. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say { text }` values to outbound TTS.
-15. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
+11. Until milestone 2/M3 supplies real outbound TTS audio, the gateway sends silence `media` frames matching the observed/requested bidirectional RTP codec back over the WebSocket as a keepalive so the single-leg PSTN call does not terminate while Motlie is receive-only at the application level.
+12. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
+13. The gateway passes a seconds-scale low-energy hangover through the active ASR session so upstream Sherpa endpointing can finalize utterances; normal speech pauses do not force a new ASR session.
+14. If Sherpa emits a repeated-token hallucination such as a growing `Q` run, the gateway suppresses that event from operator-visible transcripts, logs it, resets the ASR session, and waits for the next speech-energy frame before feeding the backend again.
+15. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
+
+Milestone 1 quality debugging should capture replayable artifacts for accepted media streams when the operator enables a capture directory. Each call/stream directory should contain raw Telnyx media JSONL, decoded inbound WAV at the observed codec/sample rate, the `16 kHz` WAV actually fed into Sherpa after gating/resampling, transcript-event JSONL, and a manifest with call ids, stream id, observed codec, and sample rate. WAV captures must be finalized with finite RIFF/data sizes so normal tooling can read duration and sample count, while Motlie's permissive streaming decoder may still read old indefinite-length captures. Capture failures should warn but must not fail the live call.
+16. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.
+17. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say { text }` values to outbound TTS.
+18. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
 
 The inbound handler should therefore be ASR-first. It must not require outbound TTS or a conversation handler to be useful.
 
@@ -3396,6 +3507,10 @@ Cons:
 - Telnyx `call.initiated` webhook: https://developers.telnyx.com/api-reference/callbacks/call-initiated
 - Tailscale Funnel docs: https://tailscale.com/kb/1223/tailscale-funnel/
 - ngrok localhost sharing docs: https://ngrok.com/docs/guides/share-localhost/overview
+- Sherpa ONNX Rust crate docs: https://docs.rs/sherpa-onnx
+- Sherpa ONNX hotwords/contextual biasing: https://k2-fsa.github.io/sherpa/onnx/hotwords/index.html
+- Sherpa ONNX online transducer models: https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/index.html
+- Sherpa ONNX NeMo and Nemotron models: https://k2-fsa.github.io/sherpa/onnx/nemo/index.html
 - Existing ASR design: [DESIGN_ASR.md](../../../libs/models/docs/DESIGN_ASR.md)
 - Existing TTS design: [DESIGN_TTS.md](../../../libs/models/docs/DESIGN_TTS.md)
 - Existing transcription contracts: [transcription.rs](../../../libs/model/src/transcription.rs)

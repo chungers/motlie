@@ -248,7 +248,7 @@ fn write_wav_header<W: Write>(
 mod tests {
     use std::io::Cursor;
 
-    use super::{decode_streaming_wav_to_f32, StreamingWavWriter};
+    use super::{StreamingWavWriter, decode_streaming_wav_to_f32};
 
     #[test]
     fn streaming_wav_header_for_i16_looks_like_wave() {
@@ -312,8 +312,7 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&1u16.to_le_bytes());
         bytes.extend_from_slice(&[
-            0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA,
-            0x00, 0x38, 0x9B, 0x71, 0x00, 0x00,
+            0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, 0x00, 0x00,
         ]);
         bytes.extend_from_slice(b"data");
         bytes.extend_from_slice(&2u32.to_le_bytes());

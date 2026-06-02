@@ -1,7 +1,11 @@
 //! Shared audio pipeline helpers used by speech examples and adapters.
 
+pub mod app;
+pub mod codec;
 pub mod frame;
 pub mod pipeline;
+pub mod runtime;
+pub mod telephony;
 pub mod wav;
 
 use std::io;
@@ -66,6 +70,21 @@ pub enum VoiceError {
     InvalidSampleRate {
         input_rate_hz: u32,
         output_rate_hz: u32,
+    },
+    #[error("encoded payload length {payload_len} is not aligned to sample width {sample_width}")]
+    MisalignedEncodedPayload {
+        payload_len: usize,
+        sample_width: usize,
+    },
+    #[error("frame sequence {sequence} is older than the next expected sequence {next_expected}")]
+    StaleFrameSequence { sequence: u64, next_expected: u64 },
+    #[error(
+        "frame sequence {sequence} is too far ahead of {next_expected} for reorder capacity {capacity}"
+    )]
+    ReorderCapacityExceeded {
+        sequence: u64,
+        next_expected: u64,
+        capacity: usize,
     },
 }
 

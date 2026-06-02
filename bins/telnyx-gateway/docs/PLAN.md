@@ -4,6 +4,26 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Fixed capture WAV finalization, added a `replay-capture` WER harness over `asr-input-16khz.wav`, and split Sherpa-only ASR quality tuning into milestone 1.5 (#370) for hotwords, model/decoder A/B, and separately scored normalization. |
+| 2026-06-01 | @codex-364-impl | Recorded the first outbound ASR-only live attempt blocker: Telnyx returned `403 D38` because the Call Control application has no Outbound Voice Profile assignment; live validation resumes after Telnyx account setup. |
+| 2026-06-01 | @codex-364-impl | Added an ASR-only outbound live-test command, `test dial-transcribe <to> [--from <from>]`, that reuses Telnyx outbound dial setup, bidirectional RTP media, silence keepalive, capture, and Sherpa transcription while leaving TTS for milestone 2. |
+| 2026-06-01 | @codex-364-impl | Recorded post-fix live validation for two `L16 16 kHz` inbound calls, with measured WER around `16-18%`, and fixed bare `answer` to prefer the single waiting inbound call when stale ended calls remain selected. |
+| 2026-06-01 | @codex-364-impl | Corrected the milestone 1 Telnyx `L16` comparison path to decode observed WebSocket `L16` payloads as little-endian PCM, added provider-neutral little-endian L16 helpers, and added a fixed read-aloud reference for WER checks. |
+| 2026-06-01 | @codex-364-impl | Added the post-live-test ASR quality loop for milestone 1: gateway media capture writes raw Telnyx JSONL, decoded inbound WAV, Sherpa input WAV, transcript JSONL, and manifest files, while replayable config can switch answer media between the known-good `PCMU 8 kHz` path and an `L16 16 kHz` comparison run. |
+| 2026-06-01 | @codex-364-impl | Updated milestone 1 ASR quality work to use upstream `sherpa-onnx` for online recognition, endpointing, and static native archive linking; normal speech pauses now stay in one ASR session while repeated-token suppression remains a reset safety valve. |
+| 2026-06-01 | @codex-364-impl | Added a milestone 1 agent-assisted live-test control path: `--socket` starts a local command socket with line-oriented Motlie driver commands, JSON command responses, `call show` transcript snapshots, and `shutdown`; milestone 4 still owns richer event polling, request IDs, socket/TUI mux validation, and appserver integration. |
+| 2026-06-01 | @codex-364-impl | Added milestone 1 ASR-session reset work from live long-call logs: speech resumed after sustained silence opens a fresh Sherpa session, repeated-token hallucinations request a reset, and the TUI keeps one assembled call transcript because current Sherpa finals are word-level. |
+| 2026-06-01 | @codex-364-impl | Updated milestone 1 live behavior to answer with bidirectional PCMU RTP and send outbound silence keepalive after Telnyx reported normal caller-side hangups in receive-only mode; added assembled transcript display above raw partial/final events. |
+| 2026-06-01 | @codex-364-impl | Added milestone 1 live-call termination diagnostics: preserve Telnyx hangup/source/SIP fields in call state, selected-call detail, structured logs, and webhook tests. |
+| 2026-06-01 | @codex-364-impl | Refined milestone 1 live handling: suppress initial silence and sustained low-energy tails before Sherpa, suppress repeated-token transcript hallucinations from the TUI transcript stream while logging them as suppressed events, and align the shell cursor by rendered rows when output wraps. |
+| 2026-06-01 | @codex-364-impl | Merged the TUI command input and REPL history into one shell-style left pane. |
+| 2026-06-01 | @codex-364-impl | Added milestone 1 ASR start-of-speech gating: low-energy initial telephony frames are logged and withheld from Sherpa until speech energy is detected. |
+| 2026-06-01 | @codex-364-impl | Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path. |
+| 2026-06-01 | @codex-364-impl | Recorded the now-superseded receive-only `PCMU` live-test attempt; later live evidence moved milestone 1 to bidirectional `PCMU` RTP silence keepalive. |
+| 2026-05-31 | @codex-364-impl | Clarified socket mode as the local agent-tooling surface: NDJSON command execution, structured snapshots, cursor-based event polling, and optional tmux/mstream wake-up notifications are socket responsibilities, while webhooks/Control API remain appserver integration surfaces. |
+| 2026-05-31 | @codex-364-impl | Updated gateway ORT guidance to use `ort/download-binaries`: Cargo downloads and statically links `libonnxruntime.a`; no `ORT_LIB_PATH`, dynamic-link, vendored ORT, or source build. |
+| 2026-05-31 | @codex-364-impl | Superseded earlier manual ONNX Runtime provisioning guidance with the `ort/download-binaries` static-link policy above. |
+| 2026-05-31 | @codex-364-impl | Superseded earlier shared-library guidance with static linkage through the downloaded `libonnxruntime.a` archive. |
 | 2026-05-30 | @codex-358-research | Addressed review round 1 by co-locating M4 with M1-M3, marking Control API/webhook Phase 6 work as M4 definition/stub work, adding M3 conversation webhook events, aligning M1 structured-log acceptance with #364, and updating operator module trees. |
 | 2026-05-30 | @codex-358-research | Reviewed the design and split product tracking into four milestone issues: M1 inbound TUI transcription (#364), M2 outbound TUI dialer/TTS (#365), M3 full-duplex TUI chat conversation (#366), and M4 external socket/webhook/appserver integration (#367). |
 | 2026-05-30 | @codex-358-research | Added startup-selected operator input modes: `--tui` for the local terminal UI, `--socket <path>` for headless Unix-domain command control, and a command-source mux that serializes both sources through one dispatcher when enabled together. |
@@ -29,11 +49,12 @@ Derived from [DESIGN.md](./DESIGN.md). This PLAN assumes brownfield work against
 Execution policy for the initial implementation:
 
 - the gateway starts as an idle operator-controlled application with an HTTP/WebSocket listener; `--tui` enables the local TUI, `--socket <path>` enables headless Unix-domain command control, and the gateway does not answer inbound calls until an operator command source enables inbound mode or runs `answer`
-- in milestone 4 (#367), the same call-control actions must also be available through an authenticated Gateway Control API, and gateway application webhooks must allow external servers to receive call/transcript/TTS events
+- in milestone 4 (#367), local agents must be able to drive the gateway through the Unix-domain socket using NDJSON command requests, structured command results, call snapshots, and cursor-based event polling; authenticated Gateway Control API and gateway application webhooks remain separate appserver integration surfaces
 - milestone 1 (#364) is inbound calls answered and managed in the TUI, with ASR transcription in the selected-call detail pane
+- milestone 1.5 (#370) is Sherpa-only ASR quality tuning using captured audio replay, WER reports, hotwords/context bias, and model/decoder A/B before considering non-Sherpa ASR
 - milestone 2 (#365) is outbound dialing plus TTS driven by the TUI command surface and selected-call detail text input
 - milestone 3 (#366) is full-duplex conversation driven by a TUI chat interface over the selected call
-- milestone 4 (#367) is external integration: socket mux, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
+- milestone 4 (#367) is external integration: local agent socket tooling, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
 - `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
 - `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
 - all work needed only for those follow-on pairings belongs in phase 10 or later
@@ -153,7 +174,7 @@ Build the provider-neutral media adaptation pipeline with explicit stage contrac
   DESIGN reference: `Behavior Contracts`, `Resampling and Format Normalization`
 - [ ] Add the provider-neutral `i16_to_f32` conversion helper in `motlie_voice::pipeline::convert` and implement i16 telephony resampler wrappers as `i16 -> f32 -> resample_f32 -> i16` over the f32 `Resampler` path until an i16-native resampler is justified.
   DESIGN reference: `Behavior Contracts`, `Resampling and Format Normalization`
-- [ ] Implement provider-neutral G.711 and `L16` codecs in `libs/voice/src/codec/`.
+- [ ] Implement provider-neutral G.711 and `L16` codecs in `libs/voice/src/codec/`, including explicit big-endian and little-endian L16 helpers so provider adapters choose the byte order proven by their media captures.
   DESIGN reference: `Codec and Container Gaps`, `Crate Hierarchy and API Surfaces`
 - [ ] Keep stage responsibilities split; do not collapse decode, resample, and packetization into one opaque adapter.
   DESIGN reference: `Required Concrete Stage Inventory`
@@ -167,6 +188,8 @@ Assemble and validate the first useful Telnyx slice: inbound call handling plus 
 - [ ] Implement the Sherpa inbound path:
   Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> Sherpa ingest flow.
   DESIGN reference: `Concrete Combination Requirements`
+- [ ] Require upstream `sherpa-onnx` static native linkage for the Sherpa live-test path: Cargo downloads and statically links the prebuilt `sherpa-onnx` native archive, including Sherpa's internal ONNX Runtime library; the runbook must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not ask operators to build ONNX Runtime from source.
+  DESIGN reference: `Recommended ASR/TTS Stack`
 
 ### 4.2 - Transcript sinks
 
@@ -292,7 +315,13 @@ Wire call-control operations for inbound and outbound calls.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Make `call use <call>` update source-local `selected_call`; allow `answer`, `reject`, `hangup`, and `say <text>` to target that source-local selection when no call id is supplied, without changing another source's selection.
   DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Define the Unix-domain socket command protocol as newline-delimited `motlie-driver` command text with one structured response per command, restrictive filesystem permissions, stale-socket safety, and optional peer credential checks where available; implement and validate it in milestone 4.
+- [ ] Define the Unix-domain socket command protocol as newline-delimited JSON frames containing `motlie-driver` command text, request IDs, structured command responses, and optional structured `data`; keep restrictive filesystem permissions, stale-socket safety, and optional peer credential checks where available. Implement and validate it in milestone 4.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Add socket-visible structured snapshots for agent polling: `calls --json`, `call get <call_id> --json`, and equivalent status/config resources that do not require parsing TUI text.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Add an in-memory gateway event journal with monotonic sequence cursors and a socket command `events poll --after <cursor> [--call <call_id>] [--types <event,...>] [--limit <n>]`; return structured `cursor_expired` errors when a client falls behind the retained ring buffer.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Add optional local agent wake-up notifiers, such as tmux send-keys or mstream channel notifications, that emit short hints telling an agent to poll the socket; treat these as opt-in hints rather than authoritative event delivery.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Define command-source mux ordering so TUI, socket, replay, and Control API commands enter the shared controller through one total-order dispatcher while responses route back to the source that submitted each command; implement and validate it in milestone 4.
   DESIGN reference: `Operator REPL and TUI Control Surface`
@@ -401,16 +430,45 @@ Close the loop on independently useful product flows before combining them.
 
 - [ ] Implement startup into an idle listener with `--tui`; the left pane is the command surface and the right side is split into call roster plus selected-call detail.
   DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Keep the shell-style TUI prompt and cursor aligned to the rendered `>` prompt when command output spans multiple terminal rows.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Implement `inbound enable --manual` -> `call.initiated` -> highlighted pending/waiting call roster row -> optional `call use <call>` -> `answer [call]` -> `answer + streaming` -> WebSocket media -> ASR -> `TuiTranscriptSink` selected-call detail -> hangup flow.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
-- [ ] Show call state, media metadata, partial/final transcript text, errors, and terminal call state in the selected-call detail pane.
+- [ ] Implement the milestone 1 local command-socket subset for agent-assisted live validation: headless `--socket <path>` startup, one command line in / one JSON response line out, `status`, `inbound enable --manual`, `calls`, `answer`, `call show`, and `shutdown`.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Getting Started: Local Deployment`
+- [ ] Show call state, media metadata, assembled transcript text, recent partial/final transcript events, errors, and terminal call state in the selected-call detail pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
+- [ ] Answer milestone 1 calls with bidirectional RTP and send outbound silence keepalive frames until milestone 2/M3 replaces that path with real TTS audio; default to the live-validated `PCMU 8 kHz` path, but allow operator config to request `L16 16 kHz` for measured ASR quality comparison.
+  DESIGN reference: `Inbound Call Handler Design`, `Audio Codecs and Formats`
+- [ ] Preserve Telnyx termination details from `streaming.stopped`, `streaming.failed`, `call.hangup`, and `call.ended` webhooks in selected-call detail and structured logs so live drops can be classified as caller hangup, provider timeout, media failure, or another carrier/SIP cause.
+  DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
+- [ ] Gate ASR ingestion for milestone 1 by suppressing low-energy initial frames, allowing a seconds-scale post-speech low-energy hangover so upstream Sherpa endpointing can finalize utterances, suppressing sustained low-energy tails after that hangover, keeping the ASR session alive across normal resumed speech, and filtering pathological repeated-token Sherpa transcripts out of the TUI transcript stream while logging `transcript.suppressed_repeated_token` with call/stream/media metadata and opening a fresh ASR session only as a safety reset.
+  DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
 - [ ] Keep inbound disabled by default at process startup; incoming webhooks must not be answered until the operator enables inbound handling.
   DESIGN reference: `Staged Build Strategy`, `Operator REPL and TUI Control Surface`
-- [ ] Validate that `stream_bidirectional_target_legs=self` is correct for the initial single-leg AI call pattern.
+- [ ] Validate during live testing that `stream_bidirectional_target_legs=self` plus outbound PCMU silence keepalive prevents provider-normal early call termination in the initial single-leg ASR-only pattern.
   DESIGN reference: `Open Concerns`
 - [ ] Add structured logs for the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, and transcript partial/final events.
   DESIGN reference: `Open Concerns`
+- [ ] Add operator-configurable capture for ASR quality debugging: raw Telnyx media JSONL, decoded inbound WAV at observed format, `16 kHz` Sherpa input WAV, transcript-event JSONL, and a manifest under a per-call/per-stream directory.
+  DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
+- [ ] Finalize captured WAV files with finite RIFF/data sizes so standard readers can inspect duration/sample counts; keep the Motlie decoder tolerant of older indefinite-length streaming captures.
+  DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
+
+### 8.1.5 - Milestone 1.5 Sherpa ASR quality tuning (#370)
+
+- [ ] Use `replay-capture <capture-dir> --reference-file <path>` against captured `asr-input-16khz.wav` artifacts to produce deterministic transcript, WER, substitution, deletion, insertion, and token-error reports without another phone call.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Recommended ASR/TTS Stack`
+- [ ] Keep a small captured-audio corpus covering inbound and ASR-only outbound calls, with fixed read-aloud references checked into an operator note or test fixture location.
+  DESIGN reference: `Testing Scope for PLAN`, `Getting Started: Local Deployment`
+- [ ] Add configurable Sherpa hotwords/context bias for transducer recognizers using upstream `hotwords_file`, `hotwords_buf`, `hotwords_score`, or per-stream hotwords, seeded with Motlie/Telnyx/operator vocabulary.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Recommended ASR/TTS Stack`
+- [ ] Benchmark Sherpa-only streaming candidates on the same replay corpus: current English Zipformer, alternate English Zipformer artifacts, the English Nemotron streaming model, and decoder settings such as `modified_beam_search`, `max_active_paths`, and endpoint rules.
+  DESIGN reference: `Recommended ASR/TTS Stack`
+- [ ] Evaluate offline Sherpa/NeMo models only as second-pass or post-call comparators until a live streaming path is validated.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`
+- [ ] Keep raw ASR transcript, normalized transcript, and agent/LLM-corrected transcript as separate outputs. WER acceptance must score raw ASR separately from any normalized-output metric.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`
 
 ### 8.2 - Milestone 2 outbound TUI dialer/TTS flow (#365)
 
@@ -450,6 +508,8 @@ Close the loop on independently useful product flows before combining them.
 
 - [ ] Implement startup with `--socket <path>` for headless Unix-domain command control; when both `--tui` and `--socket` are present, route both through the command-source mux.
   DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Implement the local-agent milestone 4 flow over the socket only: configure gateway state, enable inbound, poll `events poll` until `call.inbound.pending`, inspect `call get`, run `answer <call_id>`, poll transcript events, and run `hangup <call_id>` without using appserver webhooks or the HTTP Control API.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Implement the programmatic milestone 1 flow: application webhook subscription -> `call.inbound.pending` event -> optional `GET /api/v1/calls/{call_id}` state reconciliation -> `POST /api/v1/calls/{call_id}/attachments` to bind transcript/event delivery -> `POST /api/v1/calls/{call_id}/answer` -> media start -> `transcript.partial` / `transcript.final` webhooks.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Inbound Call Handler Design`
 - [ ] Implement the programmatic milestone 2 flow: `POST /api/v1/calls` -> outbound Telnyx dial with media -> `POST /api/v1/calls/{call_id}/say` -> outbound TTS media -> TTS playback webhooks.
@@ -471,15 +531,19 @@ Make each milestone reviewable and runnable independently before combining them.
   transcript updates,
   session teardown.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
+- [ ] Add replay/WER checks over finalized `asr-input-16khz.wav` capture artifacts using `replay-capture`, including transcript output, WER percentage, substitution/deletion/insertion counts, and token-level error rows.
+  DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Testing Scope for PLAN`
 - [ ] Add a provider-free adaptation test that feeds synthetic Telnyx-like `PCMU 8 kHz mono` payloads through G.711 decode, typed PCM, anti-aliased `8 kHz -> 16 kHz` resample, and a fake `StreamingTranscriber<Input = AudioBuf<i16, 16_000, Mono>>`.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
 - [ ] Add milestone 2 outbound loopback tests from Piper-shaped `AudioBuf<i16, 22_050, Mono>` through anti-aliased resample, packetization, and `L16` or `PCMU` transport encoding, verifying TTS packet emission and session teardown.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipelines`
 - [ ] Add regression tests for out-of-order chunks, duplicate chunks, empty media, unsupported codecs, and invalid pipeline assemblies.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
+- [ ] Add regression tests for ASR low-energy gating before speech, sustained low-energy tail suppression after speech, ASR-session reopen on speech resume after sustained silence, repeated-token transcript suppression/reset signaling, and shell cursor alignment when command output wraps across multiple rendered rows.
+  DESIGN reference: `Testing Scope for PLAN`, `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
 - [ ] Add operator-state tests for disabled inbound mode, manual inbound pending-call behavior, highlighted roster rows, unread event counts, auto-selection only when no active call is selected, source-local selected-call default command targets, TUI/socket selection isolation, command-source mux ordering, `answer` command transition, and selected-call detail event emission.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
-- [ ] Add a milestone 1 structured-log check that verifies gateway call id, Telnyx diagnostic ids, stream id, observed codec, observed sample rate, and transcript partial/final events are logged during an inbound transcription session.
+- [ ] Add a milestone 1 structured-log check that verifies gateway call id, Telnyx diagnostic ids, stream id, observed codec, observed sample rate, transcript partial/final events, and Telnyx termination details are logged during an inbound transcription session.
   DESIGN reference: `Inbound Call Handler Design`, `Open Concerns`
 - [ ] Add Control API tests for authenticated call list/detail reads, call attachment create/list/delete, attach-before-answer and attach-after-answer behavior, answer/reject/hangup, outbound dial/say, idempotency handling, and refusal of unauthenticated mutating requests.
   DESIGN reference: `Application Webhooks and Gateway Control API`
@@ -518,7 +582,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
 - [ ] Add one milestone 3 end-to-end example configuration for Sherpa + Piper only after the inbound ASR and outbound TTS milestones are independently stable.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Document the first live-call checklist, including observed codec logging and `stream_bidirectional_target_legs` validation.
+- [ ] Document the first live-call checklist, including observed codec logging, Telnyx termination reason logging, and bidirectional PCMU silence keepalive validation.
   DESIGN reference: `Open Concerns`
 
 ### 9.3 - Live validation
@@ -527,6 +591,8 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`
 - [ ] Capture and review the exact observed `start.media_format` values from Telnyx.
   DESIGN reference: `Open Concerns`
+- [ ] Use captured WAV/JSONL artifacts and `replay-capture` WER reports to compare `PCMU 8 kHz` against `L16 16 kHz`, verify the observed L16 byte order, and tune Sherpa decoding/endpointing without requiring a fresh phone call for every ASR experiment.
+  DESIGN reference: `Inbound Call Handler Design`, `Recommended ASR/TTS Stack`
 - [ ] Verify conversational latency for the Sherpa + Piper duplex path once milestone 3 exists, and document measured numbers nearby in this PLAN or a follow-up note.
   DESIGN reference: `Real-Time Latency Requirements`
 - [ ] Document first-audio latency separately from outbound transport packet cadence, because Piper currently produces a full buffer before packetized streaming begins.
