@@ -15,14 +15,86 @@ use motlie_voice::app::TranscriptEvent;
 #[cfg(feature = "sherpa")]
 use tokio::sync::Mutex;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AsrTranscriptEvent {
+    pub event: TranscriptEvent,
+    pub decision: AsrTranscriptDecision,
+}
+
+impl AsrTranscriptEvent {
+    pub fn emit(event: TranscriptEvent) -> Self {
+        Self {
+            event,
+            decision: AsrTranscriptDecision::Emit,
+        }
+    }
+
+    pub fn suppress(
+        event: TranscriptEvent,
+        reason: AsrTranscriptSuppressionReason,
+        reset_session: bool,
+    ) -> Self {
+        Self {
+            event,
+            decision: AsrTranscriptDecision::Suppress {
+                reason,
+                reset_session,
+            },
+        }
+    }
+
+    pub fn is_suppressed(&self) -> bool {
+        matches!(self.decision, AsrTranscriptDecision::Suppress { .. })
+    }
+
+    pub fn requires_session_reset(&self) -> bool {
+        matches!(
+            self.decision,
+            AsrTranscriptDecision::Suppress {
+                reset_session: true,
+                ..
+            }
+        )
+    }
+
+    pub fn suppression_reason(&self) -> Option<AsrTranscriptSuppressionReason> {
+        match self.decision {
+            AsrTranscriptDecision::Emit => None,
+            AsrTranscriptDecision::Suppress { reason, .. } => Some(reason),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AsrTranscriptDecision {
+    Emit,
+    Suppress {
+        reason: AsrTranscriptSuppressionReason,
+        reset_session: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AsrTranscriptSuppressionReason {
+    RepeatedTokenHallucination,
+}
+
+impl AsrTranscriptSuppressionReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RepeatedTokenHallucination => "repeated_token_hallucination",
+        }
+    }
+}
+
 #[async_trait]
 pub trait InboundAsrSession: Send {
     async fn ingest(
         &mut self,
         audio: AudioBuf<i16, 16_000, Mono>,
-    ) -> anyhow::Result<Vec<TranscriptEvent>>;
+    ) -> anyhow::Result<Vec<AsrTranscriptEvent>>;
 
-    async fn finish(self: Box<Self>) -> anyhow::Result<Vec<TranscriptEvent>>;
+    async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>>;
 }
 
 #[async_trait]
@@ -107,22 +179,30 @@ impl InboundAsrSession for SherpaAsrSession {
     async fn ingest(
         &mut self,
         audio: AudioBuf<i16, 16_000, Mono>,
-    ) -> anyhow::Result<Vec<TranscriptEvent>> {
+    ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
         let update = self
             .session
             .ingest(audio)
             .await
             .context("ingest audio into Sherpa ASR")?;
-        Ok(update.map(events_from_update).unwrap_or_default())
+        Ok(update
+            .map(events_from_update)
+            .unwrap_or_default()
+            .into_iter()
+            .map(apply_sherpa_transcript_policy)
+            .collect())
     }
 
-    async fn finish(self: Box<Self>) -> anyhow::Result<Vec<TranscriptEvent>> {
+    async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
         let update = self
             .session
             .finish()
             .await
             .context("finish Sherpa ASR session")?;
-        Ok(events_from_update(update))
+        Ok(events_from_update(update)
+            .into_iter()
+            .map(apply_sherpa_transcript_policy)
+            .collect())
     }
 }
 
@@ -213,6 +293,49 @@ fn events_from_update(update: motlie_model::TranscriptionUpdate) -> Vec<Transcri
         .collect()
 }
 
+#[cfg(feature = "sherpa")]
+fn apply_sherpa_transcript_policy(event: TranscriptEvent) -> AsrTranscriptEvent {
+    if looks_like_repeated_token_hallucination(event.text()) {
+        AsrTranscriptEvent::suppress(
+            event,
+            AsrTranscriptSuppressionReason::RepeatedTokenHallucination,
+            true,
+        )
+    } else {
+        AsrTranscriptEvent::emit(event)
+    }
+}
+
+#[cfg(feature = "sherpa")]
+fn looks_like_repeated_token_hallucination(text: &str) -> bool {
+    const REPEATED_TOKEN_RUN_THRESHOLD: usize = 16;
+    const REPEATED_Q_RUN_THRESHOLD: usize = 8;
+
+    let mut previous = None;
+    let mut run = 0usize;
+    let mut max_run = 0usize;
+    let mut chars = 0usize;
+    let mut q_count = 0usize;
+
+    for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+        chars += 1;
+        if ch == 'Q' {
+            q_count += 1;
+        }
+        if previous == Some(ch) {
+            run += 1;
+        } else {
+            previous = Some(ch);
+            run = 1;
+        }
+        max_run = max_run.max(run);
+    }
+
+    max_run >= REPEATED_TOKEN_RUN_THRESHOLD
+        || (q_count >= REPEATED_Q_RUN_THRESHOLD
+            && q_count.saturating_mul(3) >= chars.saturating_mul(2))
+}
+
 #[derive(Default)]
 pub struct EchoAsrFactory;
 
@@ -233,23 +356,23 @@ impl InboundAsrSession for EchoAsrSession {
     async fn ingest(
         &mut self,
         audio: AudioBuf<i16, 16_000, Mono>,
-    ) -> anyhow::Result<Vec<TranscriptEvent>> {
+    ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
         self.samples += audio.samples().len();
         if self.samples >= 16_000 {
-            Ok(vec![TranscriptEvent::Partial {
+            Ok(vec![AsrTranscriptEvent::emit(TranscriptEvent::Partial {
                 text: format!("received {} samples", self.samples),
                 update: motlie_model::TranscriptionUpdate::default(),
-            }])
+            })])
         } else {
             Ok(Vec::new())
         }
     }
 
-    async fn finish(self: Box<Self>) -> anyhow::Result<Vec<TranscriptEvent>> {
-        Ok(vec![TranscriptEvent::Final {
+    async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+        Ok(vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
             text: format!("received {} samples", self.samples),
             update: motlie_model::TranscriptionUpdate::default(),
-        }])
+        })])
     }
 }
 
@@ -261,4 +384,47 @@ pub fn default_artifact_root(cli_root: Option<PathBuf>) -> PathBuf {
         return PathBuf::from(root);
     }
     PathBuf::from(".agents/skills/voice/artifacts/hf-cache")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn final_event(text: &str) -> TranscriptEvent {
+        TranscriptEvent::Final {
+            text: text.to_string(),
+            update: motlie_model::TranscriptionUpdate::default(),
+        }
+    }
+
+    #[test]
+    fn pass_through_event_has_no_suppression_or_reset() {
+        let event = AsrTranscriptEvent::emit(final_event("MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"));
+
+        assert!(!event.is_suppressed());
+        assert!(!event.requires_session_reset());
+        assert_eq!(event.suppression_reason(), None);
+    }
+
+    #[cfg(feature = "sherpa")]
+    #[test]
+    fn sherpa_policy_suppresses_repeated_token_hallucinations() {
+        let event = apply_sherpa_transcript_policy(final_event("MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"));
+
+        assert!(event.is_suppressed());
+        assert!(event.requires_session_reset());
+        assert_eq!(
+            event.suppression_reason(),
+            Some(AsrTranscriptSuppressionReason::RepeatedTokenHallucination)
+        );
+    }
+
+    #[cfg(feature = "sherpa")]
+    #[test]
+    fn sherpa_policy_passes_normal_transcripts_through() {
+        let event = apply_sherpa_transcript_policy(final_event("meet me at the front desk"));
+
+        assert!(!event.is_suppressed());
+        assert!(!event.requires_session_reset());
+    }
 }

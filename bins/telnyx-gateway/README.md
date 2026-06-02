@@ -164,7 +164,7 @@ transcript JSONL.
 The latest prepared outbound `L16 16000Hz` ASR-only call on 2026-06-01 measured
 `29.2%` WER on a `65`-word reference using `replay-capture`. The main errors
 were phonetic/domain terms such as `outbound -> ALBAN/ALBOW`, `Telnyx -> TAL
-NICHS`, `Sherpa -> SHARPA`, and `voice -> BOYS`; issue #370 tracks Sherpa-only
+NICHS`, `Sherpa -> SHARPA`, and `voice -> BOYS`; issue #371 tracks Sherpa-only
 quality tuning with hotwords, model/decoder A/B, and separately scored
 normalization.
 

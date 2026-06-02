@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-371-impl: Implemented the #371 R1 prerequisite by moving Sherpa repeated-token transcript suppression and session-reset decisions behind the ASR adapter; recorded the updated models-first M1.5 sequence where A/B infrastructure and model comparison precede hotwords, endpointing, decoder tuning, and normalization. | Inbound Call Handler Design, Milestone 1.5: Sherpa ASR Quality Tuning, Recommended ASR/TTS Stack |
 | 2026-06-01 | @codex-364-impl: Fixed media capture WAV finalization so standard readers see finite durations, added `replay-capture` for deterministic captured-audio WER checks, and split Sherpa-only ASR quality tuning into milestone 1.5 (#370) covering hotwords, model/decoder A/B, and optional marked normalization. | Staged Build Strategy, Inbound Call Handler Design, Recommended ASR/TTS Stack, Testing Scope, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Recorded the first outbound ASR-only dial attempt blocker: Telnyx rejected `POST /v2/calls` with `403 D38` because the Call Control application has no Outbound Voice Profile assignment; the gateway command is ready, but live outbound validation requires Telnyx account setup. | Outbound Call Handler Design, Testing Scope, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Added an ASR-only outbound live-test command, `test dial-transcribe <to> [--from <from>]`, that reuses the Telnyx dial API, bidirectional RTP media attach, silence keepalive, capture, and Sherpa transcription paths without implementing milestone 2 outbound TTS. | Outbound Call Handler Design, Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
@@ -372,7 +373,7 @@ Primary gateway subsystems:
 Build the gateway in four independently useful milestones. Each milestone should expose a narrow control surface that can later compose with the others. Tracking issues:
 
 - M1 inbound TUI transcription: #364
-- M1.5 Sherpa ASR quality tuning: #370
+- M1.5 Sherpa ASR quality tuning: #371
 - M2 outbound TUI dialer/TTS: #365
 - M3 full-duplex TUI chat conversation: #366
 - M4 external integration socket/webhook/appserver harness: #367
@@ -416,17 +417,17 @@ Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic 
 
 ### Milestone 1.5: Sherpa ASR Quality Tuning
 
-Milestone 1.5 (#370) is a follow-on quality milestone for the already-runnable M1 ASR path. It must stay inside the Sherpa ecosystem: improve the current Sherpa-based transcript quality before considering non-Sherpa ASR replacements.
+Milestone 1.5 (#371) is a follow-on quality milestone for the already-runnable M1 ASR path. It must stay inside the Sherpa ecosystem: improve the current Sherpa-based transcript quality before considering non-Sherpa ASR replacements.
 
 The latest prepared outbound `L16 16 kHz` capture measured `29.2%` WER against a `65`-word reference. The failure pattern is mostly phonetic and domain-specific rather than random media corruption: `outbound` became `ALBAN`/`ALBOW`, `Telnyx` became `TAL NICHS`, `Sherpa` became `SHARPA`, `Motlie` became `MOTLEY`, `voice` became `BOYS`, and `id` became `IDEED`. That suggests the recognizer hears the approximate phonemes but lacks the desired domain/context prior.
 
 M1.5 should proceed in this order:
 
-1. Use the captured `asr-input-16khz.wav` artifacts as the deterministic tuning input. The gateway's `replay-capture` command should report the assembled transcript, WER, substitutions, insertions, deletions, and token-level errors for a fixed reference text.
-2. Add Sherpa hotwords/context bias for operator/domain vocabulary such as `Motlie`, `Telnyx`, `Sherpa`, `inbound`, `outbound`, `voice profile id`, `call control`, and `gateway`.
-3. A/B Sherpa-only streaming model and decoder variants against the same capture corpus. The initial candidate set is current English streaming Zipformer, other English streaming Zipformer variants including non-int8/larger artifacts where available, Sherpa's English Nemotron streaming model, and decoder settings such as `modified_beam_search`, `max_active_paths`, and endpoint rules.
-4. Treat offline Sherpa models, for example NeMo Parakeet converted through Sherpa ONNX, as optional second-pass quality comparators only. They may inform future transcript cleanup or post-call review, but they do not replace the live M1 streaming backend.
-5. Add optional transcript normalization only as a marked post-ASR layer. Raw ASR events and WER reports must remain available; an agent/LLM may normalize `TAL NICHS -> Telnyx`, but that is semantic correction, not raw ASR improvement.
+1. Keep backend-specific transcript suppression behind the ASR adapter before model or tuning work. The shared media loop records adapter-supplied suppression/reset decisions, while Echo and other non-Sherpa backends pass transcript events through by default.
+2. Build model A/B infrastructure before tuning sidecars: define a golden-WAV corpus manifest with reference text, codec/rate/direction metadata, the known `29.2%` L16 `16 kHz` capture, and a PCMU `8 kHz` capture.
+3. Extend `replay-capture` into a backend-selectable A/B harness that runs captured WAVs through swappable `StreamingTranscriber` backends and reports WER, substitutions, deletions, insertions, and latency in a comparable form.
+4. Integrate and A/B candidate models behind the same backbone, starting with newer Sherpa Zipformer artifacts and then Nemotron/Parakeet candidates coordinated through #191/#369.
+5. Defer Sherpa hotwords/context bias, endpointing tuning, decoder tuning, and post-ASR normalization until the best-model WER and latency baseline are measured on the golden corpus. Raw ASR events and WER reports must remain available; agent/LLM normalization is not raw ASR improvement.
 
 An agent-operated gateway can use its LLM context for transcript normalization and intent recovery after ASR. It does not replace decoder-time context bias. Decoder-time hotwords improve the actual ASR token choice before final transcript emission; LLM normalization can clean up displayed/service text after the fact but may hallucinate, hide model regressions, and should not be used for WER acceptance unless explicitly scored as a separate normalized-output metric.
 
@@ -2461,7 +2462,7 @@ Recommended design rule:
 - gateway live-test and deployment runbooks must use the upstream `sherpa-onnx` Rust crate for Sherpa; Cargo downloads and statically links the upstream prebuilt `sherpa-onnx` native archive, including the ONNX Runtime library Sherpa uses internally
 - gateway runbooks must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not require building ONNX Runtime from source or vendoring ONNX Runtime
 
-Milestone 1.5 (#370) keeps ASR quality work inside the Sherpa ecosystem. Current Sherpa model docs list multiple English-capable online transducer candidates, including `csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26`, `2023-06-21`, `2023-02-21`, `en-20M-2023-02-17`, and an English LSTM transducer. They also list a newer English `sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25` path under Nemotron ASR Streaming. M1.5 should add curated catalog entries only after replay WER shows a candidate is worth keeping.
+Milestone 1.5 (#371) keeps ASR quality work inside the Sherpa ecosystem. Current Sherpa model docs list multiple English-capable online transducer candidates, including `csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26`, `2023-06-21`, `2023-02-21`, `en-20M-2023-02-17`, and an English LSTM transducer. They also list a newer English `sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25` path under Nemotron ASR Streaming. M1.5 should add curated catalog entries only after replay WER shows a candidate is worth keeping.
 
 Recommended Sherpa-only quality order:
 
