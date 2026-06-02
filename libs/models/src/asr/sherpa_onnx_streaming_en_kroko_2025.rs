@@ -23,6 +23,11 @@ const DECODER_FILE: &str = "decoder.onnx";
 const JOINER_FILE: &str = "joiner.onnx";
 const TOKENS_FILE: &str = "tokens.txt";
 
+pub(crate) fn register(catalog: &mut crate::Catalog) {
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
+}
+
 pub(crate) fn identity() -> ModelIdentity {
     ModelIdentity {
         id: BundleId::new("sherpa_onnx_streaming_zipformer_en_kroko_2025"),
@@ -70,6 +75,16 @@ pub fn descriptor() -> BundleDescriptor {
             "sherpa_onnx_streaming_zipformer_en_kroko_2025",
             &checkpoint,
         )),
+    }
+}
+
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = spec();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::SherpaOnnx,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
     }
 }
 
@@ -150,6 +165,7 @@ fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AsrModels, Catalog, CuratedBundle, ResolveModelOptions};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -169,6 +185,40 @@ mod tests {
             descriptor
                 .capabilities
                 .supports(motlie_model::CapabilityKind::Transcription)
+        );
+    }
+
+    #[test]
+    fn default_catalog_resolves_kroko_through_curated_path() {
+        let catalog = Catalog::with_defaults();
+        let bundle_id = BundleId::new("sherpa_onnx_streaming_zipformer_en_kroko_2025");
+
+        assert_eq!(
+            SELECTOR
+                .parse::<AsrModels>()
+                .expect("Kroko selector should parse"),
+            AsrModels::SherpaOnnxStreamingEnKroko2025
+        );
+        assert_eq!(
+            catalog.model(&bundle_id).map(|model| model.id.clone()),
+            Some(bundle_id.clone())
+        );
+        assert!(
+            catalog
+                .bundles_for_track(EvalTrack::Transcription)
+                .any(|bundle| bundle.id == bundle_id)
+        );
+        assert_eq!(
+            catalog.instantiate(&bundle_id),
+            Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)
+        );
+
+        let resolved = catalog
+            .resolve_model(&bundle_id, &ResolveModelOptions::default())
+            .expect("Kroko should resolve from the default curated catalog");
+        assert_eq!(
+            catalog.instantiate_resolved(&resolved),
+            Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)
         );
     }
 

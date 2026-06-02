@@ -35,6 +35,8 @@ pub enum AsrModels {
     MoonshineStreamingEn,
     #[cfg(feature = "model-sherpa-onnx-streaming")]
     SherpaOnnxStreamingEn,
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    SherpaOnnxStreamingEnKroko2025,
     #[cfg(feature = "model-whisper-base-en")]
     WhisperBaseEn,
 }
@@ -51,6 +53,8 @@ impl AsrModels {
             Self::MoonshineStreamingEn => moonshine_streaming_en::SELECTOR,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn => sherpa_onnx_streaming_en::SELECTOR,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => sherpa_onnx_streaming_en_kroko_2025::SELECTOR,
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => whisper_base_en::SELECTOR,
         }
@@ -62,6 +66,10 @@ impl AsrModels {
             Self::MoonshineStreamingEn => moonshine_streaming_en::descriptor().id,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn => sherpa_onnx_streaming_en::descriptor().id,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => {
+                sherpa_onnx_streaming_en_kroko_2025::descriptor().id
+            }
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => whisper_base_en::descriptor().id,
         }
@@ -73,6 +81,10 @@ impl AsrModels {
             Self::MoonshineStreamingEn => moonshine_streaming_en::descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn => sherpa_onnx_streaming_en::descriptor(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => {
+                sherpa_onnx_streaming_en_kroko_2025::descriptor()
+            }
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => whisper_base_en::descriptor(),
         }
@@ -84,6 +96,10 @@ impl AsrModels {
             Self::MoonshineStreamingEn => crate::CuratedBundle::MoonshineStreamingEn,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn => crate::CuratedBundle::SherpaOnnxStreamingEn,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => {
+                crate::CuratedBundle::SherpaOnnxStreamingEnKroko2025
+            }
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => crate::CuratedBundle::WhisperBaseEn,
         }
@@ -114,10 +130,20 @@ impl FromStr for AsrModels {
             }),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             sherpa_onnx_streaming_en::SELECTOR => Ok(Self::SherpaOnnxStreamingEn),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            sherpa_onnx_streaming_en_kroko_2025::SELECTOR => {
+                Ok(Self::SherpaOnnxStreamingEnKroko2025)
+            }
             #[cfg(not(feature = "model-sherpa-onnx-streaming"))]
             SHERPA_ONNX_STREAMING_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
                 selector: value.to_owned(),
             }),
+            #[cfg(not(feature = "model-sherpa-onnx-streaming"))]
+            SHERPA_ONNX_STREAMING_KROKO_2025_SELECTOR => {
+                Err(crate::ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                })
+            }
             #[cfg(feature = "model-whisper-base-en")]
             whisper_base_en::SELECTOR => Ok(Self::WhisperBaseEn),
             #[cfg(not(feature = "model-whisper-base-en"))]
