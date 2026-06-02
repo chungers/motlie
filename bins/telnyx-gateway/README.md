@@ -119,7 +119,9 @@ The replay command reads `asr-input-16khz.wav`, feeds it through the selected AS
 backend in fixed chunks, and prints the assembled transcript, raw-ASR WER,
 substitution/deletion/insertion counts, token-level errors, and replay latency.
 Use `--backend echo` for protocol-only harness checks; `--backend auto` preserves
-the live gateway default selection.
+the live gateway default selection. For Sherpa artifact A/B, use
+`--backend sherpa-zipformer-2023` and
+`--backend sherpa-zipformer-kroko-2025`.
 
 Replay the golden corpus across comparable backends:
 
@@ -127,8 +129,8 @@ Replay the golden corpus across comparable backends:
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
   --no-asr-download \
   replay-corpus bins/telnyx-gateway/corpus/asr-golden.json \
-  --backend sherpa \
-  --backend echo \
+  --backend sherpa-zipformer-2023 \
+  --backend sherpa-zipformer-kroko-2025 \
   --chunk-ms 20
 ```
 
@@ -137,7 +139,9 @@ The checked-in corpus manifest records the M1.5 L16 `16 kHz` outbound baseline
 reference text. The actual call audio and exact outbound 65-word reference are
 private artifacts; place them at the manifest paths or use a local manifest copy
 before scoring. The corpus harness reports raw ASR output only; post-ASR or
-LLM-based normalization is intentionally not part of these WER numbers.
+LLM-based normalization is intentionally not part of these WER numbers. Current
+piece-3 artifact A/B status is tracked in
+[`docs/ASR_ARTIFACT_AB.md`](docs/ASR_ARTIFACT_AB.md).
 
 ### Live Validation Notes
 

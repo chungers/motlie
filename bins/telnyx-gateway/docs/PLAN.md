@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-02 | @codex-371-impl | Added Sherpa artifact A/B selection for current 2023 Zipformer vs the newer Kroko 2025 English Zipformer and recorded that actual WER/latency scoring is blocked until the private golden WAV/reference artifacts are copied onto this host. |
 | 2026-06-01 | @codex-371-impl | Added M1.5 A/B replay infrastructure: a golden corpus manifest, selectable replay backends, and comparable WER/token-error/latency reports while leaving model integration and tuning sidecars pending. |
 | 2026-06-01 | @codex-371-impl | Implemented the #371 R1 prerequisite and recorded the updated models-first M1.5 sequence: build backend A/B infrastructure and model comparisons before hotwords, endpointing, decoder tuning, or normalization. |
 | 2026-06-01 | @codex-364-impl | Fixed capture WAV finalization, added a `replay-capture` WER harness over `asr-input-16khz.wav`, and split Sherpa-only ASR quality tuning into milestone 1.5 (#370) for hotwords, model/decoder A/B, and separately scored normalization. |
@@ -467,7 +468,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Recommended ASR/TTS Stack`
 - [x] Wire backend selection for replay A/B so candidates can be compared behind the existing typed ASR backbone without changing Telnyx media decode/capture behavior. (@codex-371-impl, 2026-06-01 PDT)
   DESIGN reference: `Recommended ASR/TTS Stack`
-- [ ] Integrate and benchmark candidate models on the same golden corpus: newer Sherpa Zipformer first, then Nemotron/Parakeet candidates coordinated with #191/#369.
+- [ ] Integrate and benchmark candidate models on the same golden corpus: newer Sherpa Zipformer first, then Nemotron/Parakeet candidates coordinated with #191/#369. (@codex-371-impl, 2026-06-02 PDT: `sherpa-zipformer-2023` and `sherpa-zipformer-kroko-2025` replay selectors are wired; WER/latency scoring is blocked until the L16 baseline and PCMU golden capture WAVs/reference are present. See `docs/ASR_ARTIFACT_AB.md`.)
   DESIGN reference: `Recommended ASR/TTS Stack`
 - [ ] Defer Sherpa hotwords/context bias, endpointing tuning, decoder tuning, and post-ASR normalization until the model A/B results establish best-model WER and latency on the golden corpus.
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`
