@@ -4,17 +4,16 @@ use std::sync::Arc;
 
 use clap::Parser;
 use motlie_driver::CommandEngine;
-#[cfg(not(feature = "sherpa"))]
-use motlie_telnyx_gateway::adapter::UnavailableAsrFactory;
 #[cfg(feature = "sherpa")]
 use motlie_telnyx_gateway::adapter::default_artifact_root;
+#[cfg(not(feature = "sherpa"))]
+use motlie_telnyx_gateway::adapter::UnavailableAsrFactory;
 use motlie_telnyx_gateway::adapter::{EchoAsrFactory, SharedAsrFactory};
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand};
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
-use motlie_telnyx_gateway::operator::state::{LogLevel, shared_state};
-use motlie_telnyx_gateway::serve::{AppServices, serve};
-use tokio::sync::Mutex;
+use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
+use motlie_telnyx_gateway::serve::{serve, AppServices};
 use tokio::time::{self, Duration};
 
 #[tokio::main]
@@ -62,9 +61,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let socket_task = if let Some(path) = cli.socket.clone() {
-        let socket_engine = Arc::new(Mutex::new(
-            CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone()),
-        ));
+        let socket_context = Arc::new(context.for_new_source());
         {
             let mut guard = state.write().await;
             guard.log(
@@ -73,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Some(tokio::spawn(
-            motlie_telnyx_gateway::operator::socket::run_command_socket(path, socket_engine),
+            motlie_telnyx_gateway::operator::socket::run_command_socket(path, socket_context),
         ))
     } else {
         None

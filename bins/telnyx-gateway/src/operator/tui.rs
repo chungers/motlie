@@ -4,18 +4,19 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use motlie_driver::{CommandEffect, CommandEngine};
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::Terminal;
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
-use crate::operator::state::{CallStatus, GatewayState, LogLevel, SharedState, TranscriptKind};
+use crate::operator::session::{ordered_call_ids, OperatorSession};
+use crate::operator::state::{CallStatus, GatewayState, LogLevel, TranscriptKind};
 
 pub async fn run_tui(
     engine: &mut CommandEngine<GatewayContext, GatewayCommand>,
@@ -26,7 +27,9 @@ pub async fn run_tui(
 
     loop {
         let state = engine.context().state.read().await.clone();
-        terminal.draw(|frame| draw(frame, &state, &history, &input))?;
+        engine.context_mut().session.ensure_valid_selection(&state);
+        let session = engine.context().session.clone();
+        terminal.draw(|frame| draw(frame, &state, &session, &history, &input))?;
 
         if state.shutdown_requested {
             break;
@@ -70,8 +73,10 @@ pub async fn run_tui(
                     history.remove(0);
                 }
             }
-            KeyCode::Up => select_relative(&engine.context().state, -1).await,
-            KeyCode::Down => select_relative(&engine.context().state, 1).await,
+            KeyCode::Up => select_relative(engine.context_mut(), -1).await,
+            KeyCode::Down => select_relative(engine.context_mut(), 1).await,
+            KeyCode::PageUp => engine.context_mut().session.scroll_detail(-8),
+            KeyCode::PageDown => engine.context_mut().session.scroll_detail(8),
             KeyCode::Esc => break,
             _ => {}
         }
@@ -80,31 +85,18 @@ pub async fn run_tui(
     Ok(())
 }
 
-async fn select_relative(state: &SharedState, delta: isize) {
-    let mut guard = state.write().await;
-    if guard.calls.is_empty() {
-        return;
-    }
-
-    let call_ids = guard.calls.keys().cloned().collect::<Vec<_>>();
-    let current_index = guard
-        .selected_call
-        .as_ref()
-        .and_then(|selected| call_ids.iter().position(|call_id| call_id == selected))
-        .unwrap_or(0);
-    let next_index = if delta < 0 {
-        current_index.saturating_sub(1)
-    } else {
-        (current_index + 1).min(call_ids.len() - 1)
-    };
-    let selected = call_ids[next_index].clone();
-    guard.selected_call = Some(selected.clone());
-    if let Some(call) = guard.calls.get_mut(&selected) {
-        call.unread_events = 0;
-    }
+async fn select_relative(context: &mut GatewayContext, delta: isize) {
+    let mut guard = context.state.write().await;
+    let _ = context.session.move_selection(&mut guard, delta);
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String], input: &str) {
+fn draw(
+    frame: &mut ratatui::Frame<'_>,
+    state: &GatewayState,
+    session: &OperatorSession,
+    history: &[String],
+    input: &str,
+) {
     let root = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
@@ -125,14 +117,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String]
     );
     set_shell_cursor(frame, root[0], shell_view.prompt_row, input);
 
-    let call_items = if state.calls.is_empty() {
+    let call_ids = ordered_call_ids(state);
+    let call_items = if call_ids.is_empty() {
         vec![ListItem::new("no calls")]
     } else {
-        state
-            .calls
-            .values()
+        call_ids
+            .iter()
+            .filter_map(|call_id| state.calls.get(call_id))
             .map(|call| {
-                let selected = state.selected_call.as_deref() == Some(&call.gateway_call_id);
                 let style = match call.status {
                     CallStatus::PendingInbound => Style::default()
                         .fg(Color::Yellow)
@@ -143,9 +135,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String]
                     }
                     _ => Style::default(),
                 };
-                let marker = if selected { "> " } else { "  " };
                 ListItem::new(format!(
-                    "{marker}{} {:<13} {} -> {} [{}]",
+                    "{} {:<13} {} -> {} [{}]",
                     call.gateway_call_id,
                     call.status.label(),
                     call.from.as_deref().unwrap_or("?"),
@@ -156,12 +147,21 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String]
             })
             .collect::<Vec<_>>()
     };
-    frame.render_widget(
-        List::new(call_items).block(Block::default().title("Calls").borders(Borders::ALL)),
+    let selected_index = session
+        .selected_call
+        .as_ref()
+        .and_then(|selected| call_ids.iter().position(|call_id| call_id == selected));
+    let mut call_list_state = ListState::default();
+    call_list_state.select(selected_index);
+    frame.render_stateful_widget(
+        List::new(call_items)
+            .block(Block::default().title("Calls").borders(Borders::ALL))
+            .highlight_symbol("> "),
         right[0],
+        &mut call_list_state,
     );
 
-    let detail_lines = selected_detail_lines(state);
+    let detail_lines = selected_detail_lines(state, session);
     frame.render_widget(
         Paragraph::new(detail_lines)
             .block(
@@ -169,7 +169,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String]
                     .title("Selected Call")
                     .borders(Borders::ALL),
             )
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((session.detail_scroll, 0)),
         right[1],
     );
 }
@@ -240,11 +241,8 @@ fn set_shell_cursor(
     frame.set_cursor_position(Position::new(area.x + 1 + cursor_offset, prompt_y));
 }
 
-fn selected_detail_lines(state: &GatewayState) -> Vec<Line<'static>> {
-    let Some(call_id) = state.selected_call.as_deref() else {
-        return status_lines(state);
-    };
-    let Some(call) = state.calls.get(call_id) else {
+fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec<Line<'static>> {
+    let Some(call) = session.selected_call(state) else {
         return status_lines(state);
     };
 
@@ -283,7 +281,7 @@ fn selected_detail_lines(state: &GatewayState) -> Vec<Line<'static>> {
     lines.extend([
         Line::from(""),
         Line::from("assembled transcript:"),
-        Line::from(assembled_transcript_text(call)),
+        Line::from(call.assembled_transcript_text()),
         Line::from(""),
         Line::from("recent events:"),
     ]);
@@ -300,20 +298,6 @@ fn selected_detail_lines(state: &GatewayState) -> Vec<Line<'static>> {
         lines.push(Line::from(format!("error: {error}")));
     }
     lines
-}
-
-fn assembled_transcript_text(call: &crate::operator::state::CallSession) -> String {
-    match (
-        call.final_transcript.trim(),
-        call.current_partial.as_deref().map(str::trim),
-    ) {
-        ("", Some(partial)) if !partial.is_empty() => partial.to_string(),
-        (final_text, Some(partial)) if !final_text.is_empty() && !partial.is_empty() => {
-            format!("{final_text} {partial}")
-        }
-        (final_text, _) if !final_text.is_empty() => final_text.to_string(),
-        _ => "<none>".to_string(),
-    }
 }
 
 fn status_lines(state: &GatewayState) -> Vec<Line<'static>> {

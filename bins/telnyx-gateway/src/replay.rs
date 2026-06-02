@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use motlie_model::typed::{AudioBuf, Mono};
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::pipeline::convert::{downmix_to_mono, f32_to_i16_clamped};
