@@ -1,0 +1,578 @@
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "qwen3-tts-cpp")]
+use std::time::Instant;
+
+use anyhow::{bail, Context};
+use motlie_voice::pipeline::convert::{downmix_to_mono, f32_to_i16_clamped};
+#[cfg(feature = "qwen3-tts-cpp")]
+use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
+use motlie_voice::telephony::{round_trip_telnyx_asr_samples, TelnyxAsrAudioSpec};
+use motlie_voice::wav::decode_streaming_wav_to_f32;
+use serde::{Deserialize, Serialize};
+
+use crate::cli::{AsrGoldenAbArgs, GoldenCodecArg, GoldenTtsArgs};
+use crate::replay::{compute_wer, replay_samples, ReplayBackend, ReplayLatencyReport, WerReport};
+
+#[cfg(feature = "qwen3-tts-cpp")]
+use motlie_model::typed::{BufferedSpeechSynthesizer, SynthesisRequest};
+#[cfg(feature = "qwen3-tts-cpp")]
+use motlie_model::{ArtifactPolicy, ModelError, SpeechParams, StartOptions};
+
+const SOURCE_SAMPLE_RATE_HZ: u32 = 16_000;
+const SOURCE_CHANNELS: u16 = 1;
+const ALL_CATEGORIES: &str = "ALL";
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct GoldenAbManifest {
+    schema_version: u32,
+    samples: Vec<GoldenAbSample>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct GoldenAbSample {
+    id: String,
+    category: String,
+    text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GoldenTtsReport {
+    pub manifest_path: String,
+    pub output_dir: String,
+    pub generated: usize,
+    pub skipped: usize,
+    pub samples: Vec<GoldenTtsSampleReport>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GoldenTtsSampleReport {
+    pub id: String,
+    pub category: String,
+    pub text: String,
+    pub wav_path: String,
+    pub status: String,
+    pub sample_rate_hz: u32,
+    pub sample_count: usize,
+    pub elapsed_ms: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GoldenAbReport {
+    pub manifest_path: String,
+    pub audio_dir: String,
+    pub chunk_ms: u32,
+    pub entries: Vec<GoldenAbEntryReport>,
+    pub summaries: Vec<GoldenAbSummaryReport>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GoldenAbEntryReport {
+    pub id: String,
+    pub category: String,
+    pub text: String,
+    pub codec: String,
+    pub media_sample_rate_hz: u32,
+    pub backend: String,
+    pub source_wav: String,
+    pub asr_wav: String,
+    pub sample_count: usize,
+    pub transcript: String,
+    pub wer: WerReport,
+    pub latency: ReplayLatencyReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GoldenAbSummaryReport {
+    pub backend: String,
+    pub codec: String,
+    pub category: String,
+    pub sample_count: usize,
+    pub reference_words: usize,
+    pub hypothesis_words: usize,
+    pub errors: usize,
+    pub substitutions: usize,
+    pub deletions: usize,
+    pub insertions: usize,
+    pub wer_percent: f64,
+    pub audio_ms: u64,
+    pub ingest_avg_ms: f64,
+    pub finish_avg_ms: f64,
+    pub wall_avg_ms: f64,
+}
+
+#[cfg(feature = "qwen3-tts-cpp")]
+pub async fn generate_tts_wavs(
+    args: &GoldenTtsArgs,
+    artifact_root: PathBuf,
+    allow_download: bool,
+) -> anyhow::Result<GoldenTtsReport> {
+    let manifest = load_manifest(&args.manifest)?;
+    std::fs::create_dir_all(&args.output_dir)
+        .with_context(|| format!("create golden TTS output dir {}", args.output_dir.display()))?;
+
+    let handle = start_qwen3_tts(&artifact_root, allow_download).await?;
+    let mut reports = Vec::new();
+    let mut generated = 0usize;
+    let mut skipped = 0usize;
+
+    for sample in selected_samples(&manifest.samples, args.limit) {
+        let wav_path = sample_wav_path(&args.output_dir, &sample.id);
+        if wav_path.exists() && !args.force {
+            let (sample_rate_hz, samples) = read_mono_i16_wav(&wav_path)?;
+            skipped += 1;
+            reports.push(GoldenTtsSampleReport {
+                id: sample.id.clone(),
+                category: sample.category.clone(),
+                text: sample.text.clone(),
+                wav_path: wav_path.display().to_string(),
+                status: "skipped".to_string(),
+                sample_rate_hz,
+                sample_count: samples.len(),
+                elapsed_ms: 0,
+            });
+            continue;
+        }
+
+        let started_at = Instant::now();
+        let request = SynthesisRequest {
+            text: sample.text.clone(),
+            params: SpeechParams::default(),
+        };
+        let audio = handle
+            .synthesize_buffered(request)
+            .await
+            .with_context(|| format!("synthesize Qwen3-TTS sample {}", sample.id))?;
+        let resampled = resample_i16_mono(
+            &WindowedSincResampler::default(),
+            &f32_to_i16_clamped(audio.samples()),
+            audio.sample_rate_hz(),
+            SOURCE_SAMPLE_RATE_HZ,
+        )?;
+        write_i16_wav(&wav_path, SOURCE_SAMPLE_RATE_HZ, &resampled)
+            .with_context(|| format!("write golden TTS WAV {}", wav_path.display()))?;
+        generated += 1;
+        reports.push(GoldenTtsSampleReport {
+            id: sample.id.clone(),
+            category: sample.category.clone(),
+            text: sample.text.clone(),
+            wav_path: wav_path.display().to_string(),
+            status: "generated".to_string(),
+            sample_rate_hz: SOURCE_SAMPLE_RATE_HZ,
+            sample_count: resampled.len(),
+            elapsed_ms: started_at.elapsed().as_millis(),
+        });
+    }
+
+    Ok(GoldenTtsReport {
+        manifest_path: args.manifest.display().to_string(),
+        output_dir: args.output_dir.display().to_string(),
+        generated,
+        skipped,
+        samples: reports,
+    })
+}
+
+#[cfg(not(feature = "qwen3-tts-cpp"))]
+pub async fn generate_tts_wavs(
+    _args: &GoldenTtsArgs,
+    _artifact_root: PathBuf,
+    _allow_download: bool,
+) -> anyhow::Result<GoldenTtsReport> {
+    bail!("golden-tts requires rebuilding telnyx-gateway with --features qwen3-tts-cpp or --features golden-ab")
+}
+
+pub async fn run_golden_ab(
+    args: &AsrGoldenAbArgs,
+    backends: Vec<ReplayBackend>,
+) -> anyhow::Result<GoldenAbReport> {
+    if args.chunk_ms == 0 {
+        bail!("--chunk-ms must be greater than zero");
+    }
+    if backends.is_empty() {
+        bail!("at least one ASR backend is required");
+    }
+
+    let manifest = load_manifest(&args.manifest)?;
+    let codecs = args.selected_codecs();
+    let mut entries = Vec::new();
+
+    for sample in selected_samples(&manifest.samples, args.limit) {
+        let source_wav = sample_wav_path(&args.audio_dir, &sample.id);
+        let (source_rate_hz, source_samples) = read_mono_i16_wav(&source_wav)
+            .with_context(|| format!("read source golden WAV for sample {}", sample.id))?;
+
+        for codec in &codecs {
+            let spec = telnyx_spec(*codec);
+            let asr_samples = round_trip_telnyx_asr_samples(&source_samples, source_rate_hz, spec)
+                .with_context(|| {
+                    format!("round trip sample {} through {}", sample.id, codec.label())
+                })?;
+            let asr_wav = asr_wav_path(&args.audio_dir, codec.label(), &sample.id);
+            write_i16_wav(&asr_wav, SOURCE_SAMPLE_RATE_HZ, &asr_samples)
+                .with_context(|| format!("write ASR input WAV {}", asr_wav.display()))?;
+
+            for backend in &backends {
+                let run = replay_samples(&asr_samples, args.chunk_ms, backend.asr())
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "run sample {} codec {} backend {}",
+                            sample.id,
+                            codec.label(),
+                            backend.label()
+                        )
+                    })?;
+                let wer = compute_wer(&sample.text, &run.transcript);
+                entries.push(GoldenAbEntryReport {
+                    id: sample.id.clone(),
+                    category: sample.category.clone(),
+                    text: sample.text.clone(),
+                    codec: codec.label().to_string(),
+                    media_sample_rate_hz: spec.media_sample_rate_hz(),
+                    backend: backend.label().to_string(),
+                    source_wav: source_wav.display().to_string(),
+                    asr_wav: asr_wav.display().to_string(),
+                    sample_count: asr_samples.len(),
+                    transcript: run.transcript,
+                    wer,
+                    latency: run.latency,
+                });
+            }
+        }
+    }
+
+    let summaries = summarize_entries(&entries);
+    let report = GoldenAbReport {
+        manifest_path: args.manifest.display().to_string(),
+        audio_dir: args.audio_dir.display().to_string(),
+        chunk_ms: args.chunk_ms,
+        entries,
+        summaries,
+    };
+
+    if let Some(path) = &args.output_json {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create report dir {}", parent.display()))?;
+            }
+        }
+        let file =
+            File::create(path).with_context(|| format!("create report {}", path.display()))?;
+        serde_json::to_writer_pretty(file, &report)
+            .with_context(|| format!("write report {}", path.display()))?;
+    }
+
+    Ok(report)
+}
+
+fn load_manifest(path: &Path) -> anyhow::Result<GoldenAbManifest> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read golden A/B manifest {}", path.display()))?;
+    let manifest: GoldenAbManifest = serde_json::from_str(&raw)
+        .with_context(|| format!("parse golden A/B manifest {}", path.display()))?;
+    if manifest.schema_version != 1 {
+        bail!(
+            "unsupported golden A/B manifest schema_version {}; expected 1",
+            manifest.schema_version
+        );
+    }
+    if manifest.samples.is_empty() {
+        bail!("golden A/B manifest must contain at least one sample");
+    }
+    Ok(manifest)
+}
+
+fn selected_samples(
+    samples: &[GoldenAbSample],
+    limit: Option<usize>,
+) -> impl Iterator<Item = &GoldenAbSample> {
+    samples.iter().take(limit.unwrap_or(usize::MAX))
+}
+
+fn sample_wav_path(audio_dir: &Path, id: &str) -> PathBuf {
+    audio_dir.join(format!("{id}.wav"))
+}
+
+fn asr_wav_path(audio_dir: &Path, codec: &str, id: &str) -> PathBuf {
+    audio_dir
+        .join("asr-inputs")
+        .join(codec.to_ascii_lowercase())
+        .join(format!("{id}.wav"))
+}
+
+fn telnyx_spec(codec: GoldenCodecArg) -> TelnyxAsrAudioSpec {
+    match codec {
+        GoldenCodecArg::L16_16k => TelnyxAsrAudioSpec::L16_16k,
+        GoldenCodecArg::Pcmu8k => TelnyxAsrAudioSpec::Pcmu8k,
+    }
+}
+
+fn read_mono_i16_wav(path: &Path) -> anyhow::Result<(u32, Vec<i16>)> {
+    let file = File::open(path).with_context(|| format!("open WAV {}", path.display()))?;
+    let (spec, samples) = decode_streaming_wav_to_f32(file)
+        .with_context(|| format!("decode WAV {}", path.display()))?;
+    let mono = downmix_to_mono(&samples, spec.channels)?;
+    Ok((spec.sample_rate, f32_to_i16_clamped(&mono)))
+}
+
+fn write_i16_wav(path: &Path, sample_rate_hz: u32, samples: &[i16]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create WAV dir {}", parent.display()))?;
+        }
+    }
+    let spec = hound::WavSpec {
+        channels: SOURCE_CHANNELS,
+        sample_rate: sample_rate_hz,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)
+        .with_context(|| format!("create WAV {}", path.display()))?;
+    for sample in samples {
+        writer
+            .write_sample(*sample)
+            .with_context(|| format!("write WAV sample to {}", path.display()))?;
+    }
+    writer
+        .finalize()
+        .with_context(|| format!("finalize WAV {}", path.display()))?;
+    Ok(())
+}
+
+fn summarize_entries(entries: &[GoldenAbEntryReport]) -> Vec<GoldenAbSummaryReport> {
+    let mut aggregates: BTreeMap<(String, String, String), SummaryAccumulator> = BTreeMap::new();
+    for entry in entries {
+        for category in [ALL_CATEGORIES, entry.category.as_str()] {
+            aggregates
+                .entry((
+                    entry.backend.clone(),
+                    entry.codec.clone(),
+                    category.to_string(),
+                ))
+                .or_default()
+                .record(entry);
+        }
+    }
+
+    aggregates
+        .into_iter()
+        .map(|((backend, codec, category), aggregate)| {
+            aggregate.into_report(backend, codec, category)
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct SummaryAccumulator {
+    sample_count: usize,
+    reference_words: usize,
+    hypothesis_words: usize,
+    errors: usize,
+    substitutions: usize,
+    deletions: usize,
+    insertions: usize,
+    audio_ms: u64,
+    ingest_total_ms: u128,
+    chunk_count: usize,
+    finish_ms: u128,
+    wall_ms: u128,
+}
+
+impl SummaryAccumulator {
+    fn record(&mut self, entry: &GoldenAbEntryReport) {
+        self.sample_count += 1;
+        self.reference_words += entry.wer.reference_words;
+        self.hypothesis_words += entry.wer.hypothesis_words;
+        self.errors += entry.wer.errors;
+        self.substitutions += entry.wer.substitutions;
+        self.deletions += entry.wer.deletions;
+        self.insertions += entry.wer.insertions;
+        self.audio_ms += entry.latency.audio_ms;
+        self.ingest_total_ms += entry.latency.ingest_total_ms;
+        self.chunk_count += entry.latency.chunk_count;
+        self.finish_ms += entry.latency.finish_ms;
+        self.wall_ms += entry.latency.wall_ms;
+    }
+
+    fn into_report(
+        self,
+        backend: String,
+        codec: String,
+        category: String,
+    ) -> GoldenAbSummaryReport {
+        GoldenAbSummaryReport {
+            backend,
+            codec,
+            category,
+            sample_count: self.sample_count,
+            reference_words: self.reference_words,
+            hypothesis_words: self.hypothesis_words,
+            errors: self.errors,
+            substitutions: self.substitutions,
+            deletions: self.deletions,
+            insertions: self.insertions,
+            wer_percent: percent(self.errors, self.reference_words),
+            audio_ms: self.audio_ms,
+            ingest_avg_ms: average_u128(self.ingest_total_ms, self.chunk_count),
+            finish_avg_ms: average_u128(self.finish_ms, self.sample_count),
+            wall_avg_ms: average_u128(self.wall_ms, self.sample_count),
+        }
+    }
+}
+
+fn percent(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 * 100.0 / denominator as f64
+    }
+}
+
+fn average_u128(total: u128, count: usize) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total as f64 / count as f64
+    }
+}
+
+#[cfg(feature = "qwen3-tts-cpp")]
+async fn start_qwen3_tts(
+    artifact_root: &Path,
+    allow_download: bool,
+) -> anyhow::Result<motlie_model_qwen3_tts_cpp::Qwen3TtsCppHandle> {
+    match motlie_models::tts::qwen3_tts_cpp::start_typed(local_only_options(artifact_root)).await {
+        Ok(handle) => Ok(handle),
+        Err(err) if allow_download && missing_local_artifacts(&err) => {
+            tracing::info!(
+                artifact_root = %artifact_root.display(),
+                artifact = "qwen3-tts-cpp-0.6b",
+                "downloading Qwen3-TTS artifacts"
+            );
+            download_qwen3_tts_artifacts(artifact_root)?;
+            motlie_models::tts::qwen3_tts_cpp::start_typed(local_only_options(artifact_root))
+                .await
+                .map_err(anyhow::Error::from)
+                .context("start Qwen3-TTS after downloading artifacts")
+        }
+        Err(err) if !allow_download && missing_local_artifacts(&err) => {
+            bail!(
+                "{} missing for qwen3-tts-cpp-0.6b under '{}'; rerun without --no-asr-download or preinstall artifacts",
+                motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX,
+                artifact_root.display()
+            )
+        }
+        Err(err) => Err(anyhow::Error::from(err)).context("start Qwen3-TTS"),
+    }
+}
+
+#[cfg(feature = "qwen3-tts-cpp")]
+fn local_only_options(artifact_root: &Path) -> StartOptions {
+    StartOptions {
+        artifact_policy: Some(ArtifactPolicy::LocalOnly {
+            root: artifact_root.to_path_buf(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "qwen3-tts-cpp")]
+fn missing_local_artifacts(error: &ModelError) -> bool {
+    match error {
+        ModelError::InvalidConfiguration(message) => {
+            message.contains(motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "qwen3-tts-cpp")]
+fn download_qwen3_tts_artifacts(artifact_root: &Path) -> anyhow::Result<()> {
+    let catalog = motlie_models::Catalog::with_defaults();
+    let bundle_id = motlie_models::tts::qwen3_tts_cpp::descriptor().id;
+    motlie_models::download_bundle_artifacts(&catalog, &bundle_id, artifact_root)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
+        .context("download Qwen3-TTS artifacts")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::adapter::EchoAsrFactory;
+    use crate::cli::{AsrGoldenAbArgs, ReplayBackendArg};
+
+    #[test]
+    fn bundled_manifest_is_short_call_center_corpus() {
+        let manifest_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus/qwen3-call-center-golden.json");
+        let manifest = load_manifest(&manifest_path).expect("manifest should parse");
+
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.samples.len(), 72);
+        assert!(manifest.samples.iter().all(|sample| {
+            let words = sample.text.split_whitespace().count();
+            (5..=20).contains(&words)
+        }));
+    }
+
+    #[tokio::test]
+    async fn golden_ab_runs_echo_backend_over_l16_fixture() {
+        let root = std::env::temp_dir().join(format!("motlie-golden-ab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let manifest_path = root.join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            r#"{
+              "schema_version": 1,
+              "samples": [
+                {
+                  "id": "echo-fixture",
+                  "category": "fixture",
+                  "text": "received 16000 samples"
+                }
+              ]
+            }"#,
+        )
+        .expect("write manifest");
+        let fixture_samples = vec![0; 16_000];
+        write_i16_wav(
+            &root.join("echo-fixture.wav"),
+            SOURCE_SAMPLE_RATE_HZ,
+            &fixture_samples,
+        )
+        .expect("write fixture wav");
+
+        let args = AsrGoldenAbArgs {
+            manifest: manifest_path,
+            audio_dir: root.clone(),
+            backend: vec![ReplayBackendArg::Echo],
+            codec: vec![GoldenCodecArg::L16_16k],
+            chunk_ms: 20,
+            limit: None,
+            output_json: None,
+        };
+        let report = run_golden_ab(
+            &args,
+            vec![ReplayBackend::new("echo", Arc::new(EchoAsrFactory))],
+        )
+        .await
+        .expect("golden A/B should run");
+
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].wer.errors, 0);
+        assert!(report
+            .summaries
+            .iter()
+            .any(|summary| summary.category == ALL_CATEGORIES && summary.wer_percent == 0.0));
+        std::fs::remove_dir_all(root).expect("remove temp root");
+    }
+}
