@@ -144,10 +144,12 @@ mod tests {
             serde_json::from_str(&response).expect("response should be JSON");
 
         assert_eq!(response["ok"], true);
-        assert!(response["lines"][0]
-            .as_str()
-            .expect("line should be a string")
-            .starts_with("listener:"));
+        assert!(
+            response["lines"][0]
+                .as_str()
+                .expect("line should be a string")
+                .starts_with("listener:")
+        );
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);

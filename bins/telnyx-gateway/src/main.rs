@@ -4,16 +4,16 @@ use std::sync::Arc;
 
 use clap::Parser;
 use motlie_driver::CommandEngine;
-#[cfg(feature = "sherpa")]
-use motlie_telnyx_gateway::adapter::default_artifact_root;
 #[cfg(not(feature = "sherpa"))]
 use motlie_telnyx_gateway::adapter::UnavailableAsrFactory;
+#[cfg(feature = "sherpa")]
+use motlie_telnyx_gateway::adapter::default_artifact_root;
 use motlie_telnyx_gateway::adapter::{EchoAsrFactory, SharedAsrFactory};
 use motlie_telnyx_gateway::call_control::TelnyxClient;
-use motlie_telnyx_gateway::cli::Cli;
+use motlie_telnyx_gateway::cli::{Cli, CliCommand};
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
-use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
-use motlie_telnyx_gateway::serve::{serve, AppServices};
+use motlie_telnyx_gateway::operator::state::{LogLevel, shared_state};
+use motlie_telnyx_gateway::serve::{AppServices, serve};
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration};
 
@@ -26,6 +26,13 @@ async fn main() -> anyhow::Result<()> {
         .as_deref()
         .or_else(|| cli.tui.then_some(default_tui_log.as_path()));
     let _logging_guard = motlie_telnyx_gateway::logging::init(log_file)?;
+
+    if let Some(CliCommand::ReplayCapture(args)) = cli.command.as_ref() {
+        let report =
+            motlie_telnyx_gateway::replay::replay_capture(args, build_asr_factory(&cli)).await?;
+        print_replay_report(&report);
+        return Ok(());
+    }
 
     let state = shared_state(cli.bind);
     {
@@ -96,6 +103,40 @@ async fn main() -> anyhow::Result<()> {
 
     server.abort();
     Ok(())
+}
+
+fn print_replay_report(report: &motlie_telnyx_gateway::replay::ReplayReport) {
+    println!("capture_dir: {}", report.capture_dir);
+    println!("wav: {}", report.wav_path);
+    println!("samples: {}", report.sample_count);
+    println!("transcript:");
+    println!("{}", report.transcript);
+    if let Some(wer) = &report.wer {
+        println!("wer: {:.1}%", wer.rate() * 100.0);
+        println!("reference_words: {}", wer.reference_words);
+        println!("hypothesis_words: {}", wer.hypothesis_words);
+        println!("substitutions: {}", wer.substitutions);
+        println!("deletions: {}", wer.deletions);
+        println!("insertions: {}", wer.insertions);
+        println!("errors: {}", wer.errors);
+        if !wer.errors_by_token.is_empty() {
+            println!("token_errors:");
+            for error in &wer.errors_by_token {
+                match error {
+                    motlie_telnyx_gateway::replay::WerTokenError::Substitution {
+                        reference,
+                        hypothesis,
+                    } => println!("  S {reference} -> {hypothesis}"),
+                    motlie_telnyx_gateway::replay::WerTokenError::Deletion { reference } => {
+                        println!("  D {reference}");
+                    }
+                    motlie_telnyx_gateway::replay::WerTokenError::Insertion { hypothesis } => {
+                        println!("  I {hypothesis}");
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn wait_for_shutdown(

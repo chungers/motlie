@@ -5561,6 +5561,7 @@ dependencies = [
  "clap",
  "crossterm 0.29.0",
  "futures-util",
+ "hound",
  "motlie-driver",
  "motlie-model",
  "motlie-model-sherpa-onnx",

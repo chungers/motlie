@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
-use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::State;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};

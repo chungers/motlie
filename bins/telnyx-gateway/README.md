@@ -94,12 +94,29 @@ Each accepted media stream creates:
 - `transcripts.jsonl`: partial/final transcript events, including suppressed events
 - `manifest.json`: call, stream, codec, sample-rate, and file metadata
 
+The WAV files are finalized with finite RIFF/data sizes so standard tools can
+read their duration and sample count. Older captures written before that fix can
+still be replayed through Motlie's permissive decoder.
+
 For WER checks, read this exact reference text at a steady pace after the call is
 answered:
 
 ```text
 The quick brown fox jumps over the lazy dog. Motlie is testing inbound speech through Telnyx. Please record every word in this sentence clearly. The final answer should contain numbers one two three and the phrase blue copper river.
 ```
+
+Replay a capture and compute WER without another phone call:
+
+```sh
+cargo run -p motlie-telnyx-gateway --features sherpa -- \
+  --no-asr-download \
+  replay-capture /home/dchung/telnyx-test/captures/<gateway-call-id>/<stream-id> \
+  --reference-file /home/dchung/telnyx-test/reference.txt
+```
+
+The replay command reads `asr-input-16khz.wav`, feeds it through the same Sherpa
+streaming backend in fixed chunks, and prints the assembled transcript, WER,
+substitution/deletion/insertion counts, and token-level errors.
 
 ### Live Validation Notes
 
@@ -143,6 +160,13 @@ gateway uses `config set from-number <e164>`, then the selected Telnyx number.
 After the callee answers, `call show` displays the transcript and the capture
 directory contains the raw media JSONL, decoded WAV, ASR input WAV, and
 transcript JSONL.
+
+The latest prepared outbound `L16 16000Hz` ASR-only call on 2026-06-01 measured
+`29.2%` WER on a `65`-word reference using `replay-capture`. The main errors
+were phonetic/domain terms such as `outbound -> ALBAN/ALBOW`, `Telnyx -> TAL
+NICHS`, `Sherpa -> SHARPA`, and `voice -> BOYS`; issue #370 tracks Sherpa-only
+quality tuning with hotwords, model/decoder A/B, and separately scored
+normalization.
 
 Telnyx outbound calls require the Call Control application to be assigned to an
 Outbound Voice Profile. If Telnyx returns `403 D38` with `Connection has no

@@ -66,6 +66,8 @@ pub enum VoiceError {
         sample_rate_hz: u32,
         block_align: u16,
     },
+    #[error("wav data payload is too large for RIFF/WAVE: {bytes} bytes")]
+    WavDataTooLarge { bytes: u64 },
     #[error("invalid sample rate conversion: input={input_rate_hz} output={output_rate_hz}")]
     InvalidSampleRate {
         input_rate_hz: u32,
@@ -78,7 +80,9 @@ pub enum VoiceError {
     },
     #[error("frame sequence {sequence} is older than the next expected sequence {next_expected}")]
     StaleFrameSequence { sequence: u64, next_expected: u64 },
-    #[error("frame sequence {sequence} is too far ahead of {next_expected} for reorder capacity {capacity}")]
+    #[error(
+        "frame sequence {sequence} is too far ahead of {next_expected} for reorder capacity {capacity}"
+    )]
     ReorderCapacityExceeded {
         sequence: u64,
         next_expected: u64,
