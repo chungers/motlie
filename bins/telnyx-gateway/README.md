@@ -111,12 +111,33 @@ Replay a capture and compute WER without another phone call:
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
   --no-asr-download \
   replay-capture /home/dchung/telnyx-test/captures/<gateway-call-id>/<stream-id> \
+  --backend sherpa \
   --reference-file /home/dchung/telnyx-test/reference.txt
 ```
 
-The replay command reads `asr-input-16khz.wav`, feeds it through the same Sherpa
-streaming backend in fixed chunks, and prints the assembled transcript, WER,
-substitution/deletion/insertion counts, and token-level errors.
+The replay command reads `asr-input-16khz.wav`, feeds it through the selected ASR
+backend in fixed chunks, and prints the assembled transcript, raw-ASR WER,
+substitution/deletion/insertion counts, token-level errors, and replay latency.
+Use `--backend echo` for protocol-only harness checks; `--backend auto` preserves
+the live gateway default selection.
+
+Replay the golden corpus across comparable backends:
+
+```sh
+cargo run -p motlie-telnyx-gateway --features sherpa -- \
+  --no-asr-download \
+  replay-corpus bins/telnyx-gateway/corpus/asr-golden.json \
+  --backend sherpa \
+  --backend echo \
+  --chunk-ms 20
+```
+
+The checked-in corpus manifest records the M1.5 L16 `16 kHz` outbound baseline
+(`29.2%`, `19 / 65`) and a PCMU `8 kHz` inbound slot with the read-aloud
+reference text. The actual call audio and exact outbound 65-word reference are
+private artifacts; place them at the manifest paths or use a local manifest copy
+before scoring. The corpus harness reports raw ASR output only; post-ASR or
+LLM-based normalization is intentionally not part of these WER numbers.
 
 ### Live Validation Notes
 

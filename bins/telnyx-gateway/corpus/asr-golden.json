@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "telnyx-outbound-l16-2026-06-01-wer29",
+      "description": "Prepared outbound ASR-only L16 16 kHz baseline from #370/#371.",
+      "capture_dir": "external/telnyx-outbound-l16-2026-06-01-wer29",
+      "asr_input_wav": "asr-input-16khz.wav",
+      "reference_file": "references/telnyx-outbound-l16-2026-06-01-wer29.txt",
+      "codec": "L16",
+      "media_sample_rate_hz": 16000,
+      "direction": "outbound",
+      "baseline": {
+        "backend": "sherpa",
+        "wer_percent": 29.2,
+        "errors": 19,
+        "reference_words": 65,
+        "hypothesis_words": null,
+        "substitutions": null,
+        "deletions": null,
+        "insertions": null,
+        "source": "#370/#371 baseline: 29.2% raw ASR WER (19/65) on 2026-06-01 PDT"
+      },
+      "notes": "Private capture WAV and exact 65-word reference are external to the repository. Place the capture directory and reference file at these paths, or adjust the paths in a local manifest copy, before scoring this entry."
+    },
+    {
+      "id": "telnyx-inbound-pcmu-8khz-reference",
+      "description": "PCMU 8 kHz inbound golden capture slot using the M1 read-aloud WER reference.",
+      "capture_dir": "external/telnyx-inbound-pcmu-8khz-reference",
+      "asr_input_wav": "asr-input-16khz.wav",
+      "reference_text": "The quick brown fox jumps over the lazy dog. Motlie is testing inbound speech through Telnyx. Please record every word in this sentence clearly. The final answer should contain numbers one two three and the phrase blue copper river.",
+      "codec": "PCMU",
+      "media_sample_rate_hz": 8000,
+      "direction": "inbound",
+      "baseline": null,
+      "notes": "Add a privacy-safe PCMU 8 kHz capture directory at this path, or adjust capture_dir in a local manifest copy. Replay scores the captured asr-input-16khz.wav after the live media pipeline has decoded and resampled PCMU."
+    }
+  ]
+}
