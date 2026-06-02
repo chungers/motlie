@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-371-impl | Added M1.5 A/B replay infrastructure: a golden corpus manifest, selectable replay backends, and comparable WER/token-error/latency reports while leaving model integration and tuning sidecars pending. |
 | 2026-06-01 | @codex-371-impl | Implemented the #371 R1 prerequisite and recorded the updated models-first M1.5 sequence: build backend A/B infrastructure and model comparisons before hotwords, endpointing, decoder tuning, or normalization. |
 | 2026-06-01 | @codex-364-impl | Fixed capture WAV finalization, added a `replay-capture` WER harness over `asr-input-16khz.wav`, and split Sherpa-only ASR quality tuning into milestone 1.5 (#370) for hotwords, model/decoder A/B, and separately scored normalization. |
 | 2026-06-01 | @codex-364-impl | Recorded the first outbound ASR-only live attempt blocker: Telnyx returned `403 D38` because the Call Control application has no Outbound Voice Profile assignment; live validation resumes after Telnyx account setup. |
@@ -460,11 +461,11 @@ Close the loop on independently useful product flows before combining them.
 
 - [x] Move Sherpa-specific repeated-token suppression and session-reset policy behind the ASR adapter before hotword/model work; keep Echo/non-Sherpa transcript events pass-through by default, and leave the shared media loop to record adapter-supplied decisions only. (@codex-371-impl, 2026-06-01 PDT)
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Inbound Call Handler Design`
-- [ ] Define the golden-WAV corpus manifest with reference text plus codec, sample rate, direction, capture path, and baseline fields; include the known `29.2%` L16 `16 kHz` capture and at least one PCMU `8 kHz` capture.
+- [x] Define the golden-WAV corpus manifest with reference text plus codec, sample rate, direction, capture path, and baseline fields; include the known `29.2%` L16 `16 kHz` capture and at least one PCMU `8 kHz` capture. (@codex-371-impl, 2026-06-01 PDT: added `bins/telnyx-gateway/corpus/asr-golden.json`; private WAVs and the exact outbound 65-word reference remain external artifacts to place at the manifest paths before scoring.)
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Testing Scope for PLAN`
-- [ ] Extend `replay-capture` into a backend-selectable A/B harness that runs captured WAVs through swappable `StreamingTranscriber` backends and reports transcript, WER, substitutions, deletions, insertions, token errors, and latency in a comparable report.
+- [x] Extend `replay-capture` into a backend-selectable A/B harness that runs captured WAVs through swappable `StreamingTranscriber` backends and reports transcript, WER, substitutions, deletions, insertions, token errors, and latency in a comparable report. (@codex-371-impl, 2026-06-01 PDT)
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Recommended ASR/TTS Stack`
-- [ ] Wire backend selection for replay A/B so candidates can be compared behind the existing typed ASR backbone without changing Telnyx media decode/capture behavior.
+- [x] Wire backend selection for replay A/B so candidates can be compared behind the existing typed ASR backbone without changing Telnyx media decode/capture behavior. (@codex-371-impl, 2026-06-01 PDT)
   DESIGN reference: `Recommended ASR/TTS Stack`
 - [ ] Integrate and benchmark candidate models on the same golden corpus: newer Sherpa Zipformer first, then Nemotron/Parakeet candidates coordinated with #191/#369.
   DESIGN reference: `Recommended ASR/TTS Stack`
