@@ -50,6 +50,12 @@ pub enum CliCommand {
 
     /// Replay a golden ASR corpus across one or more backends.
     ReplayCorpus(ReplayCorpusArgs),
+
+    /// Generate Qwen3-TTS WAVs for the offline call-center golden ASR corpus.
+    GoldenTts(GoldenTtsArgs),
+
+    /// Run the offline call-center ASR A/B matrix without the gateway.
+    AsrGoldenAb(AsrGoldenAbArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -98,6 +104,100 @@ impl ReplayCorpusArgs {
     }
 }
 
+#[derive(Clone, Debug, Args)]
+pub struct GoldenTtsArgs {
+    /// Qwen3 call-center corpus manifest JSON file.
+    pub manifest: PathBuf,
+
+    /// Directory where one 16 kHz mono PCM WAV is written per sample.
+    #[arg(
+        long,
+        default_value = "bins/telnyx-gateway/corpus/generated/qwen3-call-center"
+    )]
+    pub output_dir: PathBuf,
+
+    /// Regenerate WAVs that already exist.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Generate only the first N samples for smoke tests.
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct AsrGoldenAbArgs {
+    /// Qwen3 call-center corpus manifest JSON file.
+    pub manifest: PathBuf,
+
+    /// Directory containing source WAVs from golden-tts.
+    #[arg(
+        long,
+        default_value = "bins/telnyx-gateway/corpus/generated/qwen3-call-center"
+    )]
+    pub audio_dir: PathBuf,
+
+    /// ASR backend to run. Repeat to compare multiple backends.
+    #[arg(long, value_enum)]
+    pub backend: Vec<ReplayBackendArg>,
+
+    /// Telnyx audio spec to score. Repeat to compare multiple specs.
+    #[arg(long, value_enum)]
+    pub codec: Vec<GoldenCodecArg>,
+
+    /// Audio chunk size to feed into each recognizer.
+    #[arg(long, default_value_t = 20)]
+    pub chunk_ms: u32,
+
+    /// Score only the first N samples for smoke tests.
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Optional JSON report path for the full matrix.
+    #[arg(long)]
+    pub output_json: Option<PathBuf>,
+}
+
+impl AsrGoldenAbArgs {
+    pub fn selected_backends(&self) -> Vec<ReplayBackendArg> {
+        if self.backend.is_empty() {
+            vec![
+                ReplayBackendArg::SherpaZipformer2023,
+                ReplayBackendArg::SherpaZipformerKroko2025,
+                ReplayBackendArg::Moonshine,
+                ReplayBackendArg::Whisper,
+            ]
+        } else {
+            self.backend.clone()
+        }
+    }
+
+    pub fn selected_codecs(&self) -> Vec<GoldenCodecArg> {
+        if self.codec.is_empty() {
+            vec![GoldenCodecArg::L16_16k, GoldenCodecArg::Pcmu8k]
+        } else {
+            self.codec.clone()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum GoldenCodecArg {
+    #[value(name = "l16-16k")]
+    L16_16k,
+    #[value(name = "pcmu-8k")]
+    Pcmu8k,
+}
+
+impl GoldenCodecArg {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::L16_16k => "L16-16k",
+            Self::Pcmu8k => "PCMU-8k",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ReplayBackendArg {
     Auto,
@@ -107,6 +207,8 @@ pub enum ReplayBackendArg {
     SherpaZipformer2023,
     #[value(name = "sherpa-zipformer-kroko-2025")]
     SherpaZipformerKroko2025,
+    Moonshine,
+    Whisper,
 }
 
 impl ReplayBackendArg {
@@ -117,6 +219,8 @@ impl ReplayBackendArg {
             Self::Sherpa => "sherpa",
             Self::SherpaZipformer2023 => "sherpa-zipformer-en-2023-06-26",
             Self::SherpaZipformerKroko2025 => "sherpa-zipformer-en-kroko-2025-08-06",
+            Self::Moonshine => "moonshine-streaming-en",
+            Self::Whisper => "whisper-base-en",
         }
     }
 }

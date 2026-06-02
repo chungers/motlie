@@ -1,18 +1,20 @@
-#[cfg(feature = "sherpa")]
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(feature = "sherpa")]
-use anyhow::{Context, bail};
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
+use anyhow::{bail, Context};
 use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono};
-#[cfg(feature = "sherpa")]
+#[cfg(feature = "whisper")]
+use motlie_model::typed::{AudioTransform, BatchTranscriber, I16ToF32};
+#[cfg(any(feature = "sherpa", feature = "moonshine"))]
 use motlie_model::typed::{StreamingTranscriber, TranscriptionSession};
-#[cfg(feature = "sherpa")]
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 use motlie_model::{ArtifactPolicy, ModelError, StartOptions, TranscriptionParams};
 use motlie_voice::app::TranscriptEvent;
-#[cfg(feature = "sherpa")]
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -195,10 +197,7 @@ impl InboundAsrFactory for SherpaAsrFactory {
     async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
         let handle = self.handle().await?;
         let session = handle
-            .open_session(TranscriptionParams {
-                language: Some("en".to_string()),
-                emit_partials: true,
-            })
+            .open_session(transcription_params(true))
             .await
             .context("open Sherpa streaming ASR session")?;
         Ok(Box::new(SherpaAsrSession { session }))
@@ -243,14 +242,165 @@ impl InboundAsrSession for SherpaAsrSession {
     }
 }
 
+#[cfg(feature = "moonshine")]
+pub struct MoonshineAsrFactory {
+    artifact_root: PathBuf,
+    allow_download: bool,
+    handle: Mutex<Option<Arc<motlie_model_moonshine::MoonshineHandle>>>,
+}
+
+#[cfg(feature = "moonshine")]
+impl MoonshineAsrFactory {
+    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+        Self {
+            artifact_root,
+            allow_download,
+            handle: Mutex::new(None),
+        }
+    }
+
+    async fn handle(&self) -> anyhow::Result<Arc<motlie_model_moonshine::MoonshineHandle>> {
+        let mut guard = self.handle.lock().await;
+        if let Some(handle) = guard.as_ref() {
+            return Ok(Arc::clone(handle));
+        }
+
+        let handle = Arc::new(start_moonshine(&self.artifact_root, self.allow_download).await?);
+        *guard = Some(Arc::clone(&handle));
+        Ok(handle)
+    }
+}
+
+#[cfg(feature = "moonshine")]
+#[async_trait]
+impl InboundAsrFactory for MoonshineAsrFactory {
+    async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
+        let handle = self.handle().await?;
+        let session = handle
+            .open_session(transcription_params(true))
+            .await
+            .context("open Moonshine streaming ASR session")?;
+        Ok(Box::new(MoonshineAsrSession { session }))
+    }
+}
+
+#[cfg(feature = "moonshine")]
+struct MoonshineAsrSession {
+    session: motlie_model_moonshine::MoonshineStream,
+}
+
+#[cfg(feature = "moonshine")]
+#[async_trait]
+impl InboundAsrSession for MoonshineAsrSession {
+    async fn ingest(
+        &mut self,
+        audio: AudioBuf<i16, 16_000, Mono>,
+    ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+        let update = self
+            .session
+            .ingest(audio)
+            .await
+            .context("ingest audio into Moonshine ASR")?;
+        Ok(update
+            .map(events_from_update)
+            .unwrap_or_default()
+            .into_iter()
+            .map(AsrTranscriptEvent::emit)
+            .collect())
+    }
+
+    async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+        let update = self
+            .session
+            .finish()
+            .await
+            .context("finish Moonshine ASR session")?;
+        Ok(events_from_update(update)
+            .into_iter()
+            .map(AsrTranscriptEvent::emit)
+            .collect())
+    }
+}
+
+#[cfg(feature = "whisper")]
+pub struct WhisperAsrFactory {
+    artifact_root: PathBuf,
+    allow_download: bool,
+    handle: Mutex<Option<Arc<motlie_model_whisper_cpp::WhisperCppHandle>>>,
+}
+
+#[cfg(feature = "whisper")]
+impl WhisperAsrFactory {
+    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+        Self {
+            artifact_root,
+            allow_download,
+            handle: Mutex::new(None),
+        }
+    }
+
+    async fn handle(&self) -> anyhow::Result<Arc<motlie_model_whisper_cpp::WhisperCppHandle>> {
+        let mut guard = self.handle.lock().await;
+        if let Some(handle) = guard.as_ref() {
+            return Ok(Arc::clone(handle));
+        }
+
+        let handle = Arc::new(start_whisper(&self.artifact_root, self.allow_download).await?);
+        *guard = Some(Arc::clone(&handle));
+        Ok(handle)
+    }
+}
+
+#[cfg(feature = "whisper")]
+#[async_trait]
+impl InboundAsrFactory for WhisperAsrFactory {
+    async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
+        Ok(Box::new(WhisperAsrSession {
+            handle: self.handle().await?,
+            samples: Vec::new(),
+        }))
+    }
+}
+
+#[cfg(feature = "whisper")]
+struct WhisperAsrSession {
+    handle: Arc<motlie_model_whisper_cpp::WhisperCppHandle>,
+    samples: Vec<i16>,
+}
+
+#[cfg(feature = "whisper")]
+#[async_trait]
+impl InboundAsrSession for WhisperAsrSession {
+    async fn ingest(
+        &mut self,
+        audio: AudioBuf<i16, 16_000, Mono>,
+    ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+        self.samples.extend(audio.into_samples());
+        Ok(Vec::new())
+    }
+
+    async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+        let audio = I16ToF32::<16_000, Mono>::new()
+            .transform(AudioBuf::<i16, 16_000, Mono>::new(self.samples))
+            .context("convert Whisper ASR input to f32")?;
+        let update = self
+            .handle
+            .transcribe(audio, transcription_params(false))
+            .await
+            .context("run Whisper final-pass ASR")?;
+        Ok(events_from_update(update)
+            .into_iter()
+            .map(AsrTranscriptEvent::emit)
+            .collect())
+    }
+}
+
 #[cfg(feature = "sherpa")]
 async fn start_sherpa(
     artifact_root: &Path,
     allow_download: bool,
     artifact: SherpaAsrArtifact,
 ) -> anyhow::Result<motlie_model_sherpa_onnx::SherpaOnnxHandle> {
-    use motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
-
     let options = local_only_options(artifact_root);
     match start_sherpa_artifact(artifact, options).await {
         Ok(handle) => Ok(handle),
@@ -267,14 +417,70 @@ async fn start_sherpa(
                 .with_context(|| format!("start {} after downloading artifacts", artifact.label()))
         }
         Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail!(
-                "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} missing for {} under '{}'; rerun without --no-asr-download or preinstall artifacts",
-                artifact.label(),
-                artifact_root.display()
-            )
+            bail_missing_artifacts(artifact.label(), artifact_root)
         }
         Err(err) => Err(anyhow::Error::from(err))
             .with_context(|| format!("start {} Sherpa ONNX", artifact.label())),
+    }
+}
+
+#[cfg(feature = "moonshine")]
+async fn start_moonshine(
+    artifact_root: &Path,
+    allow_download: bool,
+) -> anyhow::Result<motlie_model_moonshine::MoonshineHandle> {
+    match motlie_models::asr::moonshine_streaming_en::start_typed(local_only_options(artifact_root))
+        .await
+    {
+        Ok(handle) => Ok(handle),
+        Err(err) if allow_download && missing_local_artifacts(&err) => {
+            tracing::info!(
+                artifact_root = %artifact_root.display(),
+                artifact = "moonshine-streaming-en",
+                "downloading Moonshine artifacts"
+            );
+            download_asr_artifact(
+                motlie_models::AsrModels::MoonshineStreamingEn,
+                artifact_root,
+            )?;
+            motlie_models::asr::moonshine_streaming_en::start_typed(local_only_options(
+                artifact_root,
+            ))
+            .await
+            .map_err(anyhow::Error::from)
+            .context("start Moonshine after downloading artifacts")
+        }
+        Err(err) if !allow_download && missing_local_artifacts(&err) => {
+            bail_missing_artifacts("moonshine-streaming-en", artifact_root)
+        }
+        Err(err) => Err(anyhow::Error::from(err)).context("start Moonshine ASR"),
+    }
+}
+
+#[cfg(feature = "whisper")]
+async fn start_whisper(
+    artifact_root: &Path,
+    allow_download: bool,
+) -> anyhow::Result<motlie_model_whisper_cpp::WhisperCppHandle> {
+    match motlie_models::asr::whisper_base_en::start_typed(local_only_options(artifact_root)).await
+    {
+        Ok(handle) => Ok(handle),
+        Err(err) if allow_download && missing_local_artifacts(&err) => {
+            tracing::info!(
+                artifact_root = %artifact_root.display(),
+                artifact = "whisper-base-en",
+                "downloading Whisper artifacts"
+            );
+            download_asr_artifact(motlie_models::AsrModels::WhisperBaseEn, artifact_root)?;
+            motlie_models::asr::whisper_base_en::start_typed(local_only_options(artifact_root))
+                .await
+                .map_err(anyhow::Error::from)
+                .context("start Whisper after downloading artifacts")
+        }
+        Err(err) if !allow_download && missing_local_artifacts(&err) => {
+            bail_missing_artifacts("whisper-base-en", artifact_root)
+        }
+        Err(err) => Err(anyhow::Error::from(err)).context("start Whisper ASR"),
     }
 }
 
@@ -283,9 +489,13 @@ async fn start_sherpa_artifact(
     artifact: SherpaAsrArtifact,
     options: StartOptions,
 ) -> Result<motlie_model_sherpa_onnx::SherpaOnnxHandle, ModelError> {
-    match artifact.asr_model().bundle().start(options).await? {
-        motlie_models::CuratedHandle::SherpaOnnxStreamingEn(handle)
-        | motlie_models::CuratedHandle::SherpaOnnxStreamingEnKroko2025(handle) => Ok(handle),
+    match artifact {
+        SherpaAsrArtifact::ZipformerEn20230626 => {
+            motlie_models::asr::sherpa_onnx_streaming_en::start_typed(options).await
+        }
+        SherpaAsrArtifact::ZipformerEnKroko20250806 => {
+            motlie_models::asr::sherpa_onnx_streaming_en_kroko_2025::start_typed(options).await
+        }
     }
 }
 
@@ -294,15 +504,22 @@ fn download_sherpa_artifact(
     artifact: SherpaAsrArtifact,
     artifact_root: &Path,
 ) -> anyhow::Result<()> {
-    let catalog = motlie_models::Catalog::with_defaults();
-    let model = artifact.asr_model();
-    motlie_models::download_bundle_artifacts(&catalog, &model.bundle_id(), artifact_root)
-        .map(|_| ())
-        .map_err(anyhow::Error::from)
+    download_asr_artifact(artifact.asr_model(), artifact_root)
         .with_context(|| format!("download {} Sherpa ONNX artifacts", artifact.label()))
 }
 
-#[cfg(feature = "sherpa")]
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
+fn download_asr_artifact(
+    model: motlie_models::AsrModels,
+    artifact_root: &Path,
+) -> anyhow::Result<()> {
+    let catalog = motlie_models::Catalog::with_defaults();
+    motlie_models::download_bundle_artifacts(&catalog, &model.bundle_id(), artifact_root)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
+}
+
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 fn local_only_options(artifact_root: &Path) -> StartOptions {
     StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -312,7 +529,7 @@ fn local_only_options(artifact_root: &Path) -> StartOptions {
     }
 }
 
-#[cfg(feature = "sherpa")]
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 fn missing_local_artifacts(error: &ModelError) -> bool {
     match error {
         ModelError::InvalidConfiguration(message) => {
@@ -322,7 +539,25 @@ fn missing_local_artifacts(error: &ModelError) -> bool {
     }
 }
 
-#[cfg(feature = "sherpa")]
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
+fn bail_missing_artifacts<T>(label: &str, artifact_root: &Path) -> anyhow::Result<T> {
+    bail!(
+        "{} missing for {} under '{}'; rerun without --no-asr-download or preinstall artifacts",
+        motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX,
+        label,
+        artifact_root.display()
+    )
+}
+
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
+fn transcription_params(emit_partials: bool) -> TranscriptionParams {
+    TranscriptionParams {
+        language: Some("en".to_string()),
+        emit_partials,
+    }
+}
+
+#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 fn events_from_update(update: motlie_model::TranscriptionUpdate) -> Vec<TranscriptEvent> {
     update
         .segments

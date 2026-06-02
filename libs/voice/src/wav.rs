@@ -248,7 +248,7 @@ fn write_wav_header<W: Write>(
 mod tests {
     use std::io::Cursor;
 
-    use super::{StreamingWavWriter, decode_streaming_wav_to_f32};
+    use super::{decode_streaming_wav_to_f32, StreamingWavWriter};
 
     #[test]
     fn streaming_wav_header_for_i16_looks_like_wave() {

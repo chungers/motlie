@@ -4,7 +4,7 @@ use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpo
 
 // Re-export shared metric types and helpers so backend code imports from one place.
 pub(crate) use motlie_model::metrics_runtime::{
-    RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
+    lock_metrics, observe_latency, observe_memory, RuntimeMetricState,
 };
 
 /// Validate a resolved checkpoint has the expected ggml format and return

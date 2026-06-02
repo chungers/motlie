@@ -4,11 +4,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use motlie_driver::CommandEngine;
-#[cfg(feature = "sherpa")]
-use motlie_telnyx_gateway::adapter::default_artifact_root;
-#[cfg(not(feature = "sherpa"))]
-use motlie_telnyx_gateway::adapter::UnavailableAsrFactory;
-use motlie_telnyx_gateway::adapter::{EchoAsrFactory, SharedAsrFactory, SherpaAsrArtifact};
+use motlie_telnyx_gateway::adapter::{
+    default_artifact_root, EchoAsrFactory, SharedAsrFactory, SherpaAsrArtifact,
+};
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
@@ -49,6 +47,29 @@ async fn main() -> anyhow::Result<()> {
                 .collect();
             let report = motlie_telnyx_gateway::replay::replay_corpus(args, backends).await?;
             print_corpus_report(&report);
+            return Ok(());
+        }
+        Some(CliCommand::GoldenTts(args)) => {
+            let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+            let report = motlie_telnyx_gateway::golden_ab::generate_tts_wavs(
+                args,
+                artifact_root,
+                !cli.no_asr_download,
+            )
+            .await?;
+            print_golden_tts_report(&report);
+            return Ok(());
+        }
+        Some(CliCommand::AsrGoldenAb(args)) => {
+            let backends = args
+                .selected_backends()
+                .into_iter()
+                .map(|backend| {
+                    ReplayBackend::new(backend.label(), build_asr_factory(&cli, backend))
+                })
+                .collect();
+            let report = motlie_telnyx_gateway::golden_ab::run_golden_ab(args, backends).await?;
+            print_golden_ab_report(&report);
             return Ok(());
         }
         None => {}
@@ -212,6 +233,46 @@ fn print_replay_report_with_indent(
     }
 }
 
+fn print_golden_tts_report(report: &motlie_telnyx_gateway::golden_ab::GoldenTtsReport) {
+    println!("manifest: {}", report.manifest_path);
+    println!("output_dir: {}", report.output_dir);
+    println!("generated: {}", report.generated);
+    println!("skipped: {}", report.skipped);
+    for sample in &report.samples {
+        println!(
+            "sample: {} category={} status={} samples={} elapsed_ms={} wav={}",
+            sample.id,
+            sample.category,
+            sample.status,
+            sample.sample_count,
+            sample.elapsed_ms,
+            sample.wav_path
+        );
+    }
+}
+
+fn print_golden_ab_report(report: &motlie_telnyx_gateway::golden_ab::GoldenAbReport) {
+    println!("manifest: {}", report.manifest_path);
+    println!("audio_dir: {}", report.audio_dir);
+    println!("chunk_ms: {}", report.chunk_ms);
+    println!("entries: {}", report.entries.len());
+    for summary in &report.summaries {
+        println!(
+            "summary: backend={} codec={} category={} samples={} wer={:.1}% errors={}/{} ingest_avg_ms={:.1} finish_avg_ms={:.1} wall_avg_ms={:.1}",
+            summary.backend,
+            summary.codec,
+            summary.category,
+            summary.sample_count,
+            summary.wer_percent,
+            summary.errors,
+            summary.reference_words,
+            summary.ingest_avg_ms,
+            summary.finish_avg_ms,
+            summary.wall_avg_ms
+        );
+    }
+}
+
 async fn wait_for_shutdown(
     state: motlie_telnyx_gateway::operator::state::SharedState,
 ) -> anyhow::Result<()> {
@@ -241,6 +302,8 @@ fn build_asr_factory(cli: &Cli, backend: ReplayBackendArg) -> SharedAsrFactory {
         ReplayBackendArg::SherpaZipformerKroko2025 => {
             build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEnKroko20250806)
         }
+        ReplayBackendArg::Moonshine => build_moonshine_asr_factory(cli),
+        ReplayBackendArg::Whisper => build_whisper_asr_factory(cli),
     }
 }
 
@@ -265,8 +328,40 @@ fn build_sherpa_asr_factory(cli: &Cli, artifact: SherpaAsrArtifact) -> SharedAsr
 
 #[cfg(not(feature = "sherpa"))]
 fn build_sherpa_asr_factory(_cli: &Cli, _artifact: SherpaAsrArtifact) -> SharedAsrFactory {
-    Arc::new(UnavailableAsrFactory::new(
+    Arc::new(motlie_telnyx_gateway::adapter::UnavailableAsrFactory::new(
         "gateway was built without a live ASR backend; rebuild with --features sherpa or use --backend echo for replay protocol testing",
+    ))
+}
+
+#[cfg(feature = "moonshine")]
+fn build_moonshine_asr_factory(cli: &Cli) -> SharedAsrFactory {
+    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+    Arc::new(motlie_telnyx_gateway::adapter::MoonshineAsrFactory::new(
+        artifact_root,
+        !cli.no_asr_download,
+    ))
+}
+
+#[cfg(not(feature = "moonshine"))]
+fn build_moonshine_asr_factory(_cli: &Cli) -> SharedAsrFactory {
+    Arc::new(motlie_telnyx_gateway::adapter::UnavailableAsrFactory::new(
+        "gateway was built without Moonshine ASR; rebuild with --features moonshine or --features golden-ab",
+    ))
+}
+
+#[cfg(feature = "whisper")]
+fn build_whisper_asr_factory(cli: &Cli) -> SharedAsrFactory {
+    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+    Arc::new(motlie_telnyx_gateway::adapter::WhisperAsrFactory::new(
+        artifact_root,
+        !cli.no_asr_download,
+    ))
+}
+
+#[cfg(not(feature = "whisper"))]
+fn build_whisper_asr_factory(_cli: &Cli) -> SharedAsrFactory {
+    Arc::new(motlie_telnyx_gateway::adapter::UnavailableAsrFactory::new(
+        "gateway was built without Whisper ASR; rebuild with --features whisper or --features golden-ab",
     ))
 }
 

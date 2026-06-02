@@ -71,6 +71,8 @@ pub enum VoiceError {
         input_rate_hz: u32,
         output_rate_hz: u32,
     },
+    #[error("invalid audio chunk duration: {chunk_ms} ms")]
+    InvalidChunkDuration { chunk_ms: u32 },
     #[error("encoded payload length {payload_len} is not aligned to sample width {sample_width}")]
     MisalignedEncodedPayload {
         payload_len: usize,
