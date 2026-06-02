@@ -27,10 +27,11 @@ fn decode_ulaw_sample(byte: u8) -> i16 {
 fn encode_ulaw_sample(sample: i16) -> u8 {
     const BIAS: i32 = 0x84;
     const CLIP: i32 = 32_635;
+    const NEGATIVE_BOUNDARY_OFFSET: i32 = 3;
 
     let mut linear = i32::from(sample);
     let mask = if linear < 0 {
-        linear = (-linear).min(CLIP);
+        linear = (-linear + NEGATIVE_BOUNDARY_OFFSET).min(CLIP);
         0x7f
     } else {
         linear = linear.min(CLIP);
@@ -90,6 +91,16 @@ mod tests {
         assert!(decoded[1] < -900);
         assert!(decoded[3] > 900);
         assert!(decoded[4] > 28_000);
+    }
+
+    #[test]
+    fn pcmu_encoder_matches_audioop_reference_vector() {
+        const REFERENCE: &[u8; 65_536] = include_bytes!("../../testdata/pcmu_audioop_i16le.bin");
+
+        for (index, expected) in REFERENCE.iter().copied().enumerate() {
+            let sample = (index as i32 - 32_768) as i16;
+            assert_eq!(encode_ulaw_sample(sample), expected, "sample {sample}");
+        }
     }
 
     #[test]
