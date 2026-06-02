@@ -30,6 +30,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5.58", features = ["derive"] }
 crossterm = "0.29"
 futures-util = "0.3"
+hound = "3.5"
 motlie-driver = { path = "../../libs/driver" }
 motlie-model = { path = "../../libs/model" }
 motlie-model-sherpa-onnx = { path = "../../libs/model/backends/sherpa_onnx", optional = true }
@@ -49,5 +50,4 @@ urlencoding = "2.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-hound = "3.5"
 tower = "0.5"

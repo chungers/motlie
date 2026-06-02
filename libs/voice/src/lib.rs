@@ -66,8 +66,6 @@ pub enum VoiceError {
         sample_rate_hz: u32,
         block_align: u16,
     },
-    #[error("wav data payload is too large for RIFF/WAVE: {bytes} bytes")]
-    WavDataTooLarge { bytes: u64 },
     #[error("invalid sample rate conversion: input={input_rate_hz} output={output_rate_hz}")]
     InvalidSampleRate {
         input_rate_hz: u32,
