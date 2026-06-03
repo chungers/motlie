@@ -14,7 +14,8 @@ use serde::Deserialize;
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{
-    AsrTranscriptEvent, AsrTranscriptSuppressionReason, InboundAsrSession, SharedAsrFactory,
+    AsrTranscriptEvent, AsrTranscriptSuppressionReason, InboundAsrSession, LiveAsrBackend,
+    SharedAsrRegistry,
 };
 use crate::operator::state::{
     CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
@@ -90,6 +91,7 @@ struct StopEvent {
 struct MediaSocketState {
     session: Option<Box<dyn InboundAsrSession>>,
     gateway_call_id: Option<String>,
+    asr_backend: Option<LiveAsrBackend>,
     media_format: Option<MediaFormat>,
     reorder: SequencedFrameReorder<EncodedMediaFrame>,
     decoded_frame_count: usize,
@@ -104,6 +106,7 @@ impl MediaSocketState {
         Self {
             session: None,
             gateway_call_id: None,
+            asr_backend: None,
             media_format: None,
             reorder: SequencedFrameReorder::new_lazily(32),
             decoded_frame_count: 0,
@@ -115,7 +118,7 @@ impl MediaSocketState {
     }
 }
 
-pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: SharedAsrFactory) {
+pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: SharedAsrRegistry) {
     let mut media_state = MediaSocketState::new();
     let mut silence_keepalive = time::interval(SILENCE_KEEPALIVE_INTERVAL);
     silence_keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -238,7 +241,7 @@ fn samples_per_20ms(sample_rate_hz: u32) -> anyhow::Result<usize> {
 async fn handle_text(
     text: &str,
     state: &SharedState,
-    asr: &SharedAsrFactory,
+    asr: &SharedAsrRegistry,
     media_state: &mut MediaSocketState,
 ) -> anyhow::Result<()> {
     let discriminator: EventDiscriminator =
@@ -249,9 +252,10 @@ async fn handle_text(
             let event: StartEvent = serde_json::from_str(text).context("parse start event")?;
             let format = map_media_format(event.start.media_format.as_ref());
             validate_media_format(&format)?;
-            let Some(call_id) = register_start(state, &event, &format).await else {
+            let Some(registered) = register_start(state, &event, &format).await else {
                 return Ok(());
             };
+            let call_id = registered.gateway_call_id;
             if let Some(capture_root) = state.read().await.config.capture_dir.clone() {
                 match MediaCapture::start(&capture_root, &call_id, &event.stream_id, &format) {
                     Ok(mut capture) => {
@@ -275,12 +279,15 @@ async fn handle_text(
                 }
             }
             media_state.media_format = Some(format);
-            media_state.gateway_call_id = Some(call_id);
-            media_state.session = Some(asr.open_session().await?);
+            media_state.gateway_call_id = Some(call_id.clone());
+            media_state.asr_backend = Some(registered.asr_backend);
+            open_asr_session(asr, media_state, &call_id, &event.stream_id, "media_start").await?;
             media_state.silence_keepalive = true;
             tracing::info!(
                 gateway_call_id = media_state.gateway_call_id.as_deref(),
                 stream_id = event.stream_id,
+                asr_backend = registered.asr_backend.label(),
+                asr_model = registered.asr_backend.model_label(),
                 "media.silence_keepalive.started"
             );
             Ok(())
@@ -344,11 +351,16 @@ async fn handle_text(
     }
 }
 
+struct RegisteredStart {
+    gateway_call_id: String,
+    asr_backend: LiveAsrBackend,
+}
+
 async fn register_start(
     state: &SharedState,
     event: &StartEvent,
     format: &MediaFormat,
-) -> Option<String> {
+) -> Option<RegisteredStart> {
     let mut guard = state.write().await;
     let media = MediaMetadata {
         stream_id: Some(event.stream_id.clone()),
@@ -360,12 +372,18 @@ async fn register_start(
     let gateway_call_id =
         guard.set_call_stream(&event.start.call_control_id, event.stream_id.clone(), media);
     match gateway_call_id {
-        StreamAttachOutcome::Attached { gateway_call_id } => {
+        StreamAttachOutcome::Attached {
+            gateway_call_id,
+            asr_backend,
+        } => {
             guard.log(
                 LogLevel::Info,
                 format!(
-                    "media started for {gateway_call_id}: {} {} Hz {}ch",
-                    format.encoding, format.sample_rate_hz, format.channels
+                    "media started for {gateway_call_id}: {} {} Hz {}ch asr={}",
+                    format.encoding,
+                    format.sample_rate_hz,
+                    format.channels,
+                    asr_backend.label()
                 ),
             );
             tracing::info!(
@@ -376,9 +394,14 @@ async fn register_start(
                 codec = format.encoding,
                 sample_rate_hz = format.sample_rate_hz,
                 channels = format.channels,
+                asr_backend = asr_backend.label(),
+                asr_model = asr_backend.model_label(),
                 "media.started"
             );
-            Some(gateway_call_id)
+            Some(RegisteredStart {
+                gateway_call_id,
+                asr_backend,
+            })
         }
         StreamAttachOutcome::NotAnswered {
             gateway_call_id,
@@ -419,7 +442,7 @@ async fn register_start(
 
 async fn ingest_frame(
     state: &SharedState,
-    asr: &SharedAsrFactory,
+    asr: &SharedAsrRegistry,
     media_state: &mut MediaSocketState,
     stream_id: &str,
     frame: EncodedMediaFrame,
@@ -503,14 +526,24 @@ async fn ingest_frame(
 }
 
 async fn open_asr_session(
-    asr: &SharedAsrFactory,
+    asr: &SharedAsrRegistry,
     media_state: &mut MediaSocketState,
     gateway_call_id: &str,
     stream_id: &str,
     reason: &'static str,
 ) -> anyhow::Result<()> {
-    media_state.session = Some(asr.open_session().await?);
-    tracing::info!(gateway_call_id, stream_id, reason, "asr.session.opened");
+    let asr_backend = media_state
+        .asr_backend
+        .context("ASR backend was not bound to media stream")?;
+    media_state.session = Some(asr.open_session(asr_backend).await?);
+    tracing::info!(
+        gateway_call_id,
+        stream_id,
+        reason,
+        asr_backend = asr_backend.label(),
+        asr_model = asr_backend.model_label(),
+        "asr.session.opened"
+    );
     Ok(())
 }
 
@@ -821,6 +854,7 @@ async fn record_transcript_events(
         let sample_rate_hz = media_format
             .map(|format| format.sample_rate_hz)
             .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
+        let asr_backend = call.and_then(|call| call.asr_backend);
 
         if suppressed {
             let suppression_reason = event
@@ -834,6 +868,8 @@ async fn record_transcript_events(
                 stream_id = effective_stream_id.as_deref(),
                 codec = codec.as_deref(),
                 sample_rate_hz,
+                asr_backend = asr_backend.map(LiveAsrBackend::label),
+                asr_model = asr_backend.map(LiveAsrBackend::model_label),
                 transcript_kind = kind_label,
                 suppression_reason,
                 transcript_chars = text.chars().count(),
@@ -852,6 +888,8 @@ async fn record_transcript_events(
             stream_id = effective_stream_id.as_deref(),
             codec = codec.as_deref(),
             sample_rate_hz,
+            asr_backend = asr_backend.map(LiveAsrBackend::label),
+            asr_model = asr_backend.map(LiveAsrBackend::model_label),
             transcript_kind = kind_label,
             transcript_text = text,
             "{kind_label}"
@@ -902,7 +940,9 @@ mod tests {
     use motlie_model::typed::{AudioBuf, Mono};
     use motlie_voice::app::TranscriptEvent;
 
-    use crate::adapter::{EchoAsrFactory, InboundAsrFactory};
+    use crate::adapter::{
+        AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
+    };
     use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
 
     #[test]
@@ -996,7 +1036,7 @@ mod tests {
                 CallStatus::Answering,
             )
         };
-        let asr: SharedAsrFactory = Arc::new(EchoAsrFactory);
+        let asr = registry_with_factory(Arc::new(EchoAsrFactory));
         let mut media_state = MediaSocketState::new();
 
         let start = serde_json::json!({
@@ -1082,7 +1122,7 @@ mod tests {
                 CallStatus::Answering,
             )
         };
-        let asr: SharedAsrFactory = Arc::new(EchoAsrFactory);
+        let asr = registry_with_factory(Arc::new(EchoAsrFactory));
         let mut media_state = MediaSocketState::new();
 
         handle_text(
@@ -1138,7 +1178,7 @@ mod tests {
     async fn low_energy_media_is_suppressed_until_speech() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
-        let asr: SharedAsrFactory = Arc::new(EchoAsrFactory);
+        let asr = registry_with_factory(Arc::new(EchoAsrFactory));
         let mut media_state = MediaSocketState::new();
 
         handle_text(
@@ -1189,7 +1229,7 @@ mod tests {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
-        let asr: SharedAsrFactory = counting_asr.clone();
+        let asr = registry_with_factory(counting_asr.clone());
         let mut media_state = MediaSocketState::new();
 
         handle_text(
@@ -1231,7 +1271,7 @@ mod tests {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
-        let asr: SharedAsrFactory = counting_asr.clone();
+        let asr = registry_with_factory(counting_asr.clone());
         let mut media_state = MediaSocketState::new();
 
         handle_text(
@@ -1364,7 +1404,7 @@ mod tests {
             let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
             let gateway_call_id = seed_call(&state, "call-1", status).await;
             let counting_asr = Arc::new(CountingAsrFactory::default());
-            let asr: SharedAsrFactory = counting_asr.clone();
+            let asr = registry_with_factory(counting_asr.clone());
             let mut media_state = MediaSocketState::new();
 
             handle_text(
@@ -1392,7 +1432,7 @@ mod tests {
     async fn media_start_for_unknown_call_does_not_allocate_asr() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let counting_asr = Arc::new(CountingAsrFactory::default());
-        let asr: SharedAsrFactory = counting_asr.clone();
+        let asr = registry_with_factory(counting_asr.clone());
         let mut media_state = MediaSocketState::new();
 
         handle_text(
@@ -1416,7 +1456,7 @@ mod tests {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
-        let asr: SharedAsrFactory = counting_asr.clone();
+        let asr = registry_with_factory(counting_asr.clone());
         let mut media_state = MediaSocketState::new();
 
         let error = handle_text(
@@ -1440,6 +1480,51 @@ mod tests {
         assert_eq!(call.status, CallStatus::Answering);
         assert!(call.ids.stream_id.is_none());
         assert!(call.transcripts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn media_start_opens_call_bound_asr_backend() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        {
+            let mut guard = state.write().await;
+            let gateway_call_id = guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: None,
+                },
+                Some("+15550000001".to_string()),
+                Some("+15550000002".to_string()),
+                CallStatus::Answering,
+            );
+            let call = guard
+                .calls
+                .get_mut(&gateway_call_id)
+                .expect("seeded call should exist");
+            call.asr_backend = Some(LiveAsrBackend::Kroko2025);
+        }
+        let sherpa_2023 = Arc::new(CountingAsrFactory::default());
+        let kroko_2025 = Arc::new(CountingAsrFactory::default());
+        let asr = Arc::new(AsrRegistry::new(sherpa_2023.clone(), kroko_2025.clone()));
+        let mut media_state = MediaSocketState::new();
+
+        handle_text(
+            &start_event("call-1", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("start event should open call-bound ASR");
+
+        assert_eq!(sherpa_2023.opens(), 0);
+        assert_eq!(kroko_2025.opens(), 1);
+        assert_eq!(media_state.asr_backend, Some(LiveAsrBackend::Kroko2025));
+    }
+
+    fn registry_with_factory(factory: SharedAsrFactory) -> SharedAsrRegistry {
+        Arc::new(AsrRegistry::new(factory.clone(), factory))
     }
 
     fn l16_samples(count: usize, sample: i16) -> Vec<u8> {

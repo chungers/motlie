@@ -36,6 +36,9 @@ pub fn render_state_dump(state: &GatewayState) -> String {
     if let Some(path) = &state.config.state_path {
         lines.push(format!("config set state-path {}", path.display()));
     }
+    if state.config.asr_backend != Default::default() {
+        lines.push(format!("asr use {}", state.config.asr_backend.label()));
+    }
     if let Some(connection_id) = &state.config.selected_connection_id {
         lines.push(format!("telnyx app use {connection_id}"));
     }

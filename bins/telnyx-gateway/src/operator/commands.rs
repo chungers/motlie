@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 
+use crate::adapter::LiveAsrBackend;
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
@@ -20,18 +21,35 @@ pub struct GatewayContext {
 
 impl GatewayContext {
     pub fn new(state: SharedState, telnyx: TelnyxClient) -> Self {
+        Self::with_asr_backend(state, telnyx, LiveAsrBackend::default())
+    }
+
+    pub fn with_asr_backend(
+        state: SharedState,
+        telnyx: TelnyxClient,
+        next_asr_backend: LiveAsrBackend,
+    ) -> Self {
         Self {
             state,
             telnyx,
-            session: OperatorSession::default(),
+            session: OperatorSession::new(next_asr_backend),
         }
     }
 
     pub fn for_new_source(&self) -> Self {
-        Self::new(self.state.clone(), self.telnyx.clone())
+        Self::with_asr_backend(
+            self.state.clone(),
+            self.telnyx.clone(),
+            self.session.next_asr_backend,
+        )
+    }
+
+    pub fn for_new_source_with_asr_backend(&self, backend: LiveAsrBackend) -> Self {
+        Self::with_asr_backend(self.state.clone(), self.telnyx.clone(), backend)
     }
 
     async fn answer_call(&mut self, target: Option<String>) -> DriverResult<CommandOutput> {
+        let asr_backend = self.session.next_asr_backend;
         let (gateway_call_id, call_control_id, stream_url, media) = {
             let mut guard = self.state.write().await;
             let media_url = guard
@@ -60,8 +78,10 @@ impl GatewayContext {
                         call.status.label()
                     )));
                 }
+                call.asr_backend = Some(asr_backend);
                 call.status = CallStatus::Answering;
                 call.push_timeline("operator requested answer");
+                call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
                 (
                     call.gateway_call_id.clone(),
                     call.ids.call_control_id.clone(),
@@ -94,6 +114,8 @@ impl GatewayContext {
             stream_url,
             stream_codec = media.codec.as_str(),
             stream_sample_rate_hz = media.sample_rate_hz,
+            asr_backend = asr_backend.label(),
+            asr_model = asr_backend.model_label(),
             "call.answering"
         );
         Ok(CommandOutput::line(format!(
@@ -131,6 +153,10 @@ pub enum GatewayCommand {
     Inbound {
         #[command(subcommand)]
         command: InboundCommand,
+    },
+    Asr {
+        #[command(subcommand)]
+        command: AsrCommand,
     },
     Calls,
     Call {
@@ -222,6 +248,15 @@ pub enum InboundCommand {
     Disable,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum AsrCommand {
+    Status,
+    Use {
+        #[arg(value_enum)]
+        backend: LiveAsrBackend,
+    },
+}
+
 #[derive(Debug, Args)]
 pub struct InboundEnableArgs {
     #[arg(long)]
@@ -288,7 +323,7 @@ impl CommandSet<GatewayContext> for GatewayCommand {
         context: &mut GatewayContext,
     ) -> DriverResult<CommandOutput> {
         match resolved {
-            Self::Status => status(&context.state).await,
+            Self::Status => status(context).await,
             Self::Listener {
                 command: ListenerCommand::Status,
             } => listener_status(&context.state).await,
@@ -297,6 +332,7 @@ impl CommandSet<GatewayContext> for GatewayCommand {
             Self::Shutdown(args) => shutdown(context, args).await,
             Self::Telnyx { command } => telnyx_command(context, command).await,
             Self::Inbound { command } => inbound_command(context, command).await,
+            Self::Asr { command } => asr_command(context, command).await,
             Self::Calls => calls(&context.state).await,
             Self::Call { command } => call_command(context, command).await,
             Self::Answer(target) => context.answer_call(target.call).await,
@@ -309,11 +345,21 @@ impl CommandSet<GatewayContext> for GatewayCommand {
     }
 }
 
-async fn status(state: &SharedState) -> DriverResult<CommandOutput> {
-    let guard = state.read().await;
+async fn status(context: &GatewayContext) -> DriverResult<CommandOutput> {
+    let guard = context.state.read().await;
     let mut lines = vec![
         format!("listener: {:?}", guard.config.bind),
         format!("inbound: {}", guard.inbound_mode.label()),
+        format!(
+            "asr-next: {} ({})",
+            context.session.next_asr_backend.label(),
+            context.session.next_asr_backend.model_label()
+        ),
+        format!(
+            "asr-default: {} ({})",
+            guard.config.asr_backend.label(),
+            guard.config.asr_backend.model_label()
+        ),
         format!(
             "webhook-url: {}",
             guard
@@ -391,7 +437,7 @@ async fn config_command(
         ConfigCommand::Show => {
             let guard = context.state.read().await;
             Ok(CommandOutput::text(format!(
-                "webhook-url={}\nmedia-url={}\nmedia-codec={}\nmedia-sample-rate={}\ncapture-dir={}\nfrom-number={}\nstate-path={}",
+                "webhook-url={}\nmedia-url={}\nmedia-codec={}\nmedia-sample-rate={}\nasr-backend={}\ncapture-dir={}\nfrom-number={}\nstate-path={}",
                 guard
                     .config
                     .public_webhook_url
@@ -404,6 +450,7 @@ async fn config_command(
                     .unwrap_or("<unset>"),
                 guard.config.telnyx_media.codec.as_str(),
                 guard.config.telnyx_media.sample_rate_hz,
+                guard.config.asr_backend.label(),
                 guard
                     .config
                     .capture_dir
@@ -713,6 +760,42 @@ async fn inbound_command(
     }
 }
 
+async fn asr_command(
+    context: &mut GatewayContext,
+    command: AsrCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        AsrCommand::Status => {
+            let guard = context.state.read().await;
+            Ok(CommandOutput::text(format!(
+                "next={}\nnext_model={}\ndefault={}\ndefault_model={}\navailable=sherpa-2023,kroko-2025",
+                context.session.next_asr_backend.label(),
+                context.session.next_asr_backend.model_label(),
+                guard.config.asr_backend.label(),
+                guard.config.asr_backend.model_label()
+            )))
+        }
+        AsrCommand::Use { backend } => {
+            context.session.next_asr_backend = backend;
+            let mut guard = context.state.write().await;
+            guard.config.asr_backend = backend;
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "source selected ASR backend {} ({}) for next calls",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            Ok(CommandOutput::line(format!(
+                "asr backend for next calls: {} ({})",
+                backend.label(),
+                backend.model_label()
+            )))
+        }
+    }
+}
+
 async fn test_command(
     context: &mut GatewayContext,
     command: TestCommand,
@@ -726,6 +809,7 @@ async fn dial_transcribe(
     context: &mut GatewayContext,
     args: DialTranscribeArgs,
 ) -> DriverResult<CommandOutput> {
+    let asr_backend = context.session.next_asr_backend;
     let (connection_id, from, stream_url, webhook_url, media) = {
         let guard = context.state.read().await;
         let connection_id = guard
@@ -781,6 +865,10 @@ async fn dial_transcribe(
             Some(args.to.clone()),
             CallStatus::Dialing,
         );
+        if let Some(call) = guard.calls.get_mut(&gateway_call_id) {
+            call.asr_backend = Some(asr_backend);
+            call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
+        }
         guard.log(
             LogLevel::Info,
             format!(
@@ -802,6 +890,8 @@ async fn dial_transcribe(
         stream_url,
         stream_codec = media.codec.as_str(),
         stream_sample_rate_hz = media.sample_rate_hz,
+        asr_backend = asr_backend.label(),
+        asr_model = asr_backend.model_label(),
         "call.outbound.dial_transcribe"
     );
     Ok(CommandOutput::line(format!(
@@ -819,12 +909,15 @@ async fn calls(state: &SharedState) -> DriverResult<CommandOutput> {
             .values()
             .map(|call| {
                 format!(
-                    "{} {} from={} to={} stream={}",
+                    "{} {} from={} to={} stream={} asr={}",
                     call.gateway_call_id,
                     call.status.label(),
                     call.from.as_deref().unwrap_or("<unknown>"),
                     call.to.as_deref().unwrap_or("<unknown>"),
-                    call.ids.stream_id.as_deref().unwrap_or("<none>")
+                    call.ids.stream_id.as_deref().unwrap_or("<none>"),
+                    call.asr_backend
+                        .map(|backend| backend.label())
+                        .unwrap_or("<unbound>")
                 )
             })
             .collect()
@@ -897,6 +990,12 @@ async fn call_show(
                 .channels
                 .map(|channels| channels.to_string())
                 .unwrap_or_else(|| "?".to_string())
+        ),
+        format!(
+            "asr: {}",
+            call.asr_backend
+                .map(|backend| format!("{} ({})", backend.label(), backend.model_label()))
+                .unwrap_or_else(|| "<unbound>".to_string())
         ),
     ];
     if let Some(reason) = &call.terminal_reason {
@@ -1095,6 +1194,7 @@ mod tests {
     use motlie_driver::CommandEngine;
 
     use super::*;
+    use crate::adapter::LiveAsrBackend;
     use crate::call_control::TelnyxClient;
     use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
 
@@ -1126,6 +1226,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn asr_use_sets_tui_source_next_backend() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine
+            .run_line("asr use kroko-2025")
+            .await
+            .expect("asr use");
+
+        assert_eq!(
+            output.lines,
+            vec!["asr backend for next calls: kroko-2025 (sherpa-zipformer-en-kroko-2025-08-06)"]
+        );
+        assert_eq!(
+            engine.context().session.next_asr_backend,
+            LiveAsrBackend::Kroko2025
+        );
+        assert_eq!(
+            state.read().await.config.asr_backend,
+            LiveAsrBackend::Kroko2025
+        );
+    }
+
+    #[tokio::test]
+    async fn source_local_asr_choice_binds_on_answer() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let (call_one, call_two) = {
+            let mut guard = state.write().await;
+            guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+            let call_one = guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: None,
+                },
+                None,
+                None,
+                CallStatus::PendingInbound,
+            );
+            let call_two = guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-2".to_string(),
+                    call_session_id: Some("sess-2".to_string()),
+                    call_leg_id: Some("leg-2".to_string()),
+                    stream_id: None,
+                },
+                None,
+                None,
+                CallStatus::PendingInbound,
+            );
+            (call_one, call_two)
+        };
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let base = GatewayContext::new(state.clone(), telnyx);
+        let mut tui_engine =
+            CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
+        let mut socket_engine =
+            CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
+
+        tui_engine
+            .run_line("asr use kroko-2025")
+            .await
+            .expect("tui asr use");
+        tui_engine
+            .run_line(&format!("answer {call_one}"))
+            .await
+            .expect("tui answer");
+        socket_engine
+            .run_line(&format!("answer {call_two}"))
+            .await
+            .expect("socket answer");
+
+        let guard = state.read().await;
+        assert_eq!(
+            guard
+                .calls
+                .get(&call_one)
+                .expect("call one should exist")
+                .asr_backend,
+            Some(LiveAsrBackend::Kroko2025)
+        );
+        assert_eq!(
+            guard
+                .calls
+                .get(&call_two)
+                .expect("call two should exist")
+                .asr_backend,
+            Some(LiveAsrBackend::Sherpa2023)
+        );
+    }
+
+    #[tokio::test]
     async fn answer_requires_pending_call() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         {
@@ -1153,6 +1348,7 @@ mod tests {
         let guard = state.read().await;
         let call = guard.calls.values().next().expect("call exists");
         assert_eq!(call.status, CallStatus::Answering);
+        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Sherpa2023));
     }
 
     #[tokio::test]
@@ -1261,6 +1457,10 @@ mod tests {
         let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
+        engine
+            .run_line("asr use kroko-2025")
+            .await
+            .expect("asr use");
         let output = engine
             .run_line("test dial-transcribe +15550000002")
             .await
@@ -1283,6 +1483,7 @@ mod tests {
         assert_eq!(call.from.as_deref(), Some("+15550000001"));
         assert_eq!(call.to.as_deref(), Some("+15550000002"));
         assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
+        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
     }
 
     #[tokio::test]
