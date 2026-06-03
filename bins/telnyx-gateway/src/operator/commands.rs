@@ -778,7 +778,6 @@ async fn asr_command(
         AsrCommand::Use { backend } => {
             context.session.next_asr_backend = backend;
             let mut guard = context.state.write().await;
-            guard.config.asr_backend = backend;
             guard.log(
                 LogLevel::Info,
                 format!(
@@ -1247,7 +1246,7 @@ mod tests {
         );
         assert_eq!(
             state.read().await.config.asr_backend,
-            LiveAsrBackend::Kroko2025
+            LiveAsrBackend::Sherpa2023
         );
     }
 
