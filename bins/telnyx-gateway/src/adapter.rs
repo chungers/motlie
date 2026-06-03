@@ -2,10 +2,12 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::{fmt, str::FromStr};
 
 #[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 use anyhow::{bail, Context};
 use async_trait::async_trait;
+use clap::ValueEnum;
 use motlie_model::typed::{AudioBuf, Mono};
 #[cfg(feature = "whisper")]
 use motlie_model::typed::{AudioTransform, BatchTranscriber, I16ToF32};
@@ -107,6 +109,96 @@ pub trait InboundAsrFactory: Send + Sync {
 
 // justification: media WebSocket tasks share one process-selected ASR factory without coupling Telnyx wiring to a concrete model backend.
 pub type SharedAsrFactory = Arc<dyn InboundAsrFactory>;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum LiveAsrBackend {
+    #[default]
+    #[value(name = "sherpa-2023", alias = "sherpa-zipformer-2023")]
+    Sherpa2023,
+    #[value(name = "kroko-2025", alias = "sherpa-zipformer-kroko-2025")]
+    Kroko2025,
+}
+
+impl LiveAsrBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sherpa2023 => "sherpa-2023",
+            Self::Kroko2025 => "kroko-2025",
+        }
+    }
+
+    pub fn model_label(self) -> &'static str {
+        self.artifact().label()
+    }
+
+    pub fn artifact(self) -> SherpaAsrArtifact {
+        match self {
+            Self::Sherpa2023 => SherpaAsrArtifact::ZipformerEn20230626,
+            Self::Kroko2025 => SherpaAsrArtifact::ZipformerEnKroko20250806,
+        }
+    }
+}
+
+impl fmt::Display for LiveAsrBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("unsupported live ASR backend `{value}`; expected sherpa-2023 or kroko-2025")]
+pub struct LiveAsrBackendParseError {
+    value: String,
+}
+
+impl FromStr for LiveAsrBackend {
+    type Err = LiveAsrBackendParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "sherpa-2023" | "sherpa-zipformer-2023" | "sherpa-zipformer-en-2023-06-26" => {
+                Ok(Self::Sherpa2023)
+            }
+            "kroko-2025"
+            | "sherpa-zipformer-kroko-2025"
+            | "sherpa-zipformer-en-kroko-2025-08-06" => Ok(Self::Kroko2025),
+            other => Err(LiveAsrBackendParseError {
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AsrRegistry {
+    sherpa_2023: SharedAsrFactory,
+    kroko_2025: SharedAsrFactory,
+}
+
+pub type SharedAsrRegistry = Arc<AsrRegistry>;
+
+impl AsrRegistry {
+    pub fn new(sherpa_2023: SharedAsrFactory, kroko_2025: SharedAsrFactory) -> Self {
+        Self {
+            sherpa_2023,
+            kroko_2025,
+        }
+    }
+
+    pub fn factory(&self, backend: LiveAsrBackend) -> SharedAsrFactory {
+        match backend {
+            LiveAsrBackend::Sherpa2023 => self.sherpa_2023.clone(),
+            LiveAsrBackend::Kroko2025 => self.kroko_2025.clone(),
+        }
+    }
+
+    pub async fn open_session(
+        &self,
+        backend: LiveAsrBackend,
+    ) -> anyhow::Result<Box<dyn InboundAsrSession>> {
+        self.factory(backend).open_session().await
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SherpaAsrArtifact {

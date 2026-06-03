@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-use crate::adapter::SharedAsrFactory;
+use crate::adapter::SharedAsrRegistry;
 use crate::call_control::TelnyxClient;
 use crate::media;
 use crate::operator::state::{LogLevel, SharedState};
@@ -17,7 +17,7 @@ use crate::webhook;
 pub struct AppServices {
     pub state: SharedState,
     pub telnyx: TelnyxClient,
-    pub asr: SharedAsrFactory,
+    pub asr: SharedAsrRegistry,
 }
 
 pub fn router(services: AppServices) -> Router {
