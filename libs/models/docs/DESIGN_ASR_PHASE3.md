@@ -3,7 +3,8 @@
 ## Changelog
 | Date | Who | Summary |
 | --- | --- | --- |
-| 2026-06-02 PDT | @codex-191-impl | Added measured A/B results: validated Qwen3-TTS golden A/B over the Telnyx L16/PCMU round-trip (call-center + PM corpora). sherpa-2023 10.5% (call-center best), kroko-2025 14.0% (PM best), Whisper batch/digit-weak, Moonshine ~100% pending full #376. Fixed a tail-flush harness artifact (800 ms trailing-silence pad, PR #378) that had inflated all streaming WER 14-24 pts. Hotword bias warranted only for the technical lexicon. Full data on #371. |
+| 2026-06-02 21:45 PDT | @codex-191-impl | Finalized the Moonshine A/B cell after a clean #376 rebuild: still ~100% WER on call-center and PM corpora with canned transcripts, so the current Motlie Moonshine backend is disqualified / pending repair for M1.5 selection. |
+| 2026-06-02 PDT | @codex-191-impl | Added measured A/B results: validated Qwen3-TTS golden A/B over the Telnyx L16/PCMU round-trip (call-center + PM corpora). sherpa-2023 10.5% (call-center best), kroko-2025 14.0% (PM best), Whisper batch/digit-weak, Moonshine ~100% after clean #376 rebuild. Fixed a tail-flush harness artifact (800 ms trailing-silence pad, PR #378) that had inflated all streaming WER 14-24 pts. Hotword bias warranted only for the technical lexicon. Full data on #371. |
 | 2026-06-01 22:49 PDT | @codex-191-asr | Addressed PR #369 review round 1 by making upstream-Sherpa and static-ORT claims conditional on PR #368 merging into `feature/models`, correcting streaming contract names, and framing sub-100 ms GPU latency as feasibility only. |
 | 2026-06-01 16:03 PDT | @codex-191-asr | Recorded the planned Phase 3 assumption from PR #368 commit `a5c27cd4` on `feature/telnyx-voice`: once that work merges into `feature/models`, the live Sherpa baseline becomes the upstream `sherpa-onnx` crate with its own bundled native archive and internal ONNX Runtime, separate from Motlie shared `ort` runtime. |
 | 2026-06-01 14:30 PDT | @codex-191-asr | Folded in issue #191 refinement: batched Whisper as complementary final-pass evaluation, telephony 8 kHz robustness, same-ONNX-Runtime preference, and DGX CUDA placement. |
@@ -40,7 +41,7 @@ Convergence note: PR #369 remains targeted at `feature/models`. All upstream-She
 | sherpa-2023 zipformer (current live baseline) | 10.5% / 12.0% | 19.8% / 22.1% | ~640 ms | Best call-center; recommended streaming backend |
 | sherpa kroko-2025 zipformer | 14.1% / 13.9% | 14.0% / 14.0% | ~530 ms | Best PM/technical; strongest on digit strings |
 | whisper-base.en (batch) | 29.7% / 29.9% | 16.7% / 16.7% | ~2180 ms | Words-only; collapses on digits (47-70%); not live-viable |
-| Moonshine streaming | ~100% (pending) | ~100% (pending) | ~5300 ms | Not yet valid; see note |
+| Moonshine streaming | 99.8% / 100.0% | 100.0% / 100.0% | ~5500 ms | Disqualified for M1.5 selection; current backend emits canned transcripts |
 
 Source: offline Qwen3-TTS golden A/B harness on `feature/telnyx-voice` (`bins/telnyx-gateway` `golden-tts` + `asr-golden-ab`; codecs `libs/voice/src/codec`). Two 72-sample corpora (call-center, PM/orchestration), each run through the Telnyx L16-16k and PCMU-8k (8 kHz mu-law decoded and resampled to 16 kHz) round-trip. Full per-category tables and run artifacts are on issue #371. Repro playbook: `bins/telnyx-gateway/corpus/` README.
 
@@ -57,7 +58,7 @@ The first A/B run reported inflated WER (sherpa 24%, kroko 38%) because the gold
 
 ### Moonshine status
 
-A preview cherry-picking only `libs/model/backends/moonshine` from PR #376 still produced ~100% WER (~15% of words emitted, ~5.5 s/sample), so the #376 hardening likely also needs the gateway adapter and curated wiring not pulled by the partial checkout. A trustworthy Moonshine cell requires #376 merged to `feature/models`, then converged to the harness, then re-run. Rows above are placeholders, consistent with the Phase 3 decision keeping Moonshine secondary on telephony-latency grounds.
+A clean local rerun over the merged #376 Moonshine sources (`3519301d`) still produced unusable transcripts: mostly canned `So,` / `Thank you.` output, ~15% of reference words emitted, and ~5.1-5.9 s/sample. Call-center WER was 99.8% L16 / 100.0% PCMU; PM/orchestration WER was 100.0% L16 / 100.0% PCMU. This failure appears on clean L16 as well as Telnyx PCMU, while Sherpa/Kroko/Whisper produce coherent results through the same harness, so it is not a Telnyx codec or replay-pipeline artifact. The current Motlie Moonshine backend is therefore disqualified for M1.5 selection and remains pending backend/artifact repair before any future evaluation.
 
 ## Rationale
 
