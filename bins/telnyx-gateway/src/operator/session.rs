@@ -1,9 +1,27 @@
+use crate::adapter::LiveAsrBackend;
 use crate::operator::state::{CallSession, CallStatus, GatewayState};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperatorSession {
     pub selected_call: Option<String>,
     pub detail_scroll: u16,
+    pub next_asr_backend: LiveAsrBackend,
+}
+
+impl Default for OperatorSession {
+    fn default() -> Self {
+        Self::new(LiveAsrBackend::default())
+    }
+}
+
+impl OperatorSession {
+    pub fn new(next_asr_backend: LiveAsrBackend) -> Self {
+        Self {
+            selected_call: None,
+            detail_scroll: 0,
+            next_asr_backend,
+        }
+    }
 }
 
 impl OperatorSession {

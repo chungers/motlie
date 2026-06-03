@@ -5,7 +5,8 @@ use std::sync::Arc;
 use clap::Parser;
 use motlie_driver::CommandEngine;
 use motlie_telnyx_gateway::adapter::{
-    default_artifact_root, EchoAsrFactory, SharedAsrFactory, SherpaAsrArtifact,
+    default_artifact_root, AsrRegistry, EchoAsrFactory, SharedAsrFactory, SharedAsrRegistry,
+    SherpaAsrArtifact,
 };
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
@@ -83,11 +84,12 @@ async fn main() -> anyhow::Result<()> {
             format!("listener configured on {}", cli.bind),
         );
         guard.config.capture_dir = cli.capture_dir.clone();
+        guard.config.asr_backend = cli.asr_backend;
     }
 
     let api_key = std::env::var(&cli.telnyx_api_key_env).ok();
     let telnyx = TelnyxClient::new(cli.telnyx_api_base.clone(), api_key, cli.dry_run_telnyx);
-    let asr = build_asr_factory(&cli, ReplayBackendArg::Auto);
+    let asr = build_live_asr_registry(&cli);
     let services = AppServices {
         state: state.clone(),
         telnyx: telnyx.clone(),
@@ -95,15 +97,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let server = tokio::spawn(serve(cli.bind, services));
-    let context = GatewayContext::new(state.clone(), telnyx);
+    let context = GatewayContext::with_asr_backend(state.clone(), telnyx, cli.asr_backend);
     let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
 
     if let Some(path) = &cli.load {
         replay_commands(&mut replay_engine, path).await?;
     }
+    let source_asr_backend = state.read().await.config.asr_backend;
 
     let socket_task = if let Some(path) = cli.socket.clone() {
-        let socket_context = Arc::new(context.for_new_source());
+        let socket_context = Arc::new(context.for_new_source_with_asr_backend(source_asr_backend));
         {
             let mut guard = state.write().await;
             guard.log(
@@ -119,7 +122,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if cli.tui {
-        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+        let tui_context = context.for_new_source_with_asr_backend(source_asr_backend);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(tui_context);
         motlie_telnyx_gateway::operator::tui::run_tui(&mut engine).await?;
     } else {
         println!("telnyx-gateway listening on {}", cli.bind);
@@ -303,6 +307,18 @@ async fn wait_for_shutdown(
             }
         }
     }
+}
+
+fn build_live_asr_registry(cli: &Cli) -> SharedAsrRegistry {
+    if std::env::var_os("MOTLIE_TELNYX_ECHO_ASR").is_some() {
+        let echo: SharedAsrFactory = Arc::new(EchoAsrFactory);
+        return Arc::new(AsrRegistry::new(echo.clone(), echo));
+    }
+
+    Arc::new(AsrRegistry::new(
+        build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEn20230626),
+        build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEnKroko20250806),
+    ))
 }
 
 fn build_asr_factory(cli: &Cli, backend: ReplayBackendArg) -> SharedAsrFactory {

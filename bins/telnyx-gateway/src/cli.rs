@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::adapter::LiveAsrBackend;
 use crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS;
 
 #[derive(Clone, Debug, Parser)]
@@ -34,6 +35,9 @@ pub struct Cli {
 
     #[arg(long)]
     pub no_asr_download: bool,
+
+    #[arg(long, value_enum, default_value_t = LiveAsrBackend::default())]
+    pub asr_backend: LiveAsrBackend,
 
     #[arg(long)]
     pub log_file: Option<PathBuf>,
