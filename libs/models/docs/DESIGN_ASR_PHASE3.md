@@ -3,6 +3,7 @@
 ## Changelog
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-03 00:02 PDT | @codex-191-impl | Fixed the measured A/B repro pointer: the golden corpus manifests, `golden-tts` WAV generator, `asr-golden-ab` harness, and playbook live on the `feature/telnyx-voice` harness branch, not in a nonexistent `bins/telnyx-gateway/corpus/` README in this `feature/models` docs PR. |
 | 2026-06-02 21:45 PDT | @codex-191-impl | Finalized the Moonshine A/B cell after a clean #376 rebuild: still ~100% WER on call-center and PM corpora with canned transcripts, so the current Motlie Moonshine backend is disqualified / pending repair for M1.5 selection. |
 | 2026-06-02 PDT | @codex-191-impl | Added measured A/B results: validated Qwen3-TTS golden A/B over the Telnyx L16/PCMU round-trip (call-center + PM corpora). sherpa-2023 10.5% (call-center best), kroko-2025 14.0% (PM best), Whisper batch/digit-weak, Moonshine ~100% after clean #376 rebuild. Fixed a tail-flush harness artifact (800 ms trailing-silence pad, PR #378) that had inflated all streaming WER 14-24 pts. Hotword bias warranted only for the technical lexicon. Full data on #371. |
 | 2026-06-01 22:49 PDT | @codex-191-asr | Addressed PR #369 review round 1 by making upstream-Sherpa and static-ORT claims conditional on PR #368 merging into `feature/models`, correcting streaming contract names, and framing sub-100 ms GPU latency as feasibility only. |
@@ -43,7 +44,15 @@ Convergence note: PR #369 remains targeted at `feature/models`. All upstream-She
 | whisper-base.en (batch) | 29.7% / 29.9% | 16.7% / 16.7% | ~2180 ms | Words-only; collapses on digits (47-70%); not live-viable |
 | Moonshine streaming | 99.8% / 100.0% | 100.0% / 100.0% | ~5500 ms | Disqualified for M1.5 selection; current backend emits canned transcripts |
 
-Source: offline Qwen3-TTS golden A/B harness on `feature/telnyx-voice` (`bins/telnyx-gateway` `golden-tts` + `asr-golden-ab`; codecs `libs/voice/src/codec`). Two 72-sample corpora (call-center, PM/orchestration), each run through the Telnyx L16-16k and PCMU-8k (8 kHz mu-law decoded and resampled to 16 kHz) round-trip. Full per-category tables and run artifacts are on issue #371. Repro playbook: `bins/telnyx-gateway/corpus/` README.
+Source: offline Qwen3-TTS golden A/B harness on `feature/telnyx-voice` (`bins/telnyx-gateway` `golden-tts` + `asr-golden-ab`; codecs `libs/voice/src/codec`). Two 72-sample corpora (call-center, PM/orchestration), each run through the Telnyx L16-16k and PCMU-8k (8 kHz mu-law decoded and resampled to 16 kHz) round-trip. Full per-category tables and run artifacts are on issue #371.
+
+Repro locations are on the `feature/telnyx-voice` harness branch / PR #377 and PR #378, not introduced by this `feature/models` docs PR:
+
+- Golden corpus manifests: `bins/telnyx-gateway/corpus/qwen3-call-center-golden.json` and `bins/telnyx-gateway/corpus/qwen3-pm-orchestration-golden.json`.
+- WAV generation utility: `cargo run -p motlie-telnyx-gateway --features golden-ab -- golden-tts ...`, implemented in `bins/telnyx-gateway/src/golden_ab.rs` and wired through `bins/telnyx-gateway/src/cli.rs`.
+- Standalone A/B utility: `cargo run -p motlie-telnyx-gateway --features golden-ab -- asr-golden-ab ...`.
+- Playbook doc: `bins/telnyx-gateway/docs/ASR_GOLDEN_AB.md`.
+- Generated WAV/run artifacts are local, untracked `/tmp` outputs, currently `/tmp/motlie-qwen3-call-center-golden` and `/tmp/motlie-pm-golden`; Telnyx round-trip audit WAVs are under each corpus output's `asr-inputs/` directory.
 
 ### Methodology finding
 
