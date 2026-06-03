@@ -3,6 +3,7 @@
 ## Changelog
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-02 PDT | @codex-191-impl | Added measured A/B results: validated Qwen3-TTS golden A/B over the Telnyx L16/PCMU round-trip (call-center + PM corpora). sherpa-2023 10.5% (call-center best), kroko-2025 14.0% (PM best), Whisper batch/digit-weak, Moonshine ~100% pending full #376. Fixed a tail-flush harness artifact (800 ms trailing-silence pad, PR #378) that had inflated all streaming WER 14-24 pts. Hotword bias warranted only for the technical lexicon. Full data on #371. |
 | 2026-06-01 22:49 PDT | @codex-191-asr | Addressed PR #369 review round 1 by making upstream-Sherpa and static-ORT claims conditional on PR #368 merging into `feature/models`, correcting streaming contract names, and framing sub-100 ms GPU latency as feasibility only. |
 | 2026-06-01 16:03 PDT | @codex-191-asr | Recorded the planned Phase 3 assumption from PR #368 commit `a5c27cd4` on `feature/telnyx-voice`: once that work merges into `feature/models`, the live Sherpa baseline becomes the upstream `sherpa-onnx` crate with its own bundled native archive and internal ONNX Runtime, separate from Motlie shared `ort` runtime. |
 | 2026-06-01 14:30 PDT | @codex-191-asr | Folded in issue #191 refinement: batched Whisper as complementary final-pass evaluation, telephony 8 kHz robustness, same-ONNX-Runtime preference, and DGX CUDA placement. |
@@ -29,6 +30,34 @@ Convergence note: PR #369 remains targeted at `feature/models`. All upstream-She
 | whisper.cpp / Whisper | CUDA or CPU utterance batch | 13.7 s/file measured for rolling-window batch | 0.441 measured for rolling-window batch | No for live partials | Important final-pass candidate on narrowband utterances | Complementary final-pass / hybrid; `whisper.cpp` is separate from ORT | Batch-oriented fallback; measure WER uplift vs added utterance latency |
 | faster-whisper / CTranslate2 | CUDA utterance batch | tbd | tbd | No for live partials | Must include narrowband robustness | Separate CTranslate2 toolchain | Evaluate only if accuracy/latency beats same-ORT options enough to justify runtime cost |
 | Nemotron / Parakeet / Canary | DGX GPU batch or service | tbd | tbd | Out unless Rust-native streaming exists | Strong telephony claims must be validated on Motlie PCMU front-end | NeMo/Riva/NIM service boundary likely | Batched final-pass or appserver-side investigation |
+
+## Measured A/B Results
+
+### Validated WER + latency (800 ms trailing-silence pad)
+
+| Backend | Call-center WER (L16/PCMU) | PM/orchestration WER (L16/PCMU) | Median wall latency | Role |
+| --- | ---: | ---: | ---: | --- |
+| sherpa-2023 zipformer (current live baseline) | 10.5% / 12.0% | 19.8% / 22.1% | ~640 ms | Best call-center; recommended streaming backend |
+| sherpa kroko-2025 zipformer | 14.1% / 13.9% | 14.0% / 14.0% | ~530 ms | Best PM/technical; strongest on digit strings |
+| whisper-base.en (batch) | 29.7% / 29.9% | 16.7% / 16.7% | ~2180 ms | Words-only; collapses on digits (47-70%); not live-viable |
+| Moonshine streaming | ~100% (pending) | ~100% (pending) | ~5300 ms | Not yet valid; see note |
+
+Source: offline Qwen3-TTS golden A/B harness on `feature/telnyx-voice` (`bins/telnyx-gateway` `golden-tts` + `asr-golden-ab`; codecs `libs/voice/src/codec`). Two 72-sample corpora (call-center, PM/orchestration), each run through the Telnyx L16-16k and PCMU-8k (8 kHz mu-law decoded and resampled to 16 kHz) round-trip. Full per-category tables and run artifacts are on issue #371. Repro playbook: `bins/telnyx-gateway/corpus/` README.
+
+### Methodology finding
+
+The first A/B run reported inflated WER (sherpa 24%, kroko 38%) because the golden WAVs ended abruptly (~92 ms mean trailing silence), starving the streaming decoders' final-chunk flush. The deletion penalty scaled with each model's right-context, punishing kroko-2025 (larger lookahead) hardest. This was a harness artifact, not model accuracy. The fix is to feed an 800 ms trailing-silence pad through `ingest()` before `finish()` (PR #378, merged to `feature/telnyx-voice`). All numbers above are post-fix. Live telephony already carries trailing audio, so this only affected offline replay fidelity.
+
+### Insights
+
+- "Newer is better" is domain-dependent: sherpa-2023 wins call-center (10.5%); kroko-2025 wins PM/technical (14.0%). Both are below the ~20% call-center target; the digit-handling tuning track is deprioritized for call-center (digit categories 7-11% post-fix).
+- Hotword or contextual bias is warranted only for a technical/PM lexicon, not call-center: sherpa hits 30.6% on `technical_term` (zipformer, mu-law, ONNX, endpointing) versus 7-11% on call-center words. Spoken-number normalization (`metric_readout` 36-44%) is a second lever.
+- Whisper stays a complementary word-heavy final-pass only: unfit for live where IDs/numbers occur (digit strings 47-70%) and batch-only at ~2.2 s.
+- Codec L16 versus PCMU differs <2 pts everywhere; model and trailing-silence/endpointing handling are the dominant levers, not the codec.
+
+### Moonshine status
+
+A preview cherry-picking only `libs/model/backends/moonshine` from PR #376 still produced ~100% WER (~15% of words emitted, ~5.5 s/sample), so the #376 hardening likely also needs the gateway adapter and curated wiring not pulled by the partial checkout. A trustworthy Moonshine cell requires #376 merged to `feature/models`, then converged to the harness, then re-run. Rows above are placeholders, consistent with the Phase 3 decision keeping Moonshine secondary on telephony-latency grounds.
 
 ## Rationale
 
