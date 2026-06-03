@@ -193,6 +193,14 @@ fn print_replay_report_with_indent(
     println!("{indent}  audio_ms: {}", report.latency.audio_ms);
     println!("{indent}  chunk_count: {}", report.latency.chunk_count);
     println!(
+        "{indent}  trailing_silence_pad_ms: {}",
+        report.latency.trailing_silence_pad_ms
+    );
+    println!(
+        "{indent}  trailing_silence_pad_chunks: {}",
+        report.latency.trailing_silence_pad_chunks
+    );
+    println!(
         "{indent}  ingest_total_ms: {}",
         report.latency.ingest_total_ms
     );
@@ -255,10 +263,14 @@ fn print_golden_ab_report(report: &motlie_telnyx_gateway::golden_ab::GoldenAbRep
     println!("manifest: {}", report.manifest_path);
     println!("audio_dir: {}", report.audio_dir);
     println!("chunk_ms: {}", report.chunk_ms);
+    println!(
+        "trailing_silence_pad_ms: {}",
+        report.trailing_silence_pad_ms
+    );
     println!("entries: {}", report.entries.len());
     for summary in &report.summaries {
         println!(
-            "summary: backend={} codec={} category={} samples={} wer={:.1}% errors={}/{} ingest_avg_ms={:.1} finish_avg_ms={:.1} wall_avg_ms={:.1}",
+            "summary: backend={} codec={} category={} samples={} wer={:.1}% errors={}/{} tail_pad_avg_ms={:.1} ingest_avg_ms={:.1} finish_avg_ms={:.1} wall_avg_ms={:.1}",
             summary.backend,
             summary.codec,
             summary.category,
@@ -266,6 +278,7 @@ fn print_golden_ab_report(report: &motlie_telnyx_gateway::golden_ab::GoldenAbRep
             summary.wer_percent,
             summary.errors,
             summary.reference_words,
+            summary.trailing_silence_pad_avg_ms,
             summary.ingest_avg_ms,
             summary.finish_avg_ms,
             summary.wall_avg_ms

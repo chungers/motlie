@@ -9,11 +9,12 @@ use motlie_voice::pipeline::convert::{downmix_to_mono, f32_to_i16_clamped};
 use motlie_voice::wav::decode_streaming_wav_to_f32;
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::{AsrTranscriptEvent, SharedAsrFactory};
+use crate::adapter::{AsrTranscriptEvent, InboundAsrSession, SharedAsrFactory};
 use crate::cli::{ReplayCaptureArgs, ReplayCorpusArgs};
 
 const ASR_INPUT_WAV: &str = "asr-input-16khz.wav";
 const ASR_SAMPLE_RATE_HZ: u32 = 16_000;
+pub const DEFAULT_TRAILING_SILENCE_PAD_MS: u32 = 800;
 
 #[derive(Clone)]
 pub struct ReplayBackend {
@@ -89,6 +90,8 @@ pub struct ReplayReport {
 pub struct ReplayLatencyReport {
     pub audio_ms: u64,
     pub chunk_count: usize,
+    pub trailing_silence_pad_ms: u32,
+    pub trailing_silence_pad_chunks: usize,
     pub ingest_total_ms: u128,
     pub ingest_max_ms: u128,
     pub finish_ms: u128,
@@ -96,11 +99,16 @@ pub struct ReplayLatencyReport {
 }
 
 impl ReplayLatencyReport {
+    pub fn ingest_chunk_count(&self) -> usize {
+        self.chunk_count + self.trailing_silence_pad_chunks
+    }
+
     pub fn ingest_avg_ms(&self) -> f64 {
-        if self.chunk_count == 0 {
+        let ingest_chunk_count = self.ingest_chunk_count();
+        if ingest_chunk_count == 0 {
             return 0.0;
         }
-        self.ingest_total_ms as f64 / self.chunk_count as f64
+        self.ingest_total_ms as f64 / ingest_chunk_count as f64
     }
 }
 
@@ -204,6 +212,7 @@ pub async fn replay_capture(
         &wav_path,
         reference.as_deref(),
         args.chunk_ms,
+        args.trailing_silence_pad_ms,
         backend_label,
         asr,
     )
@@ -237,6 +246,7 @@ pub async fn replay_corpus(
                 &wav_path,
                 Some(&reference),
                 args.chunk_ms,
+                args.trailing_silence_pad_ms,
                 &backend.label,
                 backend.asr.clone(),
             )
@@ -323,6 +333,7 @@ async fn replay_capture_wav(
     wav_path: &Path,
     reference: Option<&str>,
     chunk_ms: u32,
+    trailing_silence_pad_ms: u32,
     backend_label: &str,
     asr: SharedAsrFactory,
 ) -> anyhow::Result<ReplayReport> {
@@ -338,7 +349,7 @@ async fn replay_capture_wav(
     }
     let mono = downmix_to_mono(&samples, spec.channels)?;
     let i16_samples = f32_to_i16_clamped(&mono);
-    let run = replay_samples(&i16_samples, chunk_ms, asr).await?;
+    let run = replay_samples(&i16_samples, chunk_ms, trailing_silence_pad_ms, asr).await?;
     let wer = reference.map(|reference| compute_wer(reference, &run.transcript));
 
     Ok(ReplayReport {
@@ -363,6 +374,7 @@ pub(crate) struct ReplayRun {
 pub(crate) async fn replay_samples(
     samples: &[i16],
     chunk_ms: u32,
+    trailing_silence_pad_ms: u32,
     asr: SharedAsrFactory,
 ) -> anyhow::Result<ReplayRun> {
     let chunk_samples = ((u64::from(ASR_SAMPLE_RATE_HZ) * u64::from(chunk_ms)) / 1_000) as usize;
@@ -373,22 +385,20 @@ pub(crate) async fn replay_samples(
     let mut session = asr.open_session().await?;
     let mut transcript = TranscriptAssembler::default();
     let wall_start = Instant::now();
-    let mut chunk_count = 0usize;
-    let mut ingest_total_ms = 0u128;
-    let mut ingest_max_ms = 0u128;
+    let mut ingest_stats = ReplayIngestStats::default();
 
     for chunk in samples.chunks(chunk_samples) {
-        chunk_count += 1;
-        let ingest_start = Instant::now();
-        let events = session
-            .ingest(AudioBuf::<i16, ASR_SAMPLE_RATE_HZ, Mono>::new(
-                chunk.to_vec(),
-            ))
-            .await?;
-        let ingest_ms = ingest_start.elapsed().as_millis();
-        ingest_total_ms += ingest_ms;
-        ingest_max_ms = ingest_max_ms.max(ingest_ms);
-        transcript.record_events(events);
+        ingest_replay_chunk(&mut session, chunk, &mut transcript, &mut ingest_stats).await?;
+        ingest_stats.chunk_count += 1;
+    }
+
+    let trailing_silence_pad_samples = trailing_silence_pad_sample_count(trailing_silence_pad_ms);
+    if trailing_silence_pad_samples > 0 {
+        let trailing_silence = vec![0_i16; trailing_silence_pad_samples];
+        for chunk in trailing_silence.chunks(chunk_samples) {
+            ingest_replay_chunk(&mut session, chunk, &mut transcript, &mut ingest_stats).await?;
+            ingest_stats.trailing_silence_pad_chunks += 1;
+        }
     }
 
     let finish_start = Instant::now();
@@ -402,13 +412,46 @@ pub(crate) async fn replay_samples(
         transcript: transcript.assembled(),
         latency: ReplayLatencyReport {
             audio_ms,
-            chunk_count,
-            ingest_total_ms,
-            ingest_max_ms,
+            chunk_count: ingest_stats.chunk_count,
+            trailing_silence_pad_ms,
+            trailing_silence_pad_chunks: ingest_stats.trailing_silence_pad_chunks,
+            ingest_total_ms: ingest_stats.ingest_total_ms,
+            ingest_max_ms: ingest_stats.ingest_max_ms,
             finish_ms,
             wall_ms,
         },
     })
+}
+
+#[derive(Default)]
+struct ReplayIngestStats {
+    chunk_count: usize,
+    trailing_silence_pad_chunks: usize,
+    ingest_total_ms: u128,
+    ingest_max_ms: u128,
+}
+
+async fn ingest_replay_chunk(
+    session: &mut Box<dyn InboundAsrSession>,
+    chunk: &[i16],
+    transcript: &mut TranscriptAssembler,
+    ingest_stats: &mut ReplayIngestStats,
+) -> anyhow::Result<()> {
+    let ingest_start = Instant::now();
+    let events = session
+        .ingest(AudioBuf::<i16, ASR_SAMPLE_RATE_HZ, Mono>::new(
+            chunk.to_vec(),
+        ))
+        .await?;
+    let ingest_ms = ingest_start.elapsed().as_millis();
+    ingest_stats.ingest_total_ms += ingest_ms;
+    ingest_stats.ingest_max_ms = ingest_stats.ingest_max_ms.max(ingest_ms);
+    transcript.record_events(events);
+    Ok(())
+}
+
+fn trailing_silence_pad_sample_count(trailing_silence_pad_ms: u32) -> usize {
+    ((u64::from(ASR_SAMPLE_RATE_HZ) * u64::from(trailing_silence_pad_ms)) / 1_000) as usize
 }
 
 fn reference_text(args: &ReplayCaptureArgs) -> anyhow::Result<Option<String>> {
@@ -653,15 +696,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trailing_silence_pad_sample_count_uses_16khz_audio() {
+        assert_eq!(trailing_silence_pad_sample_count(0), 0);
+        assert_eq!(trailing_silence_pad_sample_count(20), 320);
+        assert_eq!(
+            trailing_silence_pad_sample_count(DEFAULT_TRAILING_SILENCE_PAD_MS),
+            12_800
+        );
+    }
+
     #[tokio::test]
     async fn replay_capture_reports_backend_wer_and_latency() {
         let capture_dir = test_capture_dir("single");
         write_test_wav(&capture_dir.join(ASR_INPUT_WAV), 16_000);
         let args = ReplayCaptureArgs {
             capture_dir: capture_dir.clone(),
-            reference: Some("received 16000 samples".to_string()),
+            reference: Some("received 28800 samples".to_string()),
             reference_file: None,
             chunk_ms: 20,
+            trailing_silence_pad_ms: DEFAULT_TRAILING_SILENCE_PAD_MS,
             backend: ReplayBackendArg::Echo,
         };
 
@@ -676,6 +730,11 @@ mod tests {
         assert_eq!(report.chunk_ms, 20);
         assert_eq!(report.latency.audio_ms, 1_000);
         assert_eq!(report.latency.chunk_count, 50);
+        assert_eq!(
+            report.latency.trailing_silence_pad_ms,
+            DEFAULT_TRAILING_SILENCE_PAD_MS
+        );
+        assert_eq!(report.latency.trailing_silence_pad_chunks, 40);
         let wer = report.wer.expect("WER report");
         assert_eq!(wer.errors, 0);
         std::fs::remove_dir_all(capture_dir).expect("remove test capture dir");
@@ -696,7 +755,7 @@ mod tests {
                   "description": "synthetic echo replay fixture",
                   "capture_dir": ".",
                   "asr_input_wav": "asr-input-16khz.wav",
-                  "reference_text": "received 16000 samples",
+                  "reference_text": "received 28800 samples",
                   "codec": "PCMU",
                   "media_sample_rate_hz": 8000,
                   "direction": "inbound"
@@ -709,6 +768,7 @@ mod tests {
             manifest: manifest_path.clone(),
             backend: vec![ReplayBackendArg::Echo],
             chunk_ms: 20,
+            trailing_silence_pad_ms: DEFAULT_TRAILING_SILENCE_PAD_MS,
         };
 
         let report = replay_corpus(

@@ -63,6 +63,7 @@ pub struct GoldenAbReport {
     pub manifest_path: String,
     pub audio_dir: String,
     pub chunk_ms: u32,
+    pub trailing_silence_pad_ms: u32,
     pub entries: Vec<GoldenAbEntryReport>,
     pub summaries: Vec<GoldenAbSummaryReport>,
 }
@@ -97,6 +98,8 @@ pub struct GoldenAbSummaryReport {
     pub insertions: usize,
     pub wer_percent: f64,
     pub audio_ms: u64,
+    pub trailing_silence_pad_avg_ms: f64,
+    pub trailing_silence_pad_chunks: usize,
     pub ingest_avg_ms: f64,
     pub finish_avg_ms: f64,
     pub wall_avg_ms: f64,
@@ -214,16 +217,21 @@ pub async fn run_golden_ab(
                 .with_context(|| format!("write ASR input WAV {}", asr_wav.display()))?;
 
             for backend in &backends {
-                let run = replay_samples(&asr_samples, args.chunk_ms, backend.asr())
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "run sample {} codec {} backend {}",
-                            sample.id,
-                            codec.label(),
-                            backend.label()
-                        )
-                    })?;
+                let run = replay_samples(
+                    &asr_samples,
+                    args.chunk_ms,
+                    args.trailing_silence_pad_ms,
+                    backend.asr(),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "run sample {} codec {} backend {}",
+                        sample.id,
+                        codec.label(),
+                        backend.label()
+                    )
+                })?;
                 let wer = compute_wer(&sample.text, &run.transcript);
                 entries.push(GoldenAbEntryReport {
                     id: sample.id.clone(),
@@ -248,6 +256,7 @@ pub async fn run_golden_ab(
         manifest_path: args.manifest.display().to_string(),
         audio_dir: args.audio_dir.display().to_string(),
         chunk_ms: args.chunk_ms,
+        trailing_silence_pad_ms: args.trailing_silence_pad_ms,
         entries,
         summaries,
     };
@@ -377,6 +386,8 @@ struct SummaryAccumulator {
     deletions: usize,
     insertions: usize,
     audio_ms: u64,
+    trailing_silence_pad_ms: u64,
+    trailing_silence_pad_chunks: usize,
     ingest_total_ms: u128,
     chunk_count: usize,
     finish_ms: u128,
@@ -393,8 +404,10 @@ impl SummaryAccumulator {
         self.deletions += entry.wer.deletions;
         self.insertions += entry.wer.insertions;
         self.audio_ms += entry.latency.audio_ms;
+        self.trailing_silence_pad_ms += u64::from(entry.latency.trailing_silence_pad_ms);
+        self.trailing_silence_pad_chunks += entry.latency.trailing_silence_pad_chunks;
         self.ingest_total_ms += entry.latency.ingest_total_ms;
-        self.chunk_count += entry.latency.chunk_count;
+        self.chunk_count += entry.latency.ingest_chunk_count();
         self.finish_ms += entry.latency.finish_ms;
         self.wall_ms += entry.latency.wall_ms;
     }
@@ -418,6 +431,11 @@ impl SummaryAccumulator {
             insertions: self.insertions,
             wer_percent: percent(self.errors, self.reference_words),
             audio_ms: self.audio_ms,
+            trailing_silence_pad_avg_ms: average_u64(
+                self.trailing_silence_pad_ms,
+                self.sample_count,
+            ),
+            trailing_silence_pad_chunks: self.trailing_silence_pad_chunks,
             ingest_avg_ms: average_u128(self.ingest_total_ms, self.chunk_count),
             finish_avg_ms: average_u128(self.finish_ms, self.sample_count),
             wall_avg_ms: average_u128(self.wall_ms, self.sample_count),
@@ -434,6 +452,14 @@ fn percent(numerator: usize, denominator: usize) -> f64 {
 }
 
 fn average_u128(total: u128, count: usize) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total as f64 / count as f64
+    }
+}
+
+fn average_u64(total: u64, count: usize) -> f64 {
     if count == 0 {
         0.0
     } else {
@@ -537,7 +563,7 @@ mod tests {
                 {
                   "id": "echo-fixture",
                   "category": "fixture",
-                  "text": "received 16000 samples"
+                  "text": "received 28800 samples"
                 }
               ]
             }"#,
@@ -557,6 +583,7 @@ mod tests {
             backend: vec![ReplayBackendArg::Echo],
             codec: vec![GoldenCodecArg::L16_16k],
             chunk_ms: 20,
+            trailing_silence_pad_ms: crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS,
             limit: None,
             output_json: None,
         };
