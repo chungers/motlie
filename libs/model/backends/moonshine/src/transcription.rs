@@ -19,8 +19,9 @@ use ort::value::TensorRef;
 use serde_json::Value;
 
 use crate::common::{
-    MoonshineArtifactPaths, MoonshineArtifactSpec, RuntimeMetricState, StagedModelDir,
-    configure_artifact_policy, lock_metrics, observe_latency, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, MoonshineArtifactPaths, MoonshineArtifactSpec, RuntimeMetricState,
+    StagedModelDir,
 };
 
 const MOONSHINE_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -234,7 +235,10 @@ impl BundleHandle for MoonshineHandle {
         Some(ModelMetricSnapshot {
             runtime: Some(motlie_model::RuntimeMetrics {
                 resident_memory: None,
-                peak_resident_memory: None,
+                peak_resident_memory: metrics
+                    .runtime
+                    .peak_resident_memory_bytes
+                    .map(motlie_model::Bytes),
                 request_count: Some(metrics.runtime.request_count),
                 last_latency: metrics
                     .runtime
@@ -244,7 +248,7 @@ impl BundleHandle for MoonshineHandle {
                     .runtime
                     .max_latency_msec
                     .map(motlie_model::Milliseconds),
-                avg_latency: None,
+                avg_latency: average_latency_msec(&metrics.runtime).map(motlie_model::Milliseconds),
             }),
             text_generation: None,
             embeddings: None,
@@ -279,6 +283,12 @@ fn new_transcription_handle(
     quantization: QuantizationSupport,
     runtime: Arc<MoonshineRuntime>,
 ) -> MoonshineHandle {
+    let metrics = Arc::new(Mutex::new(AsrMetrics::default()));
+    {
+        let mut state = lock_metrics(&metrics, "moonshine-start");
+        observe_memory(&mut state.runtime);
+    }
+
     MoonshineHandle {
         descriptor: LoadedBundleDescriptor {
             id,
@@ -288,8 +298,19 @@ fn new_transcription_handle(
             resolved_quantization: None,
         },
         runtime,
-        metrics: Arc::new(Mutex::new(AsrMetrics::default())),
+        metrics,
     }
+}
+
+fn average_latency_msec(runtime: &RuntimeMetricState) -> Option<u64> {
+    if runtime.request_count == 0 {
+        return None;
+    }
+
+    Some(
+        (runtime.total_latency_msec / runtime.request_count as u128).min(u128::from(u64::MAX))
+            as u64,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1063,11 +1084,7 @@ impl MoonshineStream {
         &mut self,
         audio: AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>,
     ) -> Result<Option<TranscriptionUpdate>, ModelError> {
-        let normalized: Vec<f32> = audio
-            .into_samples()
-            .into_iter()
-            .map(|sample| sample as f32 / 32768.0)
-            .collect();
+        let normalized = normalize_i16_mono16k(audio);
 
         if normalized.is_empty() {
             return Ok(None);
@@ -1083,26 +1100,12 @@ impl MoonshineStream {
             observe_latency(&mut metrics.runtime, started.elapsed());
         }
 
-        if !self.params.emit_partials {
-            return Ok(None);
-        }
-
-        let Some(text) = maybe_text else {
-            return Ok(None);
-        };
-        if text.is_empty() || text == self.last_partial_text {
-            return Ok(None);
-        }
-        self.last_partial_text = text.clone();
-
-        Ok(Some(TranscriptionUpdate {
-            segments: vec![TranscriptSegment {
-                start_ms: 0,
-                end_ms: samples_to_ms(self.total_samples),
-                text,
-                final_segment: false,
-            }],
-        }))
+        Ok(partial_update(
+            &self.params,
+            &mut self.last_partial_text,
+            self.total_samples,
+            maybe_text,
+        ))
     }
 
     async fn finish_stream(mut self) -> Result<TranscriptionUpdate, ModelError> {
@@ -1115,17 +1118,56 @@ impl MoonshineStream {
             observe_latency(&mut metrics.runtime, started.elapsed());
         }
 
-        match final_text {
-            Some(text) if !text.is_empty() => Ok(TranscriptionUpdate {
-                segments: vec![TranscriptSegment {
-                    start_ms: 0,
-                    end_ms: samples_to_ms(self.total_samples),
-                    text,
-                    final_segment: true,
-                }],
-            }),
-            _ => Ok(TranscriptionUpdate::default()),
-        }
+        Ok(final_update(self.total_samples, final_text))
+    }
+}
+
+fn normalize_i16_mono16k(audio: AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>) -> Vec<f32> {
+    audio
+        .into_samples()
+        .into_iter()
+        .map(|sample| sample as f32 / 32768.0)
+        .collect()
+}
+
+fn partial_update(
+    params: &TranscriptionParams,
+    last_partial_text: &mut String,
+    total_samples: usize,
+    maybe_text: Option<String>,
+) -> Option<TranscriptionUpdate> {
+    if !params.emit_partials {
+        return None;
+    }
+
+    let text = maybe_text?;
+    if text.is_empty() || text == *last_partial_text {
+        return None;
+    }
+
+    *last_partial_text = text.clone();
+    Some(transcript_update(text, total_samples, false))
+}
+
+fn final_update(total_samples: usize, maybe_text: Option<String>) -> TranscriptionUpdate {
+    match maybe_text {
+        Some(text) if !text.is_empty() => transcript_update(text, total_samples, true),
+        _ => TranscriptionUpdate::default(),
+    }
+}
+
+fn transcript_update(
+    text: String,
+    total_samples: usize,
+    final_segment: bool,
+) -> TranscriptionUpdate {
+    TranscriptionUpdate {
+        segments: vec![TranscriptSegment {
+            start_ms: 0,
+            end_ms: samples_to_ms(total_samples),
+            text,
+            final_segment,
+        }],
     }
 }
 
@@ -1197,5 +1239,79 @@ mod tests {
             assert_eq!(decoder.next_token(&logits), Some(1));
         }
         assert_eq!(decoder.next_token(&logits), None);
+    }
+
+    #[test]
+    fn normalizes_i16_mono16k_audio_for_moonshine_runtime() {
+        let audio = AudioBuf::<i16, TARGET_SAMPLE_RATE_HZ, Mono>::new(vec![i16::MIN, 0, i16::MAX]);
+
+        let normalized = normalize_i16_mono16k(audio);
+
+        assert!((normalized[0] + 1.0).abs() < 0.001);
+        assert_eq!(normalized[1], 0.0);
+        assert!(normalized[2] > 0.999);
+    }
+
+    #[test]
+    fn partial_update_requires_emit_partials() {
+        let params = TranscriptionParams::default();
+        let mut last_partial = String::new();
+
+        let update = partial_update(
+            &params,
+            &mut last_partial,
+            TARGET_SAMPLE_RATE_HZ as usize,
+            Some("hello".into()),
+        );
+
+        assert!(update.is_none());
+        assert!(last_partial.is_empty());
+    }
+
+    #[test]
+    fn partial_update_emits_interim_full_hypothesis_and_deduplicates() {
+        let params = TranscriptionParams {
+            language: Some("en".into()),
+            emit_partials: true,
+        };
+        let mut last_partial = String::new();
+
+        let first = partial_update(
+            &params,
+            &mut last_partial,
+            TARGET_SAMPLE_RATE_HZ as usize,
+            Some("hello".into()),
+        )
+        .expect("new partial should be emitted");
+        let duplicate = partial_update(
+            &params,
+            &mut last_partial,
+            TARGET_SAMPLE_RATE_HZ as usize * 2,
+            Some("hello".into()),
+        );
+
+        assert_eq!(first.segments.len(), 1);
+        assert_eq!(first.segments[0].text, "hello");
+        assert_eq!(first.segments[0].start_ms, 0);
+        assert_eq!(first.segments[0].end_ms, 1000);
+        assert!(!first.segments[0].final_segment);
+        assert!(duplicate.is_none());
+    }
+
+    #[test]
+    fn final_update_commits_last_transcript_text() {
+        let update = final_update(TARGET_SAMPLE_RATE_HZ as usize * 2, Some("done".into()));
+
+        assert_eq!(update.segments.len(), 1);
+        assert_eq!(update.segments[0].text, "done");
+        assert_eq!(update.segments[0].start_ms, 0);
+        assert_eq!(update.segments[0].end_ms, 2000);
+        assert!(update.segments[0].final_segment);
+    }
+
+    #[test]
+    fn final_update_omits_empty_transcript() {
+        assert!(final_update(0, None).segments.is_empty());
+        assert!(final_update(0, Some(String::new())).segments.is_empty());
     }
 }
