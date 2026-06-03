@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
 
 pub type SharedState = Arc<RwLock<GatewayState>>;
@@ -41,6 +42,7 @@ pub struct GatewayConfig {
     pub selected_phone_number: Option<String>,
     pub default_from_number: Option<String>,
     pub state_path: Option<PathBuf>,
+    pub asr_backend: LiveAsrBackend,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -134,6 +136,7 @@ pub struct CallSession {
     pub unread_events: u32,
     pub last_error: Option<String>,
     pub terminal_reason: Option<String>,
+    pub asr_backend: Option<LiveAsrBackend>,
 }
 
 impl CallSession {
@@ -159,6 +162,7 @@ impl CallSession {
             unread_events: 0,
             last_error: None,
             terminal_reason: None,
+            asr_backend: None,
         };
         call.push_timeline("call created");
         call
@@ -248,6 +252,7 @@ pub struct GatewayState {
 pub enum StreamAttachOutcome {
     Attached {
         gateway_call_id: String,
+        asr_backend: LiveAsrBackend,
     },
     NotAnswered {
         gateway_call_id: String,
@@ -355,6 +360,7 @@ impl GatewayState {
         stream_id: String,
         media: MediaMetadata,
     ) -> StreamAttachOutcome {
+        let default_asr_backend = self.config.asr_backend;
         let Some(gateway_call_id) = self.call_control_index.get(call_control_id).cloned() else {
             return StreamAttachOutcome::UnknownCallControl;
         };
@@ -367,12 +373,17 @@ impl GatewayState {
                 status: call.status,
             };
         }
+        let asr_backend = call.asr_backend.unwrap_or(default_asr_backend);
+        call.asr_backend = Some(asr_backend);
         call.ids.stream_id = Some(stream_id.clone());
         call.media = media;
         call.status = CallStatus::MediaStarted;
         call.push_timeline("media stream started");
         self.stream_index.insert(stream_id, gateway_call_id.clone());
-        StreamAttachOutcome::Attached { gateway_call_id }
+        StreamAttachOutcome::Attached {
+            gateway_call_id,
+            asr_backend,
+        }
     }
 
     pub fn add_transcript(&mut self, gateway_call_id: &str, kind: TranscriptKind, text: String) {

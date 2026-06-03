@@ -243,7 +243,7 @@ fn set_shell_cursor(
 
 fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec<Line<'static>> {
     let Some(call) = session.selected_call(state) else {
-        return status_lines(state);
+        return status_lines(state, session);
     };
 
     let mut lines = vec![
@@ -274,6 +274,12 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "?".to_string())
         )),
+        Line::from(format!(
+            "asr: {}",
+            call.asr_backend
+                .map(|backend| format!("{} ({})", backend.label(), backend.model_label()))
+                .unwrap_or_else(|| "<unbound>".to_string())
+        )),
     ];
     if let Some(reason) = &call.terminal_reason {
         lines.push(Line::from(format!("ended: {reason}")));
@@ -300,7 +306,7 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
     lines
 }
 
-fn status_lines(state: &GatewayState) -> Vec<Line<'static>> {
+fn status_lines(state: &GatewayState, session: &OperatorSession) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(format!(
             "listener: {}",
@@ -311,6 +317,16 @@ fn status_lines(state: &GatewayState) -> Vec<Line<'static>> {
                 .unwrap_or_else(|| "<unknown>".to_string())
         )),
         Line::from(format!("inbound: {}", state.inbound_mode.label())),
+        Line::from(format!(
+            "asr next: {} ({})",
+            session.next_asr_backend.label(),
+            session.next_asr_backend.model_label()
+        )),
+        Line::from(format!(
+            "asr default: {} ({})",
+            state.config.asr_backend.label(),
+            state.config.asr_backend.model_label()
+        )),
         Line::from(format!(
             "webhook: {}",
             state

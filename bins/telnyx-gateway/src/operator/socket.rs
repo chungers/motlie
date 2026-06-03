@@ -86,7 +86,10 @@ async fn handle_connection(
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.for_new_source());
+    let asr_backend = context.state.read().await.config.asr_backend;
+    let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(
+        context.for_new_source_with_asr_backend(asr_backend),
+    );
     let mut line = String::new();
 
     loop {
@@ -186,6 +189,66 @@ mod tests {
         assert!(response_lines(&second_show)
             .iter()
             .any(|line| line == &format!("call: {call_two}")));
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn socket_connections_keep_source_local_asr_backend() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
+
+        let mut client_one = SocketTestClient::connect(&path).await;
+        let mut client_two = SocketTestClient::connect(&path).await;
+
+        let first_use = client_one.command("asr use kroko-2025").await;
+        assert_eq!(first_use["ok"], true);
+        let first_status = client_one.command("asr status").await;
+        let second_status = client_two.command("asr status").await;
+
+        assert!(response_lines(&first_status)
+            .iter()
+            .any(|line| line == "next=kroko-2025"));
+        assert!(response_lines(&second_status)
+            .iter()
+            .any(|line| line == "next=sherpa-2023"));
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn socket_opened_after_asr_use_keeps_startup_default_backend() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
+
+        let mut client_one = SocketTestClient::connect(&path).await;
+        let first_use = client_one.command("asr use kroko-2025").await;
+        assert_eq!(first_use["ok"], true);
+
+        let mut client_two = SocketTestClient::connect(&path).await;
+        let first_status = client_one.command("asr status").await;
+        let second_status = client_two.command("asr status").await;
+
+        assert!(response_lines(&first_status)
+            .iter()
+            .any(|line| line == "next=kroko-2025"));
+        assert!(response_lines(&second_status)
+            .iter()
+            .any(|line| line == "next=sherpa-2023"));
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);
