@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS;
+
 #[derive(Clone, Debug, Parser)]
 #[command(author, version, about = "Operator-driven Telnyx voice gateway")]
 pub struct Cli {
@@ -75,6 +77,10 @@ pub struct ReplayCaptureArgs {
     #[arg(long, default_value_t = 20)]
     pub chunk_ms: u32,
 
+    /// Trailing silence to feed before finish so streaming decoders flush final tokens.
+    #[arg(long, default_value_t = DEFAULT_TRAILING_SILENCE_PAD_MS)]
+    pub trailing_silence_pad_ms: u32,
+
     /// ASR backend to use for this replay.
     #[arg(long, value_enum, default_value_t = ReplayBackendArg::Auto)]
     pub backend: ReplayBackendArg,
@@ -92,6 +98,10 @@ pub struct ReplayCorpusArgs {
     /// Audio chunk size to feed into each streaming recognizer.
     #[arg(long, default_value_t = 20)]
     pub chunk_ms: u32,
+
+    /// Trailing silence to feed before finish so streaming decoders flush final tokens.
+    #[arg(long, default_value_t = DEFAULT_TRAILING_SILENCE_PAD_MS)]
+    pub trailing_silence_pad_ms: u32,
 }
 
 impl ReplayCorpusArgs {
@@ -148,6 +158,10 @@ pub struct AsrGoldenAbArgs {
     /// Audio chunk size to feed into each recognizer.
     #[arg(long, default_value_t = 20)]
     pub chunk_ms: u32,
+
+    /// Trailing silence to feed before finish so streaming decoders flush final tokens.
+    #[arg(long, default_value_t = DEFAULT_TRAILING_SILENCE_PAD_MS)]
+    pub trailing_silence_pad_ms: u32,
 
     /// Score only the first N samples for smoke tests.
     #[arg(long)]
