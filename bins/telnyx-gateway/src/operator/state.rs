@@ -68,6 +68,7 @@ pub enum CallStatus {
     Answered,
     MediaStarted,
     Transcribing,
+    Speaking,
     Ended,
     Failed,
 }
@@ -82,6 +83,7 @@ impl CallStatus {
             Self::Answered => "answered",
             Self::MediaStarted => "media",
             Self::Transcribing => "transcribing",
+            Self::Speaking => "speaking",
             Self::Ended => "ended",
             Self::Failed => "failed",
         }
@@ -90,6 +92,43 @@ impl CallStatus {
     pub fn allows_media_start(self) -> bool {
         matches!(self, Self::Dialing | Self::Answering | Self::Answered)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TtsPlaybackStatus {
+    Queued,
+    Playing,
+    MarkSent,
+    Completed,
+    Canceling,
+    Canceled,
+    Failed,
+}
+
+impl TtsPlaybackStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Playing => "playing",
+            Self::MarkSent => "mark-sent",
+            Self::Completed => "completed",
+            Self::Canceling => "canceling",
+            Self::Canceled => "canceled",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtsPlaybackState {
+    pub playback_id: String,
+    pub status: TtsPlaybackStatus,
+    pub text_preview: String,
+    pub frames_queued: usize,
+    pub frames_sent: usize,
+    pub mark_name: Option<String>,
+    pub error: Option<String>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -137,6 +176,7 @@ pub struct CallSession {
     pub last_error: Option<String>,
     pub terminal_reason: Option<String>,
     pub asr_backend: Option<LiveAsrBackend>,
+    pub tts: Option<TtsPlaybackState>,
 }
 
 impl CallSession {
@@ -163,6 +203,7 @@ impl CallSession {
             last_error: None,
             terminal_reason: None,
             asr_backend: None,
+            tts: None,
         };
         call.push_timeline("call created");
         call
@@ -210,6 +251,13 @@ impl CallSession {
             (final_text, _) if !final_text.is_empty() => final_text.to_string(),
             _ => "<none>".to_string(),
         }
+    }
+
+    pub fn tts_status_label(&self) -> &'static str {
+        self.tts
+            .as_ref()
+            .map(|tts| tts.status.label())
+            .unwrap_or("idle")
     }
 }
 
@@ -390,7 +438,9 @@ impl GatewayState {
 
     pub fn add_transcript(&mut self, gateway_call_id: &str, kind: TranscriptKind, text: String) {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
-            call.status = CallStatus::Transcribing;
+            if call.status != CallStatus::Speaking {
+                call.status = CallStatus::Transcribing;
+            }
             call.unread_events = call.unread_events.saturating_add(1);
             match kind {
                 TranscriptKind::Partial => call.current_partial = Some(text.clone()),
@@ -406,6 +456,135 @@ impl GatewayState {
             });
         }
     }
+
+    pub fn start_tts_job(&mut self, gateway_call_id: &str, playback_id: String, text: &str) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.status = CallStatus::Speaking;
+            call.tts = Some(TtsPlaybackState {
+                playback_id: playback_id.clone(),
+                status: TtsPlaybackStatus::Queued,
+                text_preview: preview_text(text),
+                frames_queued: 0,
+                frames_sent: 0,
+                mark_name: None,
+                error: None,
+                updated_at: Utc::now(),
+            });
+            call.push_timeline(format!("tts {playback_id} queued"));
+        }
+    }
+
+    pub fn mark_tts_frames_queued(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        frames: usize,
+    ) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            tts.frames_queued = tts.frames_queued.saturating_add(frames);
+            if tts.status == TtsPlaybackStatus::Queued && frames > 0 {
+                tts.status = TtsPlaybackStatus::Playing;
+            }
+        });
+    }
+
+    pub fn mark_tts_frame_sent(&mut self, gateway_call_id: &str, playback_id: &str) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            tts.frames_sent = tts.frames_sent.saturating_add(1);
+            if matches!(
+                tts.status,
+                TtsPlaybackStatus::Queued | TtsPlaybackStatus::Playing
+            ) {
+                tts.status = TtsPlaybackStatus::Playing;
+            }
+        });
+    }
+
+    pub fn mark_tts_mark_sent(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        mark_name: &str,
+    ) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            tts.status = TtsPlaybackStatus::MarkSent;
+            tts.mark_name = Some(mark_name.to_string());
+        });
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.push_timeline(format!("tts {playback_id} mark sent"));
+        }
+    }
+
+    pub fn mark_tts_completed(&mut self, gateway_call_id: &str, mark_name: &str) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            let completed_playback = if let Some(tts) = call
+                .tts
+                .as_mut()
+                .filter(|tts| tts.mark_name.as_deref() == Some(mark_name))
+            {
+                tts.status = TtsPlaybackStatus::Completed;
+                tts.updated_at = Utc::now();
+                Some(tts.playback_id.clone())
+            } else {
+                None
+            };
+            if let Some(playback_id) = completed_playback {
+                if call.status == CallStatus::Speaking {
+                    call.status = status_after_tts(call);
+                }
+                call.push_timeline(format!("tts {playback_id} completed"));
+            }
+        }
+    }
+
+    pub fn mark_tts_canceling(&mut self, gateway_call_id: &str, playback_id: &str) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            tts.status = TtsPlaybackStatus::Canceling;
+        });
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.push_timeline(format!("tts {playback_id} cancel requested"));
+        }
+    }
+
+    pub fn mark_tts_canceled(&mut self, gateway_call_id: &str, playback_id: &str) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            tts.status = TtsPlaybackStatus::Canceled;
+        });
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            if call.status == CallStatus::Speaking {
+                call.status = status_after_tts(call);
+            }
+            call.push_timeline(format!("tts {playback_id} canceled"));
+        }
+    }
+
+    pub fn mark_tts_failed(&mut self, gateway_call_id: &str, playback_id: &str, error: String) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            tts.status = TtsPlaybackStatus::Failed;
+            tts.error = Some(error.clone());
+        });
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.last_error = Some(error.clone());
+            call.push_timeline(format!("tts {playback_id} failed: {error}"));
+        }
+    }
+
+    fn update_tts(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        update: impl FnOnce(&mut TtsPlaybackState),
+    ) {
+        if let Some(tts) = self
+            .calls
+            .get_mut(gateway_call_id)
+            .and_then(|call| call.tts.as_mut())
+            .filter(|tts| tts.playback_id == playback_id)
+        {
+            update(tts);
+            tts.updated_at = Utc::now();
+        }
+    }
 }
 
 fn append_transcript_fragment(transcript: &mut String, fragment: &str) {
@@ -417,6 +596,26 @@ fn append_transcript_fragment(transcript: &mut String, fragment: &str) {
         transcript.push(' ');
     }
     transcript.push_str(fragment);
+}
+
+fn preview_text(text: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let mut preview = text.chars().take(MAX_CHARS).collect::<String>();
+    if text.chars().count() > MAX_CHARS {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn status_after_tts(call: &CallSession) -> CallStatus {
+    if !call.transcripts.is_empty()
+        || !call.final_transcript.is_empty()
+        || call.current_partial.is_some()
+    {
+        CallStatus::Transcribing
+    } else {
+        CallStatus::MediaStarted
+    }
 }
 
 pub fn shared_state(bind: SocketAddr) -> SharedState {

@@ -5565,6 +5565,7 @@ dependencies = [
  "motlie-driver",
  "motlie-model",
  "motlie-model-moonshine",
+ "motlie-model-piper",
  "motlie-model-qwen3-tts-cpp",
  "motlie-model-sherpa-onnx",
  "motlie-model-whisper-cpp",

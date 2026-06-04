@@ -9,7 +9,7 @@ use axum::{Json, Router};
 
 use crate::adapter::SharedAsrRegistry;
 use crate::call_control::TelnyxClient;
-use crate::media;
+use crate::media::{self, SharedMediaRegistry};
 use crate::operator::state::{LogLevel, SharedState};
 use crate::webhook;
 
@@ -18,6 +18,7 @@ pub struct AppServices {
     pub state: SharedState,
     pub telnyx: TelnyxClient,
     pub asr: SharedAsrRegistry,
+    pub media: SharedMediaRegistry,
 }
 
 pub fn router(services: AppServices) -> Router {
@@ -59,6 +60,11 @@ async fn telnyx_media(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| {
-        media::handle_socket(socket, services.state.clone(), services.asr.clone())
+        media::handle_socket(
+            socket,
+            services.state.clone(),
+            services.asr.clone(),
+            services.media.clone(),
+        )
     })
 }

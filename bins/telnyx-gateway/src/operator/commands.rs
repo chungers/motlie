@@ -3,19 +3,27 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
+use uuid::Uuid;
 
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
+use crate::media::{
+    packetize_tts_chunk, OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry,
+    SpeechCancelToken,
+};
 use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{CallStatus, GatewayState, InboundMode, LogLevel, SharedState};
+use crate::tts::{split_speech_text, unavailable_registry, SharedTtsRegistry};
 
 #[derive(Clone)]
 pub struct GatewayContext {
     pub state: SharedState,
     pub telnyx: TelnyxClient,
+    pub media: SharedMediaRegistry,
+    pub tts: SharedTtsRegistry,
     pub session: OperatorSession,
 }
 
@@ -29,23 +37,49 @@ impl GatewayContext {
         telnyx: TelnyxClient,
         next_asr_backend: LiveAsrBackend,
     ) -> Self {
+        Self::with_services(
+            state,
+            telnyx,
+            SharedMediaRegistry::default(),
+            unavailable_registry(),
+            next_asr_backend,
+        )
+    }
+
+    pub fn with_services(
+        state: SharedState,
+        telnyx: TelnyxClient,
+        media: SharedMediaRegistry,
+        tts: SharedTtsRegistry,
+        next_asr_backend: LiveAsrBackend,
+    ) -> Self {
         Self {
             state,
             telnyx,
+            media,
+            tts,
             session: OperatorSession::new(next_asr_backend),
         }
     }
 
     pub fn for_new_source(&self) -> Self {
-        Self::with_asr_backend(
+        Self::with_services(
             self.state.clone(),
             self.telnyx.clone(),
+            self.media.clone(),
+            self.tts.clone(),
             self.session.next_asr_backend,
         )
     }
 
     pub fn for_new_source_with_asr_backend(&self, backend: LiveAsrBackend) -> Self {
-        Self::with_asr_backend(self.state.clone(), self.telnyx.clone(), backend)
+        Self::with_services(
+            self.state.clone(),
+            self.telnyx.clone(),
+            self.media.clone(),
+            self.tts.clone(),
+            backend,
+        )
     }
 
     async fn answer_call(&mut self, target: Option<String>) -> DriverResult<CommandOutput> {
@@ -132,7 +166,7 @@ struct GatewayRoot {
 
 #[derive(Debug, Subcommand)]
 pub enum GatewayCommand {
-    Status,
+    Status(CallTarget),
     Listener {
         #[command(subcommand)]
         command: ListenerCommand,
@@ -158,11 +192,17 @@ pub enum GatewayCommand {
         #[command(subcommand)]
         command: AsrCommand,
     },
+    Tts {
+        #[command(subcommand)]
+        command: TtsCommand,
+    },
     Calls,
     Call {
         #[command(subcommand)]
         command: CallCommand,
     },
+    Dial(DialArgs),
+    Speak(SpeakArgs),
     Answer(CallTarget),
     Reject(CallTarget),
     Hangup(CallTarget),
@@ -258,6 +298,11 @@ pub enum AsrCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum TtsCommand {
+    Status,
+}
+
 #[derive(Debug, Args)]
 pub struct InboundEnableArgs {
     #[arg(long)]
@@ -275,6 +320,19 @@ pub enum CallCommand {
 #[derive(Debug, Args)]
 pub struct CallTarget {
     pub call: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct DialArgs {
+    pub to: String,
+    #[arg(long)]
+    pub from: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SpeakArgs {
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    pub parts: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,7 +386,7 @@ impl CommandSet<GatewayContext> for GatewayCommand {
         context: &mut GatewayContext,
     ) -> DriverResult<CommandOutput> {
         match resolved {
-            Self::Status => status(context).await,
+            Self::Status(target) => status(context, target.call).await,
             Self::Listener {
                 command: ListenerCommand::Status,
             } => listener_status(&context.state).await,
@@ -338,8 +396,11 @@ impl CommandSet<GatewayContext> for GatewayCommand {
             Self::Telnyx { command } => telnyx_command(context, command).await,
             Self::Inbound { command } => inbound_command(context, command).await,
             Self::Asr { command } => asr_command(context, command).await,
+            Self::Tts { command } => tts_command(context, command).await,
             Self::Calls => calls(&context.state).await,
             Self::Call { command } => call_command(context, command).await,
+            Self::Dial(args) => dial(context, args).await,
+            Self::Speak(args) => speak(context, args).await,
             Self::Answer(target) => context.answer_call(target.call).await,
             Self::Reject(target) => call_control(context, target.call, CallControlOp::Reject).await,
             Self::Hangup(target) => call_control(context, target.call, CallControlOp::Hangup).await,
@@ -350,7 +411,10 @@ impl CommandSet<GatewayContext> for GatewayCommand {
     }
 }
 
-async fn status(context: &GatewayContext) -> DriverResult<CommandOutput> {
+async fn status(context: &GatewayContext, target: Option<String>) -> DriverResult<CommandOutput> {
+    if target.is_some() {
+        return call_show(context, target).await;
+    }
     let guard = context.state.read().await;
     let mut lines = vec![
         format!("listener: {:?}", guard.config.bind),
@@ -411,6 +475,7 @@ async fn status(context: &GatewayContext) -> DriverResult<CommandOutput> {
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "<unset>".to_string())
         ),
+        format!("tts-backend: {}", context.tts.piper().label()),
         format!("calls: {}", guard.calls.len()),
     ];
     if guard.inbound_mode == InboundMode::Disabled {
@@ -812,6 +877,408 @@ async fn asr_command(
     }
 }
 
+async fn tts_command(
+    context: &mut GatewayContext,
+    command: TtsCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        TtsCommand::Status => {
+            let guard = context.state.read().await;
+            let active = guard
+                .calls
+                .values()
+                .filter_map(|call| {
+                    call.tts.as_ref().map(|tts| {
+                        format!(
+                            "{} {} playback={} frames={}/{} text={}",
+                            call.gateway_call_id,
+                            tts.status.label(),
+                            tts.playback_id,
+                            tts.frames_sent,
+                            tts.frames_queued,
+                            tts.text_preview
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            if active.is_empty() {
+                Ok(CommandOutput::line(format!(
+                    "tts backend={} active=0",
+                    context.tts.piper().label()
+                )))
+            } else {
+                let mut lines = vec![format!(
+                    "tts backend={} active={}",
+                    context.tts.piper().label(),
+                    active.len()
+                )];
+                lines.extend(active);
+                Ok(CommandOutput {
+                    lines,
+                    effects: Vec::new(),
+                })
+            }
+        }
+    }
+}
+
+async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<CommandOutput> {
+    let asr_backend = context.session.next_asr_backend;
+    let (connection_id, from, stream_url, webhook_url, media) =
+        outbound_dial_config(context, args.from.clone()).await?;
+
+    let dialed = context
+        .telnyx
+        .dial_call(&DialRequest {
+            connection_id: &connection_id,
+            to: &args.to,
+            from: &from,
+            stream_url: &stream_url,
+            webhook_url: webhook_url.as_deref(),
+            media,
+        })
+        .await
+        .map_err(|error| driver_anyhow(outbound_prereq_context(error)))?;
+
+    let gateway_call_id = register_outbound_dial(
+        context,
+        &dialed,
+        Some(from.clone()),
+        Some(args.to.clone()),
+        asr_backend,
+        "outbound dial requested",
+    )
+    .await;
+    context.session.selected_call = Some(gateway_call_id.clone());
+
+    tracing::info!(
+        gateway_call_id,
+        call_control_id = dialed.call_control_id,
+        call_session_id = dialed.call_session_id.as_deref(),
+        call_leg_id = dialed.call_leg_id.as_deref(),
+        to = args.to,
+        from,
+        stream_url,
+        stream_codec = media.codec.as_str(),
+        stream_sample_rate_hz = media.sample_rate_hz,
+        asr_backend = asr_backend.label(),
+        asr_model = asr_backend.model_label(),
+        "call.outbound.dial"
+    );
+    Ok(CommandOutput::line(format!(
+        "dial requested for {gateway_call_id}"
+    )))
+}
+
+async fn speak(context: &mut GatewayContext, args: SpeakArgs) -> DriverResult<CommandOutput> {
+    let guard = context.state.read().await;
+    let parsed = parse_speak_args(
+        &guard,
+        &args.parts,
+        context.session.selected_call.as_deref(),
+    )?;
+    drop(guard);
+    match parsed {
+        SpeakRequest::Cancel { call_id } => cancel_speech(context, call_id).await,
+        SpeakRequest::Text { call_id, text } => start_speech(context, call_id, text).await,
+    }
+}
+
+async fn start_speech(
+    context: &mut GatewayContext,
+    gateway_call_id: String,
+    text: String,
+) -> DriverResult<CommandOutput> {
+    let playback_id = format!("tts_{}", Uuid::new_v4().simple());
+    let cancel = SpeechCancelToken::default();
+    let media = {
+        let guard = context.state.read().await;
+        let media = guard.config.telnyx_media;
+        let call = guard
+            .calls
+            .get(&gateway_call_id)
+            .ok_or_else(|| DriverError::NotFound {
+                kind: "call",
+                name: gateway_call_id.clone(),
+            })?;
+        if call.ids.stream_id.is_none() {
+            return Err(DriverError::message(format!(
+                "media stream is not ready for call {gateway_call_id}"
+            )));
+        }
+        media
+    };
+    let media_handle = context
+        .media
+        .start_speech(&gateway_call_id, playback_id.clone(), cancel.clone())
+        .await
+        .map_err(driver_anyhow)?;
+    {
+        let mut guard = context.state.write().await;
+        guard.start_tts_job(&gateway_call_id, playback_id.clone(), &text);
+        guard.log(
+            LogLevel::Info,
+            format!("speak requested for {gateway_call_id}: {playback_id}"),
+        );
+    }
+    let state = context.state.clone();
+    let tts = context.tts.clone();
+    let media_registry = context.media.clone();
+    let call_id = gateway_call_id.clone();
+    let playback_for_task = playback_id.clone();
+    tokio::spawn(async move {
+        run_speech_job(SpeechJob {
+            state,
+            tts,
+            media_registry,
+            media_handle,
+            gateway_call_id: call_id,
+            playback_id: playback_for_task,
+            text,
+            media,
+            cancel,
+        })
+        .await;
+    });
+    Ok(CommandOutput::line(format!(
+        "speak queued for {gateway_call_id} playback={playback_id}"
+    )))
+}
+
+async fn cancel_speech(
+    context: &mut GatewayContext,
+    gateway_call_id: String,
+) -> DriverResult<CommandOutput> {
+    let playback_id = context
+        .media
+        .cancel_speech(&gateway_call_id)
+        .await
+        .map_err(driver_anyhow)?;
+    {
+        let mut guard = context.state.write().await;
+        guard.mark_tts_canceling(&gateway_call_id, &playback_id);
+        guard.log(
+            LogLevel::Info,
+            format!("speak cancel requested for {gateway_call_id}: {playback_id}"),
+        );
+    }
+    Ok(CommandOutput::line(format!(
+        "speak cancel requested for {gateway_call_id} playback={playback_id}"
+    )))
+}
+
+struct SpeechJob {
+    state: SharedState,
+    tts: SharedTtsRegistry,
+    media_registry: SharedMediaRegistry,
+    media_handle: crate::media::CallMediaHandle,
+    gateway_call_id: String,
+    playback_id: String,
+    text: String,
+    media: TelnyxMediaConfig,
+    cancel: SpeechCancelToken,
+}
+
+async fn run_speech_job(job: SpeechJob) {
+    let result = run_speech_job_inner(&job).await;
+    match result {
+        Ok(SpeechJobOutcome::MarkQueued) => {}
+        Ok(SpeechJobOutcome::NoAudioOrCanceled) => {
+            job.media_registry
+                .finish_speech(&job.gateway_call_id, &job.playback_id)
+                .await;
+        }
+        Err(error) => {
+            job.media_registry
+                .finish_speech(&job.gateway_call_id, &job.playback_id)
+                .await;
+            let mut guard = job.state.write().await;
+            guard.mark_tts_failed(&job.gateway_call_id, &job.playback_id, format!("{error:#}"));
+            guard.log(
+                LogLevel::Error,
+                format!("speak failed for {}: {error:#}", job.gateway_call_id),
+            );
+            tracing::error!(
+                gateway_call_id = job.gateway_call_id.as_str(),
+                playback_id = job.playback_id.as_str(),
+                error = %error,
+                "tts.speak.failed"
+            );
+        }
+    }
+}
+
+enum SpeechJobOutcome {
+    MarkQueued,
+    NoAudioOrCanceled,
+}
+
+async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcome> {
+    let text_chunks = split_speech_text(&job.text);
+    let mut queued_frames = 0usize;
+    for text_chunk in text_chunks {
+        if job.cancel.is_canceled() {
+            return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+        }
+        let audio_chunks = job.tts.piper().synthesize_chunks(text_chunk).await?;
+        for audio_chunk in audio_chunks {
+            if job.cancel.is_canceled() {
+                return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+            }
+            let packets = packetize_tts_chunk(audio_chunk, job.media)?;
+            queued_frames = queued_frames.saturating_add(packets.len());
+            job.state.write().await.mark_tts_frames_queued(
+                &job.gateway_call_id,
+                &job.playback_id,
+                packets.len(),
+            );
+            for payload in packets {
+                if job.cancel.is_canceled() {
+                    return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+                }
+                job.media_handle
+                    .send(OutboundMediaCommand::Frame(OutboundMediaFrame {
+                        playback_id: job.playback_id.clone(),
+                        payload,
+                    }))
+                    .await?;
+            }
+        }
+    }
+    if queued_frames > 0 && !job.cancel.is_canceled() {
+        job.media_handle
+            .send(OutboundMediaCommand::Mark {
+                playback_id: job.playback_id.clone(),
+            })
+            .await?;
+        tracing::info!(
+            gateway_call_id = job.gateway_call_id.as_str(),
+            playback_id = job.playback_id.as_str(),
+            frames = queued_frames,
+            "tts.speak.queued"
+        );
+        return Ok(SpeechJobOutcome::MarkQueued);
+    }
+    Ok(SpeechJobOutcome::NoAudioOrCanceled)
+}
+
+enum SpeakRequest {
+    Text { call_id: String, text: String },
+    Cancel { call_id: String },
+}
+
+fn parse_speak_args(
+    state: &GatewayState,
+    parts: &[String],
+    selected_call: Option<&str>,
+) -> DriverResult<SpeakRequest> {
+    if parts.first().is_some_and(|part| part == "cancel") {
+        if parts.len() > 2 {
+            return Err(DriverError::message("usage: speak cancel [call-id]"));
+        }
+        let call_id = resolve_call_id(state, parts.get(1).map(String::as_str), selected_call)?;
+        return Ok(SpeakRequest::Cancel { call_id });
+    }
+
+    let (call_id, text_parts) = if parts
+        .first()
+        .is_some_and(|candidate| state.calls.contains_key(candidate))
+    {
+        let call_id = parts
+            .first()
+            .cloned()
+            .ok_or_else(|| DriverError::message("usage: speak [call-id] <text...>"))?;
+        (call_id, &parts[1..])
+    } else {
+        (resolve_call_id(state, None, selected_call)?, parts)
+    };
+    if text_parts.is_empty() {
+        return Err(DriverError::message("usage: speak [call-id] <text...>"));
+    }
+    Ok(SpeakRequest::Text {
+        call_id,
+        text: text_parts.join(" "),
+    })
+}
+
+async fn outbound_dial_config(
+    context: &GatewayContext,
+    requested_from: Option<String>,
+) -> DriverResult<(String, String, String, Option<String>, TelnyxMediaConfig)> {
+    let guard = context.state.read().await;
+    let connection_id = guard
+        .config
+        .selected_connection_id
+        .clone()
+        .ok_or_else(|| DriverError::message("telnyx app use <connection-id> first"))?;
+    let from = requested_from
+        .or_else(|| guard.config.default_from_number.clone())
+        .or_else(|| guard.config.selected_phone_number.clone())
+        .ok_or_else(|| {
+            DriverError::message(
+                "pass --from <e164> or config set from-number <e164> first; the number must be outbound-enabled and the Telnyx app must have an Outbound Voice Profile",
+            )
+        })?;
+    let stream_url = guard
+        .config
+        .public_media_url
+        .clone()
+        .ok_or_else(|| DriverError::message("config set media-url <wss-url> first"))?;
+    Ok((
+        connection_id,
+        from,
+        stream_url,
+        guard.config.public_webhook_url.clone(),
+        guard.config.telnyx_media,
+    ))
+}
+
+async fn register_outbound_dial(
+    context: &mut GatewayContext,
+    dialed: &crate::call_control::DialedCall,
+    from: Option<String>,
+    to: Option<String>,
+    asr_backend: LiveAsrBackend,
+    timeline: &'static str,
+) -> String {
+    let mut guard = context.state.write().await;
+    let gateway_call_id = guard.add_or_update_outbound_call(
+        crate::operator::state::TelnyxIds {
+            call_control_id: dialed.call_control_id.clone(),
+            call_session_id: dialed.call_session_id.clone(),
+            call_leg_id: dialed.call_leg_id.clone(),
+            stream_id: None,
+        },
+        from,
+        to.clone(),
+        CallStatus::Dialing,
+    );
+    if let Some(call) = guard.calls.get_mut(&gateway_call_id) {
+        call.asr_backend = Some(asr_backend);
+        call.push_timeline(timeline);
+        call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
+    }
+    guard.log(
+        LogLevel::Info,
+        format!(
+            "outbound dial requested for {gateway_call_id} to {}",
+            to.as_deref().unwrap_or("<unknown>")
+        ),
+    );
+    gateway_call_id
+}
+
+fn outbound_prereq_context(error: anyhow::Error) -> anyhow::Error {
+    let message = format!("{error:#}");
+    if message.contains("403") || message.contains("D38") {
+        anyhow::anyhow!(
+            "{message}; outbound dialing requires the Telnyx Call Control application to have an Outbound Voice Profile and the from-number to be outbound-enabled"
+        )
+    } else {
+        anyhow::anyhow!(message)
+    }
+}
+
 async fn test_command(
     context: &mut GatewayContext,
     command: TestCommand,
@@ -826,34 +1293,8 @@ async fn dial_transcribe(
     args: DialTranscribeArgs,
 ) -> DriverResult<CommandOutput> {
     let asr_backend = context.session.next_asr_backend;
-    let (connection_id, from, stream_url, webhook_url, media) = {
-        let guard = context.state.read().await;
-        let connection_id = guard
-            .config
-            .selected_connection_id
-            .clone()
-            .ok_or_else(|| DriverError::message("telnyx app use <connection-id> first"))?;
-        let from = args
-            .from
-            .clone()
-            .or_else(|| guard.config.default_from_number.clone())
-            .or_else(|| guard.config.selected_phone_number.clone())
-            .ok_or_else(|| {
-                DriverError::message("pass --from <e164> or config set from-number <e164> first")
-            })?;
-        let stream_url = guard
-            .config
-            .public_media_url
-            .clone()
-            .ok_or_else(|| DriverError::message("config set media-url <wss-url> first"))?;
-        (
-            connection_id,
-            from,
-            stream_url,
-            guard.config.public_webhook_url.clone(),
-            guard.config.telnyx_media,
-        )
-    };
+    let (connection_id, from, stream_url, webhook_url, media) =
+        outbound_dial_config(context, args.from.clone()).await?;
 
     let dialed = context
         .telnyx
@@ -866,34 +1307,17 @@ async fn dial_transcribe(
             media,
         })
         .await
-        .map_err(driver_anyhow)?;
+        .map_err(|error| driver_anyhow(outbound_prereq_context(error)))?;
 
-    let gateway_call_id = {
-        let mut guard = context.state.write().await;
-        let gateway_call_id = guard.add_or_update_outbound_call(
-            crate::operator::state::TelnyxIds {
-                call_control_id: dialed.call_control_id.clone(),
-                call_session_id: dialed.call_session_id.clone(),
-                call_leg_id: dialed.call_leg_id.clone(),
-                stream_id: None,
-            },
-            Some(from.clone()),
-            Some(args.to.clone()),
-            CallStatus::Dialing,
-        );
-        if let Some(call) = guard.calls.get_mut(&gateway_call_id) {
-            call.asr_backend = Some(asr_backend);
-            call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
-        }
-        guard.log(
-            LogLevel::Info,
-            format!(
-                "dial-transcribe requested for {gateway_call_id} to {}",
-                args.to
-            ),
-        );
-        gateway_call_id
-    };
+    let gateway_call_id = register_outbound_dial(
+        context,
+        &dialed,
+        Some(from.clone()),
+        Some(args.to.clone()),
+        asr_backend,
+        "dial-transcribe requested",
+    )
+    .await;
     context.session.selected_call = Some(gateway_call_id.clone());
 
     tracing::info!(
@@ -925,7 +1349,7 @@ async fn calls(state: &SharedState) -> DriverResult<CommandOutput> {
             .values()
             .map(|call| {
                 format!(
-                    "{} {} from={} to={} stream={} asr={}",
+                    "{} {} from={} to={} stream={} asr={} tts={}",
                     call.gateway_call_id,
                     call.status.label(),
                     call.from.as_deref().unwrap_or("<unknown>"),
@@ -933,7 +1357,8 @@ async fn calls(state: &SharedState) -> DriverResult<CommandOutput> {
                     call.ids.stream_id.as_deref().unwrap_or("<none>"),
                     call.asr_backend
                         .map(|backend| backend.label())
-                        .unwrap_or("<unbound>")
+                        .unwrap_or("<unbound>"),
+                    call.tts_status_label()
                 )
             })
             .collect()
@@ -1013,6 +1438,7 @@ async fn call_show(
                 .map(|backend| format!("{} ({})", backend.label(), backend.model_label()))
                 .unwrap_or_else(|| "<unbound>".to_string())
         ),
+        format!("tts: {}", call_tts_status(call)),
     ];
     if let Some(reason) = &call.terminal_reason {
         lines.push(format!("ended: {reason}"));
@@ -1031,6 +1457,27 @@ async fn call_show(
         lines,
         effects: Vec::new(),
     })
+}
+
+fn call_tts_status(call: &crate::operator::state::CallSession) -> String {
+    let Some(tts) = &call.tts else {
+        return "idle".to_string();
+    };
+    let mut status = format!(
+        "{} playback={} frames={}/{} text={}",
+        tts.status.label(),
+        tts.playback_id,
+        tts.frames_sent,
+        tts.frames_queued,
+        tts.text_preview
+    );
+    if let Some(mark) = &tts.mark_name {
+        status.push_str(&format!(" mark={mark}"));
+    }
+    if let Some(error) = &tts.error {
+        status.push_str(&format!(" error={error}"));
+    }
+    status
 }
 
 enum CallControlOp {
@@ -1213,7 +1660,11 @@ fn gateway_help(topic: &[String]) -> Option<String> {
         }
         [topic] if topic == "inbound" => Some(inbound_help()),
         [topic] if topic == "asr" => Some(asr_help()),
+        [topic] if topic == "tts" => Some(tts_help()),
         [topic] if topic == "calls" || topic == "call" => Some(call_help()),
+        [topic] if topic == "dial" || topic == "speak" || topic == "outbound" => {
+            Some(outbound_help())
+        }
         [topic] if topic == "answer" || topic == "reject" || topic == "hangup" => {
             Some(call_control_help())
         }
@@ -1262,12 +1713,17 @@ fn gateway_root_help() -> String {
         "  asr list",
         "  asr status",
         "  asr use kroko-2025|sherpa-2023 Select backend for the next answered/dialed call",
+        "  tts status",
         "",
         "Calls:",
         "  calls                          List calls in operator roster order",
         "  call use <call-id>             Select a call for this TUI/socket source",
         "  call show [call-id]            Show selected call detail and assembled transcript",
+        "  status [call-id]               Show gateway status or selected call status",
         "  answer [call-id]               Answer one waiting inbound call",
+        "  dial <+e164> [--from +e164]    Place an outbound call",
+        "  speak [call-id] <text...>      Queue cancellable Piper TTS over the media socket",
+        "  speak cancel [call-id]         Clear active TTS on the selected call",
         "  reject [call-id]",
         "  hangup [call-id]",
         "  transcript follow [call-id]",
@@ -1279,7 +1735,8 @@ fn gateway_root_help() -> String {
         "",
         "Helpful topics:",
         "  help config       help telnyx       help inbound      help asr",
-        "  help call         help transcript   help test         help socket",
+        "  help tts          help call         help outbound     help socket",
+        "  help transcript   help test",
     ]
     .join("\n")
 }
@@ -1298,6 +1755,7 @@ fn status_help() -> String {
         "  selected Telnyx app and phone number",
         "  media codec/sample rate",
         "  capture directory",
+        "  TTS backend",
         "  call count",
         "",
         "Example:",
@@ -1331,7 +1789,7 @@ fn config_help() -> String {
         "  media-codec          PCMU, PCMA, or L16",
         "  media-sample-rate    Sample rate requested from Telnyx for the selected codec",
         "  capture-dir          Directory for replay/capture artifacts",
-        "  from-number          Default outbound caller ID for test dial-transcribe",
+        "  from-number          Default outbound caller ID for dial/test dial-transcribe",
         "  state-path           Default path used by quit/shutdown when no dump path is supplied",
         "",
         "Examples:",
@@ -1340,6 +1798,21 @@ fn config_help() -> String {
         "  config set media-codec PCMU",
         "  config set capture-dir ~/telnyx-test/captures",
         "  config show",
+    ]
+    .join("\n")
+}
+
+fn tts_help() -> String {
+    [
+        "tts status",
+        "",
+        "Show the configured outbound TTS backend and active speech jobs.",
+        "",
+        "Milestone 2 uses Piper when the gateway is built with `--features piper`.",
+        "Without that feature, `speak` returns an unavailable-backend error.",
+        "",
+        "Example:",
+        "  tts status",
     ]
     .join("\n")
 }
@@ -1547,6 +2020,32 @@ fn call_control_help() -> String {
     .join("\n")
 }
 
+fn outbound_help() -> String {
+    [
+        "dial <+e164-or-sip-uri> [--from +e164]",
+        "speak [call-id] <text...>",
+        "speak cancel [call-id]",
+        "status [call-id]",
+        "",
+        "Place an outbound call and send Motlie-generated TTS over the existing bidirectional",
+        "Telnyx media WebSocket. `speak` is non-blocking and cancellable; `speak cancel` sends",
+        "Telnyx clear and drops local queued outbound audio.",
+        "",
+        "Prerequisites:",
+        "  telnyx app use <connection-id>",
+        "  config set media-url <wss-url>",
+        "  config set from-number <outbound-enabled +e164>",
+        "  Telnyx account/application has an Outbound Voice Profile assigned",
+        "",
+        "Examples:",
+        "  dial +15551234567",
+        "  speak Hello from Motlie.",
+        "  speak cancel",
+        "  status",
+    ]
+    .join("\n")
+}
+
 fn test_help() -> String {
     [
         "test dial-transcribe <+e164> [--from +e164]",
@@ -1606,14 +2105,17 @@ fn socket_help() -> String {
         "Protocol:",
         "  Send one command line terminated by newline.",
         "  Receive one JSON object per command:",
-        "    {\"ok\":true,\"lines\":[...],\"effects\":[...],\"error\":null}",
+        "    {\"ok\":true,\"lines\":[...],\"data\":{...},\"effects\":[...],\"error\":null}",
+        "  `data` is present for status, calls, call show, and tts status polling.",
         "",
         "Discovery:",
         "  help",
         "  help socket",
         "  help inbound",
         "  help asr",
+        "  help tts",
         "  help call",
+        "  help dial",
         "",
         "Operational parity:",
         "  TUI and socket both use the same typed command language.",
@@ -1622,6 +2124,11 @@ fn socket_help() -> String {
         "    Calls pane cursor     calls + call use <call-id>",
         "    Calls pane `a` attach call use <call-id>",
         "    Detail pane scroll    transcript follow / call show polling",
+        "  Outbound M2 commands are also shared:",
+        "    dial <+e164> [--from +e164]",
+        "    speak [call-id] <text...>",
+        "    speak cancel [call-id]",
+        "    hangup [call-id]",
         "",
         "Source-local state:",
         "  Each socket connection has its own selected call and next ASR backend.",
@@ -1641,12 +2148,19 @@ fn expand_user_path(value: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use motlie_driver::CommandEngine;
+    use tokio::sync::mpsc;
+    use tokio::time::{timeout, Duration};
 
     use super::*;
     use crate::adapter::LiveAsrBackend;
     use crate::call_control::TelnyxClient;
-    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
+    use crate::operator::state::{
+        shared_state, CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus,
+    };
+    use crate::tts::{StaticTtsFactory, TtsRegistry};
 
     #[tokio::test]
     async fn inbound_is_disabled_by_default() {
@@ -1988,6 +2502,231 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dial_creates_outbound_call_session_for_tts() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        {
+            let mut guard = state.write().await;
+            guard.config.selected_connection_id = Some("conn-1".to_string());
+            guard.config.default_from_number = Some("+15550000001".to_string());
+            guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+            guard.config.public_webhook_url =
+                Some("https://example.test/telnyx/webhooks".to_string());
+        }
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine
+            .run_line("dial +15550000002")
+            .await
+            .expect("dial should create dry-run outbound call");
+
+        assert!(output.lines[0].starts_with("dial requested for gwc_"));
+        let guard = state.read().await;
+        let call_id = engine
+            .context()
+            .session
+            .selected_call
+            .as_deref()
+            .expect("outbound dial should select call");
+        let call = guard.calls.get(call_id).expect("call should exist");
+        assert_eq!(
+            call.direction,
+            crate::operator::state::CallDirection::Outbound
+        );
+        assert_eq!(call.status, CallStatus::Dialing);
+        assert_eq!(call.from.as_deref(), Some("+15550000001"));
+        assert_eq!(call.to.as_deref(), Some("+15550000002"));
+        assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
+        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
+    }
+
+    #[tokio::test]
+    async fn speak_queues_tts_frames_over_media_registry() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        let media = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        media.register_call(call_id.clone(), tx).await;
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = context_with_static_tts(state.clone(), telnyx, media);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let output = engine
+            .run_line("speak Hello from Motlie.")
+            .await
+            .expect("speak should queue TTS");
+
+        assert!(output.lines[0].contains("speak queued"));
+        let mut frames = 0usize;
+        let mut mark_playback = None;
+        for _ in 0..8 {
+            match receive_outbound(&mut rx).await {
+                OutboundMediaCommand::Frame(frame) => {
+                    frames = frames.saturating_add(1);
+                    assert!(!frame.payload.is_empty());
+                }
+                OutboundMediaCommand::Mark { playback_id } => {
+                    mark_playback = Some(playback_id);
+                    break;
+                }
+                OutboundMediaCommand::Clear { .. } => panic!("speak should not clear media"),
+            }
+        }
+
+        assert_eq!(frames, 5);
+        assert!(mark_playback.is_some());
+        let guard = state.read().await;
+        let tts = guard
+            .calls
+            .get(&call_id)
+            .and_then(|call| call.tts.as_ref())
+            .expect("tts state should exist");
+        assert_eq!(tts.status, TtsPlaybackStatus::Playing);
+        assert_eq!(tts.frames_queued, 5);
+        assert_eq!(tts.frames_sent, 0);
+    }
+
+    #[tokio::test]
+    async fn speak_cancel_sends_clear_and_cancels_active_job() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        let media = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media.register_call(call_id.clone(), tx).await;
+        let cancel = SpeechCancelToken::default();
+        media
+            .start_speech(&call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        state
+            .write()
+            .await
+            .start_tts_job(&call_id, "tts_test".to_string(), "hello");
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = context_with_static_tts(state.clone(), telnyx, media);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let output = engine
+            .run_line("speak cancel")
+            .await
+            .expect("cancel should send clear");
+
+        assert_eq!(
+            output.lines,
+            vec![format!(
+                "speak cancel requested for {call_id} playback=tts_test"
+            )]
+        );
+        assert!(cancel.is_canceled());
+        let guard = state.read().await;
+        let status = guard
+            .calls
+            .get(&call_id)
+            .and_then(|call| call.tts.as_ref())
+            .map(|tts| tts.status)
+            .expect("tts status should exist");
+        assert_eq!(status, TtsPlaybackStatus::Canceling);
+    }
+
+    #[tokio::test]
+    async fn speak_rejects_overlapping_active_tts_job() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        let media = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media.register_call(call_id.clone(), tx).await;
+        media
+            .start_speech(
+                &call_id,
+                "tts_existing".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("register active speech");
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = context_with_static_tts(state, telnyx, media);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let error = engine
+            .run_line("speak overlapping speech")
+            .await
+            .expect_err("overlapping speech should be rejected");
+
+        assert!(error.to_string().contains("active speech job"));
+    }
+
+    #[tokio::test]
+    async fn command_sources_keep_speech_selection_isolated() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let (call_one, call_two) = {
+            let mut guard = state.write().await;
+            (
+                add_streaming_call(&mut guard, "call-1", "stream-1"),
+                add_streaming_call(&mut guard, "call-2", "stream-2"),
+            )
+        };
+        let media = SharedMediaRegistry::default();
+        let (tx_one, mut rx_one) = mpsc::channel(16);
+        let (tx_two, mut rx_two) = mpsc::channel(16);
+        media.register_call(call_one.clone(), tx_one).await;
+        media.register_call(call_two.clone(), tx_two).await;
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let base = context_with_static_tts(state, telnyx, media);
+        let mut tui_engine =
+            CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
+        let mut socket_engine =
+            CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
+
+        tui_engine
+            .run_line(&format!("call use {call_one}"))
+            .await
+            .expect("TUI call use");
+        socket_engine
+            .run_line(&format!("call use {call_two}"))
+            .await
+            .expect("socket call use");
+        tui_engine
+            .run_line("speak TUI source says hello.")
+            .await
+            .expect("TUI speak");
+        socket_engine
+            .run_line("speak Socket source says hello.")
+            .await
+            .expect("socket speak");
+
+        let first_playback = receive_frame_playback(&mut rx_one).await;
+        let second_playback = receive_frame_playback(&mut rx_two).await;
+        assert_ne!(first_playback, second_playback);
+        assert_eq!(tui_engine.context().session.selected_call, Some(call_one));
+        assert_eq!(
+            socket_engine.context().session.selected_call,
+            Some(call_two)
+        );
+    }
+
+    #[tokio::test]
     async fn call_show_returns_assembled_transcript() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = {
@@ -2095,5 +2834,64 @@ mod tests {
             None,
             CallStatus::PendingInbound,
         )
+    }
+
+    fn add_streaming_call(
+        state: &mut GatewayState,
+        call_control_id: &str,
+        stream_id: &str,
+    ) -> String {
+        let call_id = state.add_or_update_outbound_call(
+            TelnyxIds {
+                call_control_id: call_control_id.to_string(),
+                call_session_id: Some(format!("session-{call_control_id}")),
+                call_leg_id: Some(format!("leg-{call_control_id}")),
+                stream_id: Some(stream_id.to_string()),
+            },
+            Some("+15550000001".to_string()),
+            Some("+15550000002".to_string()),
+            CallStatus::MediaStarted,
+        );
+        let call = state
+            .calls
+            .get_mut(&call_id)
+            .expect("new streaming call should exist");
+        call.media = MediaMetadata {
+            stream_id: Some(stream_id.to_string()),
+            encoding: Some("PCMU".to_string()),
+            sample_rate_hz: Some(8_000),
+            channels: Some(1),
+            track: Some("inbound".to_string()),
+        };
+        call.asr_backend = Some(LiveAsrBackend::Kroko2025);
+        call_id
+    }
+
+    fn context_with_static_tts(
+        state: SharedState,
+        telnyx: TelnyxClient,
+        media: SharedMediaRegistry,
+    ) -> GatewayContext {
+        let tts = Arc::new(TtsRegistry::new(Arc::new(StaticTtsFactory::new(vec![
+            1_000;
+            2_205
+        ]))));
+        GatewayContext::with_services(state, telnyx, media, tts, LiveAsrBackend::Kroko2025)
+    }
+
+    async fn receive_outbound(
+        rx: &mut mpsc::Receiver<OutboundMediaCommand>,
+    ) -> OutboundMediaCommand {
+        timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("outbound media command should arrive")
+            .expect("outbound media channel should remain open")
+    }
+
+    async fn receive_frame_playback(rx: &mut mpsc::Receiver<OutboundMediaCommand>) -> String {
+        match receive_outbound(rx).await {
+            OutboundMediaCommand::Frame(frame) => frame.playback_id,
+            other => panic!("expected outbound frame, got {other:?}"),
+        }
     }
 }

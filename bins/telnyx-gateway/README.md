@@ -199,6 +199,106 @@ Outbound Profile assigned`, create or select an Outbound Voice Profile in the
 Telnyx portal and add the Call Control application to that profile before
 running `test dial-transcribe` again.
 
+### M2 Outbound TTS Live Test
+
+Milestone 2 adds operator-driven outbound calls plus Piper TTS over the same
+bidirectional Telnyx media WebSocket. The inbound ASR read loop remains live
+while TTS is playing so the same call can be inspected with `call show` or
+`status <call-id>`.
+
+Prerequisites:
+
+- `TELNYX_API_KEY` is exported.
+- Tailscale Funnel or equivalent proxies `/` to `http://127.0.0.1:8080`.
+- The selected Telnyx Call Control application has an Outbound Voice Profile.
+- The `from-number` is outbound-enabled for that profile.
+- Piper artifacts can be downloaded through the curated catalog, or are already
+  present under the gateway artifact root.
+
+Start a TUI session with an agent socket:
+
+```sh
+cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
+rm -f /tmp/motlie-telnyx-gateway.sock
+: > /home/dchung/telnyx-gateway-live.log
+
+env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
+  TELNYX_API_KEY="$TELNYX_API_KEY" \
+  cargo run -p motlie-telnyx-gateway --features "sherpa piper" -- \
+    --tui \
+    --bind 127.0.0.1:8080 \
+    --load /home/dchung/telnyx-test/config.repl \
+    --socket /tmp/motlie-telnyx-gateway.sock \
+    --log-file /home/dchung/telnyx-gateway-live.log \
+    --capture-dir /home/dchung/telnyx-test/captures
+```
+
+If the replay file is not loaded or needs changes, run these in the TUI shell:
+
+```text
+config set webhook-url https://<host>/telnyx/webhooks
+config set media-url wss://<host>/telnyx/media
+config set media-codec PCMU
+config set from-number +15551234567
+telnyx app use <connection-id>
+telnyx app webhook set https://<host>/telnyx/webhooks
+tts status
+```
+
+Operator TUI flow:
+
+```text
+dial +14155550123
+calls
+call use <gateway-call-id>
+status <gateway-call-id>
+speak Hello, this is a Motlie outbound voice test.
+speak cancel
+speak The second sentence should start after the clear command.
+call show
+hangup
+```
+
+Agent socket flow uses the same commands and returns one JSON response per line.
+For `status`, `calls`, `call show`, and `tts status`, the response includes a
+machine-readable `data` object in addition to human-readable `lines`:
+
+```sh
+python3 - <<'PY'
+import json, socket
+
+commands = [
+    "status",
+    "tts status",
+    "dial +14155550123",
+    "calls",
+]
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/tmp/motlie-telnyx-gateway.sock")
+for command in commands:
+    sock.sendall((command + "\n").encode())
+    print(command)
+    print(json.dumps(json.loads(sock.recv(65536)), indent=2))
+PY
+```
+
+During validation, record for each call:
+
+- outbound `to` and `from-number`
+- selected ASR backend from `status`
+- media codec/sample rate from `call show`
+- whether `speak` reaches `mark-sent` and then `completed`
+- whether `speak cancel` sends clear and stops queued speech
+- whether the human's speech still appears in the assembled transcript while TTS
+  is active
+
+Expected structured log events include `call.outbound.dial`, `media.started`,
+`tts.speak.queued`, `tts.clear.sent`, `tts.mark.sent`, `tts.mark.received`,
+`transcript.partial`, and `transcript.final`. A Telnyx `403 D38` response means
+the Outbound Voice Profile or outbound-enabled caller ID prerequisite is not
+satisfied.
+
 1. Expose the local listener with Tailscale Funnel:
 
    ```sh
