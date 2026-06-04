@@ -241,6 +241,7 @@ impl LogLevel {
 pub struct GatewayState {
     pub config: GatewayConfig,
     pub inbound_mode: InboundMode,
+    pub started_at: DateTime<Utc>,
     pub calls: BTreeMap<String, CallSession>,
     pub call_control_index: BTreeMap<String, String>,
     pub stream_index: BTreeMap<String, String>,
@@ -270,6 +271,7 @@ impl GatewayState {
                 ..GatewayConfig::default()
             },
             inbound_mode: InboundMode::Disabled,
+            started_at: Utc::now(),
             calls: BTreeMap::new(),
             call_control_index: BTreeMap::new(),
             stream_index: BTreeMap::new(),

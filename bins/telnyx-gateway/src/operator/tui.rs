@@ -1,6 +1,7 @@
 use std::io::{self, Stdout};
 use std::time::Duration;
 
+use chrono::{DateTime, Local, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -8,7 +9,7 @@ use crossterm::terminal::{
 };
 use motlie_driver::{CommandEffect, CommandEngine};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Position};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -36,11 +37,84 @@ impl FocusedPane {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct ShellInput {
+    text: String,
+    cursor_chars: usize,
+}
+
+impl ShellInput {
+    fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor_chars = 0;
+    }
+
+    fn insert(&mut self, ch: char) {
+        let byte_index = char_to_byte_index(&self.text, self.cursor_chars);
+        self.text.insert(byte_index, ch);
+        self.cursor_chars = self.cursor_chars.saturating_add(1);
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_chars == 0 {
+            return;
+        }
+        let start = char_to_byte_index(&self.text, self.cursor_chars - 1);
+        let end = char_to_byte_index(&self.text, self.cursor_chars);
+        self.text.replace_range(start..end, "");
+        self.cursor_chars -= 1;
+    }
+
+    fn delete(&mut self) {
+        if self.cursor_chars >= self.text.chars().count() {
+            return;
+        }
+        let start = char_to_byte_index(&self.text, self.cursor_chars);
+        let end = char_to_byte_index(&self.text, self.cursor_chars + 1);
+        self.text.replace_range(start..end, "");
+    }
+
+    fn move_left(&mut self) {
+        self.cursor_chars = self.cursor_chars.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        self.cursor_chars = self
+            .cursor_chars
+            .saturating_add(1)
+            .min(self.text.chars().count());
+    }
+
+    fn move_home(&mut self) {
+        self.cursor_chars = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor_chars = self.text.chars().count();
+    }
+
+    fn cursor_chars(&self) -> usize {
+        self.cursor_chars
+    }
+}
+
+fn char_to_byte_index(text: &str, cursor_chars: usize) -> usize {
+    text.char_indices()
+        .nth(cursor_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
 pub async fn run_tui(
     engine: &mut CommandEngine<GatewayContext, GatewayCommand>,
 ) -> anyhow::Result<()> {
     let mut terminal = TerminalGuard::enter()?;
-    let mut input = String::new();
+    let host = host_label();
+    let mut input = ShellInput::default();
     let mut history = vec!["telnyx-gateway TUI ready".to_string()];
     let mut focus = FocusedPane::Shell;
 
@@ -48,7 +122,7 @@ pub async fn run_tui(
         let state = engine.context().state.read().await.clone();
         engine.context_mut().session.ensure_valid_selection(&state);
         let session = engine.context().session.clone();
-        terminal.draw(|frame| draw(frame, &state, &session, &history, &input, focus))?;
+        terminal.draw(|frame| draw(frame, &state, &session, &history, &input, focus, &host))?;
 
         if state.shutdown_requested {
             break;
@@ -70,7 +144,7 @@ pub async fn run_tui(
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Tab => focus = focus.next(),
             KeyCode::Enter if focus == FocusedPane::Shell => {
-                let command = input.trim().to_string();
+                let command = input.as_str().trim().to_string();
                 input.clear();
                 if command.is_empty() {
                     continue;
@@ -88,7 +162,13 @@ pub async fn run_tui(
                 trim_history(&mut history);
             }
             KeyCode::Char(ch) => match focus {
-                FocusedPane::Shell => input.push(ch),
+                FocusedPane::Shell
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    input.insert(ch);
+                }
                 FocusedPane::Calls if ch == 'a' => {
                     let message = attach_selected(engine.context_mut()).await;
                     history.push(message);
@@ -99,7 +179,22 @@ pub async fn run_tui(
                 _ => {}
             },
             KeyCode::Backspace if focus == FocusedPane::Shell => {
-                let _ = input.pop();
+                input.backspace();
+            }
+            KeyCode::Delete if focus == FocusedPane::Shell => {
+                input.delete();
+            }
+            KeyCode::Left if focus == FocusedPane::Shell => {
+                input.move_left();
+            }
+            KeyCode::Right if focus == FocusedPane::Shell => {
+                input.move_right();
+            }
+            KeyCode::Home if focus == FocusedPane::Shell => {
+                input.move_home();
+            }
+            KeyCode::End if focus == FocusedPane::Shell => {
+                input.move_end();
             }
             KeyCode::Up => match focus {
                 FocusedPane::Calls => select_relative(engine.context_mut(), -1).await,
@@ -153,13 +248,20 @@ fn draw(
     state: &GatewayState,
     session: &OperatorSession,
     history: &[String],
-    input: &str,
+    input: &ShellInput,
     focus: FocusedPane,
+    host: &str,
 ) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(frame.area());
+    render_status_bar(frame, outer[0], state, session, host);
+
     let root = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(frame.area());
+        .split(outer[1]);
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
@@ -167,7 +269,12 @@ fn draw(
 
     let shell_inner_height = root[0].height.saturating_sub(2) as usize;
     let shell_inner_width = root[0].width.saturating_sub(2) as usize;
-    let shell_view = build_shell_view(history, input, shell_inner_height, shell_inner_width);
+    let shell_view = build_shell_view(
+        history,
+        input.as_str(),
+        shell_inner_height,
+        shell_inner_width,
+    );
     frame.render_widget(
         Paragraph::new(shell_view.lines)
             .block(focused_block("Shell", FocusedPane::Shell, focus))
@@ -230,6 +337,163 @@ fn draw(
             .scroll((session.detail_scroll, 0)),
         right[1],
     );
+}
+
+const STATUS_BAR_BG: Color = Color::Rgb(0, 43, 85);
+const STATUS_BAR_FG: Color = Color::White;
+const STATUS_BAR_KEY_FG: Color = Color::LightCyan;
+
+fn render_status_bar(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &GatewayState,
+    session: &OperatorSession,
+    host: &str,
+) {
+    let now = Local::now();
+    let line = status_bar_line(state, session, host, now, area.width as usize);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG)),
+        area,
+    );
+}
+
+fn status_bar_line(
+    state: &GatewayState,
+    session: &OperatorSession,
+    host: &str,
+    now: DateTime<Local>,
+    width: usize,
+) -> Line<'static> {
+    let right_text = status_bar_right_text(state, now);
+    let right_text = truncate_chars(&right_text, right_text.chars().count().min(width));
+    let max_left_width = width.saturating_sub(right_text.chars().count());
+    let left_text = truncate_chars(&status_bar_left_text(state, session, host), max_left_width);
+    let padding = width.saturating_sub(left_text.chars().count() + right_text.chars().count());
+
+    Line::from(vec![
+        Span::styled(
+            left_text,
+            Style::default()
+                .fg(STATUS_BAR_FG)
+                .bg(STATUS_BAR_BG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " ".repeat(padding),
+            Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG),
+        ),
+        Span::styled(
+            right_text,
+            Style::default().fg(STATUS_BAR_KEY_FG).bg(STATUS_BAR_BG),
+        ),
+    ])
+}
+
+fn status_bar_left_text(state: &GatewayState, session: &OperatorSession, host: &str) -> String {
+    let webhook_url = state.config.public_webhook_url.as_deref();
+    let media_url = state.config.public_media_url.as_deref();
+    let public = webhook_url
+        .or(media_url)
+        .and_then(public_origin)
+        .unwrap_or_else(|| "<unset>".to_string());
+    let webhook_path = webhook_url
+        .map(public_path)
+        .unwrap_or_else(|| "<unset>".to_string());
+    let media_path = media_url
+        .map(public_path)
+        .unwrap_or_else(|| "<unset>".to_string());
+    format!(
+        " telnyx host={} bind={} public={} webhook={} media={} app={} number={} inbound={} asr={}",
+        host,
+        state
+            .config
+            .bind
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        public,
+        webhook_path,
+        media_path,
+        state
+            .config
+            .selected_connection_id
+            .as_deref()
+            .unwrap_or("<unset>"),
+        state
+            .config
+            .selected_phone_number
+            .as_deref()
+            .unwrap_or("<unset>"),
+        state.inbound_mode.label(),
+        session.next_asr_backend.label()
+    )
+}
+
+fn status_bar_right_text(state: &GatewayState, now: DateTime<Local>) -> String {
+    let now_utc = now.with_timezone(&Utc);
+    let age = format_age(now_utc.signed_duration_since(state.started_at));
+    let started = state
+        .started_at
+        .with_timezone(&Local)
+        .format("%m-%d %H:%M:%S")
+        .to_string();
+    format!(" age={age} start={started} now={} ", now.format("%H:%M:%S"))
+}
+
+fn public_origin(url: &str) -> Option<String> {
+    let scheme_end = url.find("://")?;
+    let rest_start = scheme_end + 3;
+    let rest = &url[rest_start..];
+    let host_len = rest.find('/').unwrap_or(rest.len());
+    if host_len == 0 {
+        return None;
+    }
+    Some(url[..rest_start + host_len].to_string())
+}
+
+fn public_path(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let rest_start = scheme_end + 3;
+    let rest = &url[rest_start..];
+    let Some(path_offset) = rest.find('/') else {
+        return "/".to_string();
+    };
+    let path = &rest[path_offset..];
+    path.split('?').next().unwrap_or(path).to_string()
+}
+
+fn format_age(age: chrono::Duration) -> String {
+    let total_seconds = age.num_seconds().max(0);
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m{seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn truncate_chars(text: &str, width: usize) -> String {
+    text.chars().take(width).collect()
+}
+
+fn host_label() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 fn focused_block(title: &'static str, pane: FocusedPane, focus: FocusedPane) -> Block<'static> {
@@ -296,9 +560,9 @@ fn display_rows(text: &str, width: usize) -> usize {
 
 fn set_shell_cursor(
     frame: &mut ratatui::Frame<'_>,
-    area: ratatui::layout::Rect,
+    area: Rect,
     prompt_row: u16,
-    input: &str,
+    input: &ShellInput,
 ) {
     if area.width <= 2 || area.height <= 2 {
         return;
@@ -306,7 +570,7 @@ fn set_shell_cursor(
 
     let inner_width = area.width.saturating_sub(2);
     let prompt_y = area.y + 1 + prompt_row.min(area.height.saturating_sub(3));
-    let prompt_offset = 2 + input.chars().count() as u16;
+    let prompt_offset = 2 + input.cursor_chars() as u16;
     let cursor_offset = prompt_offset.min(inner_width.saturating_sub(1));
     frame.set_cursor_position(Position::new(area.x + 1 + cursor_offset, prompt_y));
 }
@@ -480,5 +744,63 @@ mod tests {
 
         assert_eq!(view.prompt_row, 0);
         assert_eq!(view.lines.len(), 1);
+    }
+
+    #[test]
+    fn shell_input_edits_at_cursor() {
+        let mut input = ShellInput::default();
+        for ch in "abcd".chars() {
+            input.insert(ch);
+        }
+
+        input.move_left();
+        input.move_left();
+        input.insert('X');
+
+        assert_eq!(input.as_str(), "abXcd");
+        assert_eq!(input.cursor_chars(), 3);
+    }
+
+    #[test]
+    fn shell_input_backspace_and_delete_are_unicode_safe() {
+        let mut input = ShellInput::default();
+        for ch in "aé日b".chars() {
+            input.insert(ch);
+        }
+
+        input.move_left();
+        input.backspace();
+        input.delete();
+
+        assert_eq!(input.as_str(), "aé");
+        assert_eq!(input.cursor_chars(), 2);
+    }
+
+    #[test]
+    fn status_bar_left_text_includes_gateway_identity() {
+        let mut state = GatewayState::new("127.0.0.1:8080".parse().expect("valid addr"));
+        state.config.public_webhook_url = Some("https://example.test/telnyx/webhooks".to_string());
+        state.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+        state.config.selected_connection_id = Some("conn-1".to_string());
+        state.config.selected_phone_number = Some("+15550000001".to_string());
+        let session = OperatorSession::new(state.config.asr_backend);
+
+        let text = status_bar_left_text(&state, &session, "host-a");
+
+        assert!(text.contains("host=host-a"));
+        assert!(text.contains("bind=127.0.0.1:8080"));
+        assert!(text.contains("public=https://example.test"));
+        assert!(text.contains("webhook=/telnyx/webhooks"));
+        assert!(text.contains("media=/telnyx/media"));
+        assert!(text.contains("app=conn-1"));
+        assert!(text.contains("number=+15550000001"));
+    }
+
+    #[test]
+    fn status_age_is_compact() {
+        assert_eq!(format_age(chrono::Duration::seconds(-1)), "0s");
+        assert_eq!(format_age(chrono::Duration::seconds(9)), "9s");
+        assert_eq!(format_age(chrono::Duration::seconds(65)), "1m05s");
+        assert_eq!(format_age(chrono::Duration::seconds(3661)), "1h01m01s");
     }
 }
