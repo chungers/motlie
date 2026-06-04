@@ -744,6 +744,16 @@ mstream snapshot issue-337-tmux-fleet-api --max-chars 12000
 mstream summary-input issue-337-tmux-fleet-api --max-chars 12000
 ```
 
+These read the daemon's **passively-buffered timeline**: mstream records workstream
+activity continuously, so you can answer "what is agent X doing?" on demand —
+including ad-hoc user questions — with no prior trigger or capture step. Query these
+instead of shelling out to raw `ssh <host> tmux capture-pane` (or other direct host
+probes): `status` is the cheapest liveness check, `summary-input` the fastest "what
+is it doing right now", `events --readable` the human timeline, and `snapshot` the
+live pane. Reserve direct tmux/host probes for state mstream genuinely cannot surface,
+and per Prerequisites prefer asking the user or adding an mstream capability over
+ad-hoc SSH.
+
 Use `mstream status` liveness fields to decide when to look deeper:
 `activity_hint`, `tmux_present`, `last_output_secs`, and
 `observed_activity_idle_secs`. `active` means recent tmux input or output,
