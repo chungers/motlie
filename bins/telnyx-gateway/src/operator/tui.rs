@@ -256,7 +256,7 @@ fn draw(
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(frame.area());
-    render_status_bar(frame, outer[0], state, session, host);
+    render_status_bar(frame, outer[0], state, host);
 
     let root = Layout::default()
         .direction(Direction::Horizontal)
@@ -343,15 +343,9 @@ const STATUS_BAR_BG: Color = Color::Rgb(0, 43, 85);
 const STATUS_BAR_FG: Color = Color::White;
 const STATUS_BAR_KEY_FG: Color = Color::LightCyan;
 
-fn render_status_bar(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    state: &GatewayState,
-    session: &OperatorSession,
-    host: &str,
-) {
+fn render_status_bar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &GatewayState, host: &str) {
     let now = Local::now();
-    let line = status_bar_line(state, session, host, now, area.width as usize);
+    let line = status_bar_line(state, host, now, area.width as usize);
     frame.render_widget(
         Paragraph::new(line).style(Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG)),
         area,
@@ -360,7 +354,6 @@ fn render_status_bar(
 
 fn status_bar_line(
     state: &GatewayState,
-    session: &OperatorSession,
     host: &str,
     now: DateTime<Local>,
     width: usize,
@@ -368,7 +361,7 @@ fn status_bar_line(
     let right_text = status_bar_right_text(state, now);
     let right_text = truncate_chars(&right_text, right_text.chars().count().min(width));
     let max_left_width = width.saturating_sub(right_text.chars().count());
-    let left_text = truncate_chars(&status_bar_left_text(state, session, host), max_left_width);
+    let left_text = truncate_chars(&status_bar_left_text(state, host), max_left_width);
     let padding = width.saturating_sub(left_text.chars().count() + right_text.chars().count());
 
     Line::from(vec![
@@ -390,9 +383,9 @@ fn status_bar_line(
     ])
 }
 
-fn status_bar_left_text(state: &GatewayState, session: &OperatorSession, host: &str) -> String {
+fn status_bar_left_text(state: &GatewayState, host: &str) -> String {
     format!(
-        " telnyx | {} | {} | {} | {} | {}",
+        " telnyx | {} | {} | {}",
         host,
         state
             .config
@@ -403,9 +396,7 @@ fn status_bar_left_text(state: &GatewayState, session: &OperatorSession, host: &
             .config
             .public_media_url
             .as_deref()
-            .unwrap_or("<media unset>"),
-        state.inbound_mode.label(),
-        session.next_asr_backend.label()
+            .unwrap_or("<media unset>")
     )
 }
 
@@ -740,13 +731,12 @@ mod tests {
         state.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
         state.config.selected_connection_id = Some("conn-1".to_string());
         state.config.selected_phone_number = Some("+15550000001".to_string());
-        let session = OperatorSession::new(state.config.asr_backend);
 
-        let text = status_bar_left_text(&state, &session, "host-a");
+        let text = status_bar_left_text(&state, "host-a");
 
         assert_eq!(
             text,
-            " telnyx | host-a | https://example.test/telnyx/webhooks | wss://example.test/telnyx/media | disabled | kroko-2025"
+            " telnyx | host-a | https://example.test/telnyx/webhooks | wss://example.test/telnyx/media"
         );
         assert!(!text.contains("host="));
         assert!(!text.contains("bind="));
@@ -754,6 +744,8 @@ mod tests {
         assert!(!text.contains("media="));
         assert!(!text.contains("conn-1"));
         assert!(!text.contains("+15550000001"));
+        assert!(!text.contains("disabled"));
+        assert!(!text.contains("kroko-2025"));
     }
 
     #[test]
