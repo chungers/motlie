@@ -9,11 +9,17 @@ use motlie_telnyx_gateway::adapter::{
 };
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
+use motlie_telnyx_gateway::media::SharedMediaRegistry;
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
 use motlie_telnyx_gateway::operator::script::run_repl_file;
 use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
 use motlie_telnyx_gateway::replay::ReplayBackend;
 use motlie_telnyx_gateway::serve::{serve, AppServices};
+#[cfg(not(feature = "piper"))]
+use motlie_telnyx_gateway::tts::unavailable_registry;
+use motlie_telnyx_gateway::tts::SharedTtsRegistry;
+#[cfg(feature = "piper")]
+use motlie_telnyx_gateway::tts::{SharedTtsFactory, TtsRegistry};
 use tokio::time::{self, Duration};
 
 #[tokio::main]
@@ -90,14 +96,17 @@ async fn main() -> anyhow::Result<()> {
     let api_key = std::env::var(&cli.telnyx_api_key_env).ok();
     let telnyx = TelnyxClient::new(cli.telnyx_api_base.clone(), api_key, cli.dry_run_telnyx);
     let asr = build_live_asr_registry(&cli);
+    let media = SharedMediaRegistry::default();
+    let tts = build_tts_registry(&cli);
     let services = AppServices {
         state: state.clone(),
         telnyx: telnyx.clone(),
         asr,
+        media: media.clone(),
     };
 
     let server = tokio::spawn(serve(cli.bind, services));
-    let context = GatewayContext::with_asr_backend(state.clone(), telnyx, cli.asr_backend);
+    let context = GatewayContext::with_services(state.clone(), telnyx, media, tts, cli.asr_backend);
     let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
 
     if let Some(path) = &cli.load {
@@ -175,6 +184,24 @@ fn print_corpus_report(report: &motlie_telnyx_gateway::replay::CorpusReplayRepor
         for replay in &entry.reports {
             print_replay_report_with_indent(replay, "  ");
         }
+    }
+}
+
+fn build_tts_registry(cli: &Cli) -> SharedTtsRegistry {
+    #[cfg(feature = "piper")]
+    {
+        let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+        let piper: SharedTtsFactory = Arc::new(motlie_telnyx_gateway::tts::PiperTtsFactory::new(
+            artifact_root,
+            !cli.no_asr_download,
+        ));
+        Arc::new(TtsRegistry::new(piper))
+    }
+
+    #[cfg(not(feature = "piper"))]
+    {
+        let _ = cli;
+        unavailable_registry()
     }
 }
 

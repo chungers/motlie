@@ -2,6 +2,9 @@ use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -11,15 +14,18 @@ use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
 use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
 use motlie_voice::VoiceError;
 use serde::Deserialize;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{
     AsrTranscriptEvent, AsrTranscriptSuppressionReason, InboundAsrSession, LiveAsrBackend,
     SharedAsrRegistry,
 };
+use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::operator::state::{
     CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
 };
+use crate::tts::PIPER_SAMPLE_RATE_HZ;
 
 mod capture;
 
@@ -31,6 +37,7 @@ const LOW_ENERGY_HANGOVER_FRAMES: usize = 75;
 const PCMU_SILENCE_BYTE: u8 = 0xff;
 const PCMA_SILENCE_BYTE: u8 = 0xd5;
 const SILENCE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(20);
+const OUTBOUND_MEDIA_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EncodedMediaFrame {
@@ -88,6 +95,167 @@ struct StopEvent {
     stream_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct MarkEvent {
+    mark: MarkPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkPayload {
+    name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutboundMediaFrame {
+    pub playback_id: String,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub enum OutboundMediaCommand {
+    Frame(OutboundMediaFrame),
+    Clear { playback_id: String },
+    Mark { playback_id: String },
+}
+
+impl OutboundMediaCommand {
+    fn playback_id(&self) -> &str {
+        match self {
+            Self::Frame(frame) => &frame.playback_id,
+            Self::Clear { playback_id } | Self::Mark { playback_id } => playback_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SpeechCancelToken {
+    canceled: Arc<AtomicBool>,
+}
+
+impl SpeechCancelToken {
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone)]
+pub struct CallMediaHandle {
+    tx: mpsc::Sender<OutboundMediaCommand>,
+}
+
+impl CallMediaHandle {
+    pub async fn send(&self, command: OutboundMediaCommand) -> anyhow::Result<()> {
+        self.tx
+            .send(command)
+            .await
+            .context("send outbound media command")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ActiveSpeechJob {
+    playback_id: String,
+    cancel: SpeechCancelToken,
+}
+
+#[derive(Clone)]
+struct MediaRegistryEntry {
+    tx: mpsc::Sender<OutboundMediaCommand>,
+    active_speech: Option<ActiveSpeechJob>,
+    pending_clear: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct SharedMediaRegistry {
+    inner: Arc<Mutex<HashMap<String, MediaRegistryEntry>>>,
+}
+
+impl SharedMediaRegistry {
+    pub async fn register_call(
+        &self,
+        gateway_call_id: String,
+        tx: mpsc::Sender<OutboundMediaCommand>,
+    ) {
+        self.inner.lock().await.insert(
+            gateway_call_id,
+            MediaRegistryEntry {
+                tx,
+                active_speech: None,
+                pending_clear: None,
+            },
+        );
+    }
+
+    pub async fn unregister_call(&self, gateway_call_id: &str) {
+        self.inner.lock().await.remove(gateway_call_id);
+    }
+
+    pub async fn start_speech(
+        &self,
+        gateway_call_id: &str,
+        playback_id: String,
+        cancel: SpeechCancelToken,
+    ) -> anyhow::Result<CallMediaHandle> {
+        let mut guard = self.inner.lock().await;
+        let entry = guard
+            .get_mut(gateway_call_id)
+            .with_context(|| format!("media stream is not ready for call {gateway_call_id}"))?;
+        if let Some(active) = &entry.active_speech {
+            bail!(
+                "active speech job {} already exists for call {}; run speak cancel first",
+                active.playback_id,
+                gateway_call_id
+            );
+        }
+        entry.active_speech = Some(ActiveSpeechJob {
+            playback_id,
+            cancel,
+        });
+        Ok(CallMediaHandle {
+            tx: entry.tx.clone(),
+        })
+    }
+
+    pub async fn cancel_speech(&self, gateway_call_id: &str) -> anyhow::Result<String> {
+        let mut guard = self.inner.lock().await;
+        let entry = guard
+            .get_mut(gateway_call_id)
+            .with_context(|| format!("media stream is not ready for call {gateway_call_id}"))?;
+        let active = entry
+            .active_speech
+            .take()
+            .with_context(|| format!("no active speech job for call {gateway_call_id}"))?;
+        active.cancel.cancel();
+        entry.pending_clear = Some(active.playback_id.clone());
+        Ok(active.playback_id)
+    }
+
+    async fn take_pending_clear(&self, gateway_call_id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .await
+            .get_mut(gateway_call_id)?
+            .pending_clear
+            .take()
+    }
+
+    pub async fn finish_speech(&self, gateway_call_id: &str, playback_id: &str) {
+        if let Some(entry) = self.inner.lock().await.get_mut(gateway_call_id) {
+            if entry
+                .active_speech
+                .as_ref()
+                .is_some_and(|active| active.playback_id == playback_id)
+            {
+                entry.active_speech = None;
+            }
+        }
+    }
+}
+
 struct MediaSocketState {
     session: Option<Box<dyn InboundAsrSession>>,
     gateway_call_id: Option<String>,
@@ -99,10 +267,19 @@ struct MediaSocketState {
     silence_keepalive: bool,
     silence_keepalive_frames: usize,
     capture: Option<MediaCapture>,
+    outbound_rx: Option<mpsc::Receiver<OutboundMediaCommand>>,
+    outbound_pending: VecDeque<OutboundMediaCommand>,
+    canceled_playbacks: HashSet<String>,
+    media_registry: SharedMediaRegistry,
 }
 
 impl MediaSocketState {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_media_registry(SharedMediaRegistry::default())
+    }
+
+    fn with_media_registry(media_registry: SharedMediaRegistry) -> Self {
         Self {
             session: None,
             gateway_call_id: None,
@@ -114,12 +291,21 @@ impl MediaSocketState {
             silence_keepalive: false,
             silence_keepalive_frames: 0,
             capture: None,
+            outbound_rx: None,
+            outbound_pending: VecDeque::new(),
+            canceled_playbacks: HashSet::new(),
+            media_registry,
         }
     }
 }
 
-pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: SharedAsrRegistry) {
-    let mut media_state = MediaSocketState::new();
+pub async fn handle_socket(
+    mut socket: WebSocket,
+    state: SharedState,
+    asr: SharedAsrRegistry,
+    media_registry: SharedMediaRegistry,
+) {
+    let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
     let mut silence_keepalive = time::interval(SILENCE_KEEPALIVE_INTERVAL);
     silence_keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -133,6 +319,8 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
                     Ok(Message::Text(text)) => {
                         if let Err(error) = handle_text(&text, &state, &asr, &mut media_state).await {
                             log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
+                        } else {
+                            ensure_outbound_registered(&media_registry, &mut media_state).await;
                         }
                     }
                     Ok(Message::Close(_)) => break,
@@ -149,7 +337,7 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
                 }
             }
             _ = silence_keepalive.tick(), if media_state.silence_keepalive => {
-                if let Err(error) = send_silence_keepalive(&mut socket, &mut media_state).await {
+                if let Err(error) = send_outbound_or_silence(&mut socket, &state, &mut media_state).await {
                     log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
                     break;
                 }
@@ -182,6 +370,130 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
         }
     }
     finalize_capture(&mut media_state).await;
+    if let Some(call_id) = media_state.gateway_call_id.as_deref() {
+        media_registry.unregister_call(call_id).await;
+    }
+}
+
+async fn ensure_outbound_registered(
+    media_registry: &SharedMediaRegistry,
+    media_state: &mut MediaSocketState,
+) {
+    if media_state.outbound_rx.is_some() {
+        return;
+    }
+    let Some(call_id) = media_state.gateway_call_id.clone() else {
+        return;
+    };
+    let (tx, rx) = mpsc::channel(OUTBOUND_MEDIA_QUEUE_CAPACITY);
+    media_registry.register_call(call_id.clone(), tx).await;
+    media_state.outbound_rx = Some(rx);
+    tracing::info!(gateway_call_id = call_id, "media.outbound_queue.registered");
+}
+
+async fn send_outbound_or_silence(
+    socket: &mut WebSocket,
+    state: &SharedState,
+    media_state: &mut MediaSocketState,
+) -> anyhow::Result<()> {
+    if let Some(command) = pending_clear_command(media_state).await {
+        return send_outbound_command(socket, state, media_state, command).await;
+    }
+
+    if let Some(command) = next_outbound_command(media_state) {
+        return send_outbound_command(socket, state, media_state, command).await;
+    }
+
+    send_silence_keepalive(socket, media_state).await
+}
+
+async fn pending_clear_command(media_state: &mut MediaSocketState) -> Option<OutboundMediaCommand> {
+    let call_id = media_state.gateway_call_id.as_deref()?;
+    let playback_id = media_state
+        .media_registry
+        .take_pending_clear(call_id)
+        .await?;
+    drop_queued_playback(media_state, &playback_id);
+    Some(OutboundMediaCommand::Clear { playback_id })
+}
+
+fn drop_queued_playback(media_state: &mut MediaSocketState, playback_id: &str) {
+    media_state
+        .outbound_pending
+        .retain(|command| command.playback_id() != playback_id);
+    if let Some(rx) = media_state.outbound_rx.as_mut() {
+        while let Ok(command) = rx.try_recv() {
+            if command.playback_id() != playback_id {
+                media_state.outbound_pending.push_back(command);
+            }
+        }
+    }
+}
+
+fn next_outbound_command(media_state: &mut MediaSocketState) -> Option<OutboundMediaCommand> {
+    loop {
+        let command = if let Some(command) = media_state.outbound_pending.pop_front() {
+            command
+        } else {
+            media_state
+                .outbound_rx
+                .as_mut()
+                .and_then(|rx| rx.try_recv().ok())?
+        };
+        if media_state
+            .canceled_playbacks
+            .contains(command.playback_id())
+        {
+            continue;
+        }
+        return Some(command);
+    }
+}
+
+async fn send_outbound_command(
+    socket: &mut WebSocket,
+    state: &SharedState,
+    media_state: &mut MediaSocketState,
+    command: OutboundMediaCommand,
+) -> anyhow::Result<()> {
+    let Some(call_id) = media_state.gateway_call_id.as_deref() else {
+        bail!("outbound media command arrived before gateway call was known");
+    };
+    match command {
+        OutboundMediaCommand::Frame(frame) => {
+            socket
+                .send(Message::Text(media_message(&frame.payload).into()))
+                .await
+                .context("send outbound media frame to Telnyx")?;
+            state
+                .write()
+                .await
+                .mark_tts_frame_sent(call_id, &frame.playback_id);
+            Ok(())
+        }
+        OutboundMediaCommand::Clear { playback_id } => {
+            socket
+                .send(Message::Text(clear_message().into()))
+                .await
+                .context("send Telnyx clear")?;
+            media_state.canceled_playbacks.insert(playback_id.clone());
+            state.write().await.mark_tts_canceled(call_id, &playback_id);
+            tracing::info!(gateway_call_id = call_id, playback_id, "tts.clear.sent");
+            Ok(())
+        }
+        OutboundMediaCommand::Mark { playback_id } => {
+            socket
+                .send(Message::Text(mark_message(&playback_id).into()))
+                .await
+                .context("send Telnyx mark")?;
+            state
+                .write()
+                .await
+                .mark_tts_mark_sent(call_id, &playback_id, &playback_id);
+            tracing::info!(gateway_call_id = call_id, playback_id, "tts.mark.sent");
+            Ok(())
+        }
+    }
 }
 
 async fn send_silence_keepalive(
@@ -212,13 +524,38 @@ async fn send_silence_keepalive(
 
 fn silence_keepalive_message(format: &MediaFormat) -> anyhow::Result<String> {
     let payload = STANDARD.encode(silence_payload(format)?);
-    Ok(serde_json::json!({
+    Ok(media_message_from_payload(payload))
+}
+
+fn media_message(payload: &[u8]) -> String {
+    media_message_from_payload(STANDARD.encode(payload))
+}
+
+fn media_message_from_payload(payload: String) -> String {
+    serde_json::json!({
         "event": "media",
         "media": {
             "payload": payload
         }
     })
-    .to_string())
+    .to_string()
+}
+
+fn clear_message() -> String {
+    serde_json::json!({
+        "event": "clear"
+    })
+    .to_string()
+}
+
+fn mark_message(name: &str) -> String {
+    serde_json::json!({
+        "event": "mark",
+        "mark": {
+            "name": name
+        }
+    })
+    .to_string()
 }
 
 fn silence_payload(format: &MediaFormat) -> anyhow::Result<Vec<u8>> {
@@ -236,6 +573,34 @@ fn samples_per_20ms(sample_rate_hz: u32) -> anyhow::Result<usize> {
         bail!("sample rate {sample_rate_hz} cannot be packetized into 20ms frames");
     }
     Ok((sample_rate_hz / 50) as usize)
+}
+
+pub fn packetize_tts_chunk(
+    chunk: AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>,
+    media: TelnyxMediaConfig,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let mut samples = chunk.into_samples();
+    if media.sample_rate_hz != PIPER_SAMPLE_RATE_HZ {
+        samples = resample_i16_mono(
+            &WindowedSincResampler::default(),
+            &samples,
+            PIPER_SAMPLE_RATE_HZ,
+            media.sample_rate_hz,
+        )?;
+    }
+    let samples_per_packet = samples_per_20ms(media.sample_rate_hz)?;
+    let mut packets = Vec::new();
+    for packet_samples in samples.chunks(samples_per_packet) {
+        if packet_samples.is_empty() {
+            continue;
+        }
+        let payload = match media.codec {
+            TelnyxStreamCodec::Pcmu => g711::encode_pcmu(packet_samples),
+            TelnyxStreamCodec::L16 => l16::encode_l16_le(packet_samples),
+        };
+        packets.push(payload);
+    }
+    Ok(packets)
 }
 
 async fn handle_text(
@@ -345,7 +710,26 @@ async fn handle_text(
             finalize_capture(media_state).await;
             result
         }
-        "mark" | "clear" | "dtmf" => Ok(()),
+        "mark" => {
+            let event: MarkEvent = serde_json::from_str(text).context("parse mark event")?;
+            if let (Some(call_id), Some(name)) = (
+                media_state.gateway_call_id.as_deref(),
+                event.mark.name.as_deref(),
+            ) {
+                state.write().await.mark_tts_completed(call_id, name);
+                media_state
+                    .media_registry
+                    .finish_speech(call_id, name)
+                    .await;
+                tracing::info!(
+                    gateway_call_id = call_id,
+                    mark_name = name,
+                    "tts.mark.received"
+                );
+            }
+            Ok(())
+        }
+        "clear" | "dtmf" => Ok(()),
         "error" => bail!("Telnyx media error event: {text}"),
         other => bail!("unsupported Telnyx media event {other}"),
     }
@@ -1017,6 +1401,181 @@ mod tests {
 
         assert_eq!(payload.len(), 640);
         assert!(payload.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn outbound_control_messages_are_telnyx_json() {
+        let clear: serde_json::Value =
+            serde_json::from_str(&clear_message()).expect("clear should be JSON");
+        let mark: serde_json::Value =
+            serde_json::from_str(&mark_message("tts_123")).expect("mark should be JSON");
+
+        assert_eq!(clear["event"], "clear");
+        assert_eq!(mark["event"], "mark");
+        assert_eq!(mark["mark"]["name"], "tts_123");
+    }
+
+    #[test]
+    fn piper_chunk_packetizes_to_pcmu_20ms_frames() {
+        let packets = packetize_tts_chunk(
+            AudioBuf::<i16, PIPER_SAMPLE_RATE_HZ, Mono>::new(vec![1_000; 2_205]),
+            TelnyxMediaConfig::default(),
+        )
+        .expect("Piper chunk should packetize");
+
+        assert_eq!(packets.len(), 5);
+        assert!(packets.iter().all(|packet| packet.len() == 160));
+    }
+
+    #[tokio::test]
+    async fn outbound_clear_preempts_and_drops_queued_frames() {
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, rx) = mpsc::channel(8);
+        media_registry
+            .register_call("gwc_test".to_string(), tx.clone())
+            .await;
+        media_registry
+            .start_speech(
+                "gwc_test",
+                "tts_test".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("register active speech");
+        let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
+        media_state.gateway_call_id = Some("gwc_test".to_string());
+        media_state.outbound_rx = Some(rx);
+        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame {
+            playback_id: "tts_test".to_string(),
+            payload: vec![1; 160],
+        }))
+        .await
+        .expect("queue first frame");
+        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame {
+            playback_id: "tts_test".to_string(),
+            payload: vec![2; 160],
+        }))
+        .await
+        .expect("queue second frame");
+        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame {
+            playback_id: "tts_test".to_string(),
+            payload: vec![3; 160],
+        }))
+        .await
+        .expect("queue post-clear frame");
+        media_registry
+            .cancel_speech("gwc_test")
+            .await
+            .expect("cancel active speech");
+
+        match pending_clear_command(&mut media_state)
+            .await
+            .expect("clear should be selected")
+        {
+            OutboundMediaCommand::Clear { playback_id } => assert_eq!(playback_id, "tts_test"),
+            other => panic!("expected clear to preempt queued frames, got {other:?}"),
+        }
+        assert!(next_outbound_command(&mut media_state).is_none());
+    }
+
+    #[tokio::test]
+    async fn inbound_asr_ingests_while_outbound_tts_is_queued() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let asr = registry_with_factory(Arc::new(EchoAsrFactory));
+        let mut media_state = MediaSocketState::new();
+
+        handle_text(
+            &start_event("call-1", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("start event should open ASR session");
+        let (tx, rx) = mpsc::channel(4);
+        media_state.outbound_rx = Some(rx);
+        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame {
+            playback_id: "tts_test".to_string(),
+            payload: vec![PCMU_SILENCE_BYTE; 160],
+        }))
+        .await
+        .expect("queue outbound TTS frame");
+
+        let speech = STANDARD.encode(l16_samples(16_000, 4_000));
+        handle_text(
+            &media_event("stream-1", "1", &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("inbound media should still feed ASR");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.transcripts.len(), 1);
+        assert_eq!(call.transcripts[0].text, "received 16000 samples");
+        assert!(media_state.outbound_rx.is_some());
+    }
+
+    #[tokio::test]
+    async fn mark_event_completes_tts_playback() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        media_registry
+            .start_speech(
+                &gateway_call_id,
+                "tts_test".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("register active speech");
+        {
+            let mut guard = state.write().await;
+            guard.start_tts_job(&gateway_call_id, "tts_test".to_string(), "hello");
+            guard.mark_tts_mark_sent(&gateway_call_id, "tts_test", "tts_test");
+        }
+        let asr = registry_with_factory(Arc::new(EchoAsrFactory));
+        let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
+        media_state.gateway_call_id = Some(gateway_call_id.clone());
+
+        handle_text(
+            &serde_json::json!({
+                "event": "mark",
+                "mark": {
+                    "name": "tts_test"
+                }
+            })
+            .to_string(),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("mark should complete TTS");
+
+        let guard = state.read().await;
+        let status = guard
+            .calls
+            .get(&gateway_call_id)
+            .and_then(|call| call.tts.as_ref())
+            .map(|tts| tts.status)
+            .expect("TTS state should exist");
+        assert_eq!(status, crate::operator::state::TtsPlaybackStatus::Completed);
+        media_registry
+            .start_speech(
+                &gateway_call_id,
+                "tts_next".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("mark event should release active speech slot");
     }
 
     #[tokio::test]

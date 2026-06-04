@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use motlie_driver::{CommandEffect, CommandEngine};
 use serde::Serialize;
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -16,15 +17,19 @@ struct SocketCommandResponse {
     ok: bool,
     lines: Vec<String>,
     effects: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
     error: Option<String>,
 }
 
 impl SocketCommandResponse {
-    fn ok(lines: Vec<String>, effects: Vec<CommandEffect>) -> Self {
+    fn ok(command: &str, lines: Vec<String>, effects: Vec<CommandEffect>) -> Self {
+        let data = structured_data(command, &lines);
         Self {
             ok: true,
             lines,
             effects: effects.into_iter().map(effect_label).collect(),
+            data,
             error: None,
         }
     }
@@ -34,6 +39,7 @@ impl SocketCommandResponse {
             ok: false,
             lines: Vec::new(),
             effects: Vec::new(),
+            data: None,
             error: Some(error.into()),
         }
     }
@@ -105,7 +111,7 @@ async fn handle_connection(
         }
 
         let response = match run_operator_line(&mut engine, command).await {
-            Ok(output) => SocketCommandResponse::ok(output.lines, output.effects),
+            Ok(output) => SocketCommandResponse::ok(command, output.lines, output.effects),
             Err(error) => SocketCommandResponse::error(error.to_string()),
         };
         let encoded = serde_json::to_string(&response)?;
@@ -113,6 +119,110 @@ async fn handle_connection(
         writer.write_all(b"\n").await?;
         writer.flush().await?;
     }
+}
+
+fn structured_data(command: &str, lines: &[String]) -> Option<Value> {
+    let argv = shlex::split(command)?;
+    let root = argv.first()?.as_str();
+    match root {
+        "status" => Some(json!({
+            "kind": "status",
+            "fields": fields_from_lines(lines),
+            "lines": lines,
+        })),
+        "calls" => Some(json!({
+            "kind": "calls",
+            "calls": call_rows(lines),
+            "lines": lines,
+        })),
+        "call" if argv.get(1).is_some_and(|part| part == "show") => Some(json!({
+            "kind": "call",
+            "fields": fields_from_lines(lines),
+            "lines": lines,
+        })),
+        "tts" if argv.get(1).is_some_and(|part| part == "status") => Some(json!({
+            "kind": "tts",
+            "fields": kv_fields_from_line(lines.first().map(String::as_str).unwrap_or_default()),
+            "active": tts_rows(&lines[lines.len().min(1)..]),
+            "lines": lines,
+        })),
+        _ => None,
+    }
+}
+
+fn fields_from_lines(lines: &[String]) -> Value {
+    let mut fields = Map::new();
+    for line in lines {
+        if let Some((key, value)) = line.split_once(": ") {
+            fields.insert(normalize_key(key), Value::String(value.to_string()));
+        } else {
+            fields.extend(kv_fields(line));
+        }
+    }
+    Value::Object(fields)
+}
+
+fn call_rows(lines: &[String]) -> Vec<Value> {
+    lines
+        .iter()
+        .filter(|line| line.as_str() != "no calls")
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let call_id = parts.next()?;
+            let status = parts.next()?;
+            let mut fields = Map::new();
+            fields.insert("call".to_string(), Value::String(call_id.to_string()));
+            fields.insert("status".to_string(), Value::String(status.to_string()));
+            for part in parts {
+                if let Some((key, value)) = part.split_once('=') {
+                    fields.insert(normalize_key(key), Value::String(value.to_string()));
+                }
+            }
+            Some(Value::Object(fields))
+        })
+        .collect()
+}
+
+fn tts_rows(lines: &[String]) -> Vec<Value> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let call_id = parts.next()?;
+            let status = parts.next()?;
+            let mut fields = kv_fields_from_parts(parts);
+            if let Value::Object(map) = &mut fields {
+                map.insert("call".to_string(), Value::String(call_id.to_string()));
+                map.insert("status".to_string(), Value::String(status.to_string()));
+            }
+            Some(fields)
+        })
+        .collect()
+}
+
+fn kv_fields_from_line(line: &str) -> Value {
+    kv_fields_from_parts(line.split_whitespace())
+}
+
+fn kv_fields_from_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> Value {
+    let mut fields = Map::new();
+    for part in parts {
+        if let Some((key, value)) = part.split_once('=') {
+            fields.insert(normalize_key(key), Value::String(value.to_string()));
+        }
+    }
+    Value::Object(fields)
+}
+
+fn kv_fields(line: &str) -> Map<String, Value> {
+    let Value::Object(fields) = kv_fields_from_line(line) else {
+        return Map::new();
+    };
+    fields
+}
+
+fn normalize_key(key: &str) -> String {
+    key.trim().replace(['-', ' '], "_")
 }
 
 #[cfg(test)]
@@ -151,6 +261,38 @@ mod tests {
             .as_str()
             .expect("line should be a string")
             .starts_with("listener:"));
+        assert_eq!(response["data"]["kind"], "status");
+        assert!(response["data"]["fields"]["listener"]
+            .as_str()
+            .expect("listener should be structured")
+            .starts_with("Some("));
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn command_socket_returns_structured_calls_for_agent_polling() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_test_call(&mut guard, "call-1")
+        };
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
+
+        let mut client = SocketTestClient::connect(&path).await;
+        let response = client.command("calls").await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["kind"], "calls");
+        assert_eq!(response["data"]["calls"][0]["call"], call_id);
+        assert_eq!(response["data"]["calls"][0]["status"], "waiting");
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);

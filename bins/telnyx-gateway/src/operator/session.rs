@@ -114,7 +114,8 @@ fn call_sort_bucket(status: CallStatus) -> u8 {
         | CallStatus::Answering
         | CallStatus::Answered
         | CallStatus::MediaStarted
-        | CallStatus::Transcribing => 1,
+        | CallStatus::Transcribing
+        | CallStatus::Speaking => 1,
         CallStatus::Failed => 2,
         CallStatus::IgnoredInbound | CallStatus::Ended => 3,
     }
