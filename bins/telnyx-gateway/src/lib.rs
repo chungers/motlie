@@ -10,6 +10,7 @@ pub mod media;
 pub mod operator;
 pub mod replay;
 pub mod serve;
+pub mod tts;
 pub mod webhook;
 
 pub use cli::Cli;

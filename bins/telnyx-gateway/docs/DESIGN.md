@@ -6,6 +6,10 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-04 | @codex-369-rv: Removed ASR startup-default configuration in favor of code defaults plus source-local `asr use`, and normalized gateway TTS output to backend-neutral signed 16-bit PCM plus sample-rate metadata before Telnyx packetization so Piper and future Qwen3-TTS.cpp share one media path. | Operator REPL and TUI Control Surface, Returning TTS Audio, Recommended TTS: Piper |
+| 2026-06-04 | @codex-369-rv: Aligned TTS operator commands with the ASR command pattern: `tts list`, `tts status`, and `tts use piper` are available through the shared TUI/socket command engine, and `dial` output now tells operators to wait for media before running `speak`. | Operator REPL and TUI Control Surface, Driver REPL Dialer Surface, Recommended TTS: Piper |
+| 2026-06-03 | @codex-369-rv: Recorded M2 live-test findings for Piper: eSpeak-ng phonemization data must be present or auto-discovered, outbound TTS is packetized from continuous utterance audio, frames are paced by the media task, silence keepalive is not injected during active speech, and frame interval/underrun telemetry is required for live diagnosis. | Milestone 2: Outbound Dialer and TTS, Returning TTS Audio, M2-Safe Bidirectional Media Contract, Recommended TTS: Piper, Testing Scope |
+| 2026-06-03 | @codex-369-rv: Locked the milestone 2 outbound TTS shape around one bidirectional RTP media WebSocket, an outbound frame queue owned by the socket task, cancellable `speak`, live inbound ASR during playback, `clear`/`mark`, `stream_track=inbound_track`, and TUI/socket command parity so milestone 3 can add barge-in policy without replacing transport. | Staged Build Strategy, Outbound Call Handler Design, Returning TTS Audio, Driver REPL Dialer Surface, Testing Scope |
 | 2026-06-03 | @codex-369-rv: Made the intentional live ASR default explicit: the gateway defaults to `kroko-2025` because it is the balanced choice across call-center and PM/technical corpora, while `sherpa-2023` remains recommended for call-center-only deployments. Operators can switch per source between calls with `asr use`. | Recommended ASR/TTS Stack, Milestone 1.5: Sherpa ASR Quality Tuning |
 | 2026-06-01 | @codex-371-impl: Implemented the #371 R1 prerequisite by moving Sherpa repeated-token transcript suppression and session-reset decisions behind the ASR adapter; recorded the updated models-first M1.5 sequence where A/B infrastructure and model comparison precede hotwords, endpointing, decoder tuning, and normalization. | Inbound Call Handler Design, Milestone 1.5: Sherpa ASR Quality Tuning, Recommended ASR/TTS Stack |
 | 2026-06-01 | @codex-364-impl: Fixed media capture WAV finalization so standard readers see finite durations, added `replay-capture` for deterministic captured-audio WER checks, and split Sherpa-only ASR quality tuning into milestone 1.5 (#370) covering hotwords, model/decoder A/B, and optional marked normalization. | Staged Build Strategy, Inbound Call Handler Design, Recommended ASR/TTS Stack, Testing Scope, Getting Started: Local Deployment |
@@ -488,27 +492,31 @@ For milestone 1, `TuiTranscriptSink` should append partial/final transcript even
 
 For Telnyx, `provider_call_id` maps to `call_control_id`, `provider_session_id` maps to `call_session_id`, and `media_stream_id` maps to Telnyx `stream_id`. Those raw Telnyx field names should stay in `bins/telnyx-gateway`.
 
-### Milestone 2: Outbound TUI Dialer and TTS
+### Milestone 2: Outbound Dialer and TTS
 
-The second milestone is outbound call control plus TTS from the operator TUI only:
+The second milestone is outbound call control plus TTS from the shared operator command engine. The TUI shell, selected-call detail composer, startup `--load` replay, and Unix-domain socket all dispatch the same typed commands with source-local selected call and model state:
 
 ```text
-motlie-driver command source
+motlie-driver command source (TUI or socket)
 -> dial <number>
 -> Telnyx outbound call with media stream
 -> selected-call detail pane shows outbound state
--> operator enters say text through REPL or selected-call detail text composer
--> outbound TTS pipeline
--> Telnyx media WebSocket
+-> operator or agent enters speak text through shell/socket/detail composer
+-> outbound TTS pipeline enqueues outbound media frames
+-> existing Telnyx bidirectional media WebSocket writes those frames
 ```
 
 This should use the existing `motlie-driver` pattern: define a Telnyx command family implementing `CommandSet<TelnyxDialerState>`, then run it through the operator command dispatcher. The minimum command surface is:
 
 ```text
-dial <phone-or-sip-uri>
-say <text...>
-hangup
+dial <phone-or-sip-uri> [--from <+e164>]
+speak [call-id] <text...>
+speak cancel [call-id]
+hangup [call-id]
+status [call-id]
 ```
+
+The command names above are the M2 operator-facing surface. If the implementation retains an internal `say()` method for compatibility with `ConversationCommand::Say`, `speak` must still dispatch to that exact same controller path rather than introducing a second TTS route.
 
 Recommended controller surface:
 
@@ -543,16 +551,17 @@ pub struct VoiceControlError {
 #[async_trait]
 pub trait OutboundSpeechController: Send {
     async fn dial(&mut self, request: VoiceDialRequest) -> Result<CallHandle, VoiceControlError>;
-    async fn say(
+    async fn speak(
         &mut self,
         call: &CallHandle,
         text: String,
     ) -> Result<SpeechPlaybackHandle, VoiceControlError>;
+    async fn cancel_speech(&mut self, call: &CallHandle) -> Result<(), VoiceControlError>;
     async fn hangup(&mut self, call: &CallHandle) -> Result<(), VoiceControlError>;
 }
 ```
 
-The TUI REPL and selected-call detail text composer are the milestone 2 utterance sources. Any later source that can produce text, including a Unix-domain socket client, mstream send-keys, or broadcast bridge, should be able to call the same `say()` surface:
+The TUI REPL, selected-call detail text composer, and Unix-domain socket are milestone 2 utterance sources. Any later source that can produce text, including mstream send-keys, a broadcast bridge, fixture replay, or the milestone 4 Control API, should be able to call the same `speak()` surface:
 
 ```rust
 #[async_trait]
@@ -574,7 +583,7 @@ selected-call chat interface
 -> TranscriptSink
 -> ConversationHandler
 -> ConversationCommand::Say { text }
--> OutboundSpeechController::say(...)
+-> OutboundSpeechController::speak(...)
 -> assistant response and playback status in the chat/detail pane
 ```
 
@@ -597,10 +606,10 @@ Unix-domain socket client and harness appserver
 -> application webhook subscription
 -> call list/detail and per-call attachment APIs
 -> inbound answer/transcript service flow
--> outbound dial/say service flow
+-> outbound dial/speak service flow
 ```
 
-This milestone owns the Unix-domain command socket, command-source mux validation, application webhooks, authenticated Gateway Control API read/attach flows, and a harness appserver. It should not be required for milestone 1 inbound TUI transcription, milestone 2 outbound TUI TTS, or milestone 3 TUI chat conversation. The harness appserver should register a webhook subscription, verify signatures, reconcile call state through `GET /api/v1/calls/{call_id}`, attach to a call, answer inbound calls, drive outbound dial/say, and record observed events.
+This milestone owns richer Unix-domain socket event polling, command-source mux validation, application webhooks, authenticated Gateway Control API read/attach flows, and a harness appserver. It should not be required for milestone 1 inbound TUI transcription, milestone 2 outbound TUI/socket TTS, or milestone 3 TUI chat conversation. The harness appserver should register a webhook subscription, verify signatures, reconcile call state through `GET /api/v1/calls/{call_id}`, attach to a call, answer inbound calls, drive outbound dial/speak through the gateway command layer or outbound dial/say through the Control API, and record observed events.
 
 ### Design Quality Assessment
 
@@ -629,16 +638,17 @@ Inbound Telnyx audio
 -> selected-call detail transcript
 ```
 
-Milestone 2 outbound TUI dialer/TTS (#365):
+Milestone 2 outbound dialer/TTS (#365):
 
 ```text
-TUI dial/say command or selected-call detail text composer
+TUI/socket dial/speak command or selected-call detail text composer
 -> OutboundSpeechController
 -> Piper TTS
 -> PCM at about 22 kHz
 -> resample to 16 kHz
--> encode G.711 or L16
--> outbound Telnyx media
+-> packetize to ~20 ms frames
+-> outbound mpsc
+-> single bidirectional Telnyx media WebSocket
 ```
 
 Milestone 3 full-duplex TUI chat conversation (#366):
@@ -660,7 +670,7 @@ Unix-domain socket and harness appserver
 -> application webhooks
 -> call list/detail and per-call attachments
 -> inbound answer/transcript service flow
--> outbound dial/say service flow
+-> outbound dial/speak service flow
 ```
 
 These pipelines align with what currently works while allowing useful validation before the full duplex conversation path exists.
@@ -784,8 +794,8 @@ Right bottom selected-call detail:
 - shows Telnyx termination reason/cause when the call ends or the media stream stops
 - shows timeline events for that call
 - shows milestone 1 ASR as an assembled transcript plus recent raw partial/final transcript events for debugging
-- shows milestone 2 TTS playback state and the latest `say` requests
-- shows context-aware action hints such as `answer`, `reject`, `hangup`, `say <text>`, `transcript follow`, or `conversation attach`
+- shows milestone 2 TTS playback state and the latest `speak` requests
+- shows context-aware action hints such as `answer`, `reject`, `hangup`, `speak <text>`, `transcript follow`, or `conversation attach`
 
 Inbound call notification behavior:
 
@@ -796,7 +806,7 @@ Inbound call notification behavior:
 - if another active call is selected, do not steal selection; leave the new call highlighted until the operator selects it
 - optionally emit a terminal bell or desktop notification when enabled, but the roster highlight must be sufficient by itself
 
-The right bottom pane is not a second command input by default. The left REPL remains the TUI input path. Selected-call context should make TUI commands ergonomic: if a call is selected in that TUI session, `answer`, `reject`, `hangup`, and `say <text>` apply to that call unless the command names a different call id. Socket and Control API clients should prefer explicit call IDs; if they support `call use <call>`, that selection is scoped to that socket session or API principal and must not change the TUI selection.
+The right bottom pane is not a second command input by default. The left REPL remains the TUI input path. Selected-call context should make TUI commands ergonomic: if a call is selected in that TUI session, `answer`, `reject`, `hangup`, and `speak <text>` apply to that call unless the command names a different call id. Socket and Control API clients should prefer explicit call IDs; if they support `call use <call>`, that selection is scoped to that socket session or API principal and must not change the TUI selection.
 
 The right panes are the first visual validation surface. During milestone 1, an answered inbound call should show codec/media metadata plus live transcript updates in the selected-call detail pane.
 
@@ -935,13 +945,16 @@ Outbound call commands:
 
 ```text
 dial <phone-or-sip-uri> [--from <e164>]
-say [call] <text...>
+speak [call] <text...>
+speak cancel [call]
 hangup [call]
+status [call]
 tts status
-tts model use <model>
+tts list
+tts use piper
 ```
 
-The `dial` command creates or selects the active outbound call for the command source that ran it. The `say` command routes text through `OutboundSpeechController::say()`. Non-REPL sources such as mstream broadcast, scripted fixtures, socket clients, or tmux-driven tests should call the same controller instead of creating another TTS pathway.
+The `dial` command creates or selects the active outbound call for the command source that ran it and should tell the operator or agent to wait for media before running `speak`. The `speak` command routes text through `OutboundSpeechController::speak()`. Non-REPL sources such as mstream broadcast, scripted fixtures, socket clients, or tmux-driven tests should call the same controller instead of creating another TTS pathway. `tts list`, `tts status`, and `tts use piper` mirror the ASR switching surface even though milestone 2 currently has one live TTS backend; this keeps future Piper/Qwen3-TTS A/B work additive.
 
 Conversation bridge commands:
 
@@ -2505,6 +2518,7 @@ Current Piper limitations:
 - no voice cloning
 - one pre-trained voice per model
 - less flexibility than future expressive or clone-capable TTS stacks
+- requires a system `libespeak-ng` installation plus phonemization data; the gateway should auto-discover common `espeak-ng-data` paths and otherwise fail loudly before sending silent or empty TTS audio
 - CUDA execution is currently gated by issue #230: Piper defaults to CPU-only ONNX Runtime for shutdown stability on the GB10 validation host, and advanced users can opt back into CUDA probing with `MOTLIE_PIPER_ALLOW_CUDA=1`
 - gateway live-test and deployment runbooks must use the same static ONNX Runtime linkage policy for Piper once outbound TTS is enabled; dynamic ONNX Runtime linkage is not an accepted operator path
 
@@ -2517,6 +2531,7 @@ Current TTS status:
 Recommended design rule:
 
 - Telnyx v1 should standardize on Piper as the default recommended TTS backend and defer richer voice-selection work until the outbound TTS milestone is stable
+- the operator command surface should still expose `tts list`, `tts status`, and `tts use piper` so TTS follows the same discoverable pattern as ASR; `tts status` must clearly report `unavailable` when the binary was built without the `piper` feature
 - the gateway itself should still accept any injected typed TTS that implements `SpeechSynthesizer`
 
 ### Transport Streaming vs Incremental TTS
@@ -2704,17 +2719,33 @@ This is the cleanest seam for integrating Motlie-specific agent logic later.
 When the application wants to speak:
 
 1. select a typed `SpeechSynthesizer`
-2. call `synthesize()` with a `SynthesisRequest`
-3. read `next_chunk()` until exhaustion or interruption
-4. normalize PCM to the configured outbound codec and sampling rate
-5. packetize into Telnyx `media` WebSocket events
+2. allocate a per-call speech job with a cancellation token and monotonically increasing playback/mark id
+3. split long text into sentence- or clause-sized synthesis requests so one large buffer does not monopolize the call
+4. call `synthesize()` with each `SynthesisRequest`
+5. read `next_chunk()` until exhaustion or interruption
+6. concatenate the returned Piper PCM chunks for the utterance before resampling so the `22.05 kHz -> telephony-rate` resampler state is continuous across sentence/clause boundaries
+7. normalize PCM to the configured outbound codec and sampling rate
+8. packetize into fixed `20 ms` Telnyx RTP media frames, padding only the final frame if needed
+9. enqueue frames onto the per-call outbound media `mpsc`
 
-If the caller barges in while TTS is active:
+The WebSocket-owning media task is the only task that reads from or writes to the Telnyx media socket. Its loop must concurrently:
+
+- read inbound `media` frames and feed ASR
+- drain outbound TTS frames from the per-call `mpsc` at real-time packet cadence, one `20 ms` frame per `20 ms` wall-clock tick
+- send Telnyx `mark` events when a speech job has fully queued
+- handle Telnyx `mark`, `clear`, `stop`, and `dtmf` events
+- send silence keepalive frames only when no speech job is active; do not inject silence into a momentary active-TTS queue dip
+- log outbound frame send intervals, queue depth, and active-speech underrun ticks so live breakup can be diagnosed from structured logs
+
+`speak` must therefore be non-blocking from the operator command perspective: the command starts or enqueues a cancellable speech job and returns a playback id/status while the socket task continues inbound ASR. Milestone 2 may ignore the inbound transcript during playback, but it must not pause the read loop or close the ASR session while TTS is active.
+
+If the caller barges in or the operator runs `speak cancel` while TTS is active:
 
 - stop reading the current `SpeechStream`
 - call `finish()` to release backend resources
-- stop sending outbound RTP frames
-- if MP3 mode is ever used, also send Telnyx `clear`
+- drop queued local outbound frames for that speech job
+- send Telnyx `clear` over the same bidirectional media WebSocket so provider-side buffered media is flushed
+- keep inbound ASR active and continue the call unless a separate hangup action was requested
 
 ### Why `stream_track=inbound_track`
 
@@ -2725,16 +2756,42 @@ Motlie ASR should usually ingest only caller speech. Streaming both tracks by de
 
 That would degrade ASR and complicate turn-taking. `both_tracks` should be reserved for diagnostics or analytics, not the default conversational path.
 
+For milestone 2 and milestone 3, `stream_track=inbound_track` is also the guard that lets inbound ASR stay live during TTS playback without Motlie transcribing its own synthesized audio.
+
+### M2-Safe Bidirectional Media Contract
+
+Milestone 2 outbound TTS must use the single bidirectional Media Streaming WebSocket already attached to the call. It must not use Telnyx Call Control `playback_start`, hosted `speak`, or any separate playback API as the primary Motlie TTS path.
+
+The per-call media task owns:
+
+- the Telnyx WebSocket read half
+- the Telnyx WebSocket write half
+- the outbound frame receiver
+- the currently active speech job metadata
+- Telnyx `mark` correlation state
+
+The TTS synthesis task owns:
+
+- the selected typed TTS backend
+- text chunking into sentence/clause requests
+- conversion from backend audio to outbound telephony frames, with all chunks for one utterance concatenated before resampling so boundaries do not reset the resampler
+- cancellation checks before and while enqueuing frames
+
+The media task must be the pacer. Producers may fill the per-call outbound queue quickly, but only the WebSocket-owning task sends media frames to Telnyx, and it sends them on the fixed `20 ms` cadence. When a speech job is active and the queue is empty, the task records an underrun and withholds keepalive silence instead of splicing silence into the utterance. Silence keepalive resumes only after the speech job completes, fails, or is canceled.
+
+This split keeps milestone 3 safe: barge-in policy can decide when to call `speak cancel`, but it does not need to replace the transport, ASR read loop, or outbound packet writer.
+
 ## Outbound Call Handler Design
 
 ### Control Flow
 
 Recommended outbound flow:
 
-1. For milestone 2, the operator runs `dial <phone-or-sip-uri>` from the TUI command source. In milestone 4, an external application may request the same transition with `POST /api/v1/calls`, optionally after selecting a default `from` number.
+1. For milestone 2, the operator or local agent runs `dial <phone-or-sip-uri>` from the TUI shell or Unix-domain socket command source. In milestone 4, an external application may request the same transition with `POST /api/v1/calls`, optionally after selecting a default `from` number.
 2. Gateway looks up the selected Telnyx application/connection, public media URL, caller ID, and outbound stream defaults from `GatewayRuntimeState`.
-3. Gateway issues `POST /v2/calls`.
-4. The Telnyx dial request includes:
+3. Gateway verifies that a Telnyx outbound caller ID and outbound-capable Voice Profile are configured. If Telnyx returns an account-side outbound error such as `403 D38`, the operator-visible status and logs must surface that prerequisite clearly.
+4. Gateway issues `POST /v2/calls`.
+5. The Telnyx dial request includes:
    - `connection_id`
    - `to`
    - `from`
@@ -2745,10 +2802,10 @@ Recommended outbound flow:
    - `stream_bidirectional_codec=L16`
    - `stream_bidirectional_sampling_rate=16000`
    - `stream_establish_before_call_originate=true`
-5. Telnyx establishes the WebSocket.
-6. The gateway starts the outbound media session on `start` and renders call state in the roster/detail panes.
-7. Once the callee answers, the operator may run `say <text...>` to synthesize outbound audio. In milestone 4, an external application may request the same action with `POST /api/v1/calls/{call_id}/say`.
-8. The rest of the session uses the same media path as inbound calls.
+6. Telnyx establishes the WebSocket.
+7. The gateway starts the outbound media session on `start`, opens inbound ASR for caller speech, creates the outbound frame channel, and renders call state in the roster/detail panes.
+8. Once the callee answers, the operator or socket client may run `speak <text...>` to synthesize outbound audio. In milestone 4, an external application may request the same action with `POST /api/v1/calls/{call_id}/say`.
+9. The rest of the session uses the same media path as inbound calls: ASR read loop live, outbound TTS frames written by the socket task, and cancellation using local queue flush plus Telnyx `clear`.
 
 ### Why Streaming Should Be Attached at Dial Time
 
@@ -2771,6 +2828,7 @@ pub struct TelnyxOutboundDial {
     pub from: String,
     pub connection_id: String,
     pub stream_url: String,
+    pub media: TelnyxMediaConfig,
 }
 
 impl TelnyxGateway {
@@ -2789,14 +2847,16 @@ impl TelnyxGateway {
 
 ### Driver REPL Dialer Surface
 
-The outbound product surface should be the shared operator `motlie-driver` command family described above, not a separate dialer REPL. The command family owns parsing and source-local operator session state; the gateway owns call and media execution.
+The outbound product surface should be the shared operator `motlie-driver` command family described above, not a separate dialer REPL. The command family owns parsing and source-local operator session state; the gateway owns call and media execution. Every M2 command must work through both the TUI shell and the Unix-domain agent socket.
 
 Recommended command family:
 
 ```text
-dial <phone-or-sip-uri>
-say <text...>
-hangup
+dial <phone-or-sip-uri> [--from <+e164>]
+speak [call-id] <text...>
+speak cancel [call-id]
+hangup [call-id]
+status [call-id]
 ```
 
 Recommended driver state:
@@ -2808,7 +2868,7 @@ pub struct TelnyxDialerState<C> {
 }
 ```
 
-`dial` stores the active `CallHandle`. `say` sends text to the active call through `OutboundSpeechController::say()`. `hangup` terminates the active call.
+`dial` stores the active `CallHandle` in the command source that requested it. `speak` sends text to the active call through `OutboundSpeechController::speak()`. `speak cancel` interrupts the active speech job through the same controller and WebSocket `clear` path. `hangup` terminates the active call. `status` returns the source-local selected call plus call/media/TTS state so a socket-driven agent can operate without scraping the TUI.
 
 The same controller should also accept text from non-REPL sources. The Gateway Control API, mstream bridge, broadcast command, fixture replay, or tmux-driven test should not need a second TTS pathway; each source should produce text and call the same outbound controller.
 
@@ -3450,6 +3510,22 @@ Cons:
 - encode latency
 - queue semantics hurt interruption
 - poorer fit to chunked PCM contracts
+
+### Alternative 2b: Telnyx Call Control `playback_start` / Hosted `speak`
+
+Decision: reject for milestone 2 Motlie-generated TTS.
+
+Pros:
+
+- simple REST-level command path
+- useful for fixed hosted prompts outside the Motlie media loop
+
+Cons:
+
+- introduces a second audio source outside the gateway's bidirectional media socket
+- makes `speak` blocking or queue-oriented unless extra cancellation glue is added
+- prevents the inbound ASR read loop from being the single always-live source of caller speech during playback
+- would force milestone 3 to replace transport before adding barge-in policy
 
 ### Alternative 3: Telnyx Hosted AI / Hosted Speech Features
 

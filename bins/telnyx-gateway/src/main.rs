@@ -9,11 +9,17 @@ use motlie_telnyx_gateway::adapter::{
 };
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
+use motlie_telnyx_gateway::media::SharedMediaRegistry;
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
 use motlie_telnyx_gateway::operator::script::run_repl_file;
 use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
 use motlie_telnyx_gateway::replay::ReplayBackend;
 use motlie_telnyx_gateway::serve::{serve, AppServices};
+#[cfg(not(feature = "piper"))]
+use motlie_telnyx_gateway::tts::unavailable_registry;
+use motlie_telnyx_gateway::tts::SharedTtsRegistry;
+#[cfg(feature = "piper")]
+use motlie_telnyx_gateway::tts::{SharedTtsFactory, TtsRegistry};
 use tokio::time::{self, Duration};
 
 #[tokio::main]
@@ -84,29 +90,35 @@ async fn main() -> anyhow::Result<()> {
             format!("listener configured on {}", cli.bind),
         );
         guard.config.capture_dir = cli.capture_dir.clone();
-        guard.config.asr_backend = cli.asr_backend;
     }
 
     let api_key = std::env::var(&cli.telnyx_api_key_env).ok();
     let telnyx = TelnyxClient::new(cli.telnyx_api_base.clone(), api_key, cli.dry_run_telnyx);
     let asr = build_live_asr_registry(&cli);
+    let media = SharedMediaRegistry::default();
+    let tts = build_tts_registry(&cli);
     let services = AppServices {
         state: state.clone(),
         telnyx: telnyx.clone(),
         asr,
+        media: media.clone(),
     };
 
     let server = tokio::spawn(serve(cli.bind, services));
-    let context = GatewayContext::with_asr_backend(state.clone(), telnyx, cli.asr_backend);
+    let context = GatewayContext::with_services(
+        state.clone(),
+        telnyx,
+        media,
+        tts,
+        motlie_telnyx_gateway::adapter::LiveAsrBackend::default(),
+    );
     let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
 
     if let Some(path) = &cli.load {
         let _ = run_repl_file(&mut replay_engine, path).await?;
     }
-    let source_asr_backend = state.read().await.config.asr_backend;
-
     let socket_task = if let Some(path) = cli.socket.clone() {
-        let socket_context = Arc::new(context.for_new_source_with_asr_backend(source_asr_backend));
+        let socket_context = Arc::new(context.for_new_source());
         {
             let mut guard = state.write().await;
             guard.log(
@@ -122,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if cli.tui {
-        let tui_context = context.for_new_source_with_asr_backend(source_asr_backend);
+        let tui_context = context.for_new_source();
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(tui_context);
         motlie_telnyx_gateway::operator::tui::run_tui(&mut engine).await?;
     } else {
@@ -175,6 +187,24 @@ fn print_corpus_report(report: &motlie_telnyx_gateway::replay::CorpusReplayRepor
         for replay in &entry.reports {
             print_replay_report_with_indent(replay, "  ");
         }
+    }
+}
+
+fn build_tts_registry(cli: &Cli) -> SharedTtsRegistry {
+    #[cfg(feature = "piper")]
+    {
+        let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+        let piper: SharedTtsFactory = Arc::new(motlie_telnyx_gateway::tts::PiperTtsFactory::new(
+            artifact_root,
+            !cli.no_asr_download,
+        ));
+        Arc::new(TtsRegistry::new(piper))
+    }
+
+    #[cfg(not(feature = "piper"))]
+    {
+        let _ = cli;
+        unavailable_registry()
     }
 }
 

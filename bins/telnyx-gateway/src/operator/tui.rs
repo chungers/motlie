@@ -301,6 +301,9 @@ fn draw(
                     CallStatus::Transcribing | CallStatus::MediaStarted => {
                         Style::default().fg(Color::Green)
                     }
+                    CallStatus::Speaking => Style::default()
+                        .fg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
                     _ => Style::default(),
                 };
                 ListItem::new(format!(
@@ -561,6 +564,7 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
                 .map(|backend| format!("{} ({})", backend.label(), backend.model_label()))
                 .unwrap_or_else(|| "<unbound>".to_string())
         )),
+        Line::from(format!("tts: {}", selected_call_tts_status(call))),
     ];
     if let Some(reason) = &call.terminal_reason {
         lines.push(Line::from(format!("ended: {reason}")));
@@ -575,6 +579,27 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
         lines.push(Line::from(format!("error: {error}")));
     }
     lines
+}
+
+fn selected_call_tts_status(call: &crate::operator::state::CallSession) -> String {
+    let Some(tts) = &call.tts else {
+        return "idle".to_string();
+    };
+    let mut status = format!(
+        "{} playback={} frames={}/{}",
+        tts.status.label(),
+        tts.playback_id,
+        tts.frames_sent,
+        tts.frames_queued
+    );
+    if let Some(mark) = &tts.mark_name {
+        status.push_str(&format!(" mark={mark}"));
+    }
+    if let Some(error) = &tts.error {
+        status.push_str(&format!(" error={error}"));
+    }
+    status.push_str(&format!(" text={}", tts.text_preview));
+    status
 }
 
 fn status_lines(state: &GatewayState, session: &OperatorSession) -> Vec<Line<'static>> {
@@ -595,8 +620,8 @@ fn status_lines(state: &GatewayState, session: &OperatorSession) -> Vec<Line<'st
         )),
         Line::from(format!(
             "asr default: {} ({})",
-            state.config.asr_backend.label(),
-            state.config.asr_backend.model_label()
+            crate::adapter::LiveAsrBackend::default().label(),
+            crate::adapter::LiveAsrBackend::default().model_label()
         )),
         Line::from(format!(
             "webhook: {}",

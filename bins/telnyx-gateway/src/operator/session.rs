@@ -1,11 +1,13 @@
 use crate::adapter::LiveAsrBackend;
 use crate::operator::state::{CallSession, CallStatus, GatewayState};
+use crate::tts::LiveTtsBackend;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperatorSession {
     pub selected_call: Option<String>,
     pub detail_scroll: u16,
     pub next_asr_backend: LiveAsrBackend,
+    pub next_tts_backend: LiveTtsBackend,
 }
 
 impl Default for OperatorSession {
@@ -20,6 +22,7 @@ impl OperatorSession {
             selected_call: None,
             detail_scroll: 0,
             next_asr_backend,
+            next_tts_backend: LiveTtsBackend::default(),
         }
     }
 }
@@ -114,7 +117,8 @@ fn call_sort_bucket(status: CallStatus) -> u8 {
         | CallStatus::Answering
         | CallStatus::Answered
         | CallStatus::MediaStarted
-        | CallStatus::Transcribing => 1,
+        | CallStatus::Transcribing
+        | CallStatus::Speaking => 1,
         CallStatus::Failed => 2,
         CallStatus::IgnoredInbound | CallStatus::Ended => 3,
     }
