@@ -656,18 +656,22 @@ pub fn packetize_tts_chunk(
     chunk: AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>,
     media: TelnyxMediaConfig,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
-    packetize_tts_samples(chunk.into_samples(), media)
+    packetize_tts_samples(chunk.into_samples(), PIPER_SAMPLE_RATE_HZ, media)
 }
 
 pub fn packetize_tts_samples(
     mut samples: Vec<i16>,
+    input_sample_rate_hz: u32,
     media: TelnyxMediaConfig,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
-    if media.sample_rate_hz != PIPER_SAMPLE_RATE_HZ {
+    if input_sample_rate_hz == 0 {
+        bail!("TTS input sample rate must be non-zero");
+    }
+    if media.sample_rate_hz != input_sample_rate_hz {
         samples = resample_i16_mono(
             &WindowedSincResampler::default(),
             &samples,
-            PIPER_SAMPLE_RATE_HZ,
+            input_sample_rate_hz,
             media.sample_rate_hz,
         )?;
     }
@@ -1509,6 +1513,16 @@ mod tests {
             TelnyxMediaConfig::default(),
         )
         .expect("Piper chunk should packetize");
+
+        assert_eq!(packets.len(), 5);
+        assert!(packets.iter().all(|packet| packet.len() == 160));
+    }
+
+    #[test]
+    fn normalized_tts_samples_packetize_from_non_piper_rate() {
+        let packets =
+            packetize_tts_samples(vec![1_000; 2_400], 24_000, TelnyxMediaConfig::default())
+                .expect("24kHz normalized TTS samples should packetize");
 
         assert_eq!(packets.len(), 5);
         assert!(packets.iter().all(|packet| packet.len() == 160));

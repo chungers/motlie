@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-04 | @codex-369-rv | Removed the ASR startup-default flag/config path while keeping `kroko-2025` as the code default, and made the TTS factory boundary backend-neutral by normalizing synthesized output to signed 16-bit PCM plus source sample-rate metadata before packetization. |
 | 2026-06-04 | @codex-369-rv | Aligned milestone 2 TTS operator UX with ASR: `tts list`, `tts status`, and `tts use piper` are shared TUI/socket commands, `tts status` reports clear availability, and `dial` tells operators to wait for media before running `speak`. |
 | 2026-06-03 23:30 PDT | @codex-369-rv | Captured M2 live-test hardening: Piper eSpeak-ng data must be auto-detected or fail loudly, outbound speech is prebuffered as continuous utterance audio before resample/packetize, the media task owns 20 ms pacing, silence keepalive is withheld during active speech, and frame interval/underrun logs diagnose choppy playback. |
 | 2026-06-03 21:49 PDT | @codex-369-rv | Locked milestone 2 outbound TTS to the single bidirectional RTP media WebSocket with an outbound frame queue, cancellable `speak`, always-live inbound ASR during playback, Telnyx `clear`/`mark`, `stream_track=inbound_track`, TUI/socket parity, and explicit Outbound Voice Profile live-test prerequisite. |
