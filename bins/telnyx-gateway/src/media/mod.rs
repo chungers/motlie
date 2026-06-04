@@ -5,7 +5,7 @@ use base64::Engine;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
@@ -243,6 +243,16 @@ impl SharedMediaRegistry {
             .take()
     }
 
+    async fn active_speech_playback_id(&self, gateway_call_id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .await
+            .get(gateway_call_id)?
+            .active_speech
+            .as_ref()
+            .map(|active| active.playback_id.clone())
+    }
+
     pub async fn finish_speech(&self, gateway_call_id: &str, playback_id: &str) {
         if let Some(entry) = self.inner.lock().await.get_mut(gateway_call_id) {
             if entry
@@ -271,6 +281,9 @@ struct MediaSocketState {
     outbound_pending: VecDeque<OutboundMediaCommand>,
     canceled_playbacks: HashSet<String>,
     media_registry: SharedMediaRegistry,
+    outbound_frame_count: usize,
+    outbound_underrun_ticks: usize,
+    last_outbound_frame_sent_at: Option<Instant>,
 }
 
 impl MediaSocketState {
@@ -295,6 +308,9 @@ impl MediaSocketState {
             outbound_pending: VecDeque::new(),
             canceled_playbacks: HashSet::new(),
             media_registry,
+            outbound_frame_count: 0,
+            outbound_underrun_ticks: 0,
+            last_outbound_frame_sent_at: None,
         }
     }
 }
@@ -404,6 +420,29 @@ async fn send_outbound_or_silence(
         return send_outbound_command(socket, state, media_state, command).await;
     }
 
+    let active_lookup = media_state
+        .gateway_call_id
+        .clone()
+        .map(|call_id| (call_id, media_state.media_registry.clone()));
+    if let Some((call_id, media_registry)) = active_lookup {
+        let Some(playback_id) = media_registry.active_speech_playback_id(&call_id).await else {
+            return send_silence_keepalive(socket, media_state).await;
+        };
+        media_state.outbound_underrun_ticks = media_state.outbound_underrun_ticks.saturating_add(1);
+        if media_state.outbound_underrun_ticks <= 5
+            || media_state.outbound_underrun_ticks.is_multiple_of(50)
+        {
+            tracing::warn!(
+                gateway_call_id = call_id,
+                playback_id,
+                underrun_ticks = media_state.outbound_underrun_ticks,
+                queue_depth = outbound_queue_depth(media_state),
+                "tts.outbound.underrun"
+            );
+        }
+        return Ok(());
+    }
+
     send_silence_keepalive(socket, media_state).await
 }
 
@@ -456,7 +495,7 @@ async fn send_outbound_command(
     media_state: &mut MediaSocketState,
     command: OutboundMediaCommand,
 ) -> anyhow::Result<()> {
-    let Some(call_id) = media_state.gateway_call_id.as_deref() else {
+    let Some(call_id) = media_state.gateway_call_id.clone() else {
         bail!("outbound media command arrived before gateway call was known");
     };
     match command {
@@ -465,10 +504,11 @@ async fn send_outbound_command(
                 .send(Message::Text(media_message(&frame.payload).into()))
                 .await
                 .context("send outbound media frame to Telnyx")?;
+            log_outbound_frame_sent(media_state, &call_id, &frame.playback_id);
             state
                 .write()
                 .await
-                .mark_tts_frame_sent(call_id, &frame.playback_id);
+                .mark_tts_frame_sent(&call_id, &frame.playback_id);
             Ok(())
         }
         OutboundMediaCommand::Clear { playback_id } => {
@@ -477,7 +517,10 @@ async fn send_outbound_command(
                 .await
                 .context("send Telnyx clear")?;
             media_state.canceled_playbacks.insert(playback_id.clone());
-            state.write().await.mark_tts_canceled(call_id, &playback_id);
+            state
+                .write()
+                .await
+                .mark_tts_canceled(&call_id, &playback_id);
             tracing::info!(gateway_call_id = call_id, playback_id, "tts.clear.sent");
             Ok(())
         }
@@ -489,11 +532,45 @@ async fn send_outbound_command(
             state
                 .write()
                 .await
-                .mark_tts_mark_sent(call_id, &playback_id, &playback_id);
+                .mark_tts_mark_sent(&call_id, &playback_id, &playback_id);
             tracing::info!(gateway_call_id = call_id, playback_id, "tts.mark.sent");
             Ok(())
         }
     }
+}
+
+fn log_outbound_frame_sent(media_state: &mut MediaSocketState, call_id: &str, playback_id: &str) {
+    let now = Instant::now();
+    let interval_ms = media_state
+        .last_outbound_frame_sent_at
+        .map(|last| now.duration_since(last).as_millis() as u64);
+    media_state.last_outbound_frame_sent_at = Some(now);
+    media_state.outbound_frame_count = media_state.outbound_frame_count.saturating_add(1);
+    media_state.outbound_underrun_ticks = 0;
+
+    let is_pacing_anomaly = interval_ms.is_some_and(|ms| !(15..=35).contains(&ms));
+    if media_state.outbound_frame_count <= 5
+        || media_state.outbound_frame_count.is_multiple_of(50)
+        || is_pacing_anomaly
+    {
+        tracing::info!(
+            gateway_call_id = call_id,
+            playback_id,
+            frame_index = media_state.outbound_frame_count,
+            interval_ms = interval_ms.unwrap_or_default(),
+            interval_observed = interval_ms.is_some(),
+            queue_depth = outbound_queue_depth(media_state),
+            "tts.outbound.frame.sent"
+        );
+    }
+}
+
+fn outbound_queue_depth(media_state: &MediaSocketState) -> usize {
+    media_state.outbound_pending.len()
+        + media_state
+            .outbound_rx
+            .as_ref()
+            .map_or(0, mpsc::Receiver::len)
 }
 
 async fn send_silence_keepalive(
@@ -579,7 +656,13 @@ pub fn packetize_tts_chunk(
     chunk: AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>,
     media: TelnyxMediaConfig,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
-    let mut samples = chunk.into_samples();
+    packetize_tts_samples(chunk.into_samples(), media)
+}
+
+pub fn packetize_tts_samples(
+    mut samples: Vec<i16>,
+    media: TelnyxMediaConfig,
+) -> anyhow::Result<Vec<Vec<u8>>> {
     if media.sample_rate_hz != PIPER_SAMPLE_RATE_HZ {
         samples = resample_i16_mono(
             &WindowedSincResampler::default(),
@@ -594,9 +677,13 @@ pub fn packetize_tts_chunk(
         if packet_samples.is_empty() {
             continue;
         }
+        let mut packet_samples = packet_samples.to_vec();
+        if packet_samples.len() < samples_per_packet {
+            packet_samples.resize(samples_per_packet, 0);
+        }
         let payload = match media.codec {
-            TelnyxStreamCodec::Pcmu => g711::encode_pcmu(packet_samples),
-            TelnyxStreamCodec::L16 => l16::encode_l16_le(packet_samples),
+            TelnyxStreamCodec::Pcmu => g711::encode_pcmu(&packet_samples),
+            TelnyxStreamCodec::L16 => l16::encode_l16_le(&packet_samples),
         };
         packets.push(payload);
     }

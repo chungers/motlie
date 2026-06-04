@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-03 23:30 PDT | @codex-369-rv | Captured M2 live-test hardening: Piper eSpeak-ng data must be auto-detected or fail loudly, outbound speech is prebuffered as continuous utterance audio before resample/packetize, the media task owns 20 ms pacing, silence keepalive is withheld during active speech, and frame interval/underrun logs diagnose choppy playback. |
 | 2026-06-03 21:49 PDT | @codex-369-rv | Locked milestone 2 outbound TTS to the single bidirectional RTP media WebSocket with an outbound frame queue, cancellable `speak`, always-live inbound ASR during playback, Telnyx `clear`/`mark`, `stream_track=inbound_track`, TUI/socket parity, and explicit Outbound Voice Profile live-test prerequisite. |
 | 2026-06-02 | @codex-371-impl | Added Sherpa artifact A/B selection for current 2023 Zipformer vs the newer Kroko 2025 English Zipformer and recorded that actual WER/latency scoring is blocked until the private golden WAV/reference artifacts are copied onto this host. |
 | 2026-06-01 | @codex-371-impl | Added M1.5 A/B replay infrastructure: a golden corpus manifest, selectable replay backends, and comparable WER/token-error/latency reports while leaving model integration and tuning sidecars pending. |
@@ -409,8 +410,16 @@ Connect the Telnyx adapter and the provider-neutral voice pipeline to the existi
   DESIGN reference: `Transport Streaming vs Incremental TTS`, `Latency Budget`
 - [ ] Split long `speak` text into sentence- or clause-sized `SynthesisRequest` jobs so milestone 2 does not enqueue one giant TTS buffer and milestone 3 can cancel between chunks.
   DESIGN reference: `Returning TTS Audio`, `M2-Safe Bidirectional Media Contract`
+- [ ] Concatenate the returned Piper PCM chunks for one utterance before outbound resampling and packetization so resampler state is continuous across sentence/clause boundaries.
+  DESIGN reference: `Returning TTS Audio`, `M2-Safe Bidirectional Media Contract`
+- [ ] Pace outbound media writes from the WebSocket-owning media task at one fixed `20 ms` frame per `20 ms` tick; producers must fill the per-call queue, not write directly or burst frames to Telnyx.
+  DESIGN reference: `M2-Safe Bidirectional Media Contract`
+- [ ] Withhold silence keepalive while a speech job is active; log active-speech queue underruns instead of splicing silence into an utterance.
+  DESIGN reference: `Returning TTS Audio`, `M2-Safe Bidirectional Media Contract`
 - [ ] Record the Piper runtime mode used for validation. By default Piper is CPU-only because of #230; `MOTLIE_PIPER_ALLOW_CUDA=1` must be explicitly documented if enabled.
   DESIGN reference: `Recommended TTS: Piper`, `Open Concerns`
+- [ ] Auto-detect common eSpeak-ng data paths for Piper phonemization and fail loudly with a clear operator error if the data is absent; do not silently send empty TTS audio.
+  DESIGN reference: `Recommended TTS: Piper`
 - [ ] Call the selected `SpeechSynthesizer` and drain its returned `SpeechStream` when `OutboundSpeechController::speak()` receives text.
   DESIGN reference: `Returning TTS Audio`, `Driver REPL Dialer Surface`
 - [ ] Instantiate the correct typed outbound pipeline from the selected TTS runtime and Telnyx outbound codec.
@@ -560,6 +569,8 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
 - [ ] Add milestone 2 outbound loopback tests from Piper-shaped `AudioBuf<i16, 22_050, Mono>` through anti-aliased resample, packetization, and `L16` or `PCMU` transport encoding, verifying TTS packet emission through the outbound media channel and session teardown.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipelines`
+- [ ] Add outbound TTS quality regression checks for fixed `20 ms` packet sizing, continuous utterance-level resampling, no keepalive-silence interleaving during active speech, and frame interval/underrun structured logging.
+  DESIGN reference: `Testing Scope for PLAN`, `M2-Safe Bidirectional Media Contract`
 - [ ] Add media-task tests proving inbound ASR frames are still consumed while outbound TTS frames are queued/sent over the same bidirectional WebSocket.
   DESIGN reference: `Testing Scope for PLAN`, `M2-Safe Bidirectional Media Contract`
 - [ ] Add cancellation tests proving `speak cancel` stops synthesis/draining, drops local queued frames, sends Telnyx `clear`, and preserves the call/ASR session.
@@ -628,6 +639,8 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Real-Time Latency Requirements`
 - [ ] Document first-audio latency separately from outbound transport packet cadence, because Piper currently produces a full buffer before packetized streaming begins.
   DESIGN reference: `Transport Streaming vs Incremental TTS`, `Real-Time Latency Requirements`
+- [ ] During M2 live validation, review `tts.outbound.frame.sent` intervals, queue depth, `tts.outbound.underrun`, Telnyx `mark` receipt, and human-reported smoothness before accepting outbound TTS quality.
+  DESIGN reference: `M2-Safe Bidirectional Media Contract`, `Testing Scope for PLAN`
 
 ## Phase 10: Follow-On Backend Pairings
 

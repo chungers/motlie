@@ -61,7 +61,7 @@ python3 - <<'PY'
 import json, socket
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect("/tmp/motlie-telnyx-gateway.sock")
-sock.sendall(b"shutdown\n")
+sock.sendall(b"quit\n")
 print(json.loads(sock.recv(65536)))
 PY
 ```
@@ -176,7 +176,7 @@ TTS: the gateway sends only silence keepalive frames on the outbound RTP path.
 config set media-codec L16
 config set media-sample-rate 16000
 config set capture-dir /home/dchung/telnyx-test/captures
-test dial-transcribe +14155097294 --from +14159148777
+test dial-transcribe <callee-number> --from <from-number>
 ```
 
 The command uses the selected Telnyx application, public media URL, and same
@@ -214,6 +214,11 @@ Prerequisites:
 - The `from-number` is outbound-enabled for that profile.
 - Piper artifacts can be downloaded through the curated catalog, or are already
   present under the gateway artifact root.
+- A system `libespeak-ng` installation and phonemization data are available for
+  Piper. The gateway auto-detects common data paths such as
+  `/usr/lib/<arch>/espeak-ng-data` and `/usr/share/espeak-ng-data`; if your host
+  stores it elsewhere, export `PIPER_ESPEAKNG_DATA_DIRECTORY` to the directory
+  that contains the eSpeak-ng data files before starting the gateway.
 
 Start a TUI session with an agent socket:
 
@@ -224,6 +229,7 @@ rm -f /tmp/motlie-telnyx-gateway.sock
 
 env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
   TELNYX_API_KEY="$TELNYX_API_KEY" \
+  PIPER_ESPEAKNG_DATA_DIRECTORY="${PIPER_ESPEAKNG_DATA_DIRECTORY:-/usr/lib/x86_64-linux-gnu/espeak-ng-data}" \
   cargo run -p motlie-telnyx-gateway --features "sherpa piper" -- \
     --tui \
     --bind 127.0.0.1:8080 \
@@ -239,7 +245,7 @@ If the replay file is not loaded or needs changes, run these in the TUI shell:
 config set webhook-url https://<host>/telnyx/webhooks
 config set media-url wss://<host>/telnyx/media
 config set media-codec PCMU
-config set from-number +15551234567
+config set from-number <from-number>
 telnyx app use <connection-id>
 telnyx app webhook set https://<host>/telnyx/webhooks
 tts status
@@ -248,7 +254,7 @@ tts status
 Operator TUI flow:
 
 ```text
-dial +14155550123
+dial <callee-number>
 calls
 call use <gateway-call-id>
 status <gateway-call-id>
@@ -270,7 +276,7 @@ import json, socket
 commands = [
     "status",
     "tts status",
-    "dial +14155550123",
+    "dial <callee-number>",
     "calls",
 ]
 
@@ -294,10 +300,12 @@ During validation, record for each call:
   is active
 
 Expected structured log events include `call.outbound.dial`, `media.started`,
-`tts.speak.queued`, `tts.clear.sent`, `tts.mark.sent`, `tts.mark.received`,
-`transcript.partial`, and `transcript.final`. A Telnyx `403 D38` response means
-the Outbound Voice Profile or outbound-enabled caller ID prerequisite is not
-satisfied.
+`tts.speak.prebuffered`, `tts.outbound.frame.sent`, `tts.clear.sent`,
+`tts.mark.sent`, `tts.mark.received`, `transcript.partial`, and
+`transcript.final`. Any `tts.outbound.underrun` event during active speech means
+the TTS queue emptied before playback completed and should be investigated for
+audible gaps. A Telnyx `403 D38` response means the Outbound Voice Profile or
+outbound-enabled caller ID prerequisite is not satisfied.
 
 1. Expose the local listener with Tailscale Funnel:
 
@@ -332,7 +340,7 @@ satisfied.
    telnyx app use <connection-id>
    telnyx app webhook set https://<host>/telnyx/webhooks
    telnyx number list
-   telnyx number bind +15551234567 <connection-id>
+   telnyx number bind <inbound-number> <connection-id>
    inbound enable --manual
    ```
 

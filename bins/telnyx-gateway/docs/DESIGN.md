@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-03 | @codex-369-rv: Recorded M2 live-test findings for Piper: eSpeak-ng phonemization data must be present or auto-discovered, outbound TTS is packetized from continuous utterance audio, frames are paced by the media task, silence keepalive is not injected during active speech, and frame interval/underrun telemetry is required for live diagnosis. | Milestone 2: Outbound Dialer and TTS, Returning TTS Audio, M2-Safe Bidirectional Media Contract, Recommended TTS: Piper, Testing Scope |
 | 2026-06-03 | @codex-369-rv: Locked the milestone 2 outbound TTS shape around one bidirectional RTP media WebSocket, an outbound frame queue owned by the socket task, cancellable `speak`, live inbound ASR during playback, `clear`/`mark`, `stream_track=inbound_track`, and TUI/socket command parity so milestone 3 can add barge-in policy without replacing transport. | Staged Build Strategy, Outbound Call Handler Design, Returning TTS Audio, Driver REPL Dialer Surface, Testing Scope |
 | 2026-06-03 | @codex-369-rv: Made the intentional live ASR default explicit: the gateway defaults to `kroko-2025` because it is the balanced choice across call-center and PM/technical corpora, while `sherpa-2023` remains recommended for call-center-only deployments. Operators can switch per source between calls with `asr use`. | Recommended ASR/TTS Stack, Milestone 1.5: Sherpa ASR Quality Tuning |
 | 2026-06-01 | @codex-371-impl: Implemented the #371 R1 prerequisite by moving Sherpa repeated-token transcript suppression and session-reset decisions behind the ASR adapter; recorded the updated models-first M1.5 sequence where A/B infrastructure and model comparison precede hotwords, endpointing, decoder tuning, and normalization. | Inbound Call Handler Design, Milestone 1.5: Sherpa ASR Quality Tuning, Recommended ASR/TTS Stack |
@@ -2514,6 +2515,7 @@ Current Piper limitations:
 - no voice cloning
 - one pre-trained voice per model
 - less flexibility than future expressive or clone-capable TTS stacks
+- requires a system `libespeak-ng` installation plus phonemization data; the gateway should auto-discover common `espeak-ng-data` paths and otherwise fail loudly before sending silent or empty TTS audio
 - CUDA execution is currently gated by issue #230: Piper defaults to CPU-only ONNX Runtime for shutdown stability on the GB10 validation host, and advanced users can opt back into CUDA probing with `MOTLIE_PIPER_ALLOW_CUDA=1`
 - gateway live-test and deployment runbooks must use the same static ONNX Runtime linkage policy for Piper once outbound TTS is enabled; dynamic ONNX Runtime linkage is not an accepted operator path
 
@@ -2717,17 +2719,19 @@ When the application wants to speak:
 3. split long text into sentence- or clause-sized synthesis requests so one large buffer does not monopolize the call
 4. call `synthesize()` with each `SynthesisRequest`
 5. read `next_chunk()` until exhaustion or interruption
-6. normalize PCM to the configured outbound codec and sampling rate
-7. packetize into roughly `20 ms` Telnyx RTP media frames
-8. enqueue frames onto the per-call outbound media `mpsc`
+6. concatenate the returned Piper PCM chunks for the utterance before resampling so the `22.05 kHz -> telephony-rate` resampler state is continuous across sentence/clause boundaries
+7. normalize PCM to the configured outbound codec and sampling rate
+8. packetize into fixed `20 ms` Telnyx RTP media frames, padding only the final frame if needed
+9. enqueue frames onto the per-call outbound media `mpsc`
 
 The WebSocket-owning media task is the only task that reads from or writes to the Telnyx media socket. Its loop must concurrently:
 
 - read inbound `media` frames and feed ASR
-- drain outbound TTS frames from the per-call `mpsc`
+- drain outbound TTS frames from the per-call `mpsc` at real-time packet cadence, one `20 ms` frame per `20 ms` wall-clock tick
 - send Telnyx `mark` events when a speech job has fully queued
 - handle Telnyx `mark`, `clear`, `stop`, and `dtmf` events
-- send silence keepalive frames only when there is no real outbound TTS frame ready
+- send silence keepalive frames only when no speech job is active; do not inject silence into a momentary active-TTS queue dip
+- log outbound frame send intervals, queue depth, and active-speech underrun ticks so live breakup can be diagnosed from structured logs
 
 `speak` must therefore be non-blocking from the operator command perspective: the command starts or enqueues a cancellable speech job and returns a playback id/status while the socket task continues inbound ASR. Milestone 2 may ignore the inbound transcript during playback, but it must not pause the read loop or close the ASR session while TTS is active.
 
@@ -2766,8 +2770,10 @@ The TTS synthesis task owns:
 
 - the selected typed TTS backend
 - text chunking into sentence/clause requests
-- conversion from backend audio to outbound telephony frames
+- conversion from backend audio to outbound telephony frames, with all chunks for one utterance concatenated before resampling so boundaries do not reset the resampler
 - cancellation checks before and while enqueuing frames
+
+The media task must be the pacer. Producers may fill the per-call outbound queue quickly, but only the WebSocket-owning task sends media frames to Telnyx, and it sends them on the fixed `20 ms` cadence. When a speech job is active and the queue is empty, the task records an underrun and withholds keepalive silence instead of splicing silence into the utterance. Silence keepalive resumes only after the speech job completes, fails, or is canceled.
 
 This split keeps milestone 3 safe: barge-in policy can decide when to call `speak cancel`, but it does not need to replace the transport, ASR read loop, or outbound packet writer.
 
