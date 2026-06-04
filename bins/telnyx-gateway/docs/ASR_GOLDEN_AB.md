@@ -2,6 +2,7 @@
 
 ## Changelog
 
+- 2026-06-03 20:48:10 PDT, @codex-369-rv -- Replaced the contaminated pre-pad kroko matrix with the validated post-#378 padded call-center results and recorded the balanced default policy: `kroko-2025` for mixed call-center plus PM/technical use, `sherpa-2023` for call-center-only deployments.
 - 2026-06-02 14:24:49 PDT, @codex-191-impl -- Added the offline Qwen3-TTS call-center golden corpus workflow and recorded the first full DGX run for #371/#191.
 
 ## Purpose
@@ -26,23 +27,23 @@ cargo run -p motlie-telnyx-gateway --features golden-ab --   asr-golden-ab bins/
 
 The harness materializes codec-specific audit WAVs under `/tmp/motlie-qwen3-call-center-golden/asr-inputs/`.
 
-## First DGX Run
+## Valid Padded DGX Run
 
-Run by @codex-191-impl on 2026-06-02 PDT. Qwen3-TTS used CPU backend on this run; it loaded the Q8_0 model and tokenizer from `.agents/skills/voice/artifacts/hf-cache`, used about 1.9 GB RSS, and generated 72 source WAVs.
+Run on dgx1 on 2026-06-02 PDT after PR #378 added an 800 ms trailing-silence pad before `finish()`. The earlier first matrix was contaminated by too-short golden WAV tails; it starved streaming zipformer final-token flush and inflated kroko-2025 WER from about `14%` to about `38%`. The padded run is the valid selection data.
 
 Full matrix size: 72 samples x 2 codecs x 4 ASR backends = 576 ASR runs. Total reference words: 626.
 
-| Backend | Codec | WER | Errors / Words | Ingest Avg ms | Finish Avg ms | Wall Avg ms |
-|---|---:|---:|---:|---:|---:|---:|
-| sherpa-zipformer-en-2023-06-26 | L16-16k | 24.3% | 152 / 626 | 2.9 | 4.1 | 559.8 |
-| sherpa-zipformer-en-2023-06-26 | PCMU-8k | 25.9% | 162 / 626 | 2.9 | 4.0 | 559.8 |
-| whisper-base-en | L16-16k | 29.7% | 186 / 626 | 0.0 | 2187.2 | 2187.3 |
-| whisper-base-en | PCMU-8k | 29.9% | 187 / 626 | 0.0 | 2186.5 | 2186.6 |
-| sherpa-zipformer-en-kroko-2025-08-06 | L16-16k | 38.2% | 239 / 626 | 2.4 | 2.1 | 468.3 |
-| sherpa-zipformer-en-kroko-2025-08-06 | PCMU-8k | 38.0% | 238 / 626 | 2.4 | 2.1 | 468.1 |
-| moonshine-streaming-en | L16-16k | 99.7% | 624 / 626 | 28.0 | 36.7 | 4618.8 |
-| moonshine-streaming-en | PCMU-8k | 99.7% | 624 / 626 | 27.2 | 36.2 | 4484.3 |
+| Backend | Codec | Agg WER | Errors / Words | Median wall latency | Selection signal |
+|---|---:|---:|---:|---:|---|
+| sherpa-zipformer-en-2023-06-26 | L16-16k | 10.5% | 66 / 626 | ~680 ms | Best call-center-only backend |
+| sherpa-zipformer-en-2023-06-26 | PCMU-8k | 12.0% | 75 / 626 | ~680 ms | Best call-center-only backend |
+| sherpa-zipformer-en-kroko-2025-08-06 | L16-16k | 14.1% | 88 / 626 | ~583 ms | Balanced live default candidate |
+| sherpa-zipformer-en-kroko-2025-08-06 | PCMU-8k | 13.9% | 87 / 626 | ~583 ms | Balanced live default candidate |
+| whisper-base-en | L16-16k | 29.7% | 186 / 626 | ~2188 ms | Batch/final-pass only; weak on digit-heavy categories |
+| whisper-base-en | PCMU-8k | 29.9% | 187 / 626 | ~2188 ms | Batch/final-pass only; weak on digit-heavy categories |
+| moonshine-streaming-en | L16-16k | ~99.8% | 625 / 626 | ~5500 ms | Disqualified for this harness |
+| moonshine-streaming-en | PCMU-8k | ~100.0% | 626 / 626 | ~5500 ms | Disqualified for this harness |
 
-Observed selection signal: Sherpa 2023 is the best overall live-style recognizer in this corpus; Whisper base.en is competitive on greetings, yes/no, short commands, short questions, and spelled names, but weak on digit-heavy categories. PCMU 8 kHz changed overall WER only slightly in this synthetic set, but category breakdown remains the right place to evaluate narrowband robustness.
+Observed call-center signal: `sherpa-2023` is the best call-center recognizer (`10.5% / 12.0%` on `L16-16k / PCMU-8k`), but `kroko-2025` is still below target (`14.1% / 13.9%`) and stronger on digit categories. The PM/orchestration corpus reorders the live default decision: `kroko-2025` measures `14.0% / 14.0%`, while `sherpa-2023` measures `19.8% / 22.1%`. The Telnyx gateway therefore defaults to `kroko-2025` as the balanced cross-domain profile, and operators can select `sherpa-2023` with `asr use sherpa-2023` for call-center-only deployments.
 
-The full JSON report for this run was written to `/tmp/motlie-asr-golden-ab-full.json`.
+The padded call-center JSON report for this run was written to `/tmp/motlie-asr-golden-ab-padded.json`; the PM/orchestration report was written to `/tmp/motlie-pm-ab.json`.
