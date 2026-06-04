@@ -272,8 +272,13 @@ assumption can be revisited with observed Telnyx payloads.
 
 ## ASR Artifacts
 
-Sherpa ONNX is the live M1 ASR backend. Build the gateway with `--features sherpa`
-with no ORT-specific environment variables before running the live test.
+Sherpa ONNX is the live M1 ASR backend family. The live gateway default is
+`kroko-2025` because it is the balanced profile across call-center and
+PM/technical golden corpora. Use `sherpa-2023` for call-center-only deployments.
+Operators and agents can switch the source-local next-call backend with
+`asr use kroko-2025` or `asr use sherpa-2023`. Build the gateway with
+`--features sherpa` with no ORT-specific environment variables before running
+the live test.
 
 Artifacts are loaded from:
 

@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-03 | @codex-369-rv: Made the intentional live ASR default explicit: the gateway defaults to `kroko-2025` because it is the balanced choice across call-center and PM/technical corpora, while `sherpa-2023` remains recommended for call-center-only deployments. Operators can switch per source between calls with `asr use`. | Recommended ASR/TTS Stack, Milestone 1.5: Sherpa ASR Quality Tuning |
 | 2026-06-01 | @codex-371-impl: Implemented the #371 R1 prerequisite by moving Sherpa repeated-token transcript suppression and session-reset decisions behind the ASR adapter; recorded the updated models-first M1.5 sequence where A/B infrastructure and model comparison precede hotwords, endpointing, decoder tuning, and normalization. | Inbound Call Handler Design, Milestone 1.5: Sherpa ASR Quality Tuning, Recommended ASR/TTS Stack |
 | 2026-06-01 | @codex-364-impl: Fixed media capture WAV finalization so standard readers see finite durations, added `replay-capture` for deterministic captured-audio WER checks, and split Sherpa-only ASR quality tuning into milestone 1.5 (#370) covering hotwords, model/decoder A/B, and optional marked normalization. | Staged Build Strategy, Inbound Call Handler Design, Recommended ASR/TTS Stack, Testing Scope, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Recorded the first outbound ASR-only dial attempt blocker: Telnyx rejected `POST /v2/calls` with `403 D38` because the Call Control application has no Outbound Voice Profile assignment; the gateway command is ready, but live outbound validation requires Telnyx account setup. | Outbound Call Handler Design, Testing Scope, Getting Started: Local Deployment |
@@ -420,6 +421,13 @@ Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic 
 Milestone 1.5 (#371) is a follow-on quality milestone for the already-runnable M1 ASR path. It must stay inside the Sherpa ecosystem: improve the current Sherpa-based transcript quality before considering non-Sherpa ASR replacements.
 
 The latest prepared outbound `L16 16 kHz` capture measured `29.2%` WER against a `65`-word reference. The failure pattern is mostly phonetic and domain-specific rather than random media corruption: `outbound` became `ALBAN`/`ALBOW`, `Telnyx` became `TAL NICHS`, `Sherpa` became `SHARPA`, `Motlie` became `MOTLEY`, `voice` became `BOYS`, and `id` became `IDEED`. That suggests the recognizer hears the approximate phonemes but lacks the desired domain/context prior.
+
+The validated Qwen3-TTS golden A/B after the #378 trailing-silence pad fix changed the live default decision from a call-center-only pick to a balanced profile pick:
+
+- `sherpa-2023`: `10.5% / 12.0%` call-center WER, `19.8% / 22.1%` PM/technical WER (`L16-16k / PCMU-8k`)
+- `kroko-2025`: `14.1% / 13.9%` call-center WER, `14.0% / 14.0%` PM/technical WER (`L16-16k / PCMU-8k`)
+
+Therefore the live gateway default is intentionally `kroko-2025`, while `sherpa-2023` is a recommended operator-selected backend for call-center-only runs. This is not a hidden default flip: the CLI default, `asr status`, and `asr use` operator commands must make the selected backend observable and switchable between calls.
 
 M1.5 should proceed in this order:
 
@@ -2457,7 +2465,10 @@ Implications:
 
 Recommended design rule:
 
-- Telnyx v1 should treat `sherpa-onnx` as the default recommended ASR backend for the real-time conversational flow
+- Telnyx v1 should treat upstream `sherpa-onnx` streaming Zipformer models as the default recommended ASR family for the real-time conversational flow
+- the live gateway default is `kroko-2025` (`sherpa-zipformer-en-kroko-2025-08-06`) because the M1.5 A/B results show it is the balanced cross-domain choice: call-center WER is `14.1% / 13.9%` on `L16-16k / PCMU-8k`, and PM/technical WER is `14.0% / 14.0%`
+- `sherpa-2023` (`sherpa-zipformer-en-2023-06-26`) remains the recommended profile for call-center-only deployments: it measured `10.5% / 12.0%` on the call-center corpus but `19.8% / 22.1%` on the PM/technical corpus
+- operators and agents can switch the next-call backend between `kroko-2025` and `sherpa-2023` with `asr use <backend>`; switching is source-local and takes effect only for calls answered or dialed after the command
 - the gateway itself should still accept any injected typed ASR that implements `StreamingTranscriber`
 - gateway live-test and deployment runbooks must use the upstream `sherpa-onnx` Rust crate for Sherpa; Cargo downloads and statically links the upstream prebuilt `sherpa-onnx` native archive, including the ONNX Runtime library Sherpa uses internally
 - gateway runbooks must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not require building ONNX Runtime from source or vendoring ONNX Runtime
