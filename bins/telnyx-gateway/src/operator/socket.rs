@@ -140,12 +140,23 @@ fn structured_data(command: &str, lines: &[String]) -> Option<Value> {
             "fields": fields_from_lines(lines),
             "lines": lines,
         })),
-        "tts" if argv.get(1).is_some_and(|part| part == "status") => Some(json!({
-            "kind": "tts",
-            "fields": kv_fields_from_line(lines.first().map(String::as_str).unwrap_or_default()),
-            "active": tts_rows(&lines[lines.len().min(1)..]),
+        "tts" if argv.get(1).is_some_and(|part| part == "list") => Some(json!({
+            "kind": "tts_list",
+            "backends": tts_list_rows(lines),
             "lines": lines,
         })),
+        "tts" if argv.get(1).is_some_and(|part| part == "status") => {
+            let active_start = lines
+                .iter()
+                .position(|line| line.starts_with("active-call "))
+                .unwrap_or(lines.len());
+            Some(json!({
+                "kind": "tts",
+                "fields": fields_from_lines(&lines[..active_start]),
+                "active": tts_rows(&lines[active_start..]),
+                "lines": lines,
+            }))
+        }
         _ => None,
     }
 }
@@ -187,6 +198,7 @@ fn tts_rows(lines: &[String]) -> Vec<Value> {
     lines
         .iter()
         .filter_map(|line| {
+            let line = line.strip_prefix("active-call ").unwrap_or(line);
             let mut parts = line.split_whitespace();
             let call_id = parts.next()?;
             let status = parts.next()?;
@@ -196,6 +208,24 @@ fn tts_rows(lines: &[String]) -> Vec<Value> {
                 map.insert("status".to_string(), Value::String(status.to_string()));
             }
             Some(fields)
+        })
+        .collect()
+}
+
+fn tts_list_rows(lines: &[String]) -> Vec<Value> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let backend = parts.next()?;
+            let model = parts.next()?;
+            let status = parts.next()?;
+            Some(json!({
+                "backend": backend,
+                "model": model,
+                "status": status.trim_end_matches(':'),
+                "line": line,
+            }))
         })
         .collect()
 }
@@ -316,6 +346,34 @@ mod tests {
         assert!(lines.contains("Agent socket interface"));
         assert!(lines.contains("Receive one JSON object"));
         assert!(lines.contains("Operational parity"));
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn command_socket_returns_structured_tts_discovery() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
+
+        let mut client = SocketTestClient::connect(&path).await;
+        let list = client.command("tts list").await;
+        let status = client.command("tts status").await;
+
+        assert_eq!(list["ok"], true);
+        assert_eq!(list["data"]["kind"], "tts_list");
+        assert_eq!(list["data"]["backends"][0]["backend"], "piper");
+        assert_eq!(list["data"]["backends"][0]["status"], "unavailable");
+        assert_eq!(status["ok"], true);
+        assert_eq!(status["data"]["kind"], "tts");
+        assert_eq!(status["data"]["fields"]["next"], "piper");
+        assert_eq!(status["data"]["fields"]["status"], "unavailable");
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);

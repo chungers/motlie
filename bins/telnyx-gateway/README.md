@@ -248,7 +248,9 @@ config set media-codec PCMU
 config set from-number <from-number>
 telnyx app use <connection-id>
 telnyx app webhook set https://<host>/telnyx/webhooks
+tts list
 tts status
+tts use piper
 ```
 
 Operator TUI flow:
@@ -258,6 +260,7 @@ dial <callee-number>
 calls
 call use <gateway-call-id>
 status <gateway-call-id>
+tts status
 speak Hello, this is a Motlie outbound voice test.
 speak cancel
 speak The second sentence should start after the clear command.
@@ -266,7 +269,7 @@ hangup
 ```
 
 Agent socket flow uses the same commands and returns one JSON response per line.
-For `status`, `calls`, `call show`, and `tts status`, the response includes a
+For `status`, `calls`, `call show`, `tts list`, and `tts status`, the response includes a
 machine-readable `data` object in addition to human-readable `lines`:
 
 ```sh
@@ -275,6 +278,7 @@ import json, socket
 
 commands = [
     "status",
+    "tts list",
     "tts status",
     "dial <callee-number>",
     "calls",

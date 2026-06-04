@@ -16,7 +16,7 @@ use crate::media::{
 use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{CallStatus, GatewayState, InboundMode, LogLevel, SharedState};
-use crate::tts::{split_speech_text, unavailable_registry, SharedTtsRegistry};
+use crate::tts::{split_speech_text, unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
 
 #[derive(Clone)]
 pub struct GatewayContext {
@@ -63,23 +63,27 @@ impl GatewayContext {
     }
 
     pub fn for_new_source(&self) -> Self {
-        Self::with_services(
+        let mut context = Self::with_services(
             self.state.clone(),
             self.telnyx.clone(),
             self.media.clone(),
             self.tts.clone(),
             self.session.next_asr_backend,
-        )
+        );
+        context.session.next_tts_backend = self.session.next_tts_backend;
+        context
     }
 
     pub fn for_new_source_with_asr_backend(&self, backend: LiveAsrBackend) -> Self {
-        Self::with_services(
+        let mut context = Self::with_services(
             self.state.clone(),
             self.telnyx.clone(),
             self.media.clone(),
             self.tts.clone(),
             backend,
-        )
+        );
+        context.session.next_tts_backend = self.session.next_tts_backend;
+        context
     }
 
     async fn answer_call(&mut self, target: Option<String>) -> DriverResult<CommandOutput> {
@@ -300,7 +304,12 @@ pub enum AsrCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TtsCommand {
+    List,
     Status,
+    Use {
+        #[arg(value_enum)]
+        backend: LiveTtsBackend,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -475,7 +484,12 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "<unset>".to_string())
         ),
-        format!("tts-backend: {}", context.tts.piper().label()),
+        format!(
+            "tts-next: {} ({}) {}",
+            context.session.next_tts_backend.label(),
+            context.session.next_tts_backend.model_label(),
+            tts_availability_label(&context.tts.factory(context.session.next_tts_backend))
+        ),
         format!("calls: {}", guard.calls.len()),
     ];
     if guard.inbound_mode == InboundMode::Disabled {
@@ -882,6 +896,25 @@ async fn tts_command(
     command: TtsCommand,
 ) -> DriverResult<CommandOutput> {
     match command {
+        TtsCommand::List => Ok(CommandOutput {
+            lines: LiveTtsBackend::available()
+                .into_iter()
+                .map(|backend| {
+                    let factory = context.tts.factory(backend);
+                    if let Some(reason) = factory.unavailable_reason() {
+                        format!(
+                            "{} {} unavailable: {}",
+                            backend.label(),
+                            backend.model_label(),
+                            reason
+                        )
+                    } else {
+                        format!("{} {} available", backend.label(), backend.model_label())
+                    }
+                })
+                .collect(),
+            effects: Vec::new(),
+        }),
         TtsCommand::Status => {
             let guard = context.state.read().await;
             let active = guard
@@ -890,7 +923,7 @@ async fn tts_command(
                 .filter_map(|call| {
                     call.tts.as_ref().map(|tts| {
                         format!(
-                            "{} {} playback={} frames={}/{} text={}",
+                            "active-call {} {} playback={} frames={}/{} text={}",
                             call.gateway_call_id,
                             tts.status.label(),
                             tts.playback_id,
@@ -901,24 +934,78 @@ async fn tts_command(
                     })
                 })
                 .collect::<Vec<_>>();
-            if active.is_empty() {
-                Ok(CommandOutput::line(format!(
-                    "tts backend={} active=0",
-                    context.tts.piper().label()
-                )))
-            } else {
-                let mut lines = vec![format!(
-                    "tts backend={} active={}",
-                    context.tts.piper().label(),
-                    active.len()
-                )];
-                lines.extend(active);
-                Ok(CommandOutput {
-                    lines,
-                    effects: Vec::new(),
-                })
+            let backend = context.session.next_tts_backend;
+            let factory = context.tts.factory(backend);
+            let available = LiveTtsBackend::available()
+                .into_iter()
+                .filter(|backend| context.tts.factory(*backend).is_available())
+                .map(|backend| backend.label())
+                .collect::<Vec<_>>();
+            let mut lines = vec![
+                format!("next={}", backend.label()),
+                format!("next_model={}", backend.model_label()),
+                format!("default={}", LiveTtsBackend::default().label()),
+                format!("default_model={}", LiveTtsBackend::default().model_label()),
+                format!(
+                    "available={}",
+                    if available.is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        available.join(",")
+                    }
+                ),
+                format!(
+                    "status={}",
+                    if factory.is_available() {
+                        "available"
+                    } else {
+                        "unavailable"
+                    }
+                ),
+            ];
+            if let Some(reason) = factory.unavailable_reason() {
+                lines.push(format!("reason={reason}"));
             }
+            lines.push(format!("active={}", active.len()));
+            lines.extend(active);
+            Ok(CommandOutput {
+                lines,
+                effects: Vec::new(),
+            })
         }
+        TtsCommand::Use { backend } => {
+            context.session.next_tts_backend = backend;
+            let factory = context.tts.factory(backend);
+            let mut guard = context.state.write().await;
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "source selected TTS backend {} ({}) for next speech",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            let mut lines = vec![format!(
+                "tts backend for next speech: {} ({})",
+                backend.label(),
+                backend.model_label()
+            )];
+            if let Some(reason) = factory.unavailable_reason() {
+                lines.push(format!("unavailable: {reason}"));
+            }
+            Ok(CommandOutput {
+                lines,
+                effects: Vec::new(),
+            })
+        }
+    }
+}
+
+fn tts_availability_label(factory: &crate::tts::SharedTtsFactory) -> &'static str {
+    if factory.is_available() {
+        "available"
+    } else {
+        "unavailable"
     }
 }
 
@@ -965,9 +1052,16 @@ async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<Comm
         asr_model = asr_backend.model_label(),
         "call.outbound.dial"
     );
-    Ok(CommandOutput::line(format!(
-        "dial requested for {gateway_call_id}"
-    )))
+    Ok(CommandOutput {
+        lines: vec![
+            format!("dial requested for {gateway_call_id}"),
+            format!("selected call: {gateway_call_id}"),
+            "wait for call state media/transcribing, then run:".to_string(),
+            format!("  speak {gateway_call_id} <text to say>"),
+            "use `status` or `call show` to inspect TTS playback; use `speak cancel` to clear active speech".to_string(),
+        ],
+        effects: Vec::new(),
+    })
 }
 
 async fn speak(context: &mut GatewayContext, args: SpeakArgs) -> DriverResult<CommandOutput> {
@@ -1023,6 +1117,7 @@ async fn start_speech(
     }
     let state = context.state.clone();
     let tts = context.tts.clone();
+    let tts_backend = context.session.next_tts_backend;
     let media_registry = context.media.clone();
     let call_id = gateway_call_id.clone();
     let playback_for_task = playback_id.clone();
@@ -1034,6 +1129,7 @@ async fn start_speech(
             media_handle,
             gateway_call_id: call_id,
             playback_id: playback_for_task,
+            tts_backend,
             text,
             media,
             cancel,
@@ -1074,6 +1170,7 @@ struct SpeechJob {
     media_handle: crate::media::CallMediaHandle,
     gateway_call_id: String,
     playback_id: String,
+    tts_backend: LiveTtsBackend,
     text: String,
     media: TelnyxMediaConfig,
     cancel: SpeechCancelToken,
@@ -1121,7 +1218,11 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
         if job.cancel.is_canceled() {
             return Ok(SpeechJobOutcome::NoAudioOrCanceled);
         }
-        let audio_chunks = job.tts.piper().synthesize_chunks(text_chunk).await?;
+        let audio_chunks = job
+            .tts
+            .factory(job.tts_backend)
+            .synthesize_chunks(text_chunk)
+            .await?;
         for audio_chunk in audio_chunks {
             if job.cancel.is_canceled() {
                 return Ok(SpeechJobOutcome::NoAudioOrCanceled);
@@ -1730,7 +1831,9 @@ fn gateway_root_help() -> String {
         "  asr list",
         "  asr status",
         "  asr use kroko-2025|sherpa-2023 Select backend for the next answered/dialed call",
+        "  tts list",
         "  tts status",
+        "  tts use piper                 Select TTS backend for the next speak command",
         "",
         "Calls:",
         "  calls                          List calls in operator roster order",
@@ -1821,15 +1924,24 @@ fn config_help() -> String {
 
 fn tts_help() -> String {
     [
+        "tts list",
         "tts status",
+        "tts use piper",
         "",
-        "Show the configured outbound TTS backend and active speech jobs.",
+        "Inspect or select the outbound TTS backend used by `speak`.",
         "",
-        "Milestone 2 uses Piper when the gateway is built with `--features piper`.",
-        "Without that feature, `speak` returns an unavailable-backend error.",
+        "Milestone 2 supports Piper. If `tts status` reports unavailable, restart",
+        "the gateway from a binary built with `--features \"sherpa piper\"`.",
         "",
-        "Example:",
+        "After `dial`, wait until the call state is `media` or `transcribing`, then run:",
+        "  speak <text...>",
+        "or explicitly:",
+        "  speak <call-id> <text...>",
+        "",
+        "Examples:",
+        "  tts list",
         "  tts status",
+        "  tts use piper",
     ]
     .join("\n")
 }
@@ -2056,9 +2168,10 @@ fn outbound_help() -> String {
         "",
         "Examples:",
         "  dial +15551234567",
-        "  speak Hello from Motlie.",
-        "  speak cancel",
         "  status",
+        "  speak Hello from Motlie.",
+        "  speak gwc_... Hello from Motlie.",
+        "  speak cancel",
     ]
     .join("\n")
 }
@@ -2123,7 +2236,7 @@ fn socket_help() -> String {
         "  Send one command line terminated by newline.",
         "  Receive one JSON object per command:",
         "    {\"ok\":true,\"lines\":[...],\"data\":{...},\"effects\":[...],\"error\":null}",
-        "  `data` is present for status, calls, call show, and tts status polling.",
+        "  `data` is present for status, calls, call show, tts list, and tts status polling.",
         "",
         "Discovery:",
         "  help",
@@ -2148,8 +2261,8 @@ fn socket_help() -> String {
         "    hangup [call-id]",
         "",
         "Source-local state:",
-        "  Each socket connection has its own selected call and next ASR backend.",
-        "  A later socket starts from the startup default ASR backend, not another source's choice.",
+        "  Each socket connection has its own selected call, next ASR backend, and next TTS backend.",
+        "  A later socket starts from the startup defaults, not another source's choices.",
     ]
     .join("\n")
 }
@@ -2263,6 +2376,8 @@ mod tests {
         assert!(rendered.contains("TUI shell and each agent socket connection"));
         assert!(rendered.contains("load <path>"));
         assert!(rendered.contains("quit [dump_path]"));
+        assert!(rendered.contains("tts list"));
+        assert!(rendered.contains("tts use piper"));
         assert!(rendered.contains("help socket"));
     }
 
@@ -2274,13 +2389,71 @@ mod tests {
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let asr = engine.run_line("help asr").await.expect("asr help");
+        let tts = engine.run_line("help tts").await.expect("tts help");
         let call = engine.run_line("help call").await.expect("call help");
         let socket = engine.run_line("help socket").await.expect("socket help");
 
         assert!(asr.lines.join("\n").contains("source-local"));
+        assert!(tts.lines.join("\n").contains("tts list"));
+        assert!(tts.lines.join("\n").contains("speak <text...>"));
         assert!(call.lines.join("\n").contains("call use <call-id>"));
         assert!(socket.lines.join("\n").contains("Receive one JSON object"));
         assert!(socket.lines.join("\n").contains("Operational parity"));
+    }
+
+    #[tokio::test]
+    async fn tts_list_reports_backend_availability() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = context_with_static_tts(state, telnyx, SharedMediaRegistry::default());
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("tts list").await.expect("tts list");
+
+        assert_eq!(
+            output.lines,
+            vec!["piper piper/en_us_ljspeech_medium available"]
+        );
+    }
+
+    #[tokio::test]
+    async fn tts_status_reports_unavailable_backend_clearly() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("tts status").await.expect("tts status");
+
+        assert!(output.lines.iter().any(|line| line == "next=piper"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "next_model=piper/en_us_ljspeech_medium"));
+        assert!(output.lines.iter().any(|line| line == "status=unavailable"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "reason=Piper TTS is unavailable; rebuild with --features piper"));
+    }
+
+    #[tokio::test]
+    async fn tts_use_matches_asr_command_shape() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = context_with_static_tts(state, telnyx, SharedMediaRegistry::default());
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("tts use piper").await.expect("tts use");
+
+        assert_eq!(
+            output.lines,
+            vec!["tts backend for next speech: piper (piper/en_us_ljspeech_medium)"]
+        );
+        assert_eq!(
+            engine.context().session.next_tts_backend,
+            LiveTtsBackend::Piper
+        );
     }
 
     #[tokio::test]
@@ -2539,6 +2712,14 @@ mod tests {
             .expect("dial should create dry-run outbound call");
 
         assert!(output.lines[0].starts_with("dial requested for gwc_"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "wait for call state media/transcribing, then run:"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line.contains("speak ") && line.contains("<text to say>")));
         let guard = state.read().await;
         let call_id = engine
             .context()

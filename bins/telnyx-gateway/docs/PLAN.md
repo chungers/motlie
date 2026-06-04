@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-04 | @codex-369-rv | Aligned milestone 2 TTS operator UX with ASR: `tts list`, `tts status`, and `tts use piper` are shared TUI/socket commands, `tts status` reports clear availability, and `dial` tells operators to wait for media before running `speak`. |
 | 2026-06-03 23:30 PDT | @codex-369-rv | Captured M2 live-test hardening: Piper eSpeak-ng data must be auto-detected or fail loudly, outbound speech is prebuffered as continuous utterance audio before resample/packetize, the media task owns 20 ms pacing, silence keepalive is withheld during active speech, and frame interval/underrun logs diagnose choppy playback. |
 | 2026-06-03 21:49 PDT | @codex-369-rv | Locked milestone 2 outbound TTS to the single bidirectional RTP media WebSocket with an outbound frame queue, cancellable `speak`, always-live inbound ASR during playback, Telnyx `clear`/`mark`, `stream_track=inbound_track`, TUI/socket parity, and explicit Outbound Voice Profile live-test prerequisite. |
 | 2026-06-02 | @codex-371-impl | Added Sherpa artifact A/B selection for current 2023 Zipformer vs the newer Kroko 2025 English Zipformer and recorded that actual WER/latency scoring is blocked until the private golden WAV/reference artifacts are copied onto this host. |
@@ -502,7 +503,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Outbound Call Handler Design`
 - [ ] Use `stream_establish_before_call_originate=true` in the first outbound implementation.
   DESIGN reference: `Outbound Call Handler Design`
-- [ ] Add outbound `motlie-driver` commands for `dial <phone-or-sip-uri> [--from <+e164>]`, `speak [call-id] <text...>`, `speak cancel [call-id]`, `hangup [call-id]`, `status [call-id]`, `tts status`, and `tts model use <model>`.
+- [ ] Add outbound `motlie-driver` commands for `dial <phone-or-sip-uri> [--from <+e164>]`, `speak [call-id] <text...>`, `speak cancel [call-id]`, `hangup [call-id]`, `status [call-id]`, `tts list`, `tts status`, and `tts use piper`.
   DESIGN reference: `Driver REPL Dialer Surface`
 - [ ] Route every M2 command through the shared command engine used by TUI, socket, and `--load` replay; source-local selected call and source-local command session state must remain isolated between TUI and each socket connection.
   DESIGN reference: `Driver REPL Dialer Surface`, `Operator REPL and TUI Control Surface`
