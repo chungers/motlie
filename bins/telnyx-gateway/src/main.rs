@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,6 +10,7 @@ use motlie_telnyx_gateway::adapter::{
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
+use motlie_telnyx_gateway::operator::script::run_repl_file;
 use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
 use motlie_telnyx_gateway::replay::ReplayBackend;
 use motlie_telnyx_gateway::serve::{serve, AppServices};
@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
     let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
 
     if let Some(path) = &cli.load {
-        replay_commands(&mut replay_engine, path).await?;
+        let _ = run_repl_file(&mut replay_engine, path).await?;
     }
     let source_asr_backend = state.read().await.config.asr_backend;
 
@@ -392,22 +392,4 @@ fn build_whisper_asr_factory(_cli: &Cli) -> SharedAsrFactory {
     Arc::new(motlie_telnyx_gateway::adapter::UnavailableAsrFactory::new(
         "gateway was built without Whisper ASR; rebuild with --features whisper or --features golden-ab",
     ))
-}
-
-async fn replay_commands(
-    engine: &mut CommandEngine<GatewayContext, GatewayCommand>,
-    path: &std::path::Path,
-) -> anyhow::Result<()> {
-    let raw = fs::read_to_string(path)?;
-    for (index, line) in raw.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        engine
-            .run_line(trimmed)
-            .await
-            .map_err(|err| anyhow::anyhow!("{}:{}: {err}", path.display(), index + 1))?;
-    }
-    Ok(())
 }

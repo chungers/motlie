@@ -120,6 +120,10 @@ pub enum LiveAsrBackend {
 }
 
 impl LiveAsrBackend {
+    pub const fn available() -> [Self; 2] {
+        [Self::Kroko2025, Self::Sherpa2023]
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Sherpa2023 => "sherpa-2023",
