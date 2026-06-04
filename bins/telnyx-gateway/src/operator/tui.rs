@@ -404,13 +404,8 @@ fn status_bar_left_text(state: &GatewayState, session: &OperatorSession, host: &
         .map(public_path)
         .unwrap_or_else(|| "<unset>".to_string());
     format!(
-        " telnyx host={} bind={} public={} webhook={} media={} app={} number={} inbound={} asr={}",
+        " telnyx | {} | {} | {} | {} | {} | {} | {} | {}",
         host,
-        state
-            .config
-            .bind
-            .map(|addr| addr.to_string())
-            .unwrap_or_else(|| "<unknown>".to_string()),
         public,
         webhook_path,
         media_path,
@@ -437,7 +432,7 @@ fn status_bar_right_text(state: &GatewayState, now: DateTime<Local>) -> String {
         .with_timezone(&Local)
         .format("%m-%d %H:%M:%S")
         .to_string();
-    format!(" age={age} start={started} now={} ", now.format("%H:%M:%S"))
+    format!(" {started} / {} / {age} ", now.format("%H:%M:%S"))
 }
 
 fn public_origin(url: &str) -> Option<String> {
@@ -713,6 +708,7 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn display_rows_counts_wrapped_terminal_rows() {
@@ -777,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_left_text_includes_gateway_identity() {
+    fn status_bar_left_text_uses_compact_unlabeled_fields() {
         let mut state = GatewayState::new("127.0.0.1:8080".parse().expect("valid addr"));
         state.config.public_webhook_url = Some("https://example.test/telnyx/webhooks".to_string());
         state.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
@@ -787,13 +783,33 @@ mod tests {
 
         let text = status_bar_left_text(&state, &session, "host-a");
 
-        assert!(text.contains("host=host-a"));
-        assert!(text.contains("bind=127.0.0.1:8080"));
-        assert!(text.contains("public=https://example.test"));
-        assert!(text.contains("webhook=/telnyx/webhooks"));
-        assert!(text.contains("media=/telnyx/media"));
-        assert!(text.contains("app=conn-1"));
-        assert!(text.contains("number=+15550000001"));
+        assert_eq!(
+            text,
+            " telnyx | host-a | https://example.test | /telnyx/webhooks | /telnyx/media | conn-1 | +15550000001 | disabled | kroko-2025"
+        );
+        assert!(!text.contains("host="));
+        assert!(!text.contains("bind="));
+        assert!(!text.contains("public="));
+        assert!(!text.contains("webhook="));
+        assert!(!text.contains("media="));
+    }
+
+    #[test]
+    fn status_bar_right_text_uses_start_now_age_order() {
+        let mut state = GatewayState::new("127.0.0.1:8080".parse().expect("valid addr"));
+        state.started_at = Utc
+            .with_ymd_and_hms(2026, 6, 3, 20, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let now = state.started_at.with_timezone(&Local) + chrono::Duration::seconds(65);
+
+        let text = status_bar_right_text(&state, now);
+
+        assert!(text.contains(" / "));
+        assert!(text.ends_with(" / 1m05s "));
+        assert!(!text.contains("start="));
+        assert!(!text.contains("now="));
+        assert!(!text.contains("age="));
     }
 
     #[test]
