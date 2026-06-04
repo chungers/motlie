@@ -3,6 +3,7 @@
 ## Changelog
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-03 20:49 PDT | @codex-369-rv | Recorded the Telnyx live-model policy after the padded A/B runs: `kroko-2025` is the balanced live default across call-center and PM/technical corpora, while `sherpa-2023` remains the call-center-only profile. |
 | 2026-06-03 00:02 PDT | @codex-191-impl | Fixed the measured A/B repro pointer: the golden corpus manifests, `golden-tts` WAV generator, `asr-golden-ab` harness, and playbook live on the `feature/telnyx-voice` harness branch, not in a nonexistent `bins/telnyx-gateway/corpus/` README in this `feature/models` docs PR. |
 | 2026-06-02 21:45 PDT | @codex-191-impl | Finalized the Moonshine A/B cell after a clean #376 rebuild: still ~100% WER on call-center and PM corpora with canned transcripts, so the current Motlie Moonshine backend is disqualified / pending repair for M1.5 selection. |
 | 2026-06-02 PDT | @codex-191-impl | Added measured A/B results: validated Qwen3-TTS golden A/B over the Telnyx L16/PCMU round-trip (call-center + PM corpora). sherpa-2023 10.5% (call-center best), kroko-2025 14.0% (PM best), Whisper batch/digit-weak, Moonshine ~100% after clean #376 rebuild. Fixed a tail-flush harness artifact (800 ms trailing-silence pad, PR #378) that had inflated all streaming WER 14-24 pts. Hotword bias warranted only for the technical lexicon. Full data on #371. |
@@ -15,7 +16,8 @@
 
 ## Decision
 
-- `sherpa-onnx` remains the primary ASR backend for telephony and real-time streaming. This PR targets `feature/models`, where the current backend still uses the shared `motlie-model-ort` path; the Phase 3 baseline assumes PR #368 / commit `a5c27cd4` from `feature/telnyx-voice` is merged into `feature/models`, after which the canonical baseline becomes the official upstream `sherpa-onnx` Rust crate `OnlineRecognizer` / `OnlineStream` path.
+- `sherpa-onnx` remains the primary ASR family for telephony and real-time streaming. This PR targets `feature/models`, where the current backend still uses the shared `motlie-model-ort` path; the Phase 3 baseline assumes PR #368 / commit `a5c27cd4` from `feature/telnyx-voice` is merged into `feature/models`, after which the canonical baseline becomes the official upstream `sherpa-onnx` Rust crate `OnlineRecognizer` / `OnlineStream` path.
+- The Telnyx gateway live ASR default is `kroko-2025`, selected as the balanced profile after the post-#378 padded A/B runs: it is near target on call-center utterances and materially better on PM/technical utterances. `sherpa-2023` remains the recommended profile for call-center-only deployments.
 - `Moonshine Streaming` remains the primary in-scope `transcribe-rs` streaming candidate, but not the live baseline until it can meet telephony chunk latency and stability requirements.
 - VAD-gated or utterance-batched Whisper is in scope only as a complementary final-pass / hybrid path. It is not the live engine, and live Whisper micro-chunking remains excluded.
 - Nemotron / Parakeet / Canary are DGX batched-GPU investigations, not live-streaming selection candidates unless a Rust-native streaming path exists.
@@ -39,8 +41,8 @@ Convergence note: PR #369 remains targeted at `feature/models`. All upstream-She
 
 | Backend | Call-center WER (L16/PCMU) | PM/orchestration WER (L16/PCMU) | Median wall latency | Role |
 | --- | ---: | ---: | ---: | --- |
-| sherpa-2023 zipformer (current live baseline) | 10.5% / 12.0% | 19.8% / 22.1% | ~640 ms | Best call-center; recommended streaming backend |
-| sherpa kroko-2025 zipformer | 14.1% / 13.9% | 14.0% / 14.0% | ~530 ms | Best PM/technical; strongest on digit strings |
+| sherpa-2023 zipformer | 10.5% / 12.0% | 19.8% / 22.1% | ~640 ms | Call-center-only profile; lowest call-center WER |
+| sherpa kroko-2025 zipformer | 14.1% / 13.9% | 14.0% / 14.0% | ~530 ms | Balanced Telnyx live default; best PM/technical |
 | whisper-base.en (batch) | 29.7% / 29.9% | 16.7% / 16.7% | ~2180 ms | Words-only; collapses on digits (47-70%); not live-viable |
 | Moonshine streaming | 99.8% / 100.0% | 100.0% / 100.0% | ~5500 ms | Disqualified for M1.5 selection; current backend emits canned transcripts |
 
@@ -65,6 +67,14 @@ The first A/B run reported inflated WER (sherpa 24%, kroko 38%) because the gold
 - Whisper stays a complementary word-heavy final-pass only: unfit for live where IDs/numbers occur (digit strings 47-70%) and batch-only at ~2.2 s.
 - Codec L16 versus PCMU differs <2 pts everywhere; model and trailing-silence/endpointing handling are the dominant levers, not the codec.
 
+## Recommendation
+
+- Use `kroko-2025` as the Telnyx gateway live default for mixed production traffic because it balances call-center and PM/technical accuracy at about 14% WER on both corpora.
+- Use `sherpa-2023` for call-center-only deployments where the narrower corpus matters more than PM/technical robustness.
+- Keep runtime selection between `kroko-2025` and `sherpa-2023` as a first-class gateway control so operators and agents can alternate backends between calls during A/B validation.
+- Keep Whisper, faster-whisper, Parakeet, Canary, and Nemotron as batched final-pass or appserver-side investigations; none replace the live streaming default.
+- Keep hotword/context-bias work separate from raw backend selection. The measured need is technical/PM lexicon support, not a general call-center fix.
+
 ### Moonshine status
 
 A clean local rerun over the merged #376 Moonshine sources (`3519301d`) still produced unusable transcripts: mostly canned `So,` / `Thank you.` output, ~15% of reference words emitted, and ~5.1-5.9 s/sample. Call-center WER was 99.8% L16 / 100.0% PCMU; PM/orchestration WER was 100.0% L16 / 100.0% PCMU. This failure appears on clean L16 as well as Telnyx PCMU, while Sherpa/Kroko/Whisper produce coherent results through the same harness, so it is not a Telnyx codec or replay-pipeline artifact. The current Motlie Moonshine backend is therefore disqualified for M1.5 selection and remains pending backend/artifact repair before any future evaluation.
@@ -76,7 +86,7 @@ A clean local rerun over the merged #376 Moonshine sources (`3519301d`) still pr
 - Moonshine therefore fits best as the secondary chunk-capable backend that still shares the same PCM chunk contract as the primary backend, but is used for non-telephony workloads because its chunk latency is much higher.
 - Current Moonshine CUDA incremental behavior is unstable, so the Motlie integration keeps the backend CPU-only for now.
 - Telnyx media arrives as 8 kHz mu-law narrowband audio that is decoded and upsampled to 16 kHz. This front-end and model-domain mismatch is now a first-class accuracy axis for every candidate; generic wideband WER alone is not sufficient.
-- Simulated-streaming Whisper should be evaluated as a final-pass quality upgrade after VAD endpointing, LocalAgreement, or Simul-Whisper style stabilization. The acceptance metric is WER uplift over the live sherpa transcript versus the added finalization latency. Per-frame or micro-chunked Whisper remains excluded for live partials because it worsens both latency and WER.
+- Simulated-streaming Whisper should be evaluated as a final-pass quality upgrade after VAD endpointing, LocalAgreement, or Simul-Whisper style stabilization. The acceptance metric is WER uplift over the live streaming transcript versus the added finalization latency. Per-frame or micro-chunked Whisper remains excluded for live partials because it worsens both latency and WER.
 - The desired post-convergence integration preference has two static CPU runtime lanes. Motlie-owned ORT backends such as Moonshine and Piper use the shared workspace `ort` / `download-binaries` path after the #368 ORT policy is merged into `feature/models`. The planned live Sherpa backend is the explicit Sherpa exception: upstream `sherpa-onnx` owns its downloaded static native archive and internal ONNX Runtime. These are separate runtimes; do not assume Sherpa live streaming shares the Motlie `ort` runtime. `faster-whisper` / CTranslate2 and `whisper.cpp` remain additional runtime stacks.
 
 ## CUDA / GPU Findings On DGX Spark
