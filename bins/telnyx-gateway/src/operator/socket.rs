@@ -157,6 +157,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_socket_exposes_help_to_agents() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
+
+        let mut client = SocketTestClient::connect(&path).await;
+        let response = client.command("help socket").await;
+        let lines = response_lines(&response).join("\n");
+
+        assert!(lines.contains("Agent socket interface"));
+        assert!(lines.contains("Receive one JSON object"));
+        assert!(lines.contains("Operational parity"));
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn socket_connections_keep_source_local_selection() {
         let path = std::env::temp_dir().join(format!(
             "motlie-telnyx-gateway-test-{}.sock",
