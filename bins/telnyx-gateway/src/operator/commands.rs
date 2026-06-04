@@ -10,7 +10,7 @@ use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
 use crate::media::{
-    packetize_tts_chunk, OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry,
+    packetize_tts_samples, OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry,
     SpeechCancelToken,
 };
 use crate::operator::persistence::write_state_dump;
@@ -1115,7 +1115,8 @@ enum SpeechJobOutcome {
 
 async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcome> {
     let text_chunks = split_speech_text(&job.text);
-    let mut queued_frames = 0usize;
+    let mut model_samples = Vec::new();
+    let mut model_chunks = 0usize;
     for text_chunk in text_chunks {
         if job.cancel.is_canceled() {
             return Ok(SpeechJobOutcome::NoAudioOrCanceled);
@@ -1125,25 +1126,41 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
             if job.cancel.is_canceled() {
                 return Ok(SpeechJobOutcome::NoAudioOrCanceled);
             }
-            let packets = packetize_tts_chunk(audio_chunk, job.media)?;
-            queued_frames = queued_frames.saturating_add(packets.len());
-            job.state.write().await.mark_tts_frames_queued(
-                &job.gateway_call_id,
-                &job.playback_id,
-                packets.len(),
-            );
-            for payload in packets {
-                if job.cancel.is_canceled() {
-                    return Ok(SpeechJobOutcome::NoAudioOrCanceled);
-                }
-                job.media_handle
-                    .send(OutboundMediaCommand::Frame(OutboundMediaFrame {
-                        playback_id: job.playback_id.clone(),
-                        payload,
-                    }))
-                    .await?;
-            }
+            model_samples.extend(audio_chunk.into_samples());
+            model_chunks = model_chunks.saturating_add(1);
         }
+    }
+    if model_samples.is_empty() || job.cancel.is_canceled() {
+        return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+    }
+
+    let packets = packetize_tts_samples(model_samples, job.media)?;
+    let queued_frames = packets.len();
+    if queued_frames == 0 || job.cancel.is_canceled() {
+        return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+    }
+    job.state.write().await.mark_tts_frames_queued(
+        &job.gateway_call_id,
+        &job.playback_id,
+        queued_frames,
+    );
+    tracing::info!(
+        gateway_call_id = job.gateway_call_id.as_str(),
+        playback_id = job.playback_id.as_str(),
+        model_chunks,
+        frames = queued_frames,
+        "tts.speak.prebuffered"
+    );
+    for payload in packets {
+        if job.cancel.is_canceled() {
+            return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+        }
+        job.media_handle
+            .send(OutboundMediaCommand::Frame(OutboundMediaFrame {
+                playback_id: job.playback_id.clone(),
+                payload,
+            }))
+            .await?;
     }
     if queued_frames > 0 && !job.cancel.is_canceled() {
         job.media_handle
