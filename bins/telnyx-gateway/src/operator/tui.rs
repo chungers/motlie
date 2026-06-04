@@ -17,7 +17,7 @@ use ratatui::Terminal;
 use crate::operator::commands::{GatewayCommand, GatewayContext};
 use crate::operator::script::run_operator_line;
 use crate::operator::session::{ordered_call_ids, OperatorSession};
-use crate::operator::state::{CallStatus, GatewayState, LogLevel, TranscriptKind};
+use crate::operator::state::{CallStatus, GatewayState, LogLevel};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FocusedPane {
@@ -356,19 +356,9 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
     }
     lines.extend([
         Line::from(""),
-        Line::from("assembled transcript:"),
+        Line::from("assembled transcription:"),
         Line::from(call.assembled_transcript_text()),
-        Line::from(""),
-        Line::from("recent events:"),
     ]);
-
-    for transcript in call.transcripts.iter().rev().take(12).rev() {
-        let prefix = match transcript.kind {
-            TranscriptKind::Partial => "partial",
-            TranscriptKind::Final => "final",
-        };
-        lines.push(Line::from(format!("{prefix}: {}", transcript.text)));
-    }
     if let Some(error) = &call.last_error {
         lines.push(Line::from(""));
         lines.push(Line::from(format!("error: {error}")));

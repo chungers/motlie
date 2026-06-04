@@ -13,10 +13,7 @@ pub async fn run_operator_line(
         return run_repl_file(engine, &path).await;
     }
 
-    engine
-        .run_line(line)
-        .await
-        .map_err(|error| anyhow!("{error}"))
+    run_non_repl_operator_line(engine, line).await
 }
 
 pub async fn run_repl_file(
@@ -37,8 +34,7 @@ pub async fn run_repl_file(
         output
             .lines
             .push(format!("{}:{} > {}", path.display(), index + 1, trimmed));
-        let command_output = engine
-            .run_line(trimmed)
+        let command_output = run_non_repl_operator_line(engine, trimmed)
             .await
             .map_err(|error| anyhow!("{}:{}: {error}", path.display(), index + 1))?;
         let should_exit = command_output.effects.contains(&CommandEffect::ExitShell);
@@ -49,6 +45,45 @@ pub async fn run_repl_file(
         }
     }
 
+    Ok(output)
+}
+
+async fn run_non_repl_operator_line(
+    engine: &mut CommandEngine<GatewayContext, GatewayCommand>,
+    line: &str,
+) -> anyhow::Result<CommandOutput> {
+    let argv = shlex::split(line).ok_or_else(|| anyhow!("invalid shell quoting"))?;
+    if argv.first().is_some_and(|command| command == "quit") {
+        return run_quit_command(engine, &argv).await;
+    }
+
+    engine
+        .run_argv(&argv)
+        .await
+        .map_err(|error| anyhow!("{error}"))
+}
+
+async fn run_quit_command(
+    engine: &mut CommandEngine<GatewayContext, GatewayCommand>,
+    argv: &[String],
+) -> anyhow::Result<CommandOutput> {
+    if argv.len() > 2 {
+        bail!("usage: quit [dump_path]");
+    }
+
+    let mut shutdown_argv = vec!["shutdown".to_string()];
+    if let Some(path) = argv.get(1) {
+        shutdown_argv.push(path.clone());
+    }
+    let mut output = engine
+        .run_argv(&shutdown_argv)
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+    for line in &mut output.lines {
+        if line == "shutdown requested" {
+            *line = "quit requested".to_string();
+        }
+    }
     Ok(output)
 }
 
@@ -141,5 +176,21 @@ mod tests {
             crate::adapter::LiveAsrBackend::Kroko2025
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn quit_requests_gateway_shutdown() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = run_operator_line(&mut engine, "quit")
+            .await
+            .expect("quit should shutdown gateway");
+
+        assert_eq!(output.lines, vec!["quit requested"]);
+        assert!(output.effects.contains(&CommandEffect::ExitShell));
+        assert!(state.read().await.shutdown_requested);
     }
 }
