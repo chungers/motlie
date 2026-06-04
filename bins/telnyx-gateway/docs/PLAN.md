@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-03 21:49 PDT | @codex-369-rv | Locked milestone 2 outbound TTS to the single bidirectional RTP media WebSocket with an outbound frame queue, cancellable `speak`, always-live inbound ASR during playback, Telnyx `clear`/`mark`, `stream_track=inbound_track`, TUI/socket parity, and explicit Outbound Voice Profile live-test prerequisite. |
 | 2026-06-02 | @codex-371-impl | Added Sherpa artifact A/B selection for current 2023 Zipformer vs the newer Kroko 2025 English Zipformer and recorded that actual WER/latency scoring is blocked until the private golden WAV/reference artifacts are copied onto this host. |
 | 2026-06-01 | @codex-371-impl | Added M1.5 A/B replay infrastructure: a golden corpus manifest, selectable replay backends, and comparable WER/token-error/latency reports while leaving model integration and tuning sidecars pending. |
 | 2026-06-01 | @codex-371-impl | Implemented the #371 R1 prerequisite and recorded the updated models-first M1.5 sequence: build backend A/B infrastructure and model comparisons before hotwords, endpointing, decoder tuning, or normalization. |
@@ -55,7 +56,7 @@ Execution policy for the initial implementation:
 - in milestone 4 (#367), local agents must be able to drive the gateway through the Unix-domain socket using NDJSON command requests, structured command results, call snapshots, and cursor-based event polling; authenticated Gateway Control API and gateway application webhooks remain separate appserver integration surfaces
 - milestone 1 (#364) is inbound calls answered and managed in the TUI, with ASR transcription in the selected-call detail pane
 - milestone 1.5 (#371) is Sherpa-only ASR quality tuning using captured audio replay, WER reports, hotwords/context bias, and model/decoder A/B before considering non-Sherpa ASR
-- milestone 2 (#365) is outbound dialing plus TTS driven by the TUI command surface and selected-call detail text input
+- milestone 2 (#365) is outbound dialing plus TTS driven through the shared command engine from either the TUI or the Unix-domain socket; selected-call detail text input is a TUI affordance over the same `speak` command path
 - milestone 3 (#366) is full-duplex conversation driven by a TUI chat interface over the selected call
 - milestone 4 (#367) is external integration: local agent socket tooling, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
 - `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
@@ -142,7 +143,7 @@ Define the reusable voice application surface in `libs/voice`.
   DESIGN reference: `Pipeline Controller Contracts`, `Inbound Call Handler Design`
 - [ ] Add `OutboundTtsPipeline` and `OutboundSpeechController` as the high-level controller consumed by operator commands, socket clients, mstream/broadcast bridges, tests, and conversation handlers.
   DESIGN reference: `Pipeline Controller Contracts`, `Driver REPL Dialer Surface`
-- [ ] Keep these controllers source-agnostic: TUI commands, socket commands, mstream broadcast, fixture replay, and conversation handlers should all call the same outbound `say()` path.
+- [ ] Keep these controllers source-agnostic: TUI commands, socket commands, mstream broadcast, fixture replay, and conversation handlers should all call the same outbound `speak()` path.
   DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
 
 ## Phase 3: Typed Media Pipeline in `libs/voice`
@@ -316,7 +317,7 @@ Wire call-control operations for inbound and outbound calls.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Route command results, Telnyx API responses, pending/active call state, media metadata, and transcript events to the global status stream, top call roster, or selected-call detail pane as appropriate.
   DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Make `call use <call>` update source-local `selected_call`; allow `answer`, `reject`, `hangup`, and `say <text>` to target that source-local selection when no call id is supplied, without changing another source's selection.
+- [ ] Make `call use <call>` update source-local `selected_call`; allow `answer`, `reject`, `hangup`, and `speak <text>` to target that source-local selection when no call id is supplied, without changing another source's selection.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Define the Unix-domain socket command protocol as newline-delimited JSON frames containing `motlie-driver` command text, request IDs, structured command responses, and optional structured `data`; keep restrictive filesystem permissions, stale-socket safety, and optional peer credential checks where available. Implement and validate it in milestone 4.
   DESIGN reference: `Operator REPL and TUI Control Surface`
@@ -397,22 +398,31 @@ Connect the Telnyx adapter and the provider-neutral voice pipeline to the existi
 
 ### 7.2 - Outbound text to TTS
 
+- [ ] Add a per-call outbound media channel, drained only by the WebSocket-owning media task, so TTS producers never write directly to the Telnyx socket.
+  DESIGN reference: `M2-Safe Bidirectional Media Contract`, `Returning TTS Audio`
+- [ ] Keep the inbound media read loop and ASR session active while outbound TTS frames are being synthesized, queued, and sent.
+  DESIGN reference: `M2-Safe Bidirectional Media Contract`, `Why stream_track=inbound_track`
 - [ ] Implement the Piper outbound path:
   `AudioBuf<i16, 22_050, Mono>` -> target-rate resample -> telephony packetize -> Telnyx encode.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Treat Piper as full-buffer synthesis followed by transport packetization; do not claim incremental TTS audio until the backend actually emits audio incrementally.
   DESIGN reference: `Transport Streaming vs Incremental TTS`, `Latency Budget`
+- [ ] Split long `speak` text into sentence- or clause-sized `SynthesisRequest` jobs so milestone 2 does not enqueue one giant TTS buffer and milestone 3 can cancel between chunks.
+  DESIGN reference: `Returning TTS Audio`, `M2-Safe Bidirectional Media Contract`
 - [ ] Record the Piper runtime mode used for validation. By default Piper is CPU-only because of #230; `MOTLIE_PIPER_ALLOW_CUDA=1` must be explicitly documented if enabled.
   DESIGN reference: `Recommended TTS: Piper`, `Open Concerns`
-- [ ] Call the selected `SpeechSynthesizer` and drain its returned `SpeechStream` when `OutboundSpeechController::say()` receives text.
+- [ ] Call the selected `SpeechSynthesizer` and drain its returned `SpeechStream` when `OutboundSpeechController::speak()` receives text.
   DESIGN reference: `Returning TTS Audio`, `Driver REPL Dialer Surface`
 - [ ] Instantiate the correct typed outbound pipeline from the selected TTS runtime and Telnyx outbound codec.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Add interruption handling:
   stop active TTS generation,
-  stop outbound packet send,
-  send `clear` only for MP3 mode.
+  drop queued local outbound frames for the speech job,
+  stop outbound packet send for that job,
+  send Telnyx `clear` over the bidirectional RTP WebSocket.
   DESIGN reference: `Returning TTS Audio`
+- [ ] Add Telnyx `mark` send/correlation so the selected-call detail pane and socket `status` can report queued, playing, completed, canceled, and failed speech jobs.
+  DESIGN reference: `Returning TTS Audio`, `M2-Safe Bidirectional Media Contract`
 
 ### 7.3 - Conversation, DTMF, and IVR control
 
@@ -475,24 +485,32 @@ Close the loop on independently useful product flows before combining them.
 - [ ] Keep raw ASR transcript, normalized transcript, and agent/LLM-corrected transcript as separate outputs if normalization is later implemented. WER acceptance must score raw ASR separately from any normalized-output metric.
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`
 
-### 8.2 - Milestone 2 outbound TUI dialer/TTS flow (#365)
+### 8.2 - Milestone 2 outbound TUI/socket dialer/TTS flow (#365)
 
+- [ ] Confirm live Telnyx outbound prerequisites before implementation validation: selected Call Control application/connection has an Outbound Voice Profile assignment, the `from` number is outbound-enabled for the account, and the gateway surfaces account-side errors such as `403 D38` instead of failing silently.
+  DESIGN reference: `Outbound Call Handler Design`, `Getting Started: Local Deployment`
 - [ ] Implement application-triggered `POST /v2/calls` with inline streaming parameters.
   DESIGN reference: `Outbound Call Handler Design`
 - [ ] Use `stream_establish_before_call_originate=true` in the first outbound implementation.
   DESIGN reference: `Outbound Call Handler Design`
-- [ ] Add outbound `motlie-driver` commands for `dial <phone-or-sip-uri>`, `say [call] <text...>`, `hangup [call]`, `tts status`, and `tts model use <model>`.
+- [ ] Add outbound `motlie-driver` commands for `dial <phone-or-sip-uri> [--from <+e164>]`, `speak [call-id] <text...>`, `speak cancel [call-id]`, `hangup [call-id]`, `status [call-id]`, `tts status`, and `tts model use <model>`.
   DESIGN reference: `Driver REPL Dialer Surface`
-- [ ] Add selected-call detail text input/composer for outbound TTS; submitting it must call the same `OutboundSpeechController::say()` path as `say [call] <text...>`.
+- [ ] Route every M2 command through the shared command engine used by TUI, socket, and `--load` replay; source-local selected call and source-local command session state must remain isolated between TUI and each socket connection.
+  DESIGN reference: `Driver REPL Dialer Surface`, `Operator REPL and TUI Control Surface`
+- [ ] Add selected-call detail text input/composer for outbound TTS; submitting it must call the same `OutboundSpeechController::speak()` path as `speak [call-id] <text...>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Driver REPL Dialer Surface`
 - [ ] Render outbound call state in the top roster and media session state, TTS synthesis status, and packet-send status in the selected-call detail pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Driver REPL Dialer Surface`
+- [ ] Make socket `status [call-id]` report the same outbound call/media/TTS state needed for an agent to place an outbound call, drive TTS, cancel speech, and summarize the result without reading the TUI.
+  DESIGN reference: `Driver REPL Dialer Surface`
 - [ ] Keep Telnyx `connection_id`, stream URL, credentials, and bidirectional media flags in gateway configuration rather than adding them to provider-neutral outbound call requests.
   DESIGN reference: `Staged Build Strategy`, `Provider Adapter Boundary`
-- [ ] Keep the TUI REPL and socket command surface as utterance sources only; mstream send-keys/broadcast bridges and fixture replay should call the same `OutboundSpeechController::say()` path.
+- [ ] Keep the TUI REPL and socket command surface as utterance sources only; mstream send-keys/broadcast bridges and fixture replay should call the same `OutboundSpeechController::speak()` path.
   DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
-- [ ] Support optional initial greeting once the media session is ready, implemented as a normal `say()` call.
+- [ ] Support optional initial greeting once the media session is ready, implemented as a normal `speak()` call.
   DESIGN reference: `Outbound Call Handler Design`, `Driver REPL Dialer Surface`
+- [ ] Document and exercise a manual M2 live-test runbook: start gateway with TUI and optional socket, load config, verify outbound profile/number, dial David, send one or more `speak` utterances, cancel one utterance with `speak cancel`, hang up, and inspect TUI/socket/log status.
+  DESIGN reference: `Getting Started: Local Deployment`, `Driver REPL Dialer Surface`
 
 ### 8.3 - Milestone 3 full-duplex TUI chat conversation flow (#366)
 
@@ -500,9 +518,9 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Staged Build Strategy`, `Conversation Handler Contract`
 - [ ] Add conversation bridge commands `conversation status`, `conversation attach [call]`, `conversation detach [call]`, and `conversation mode <manual|auto>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Conversation Handler Contract`
-- [ ] Add selected-call chat interface state showing inbound transcript, assistant response lifecycle, outbound `say` activity, playback status, and call lifecycle.
+- [ ] Add selected-call chat interface state showing inbound transcript, assistant response lifecycle, outbound `speak` activity, playback status, and call lifecycle.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Conversation Handler Contract`
-- [ ] Route `ConversationCommand::Say { text }` to `OutboundSpeechController::say()`.
+- [ ] Route `ConversationCommand::Say { text }` to `OutboundSpeechController::speak()`.
   DESIGN reference: `Staged Build Strategy`, `Returning TTS Audio`
 - [ ] Route `ConversationCommand::Call(action)` through the Telnyx call-control mapping.
   DESIGN reference: `motlie_voice::telephony Surface`, `v1.1: DTMF and Call Control`
@@ -540,8 +558,16 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Testing Scope for PLAN`
 - [ ] Add a provider-free adaptation test that feeds synthetic Telnyx-like `PCMU 8 kHz mono` payloads through G.711 decode, typed PCM, anti-aliased `8 kHz -> 16 kHz` resample, and a fake `StreamingTranscriber<Input = AudioBuf<i16, 16_000, Mono>>`.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
-- [ ] Add milestone 2 outbound loopback tests from Piper-shaped `AudioBuf<i16, 22_050, Mono>` through anti-aliased resample, packetization, and `L16` or `PCMU` transport encoding, verifying TTS packet emission and session teardown.
+- [ ] Add milestone 2 outbound loopback tests from Piper-shaped `AudioBuf<i16, 22_050, Mono>` through anti-aliased resample, packetization, and `L16` or `PCMU` transport encoding, verifying TTS packet emission through the outbound media channel and session teardown.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipelines`
+- [ ] Add media-task tests proving inbound ASR frames are still consumed while outbound TTS frames are queued/sent over the same bidirectional WebSocket.
+  DESIGN reference: `Testing Scope for PLAN`, `M2-Safe Bidirectional Media Contract`
+- [ ] Add cancellation tests proving `speak cancel` stops synthesis/draining, drops local queued frames, sends Telnyx `clear`, and preserves the call/ASR session.
+  DESIGN reference: `Testing Scope for PLAN`, `Returning TTS Audio`
+- [ ] Add `mark` correlation tests proving speech jobs move through queued/sent/completed/canceled states and that TUI/socket `status` exposes those states.
+  DESIGN reference: `Testing Scope for PLAN`, `Returning TTS Audio`
+- [ ] Add command parity tests proving TUI, socket, and replayed `load` commands dispatch `dial`, `speak`, `speak cancel`, `hangup`, and `status` through the same source-local command engine without leaking selected calls between sources.
+  DESIGN reference: `Testing Scope for PLAN`, `Driver REPL Dialer Surface`
 - [ ] Add regression tests for out-of-order chunks, duplicate chunks, empty media, unsupported codecs, and invalid pipeline assemblies.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
 - [ ] Add regression tests for ASR low-energy gating before speech, sustained low-energy tail suppression after speech, ASR-session reopen on speech resume after sustained silence, repeated-token transcript suppression/reset signaling, and shell cursor alignment when command output wraps across multiple rendered rows.
@@ -581,7 +607,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Add one milestone 4 inbound service walkthrough: register a webhook subscription, receive `call.inbound.pending`, reconcile with `GET /api/v1/calls/{call_id}`, attach the subscription to the call with `POST /api/v1/calls/{call_id}/attachments`, call `POST /api/v1/calls/{call_id}/answer`, and receive transcript webhooks.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Inbound Call Handler Design`
-- [ ] Add one milestone 2 outbound dial/say example configuration for Piper TTS through `OutboundSpeechController::say()`.
+- [ ] Add one milestone 2 outbound dial/speak example configuration for Piper TTS through `OutboundSpeechController::speak()`.
   DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
 - [ ] Add one milestone 4 outbound service walkthrough: call `POST /api/v1/calls`, then `POST /api/v1/calls/{call_id}/say`, and observe TTS playback webhooks.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
