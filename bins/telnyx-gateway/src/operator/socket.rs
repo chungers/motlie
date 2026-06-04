@@ -209,17 +209,17 @@ mod tests {
         let mut client_one = SocketTestClient::connect(&path).await;
         let mut client_two = SocketTestClient::connect(&path).await;
 
-        let first_use = client_one.command("asr use kroko-2025").await;
+        let first_use = client_one.command("asr use sherpa-2023").await;
         assert_eq!(first_use["ok"], true);
         let first_status = client_one.command("asr status").await;
         let second_status = client_two.command("asr status").await;
 
         assert!(response_lines(&first_status)
             .iter()
-            .any(|line| line == "next=kroko-2025"));
+            .any(|line| line == "next=sherpa-2023"));
         assert!(response_lines(&second_status)
             .iter()
-            .any(|line| line == "next=sherpa-2023"));
+            .any(|line| line == "next=kroko-2025"));
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);
@@ -237,7 +237,7 @@ mod tests {
         let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
 
         let mut client_one = SocketTestClient::connect(&path).await;
-        let first_use = client_one.command("asr use kroko-2025").await;
+        let first_use = client_one.command("asr use sherpa-2023").await;
         assert_eq!(first_use["ok"], true);
 
         let mut client_two = SocketTestClient::connect(&path).await;
@@ -246,10 +246,10 @@ mod tests {
 
         assert!(response_lines(&first_status)
             .iter()
-            .any(|line| line == "next=kroko-2025"));
+            .any(|line| line == "next=sherpa-2023"));
         assert!(response_lines(&second_status)
             .iter()
-            .any(|line| line == "next=sherpa-2023"));
+            .any(|line| line == "next=kroko-2025"));
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);
