@@ -391,34 +391,19 @@ fn status_bar_line(
 }
 
 fn status_bar_left_text(state: &GatewayState, session: &OperatorSession, host: &str) -> String {
-    let webhook_url = state.config.public_webhook_url.as_deref();
-    let media_url = state.config.public_media_url.as_deref();
-    let public = webhook_url
-        .or(media_url)
-        .and_then(public_origin)
-        .unwrap_or_else(|| "<unset>".to_string());
-    let webhook_path = webhook_url
-        .map(public_path)
-        .unwrap_or_else(|| "<unset>".to_string());
-    let media_path = media_url
-        .map(public_path)
-        .unwrap_or_else(|| "<unset>".to_string());
     format!(
-        " telnyx | {} | {} | {} | {} | {} | {} | {} | {}",
+        " telnyx | {} | {} | {} | {} | {}",
         host,
-        public,
-        webhook_path,
-        media_path,
         state
             .config
-            .selected_connection_id
+            .public_webhook_url
             .as_deref()
-            .unwrap_or("<unset>"),
+            .unwrap_or("<webhook unset>"),
         state
             .config
-            .selected_phone_number
+            .public_media_url
             .as_deref()
-            .unwrap_or("<unset>"),
+            .unwrap_or("<media unset>"),
         state.inbound_mode.label(),
         session.next_asr_backend.label()
     )
@@ -433,30 +418,6 @@ fn status_bar_right_text(state: &GatewayState, now: DateTime<Local>) -> String {
         .format("%m-%d %H:%M:%S")
         .to_string();
     format!(" {started} / {} / {age} ", now.format("%H:%M:%S"))
-}
-
-fn public_origin(url: &str) -> Option<String> {
-    let scheme_end = url.find("://")?;
-    let rest_start = scheme_end + 3;
-    let rest = &url[rest_start..];
-    let host_len = rest.find('/').unwrap_or(rest.len());
-    if host_len == 0 {
-        return None;
-    }
-    Some(url[..rest_start + host_len].to_string())
-}
-
-fn public_path(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
-    };
-    let rest_start = scheme_end + 3;
-    let rest = &url[rest_start..];
-    let Some(path_offset) = rest.find('/') else {
-        return "/".to_string();
-    };
-    let path = &rest[path_offset..];
-    path.split('?').next().unwrap_or(path).to_string()
 }
 
 fn format_age(age: chrono::Duration) -> String {
@@ -785,13 +746,14 @@ mod tests {
 
         assert_eq!(
             text,
-            " telnyx | host-a | https://example.test | /telnyx/webhooks | /telnyx/media | conn-1 | +15550000001 | disabled | kroko-2025"
+            " telnyx | host-a | https://example.test/telnyx/webhooks | wss://example.test/telnyx/media | disabled | kroko-2025"
         );
         assert!(!text.contains("host="));
         assert!(!text.contains("bind="));
-        assert!(!text.contains("public="));
         assert!(!text.contains("webhook="));
         assert!(!text.contains("media="));
+        assert!(!text.contains("conn-1"));
+        assert!(!text.contains("+15550000001"));
     }
 
     #[test]
