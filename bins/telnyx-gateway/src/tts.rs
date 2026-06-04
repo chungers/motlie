@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::{fmt, str::FromStr};
 
 use anyhow::bail;
 use async_trait::async_trait;
+use clap::ValueEnum;
 use motlie_model::typed::{AudioBuf, Mono};
 
 #[cfg(feature = "piper")]
@@ -17,6 +19,62 @@ use tokio::sync::Mutex;
 
 pub const PIPER_SAMPLE_RATE_HZ: u32 = 22_050;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum LiveTtsBackend {
+    #[default]
+    #[value(
+        name = "piper",
+        alias = "piper-en-us-ljspeech-medium",
+        alias = "piper/en_us_ljspeech_medium"
+    )]
+    Piper,
+}
+
+impl LiveTtsBackend {
+    pub const fn available() -> [Self; 1] {
+        [Self::Piper]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Piper => "piper",
+        }
+    }
+
+    pub fn model_label(self) -> &'static str {
+        match self {
+            Self::Piper => "piper/en_us_ljspeech_medium",
+        }
+    }
+}
+
+impl fmt::Display for LiveTtsBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("unsupported live TTS backend `{value}`; expected piper")]
+pub struct LiveTtsBackendParseError {
+    value: String,
+}
+
+impl FromStr for LiveTtsBackend {
+    type Err = LiveTtsBackendParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "piper" | "piper-en-us-ljspeech-medium" | "piper/en_us_ljspeech_medium" => {
+                Ok(Self::Piper)
+            }
+            _ => Err(LiveTtsBackendParseError {
+                value: value.to_string(),
+            }),
+        }
+    }
+}
+
 #[async_trait]
 pub trait OutboundTtsFactory: Send + Sync {
     async fn synthesize_chunks(
@@ -25,6 +83,14 @@ pub trait OutboundTtsFactory: Send + Sync {
     ) -> anyhow::Result<Vec<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>>>;
 
     fn label(&self) -> &'static str;
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 // justification: operator commands and media tests need one shared TTS handle without coupling the gateway command layer to a concrete compiled backend.
@@ -45,15 +111,22 @@ impl TtsRegistry {
     pub fn piper(&self) -> SharedTtsFactory {
         self.piper.clone()
     }
+
+    pub fn factory(&self, backend: LiveTtsBackend) -> SharedTtsFactory {
+        match backend {
+            LiveTtsBackend::Piper => self.piper(),
+        }
+    }
 }
 
 pub struct UnavailableTtsFactory {
+    label: &'static str,
     message: &'static str,
 }
 
 impl UnavailableTtsFactory {
-    pub fn new(message: &'static str) -> Self {
-        Self { message }
+    pub fn new(label: &'static str, message: &'static str) -> Self {
+        Self { label, message }
     }
 }
 
@@ -67,7 +140,15 @@ impl OutboundTtsFactory for UnavailableTtsFactory {
     }
 
     fn label(&self) -> &'static str {
-        "unavailable"
+        self.label
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
+
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        Some(self.message)
     }
 }
 
@@ -158,6 +239,7 @@ fn push_speech_chunk(chunks: &mut Vec<String>, current: &mut String) {
 
 pub fn unavailable_registry() -> SharedTtsRegistry {
     Arc::new(TtsRegistry::new(Arc::new(UnavailableTtsFactory::new(
+        LiveTtsBackend::Piper.model_label(),
         "Piper TTS is unavailable; rebuild with --features piper",
     ))))
 }

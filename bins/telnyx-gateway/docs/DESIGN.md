@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-04 | @codex-369-rv: Aligned TTS operator commands with the ASR command pattern: `tts list`, `tts status`, and `tts use piper` are available through the shared TUI/socket command engine, and `dial` output now tells operators to wait for media before running `speak`. | Operator REPL and TUI Control Surface, Driver REPL Dialer Surface, Recommended TTS: Piper |
 | 2026-06-03 | @codex-369-rv: Recorded M2 live-test findings for Piper: eSpeak-ng phonemization data must be present or auto-discovered, outbound TTS is packetized from continuous utterance audio, frames are paced by the media task, silence keepalive is not injected during active speech, and frame interval/underrun telemetry is required for live diagnosis. | Milestone 2: Outbound Dialer and TTS, Returning TTS Audio, M2-Safe Bidirectional Media Contract, Recommended TTS: Piper, Testing Scope |
 | 2026-06-03 | @codex-369-rv: Locked the milestone 2 outbound TTS shape around one bidirectional RTP media WebSocket, an outbound frame queue owned by the socket task, cancellable `speak`, live inbound ASR during playback, `clear`/`mark`, `stream_track=inbound_track`, and TUI/socket command parity so milestone 3 can add barge-in policy without replacing transport. | Staged Build Strategy, Outbound Call Handler Design, Returning TTS Audio, Driver REPL Dialer Surface, Testing Scope |
 | 2026-06-03 | @codex-369-rv: Made the intentional live ASR default explicit: the gateway defaults to `kroko-2025` because it is the balanced choice across call-center and PM/technical corpora, while `sherpa-2023` remains recommended for call-center-only deployments. Operators can switch per source between calls with `asr use`. | Recommended ASR/TTS Stack, Milestone 1.5: Sherpa ASR Quality Tuning |
@@ -948,10 +949,11 @@ speak cancel [call]
 hangup [call]
 status [call]
 tts status
-tts model use <model>
+tts list
+tts use piper
 ```
 
-The `dial` command creates or selects the active outbound call for the command source that ran it. The `speak` command routes text through `OutboundSpeechController::speak()`. Non-REPL sources such as mstream broadcast, scripted fixtures, socket clients, or tmux-driven tests should call the same controller instead of creating another TTS pathway.
+The `dial` command creates or selects the active outbound call for the command source that ran it and should tell the operator or agent to wait for media before running `speak`. The `speak` command routes text through `OutboundSpeechController::speak()`. Non-REPL sources such as mstream broadcast, scripted fixtures, socket clients, or tmux-driven tests should call the same controller instead of creating another TTS pathway. `tts list`, `tts status`, and `tts use piper` mirror the ASR switching surface even though milestone 2 currently has one live TTS backend; this keeps future Piper/Qwen3-TTS A/B work additive.
 
 Conversation bridge commands:
 
@@ -2528,6 +2530,7 @@ Current TTS status:
 Recommended design rule:
 
 - Telnyx v1 should standardize on Piper as the default recommended TTS backend and defer richer voice-selection work until the outbound TTS milestone is stable
+- the operator command surface should still expose `tts list`, `tts status`, and `tts use piper` so TTS follows the same discoverable pattern as ASR; `tts status` must clearly report `unavailable` when the binary was built without the `piper` feature
 - the gateway itself should still accept any injected typed TTS that implements `SpeechSynthesizer`
 
 ### Transport Streaming vs Incremental TTS
