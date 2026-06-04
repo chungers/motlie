@@ -29,20 +29,12 @@ pub struct GatewayContext {
 
 impl GatewayContext {
     pub fn new(state: SharedState, telnyx: TelnyxClient) -> Self {
-        Self::with_asr_backend(state, telnyx, LiveAsrBackend::default())
-    }
-
-    pub fn with_asr_backend(
-        state: SharedState,
-        telnyx: TelnyxClient,
-        next_asr_backend: LiveAsrBackend,
-    ) -> Self {
         Self::with_services(
             state,
             telnyx,
             SharedMediaRegistry::default(),
             unavailable_registry(),
-            next_asr_backend,
+            LiveAsrBackend::default(),
         )
     }
 
@@ -69,18 +61,6 @@ impl GatewayContext {
             self.media.clone(),
             self.tts.clone(),
             self.session.next_asr_backend,
-        );
-        context.session.next_tts_backend = self.session.next_tts_backend;
-        context
-    }
-
-    pub fn for_new_source_with_asr_backend(&self, backend: LiveAsrBackend) -> Self {
-        let mut context = Self::with_services(
-            self.state.clone(),
-            self.telnyx.clone(),
-            self.media.clone(),
-            self.tts.clone(),
-            backend,
         );
         context.session.next_tts_backend = self.session.next_tts_backend;
         context
@@ -435,8 +415,8 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
         ),
         format!(
             "asr-default: {} ({})",
-            guard.config.asr_backend.label(),
-            guard.config.asr_backend.model_label()
+            LiveAsrBackend::default().label(),
+            LiveAsrBackend::default().model_label()
         ),
         format!(
             "webhook-url: {}",
@@ -521,7 +501,7 @@ async fn config_command(
         ConfigCommand::Show => {
             let guard = context.state.read().await;
             Ok(CommandOutput::text(format!(
-                "webhook-url={}\nmedia-url={}\nmedia-codec={}\nmedia-sample-rate={}\nasr-backend={}\ncapture-dir={}\nfrom-number={}\nstate-path={}",
+                "webhook-url={}\nmedia-url={}\nmedia-codec={}\nmedia-sample-rate={}\ncapture-dir={}\nfrom-number={}\nstate-path={}",
                 guard
                     .config
                     .public_webhook_url
@@ -534,7 +514,6 @@ async fn config_command(
                     .unwrap_or("<unset>"),
                 guard.config.telnyx_media.codec.as_str(),
                 guard.config.telnyx_media.sample_rate_hz,
-                guard.config.asr_backend.label(),
                 guard
                     .config
                     .capture_dir
@@ -857,7 +836,6 @@ async fn asr_command(
             effects: Vec::new(),
         }),
         AsrCommand::Status => {
-            let guard = context.state.read().await;
             let available = LiveAsrBackend::available()
                 .into_iter()
                 .map(|backend| backend.label())
@@ -867,8 +845,8 @@ async fn asr_command(
                 "next={}\nnext_model={}\ndefault={}\ndefault_model={}\navailable={available}",
                 context.session.next_asr_backend.label(),
                 context.session.next_asr_backend.model_label(),
-                guard.config.asr_backend.label(),
-                guard.config.asr_backend.model_label()
+                LiveAsrBackend::default().label(),
+                LiveAsrBackend::default().model_label()
             )))
         }
         AsrCommand::Use { backend } => {
@@ -1213,6 +1191,7 @@ enum SpeechJobOutcome {
 async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcome> {
     let text_chunks = split_speech_text(&job.text);
     let mut model_samples = Vec::new();
+    let mut model_sample_rate_hz = None;
     let mut model_chunks = 0usize;
     for text_chunk in text_chunks {
         if job.cancel.is_canceled() {
@@ -1227,7 +1206,17 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
             if job.cancel.is_canceled() {
                 return Ok(SpeechJobOutcome::NoAudioOrCanceled);
             }
-            model_samples.extend(audio_chunk.into_samples());
+            let sample_rate_hz = audio_chunk.sample_rate_hz();
+            match model_sample_rate_hz {
+                Some(existing) if existing != sample_rate_hz => {
+                    anyhow::bail!(
+                        "TTS backend emitted mixed sample rates: {existing}Hz and {sample_rate_hz}Hz"
+                    );
+                }
+                Some(_) => {}
+                None => model_sample_rate_hz = Some(sample_rate_hz),
+            }
+            model_samples.extend(audio_chunk.into_samples_i16());
             model_chunks = model_chunks.saturating_add(1);
         }
     }
@@ -1235,7 +1224,8 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
         return Ok(SpeechJobOutcome::NoAudioOrCanceled);
     }
 
-    let packets = packetize_tts_samples(model_samples, job.media)?;
+    let model_sample_rate_hz = model_sample_rate_hz.unwrap_or(crate::tts::PIPER_SAMPLE_RATE_HZ);
+    let packets = packetize_tts_samples(model_samples, model_sample_rate_hz, job.media)?;
     let queued_frames = packets.len();
     if queued_frames == 0 || job.cancel.is_canceled() {
         return Ok(SpeechJobOutcome::NoAudioOrCanceled);
@@ -1249,6 +1239,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
         gateway_call_id = job.gateway_call_id.as_str(),
         playback_id = job.playback_id.as_str(),
         model_chunks,
+        model_sample_rate_hz,
         frames = queued_frames,
         "tts.speak.prebuffered"
     );
@@ -1870,7 +1861,7 @@ fn status_help() -> String {
         "Includes:",
         "  listener bind address",
         "  inbound mode",
-        "  source-local next ASR backend and process default ASR backend",
+        "  source-local next ASR backend and code default ASR backend",
         "  public webhook/media URLs",
         "  selected Telnyx app and phone number",
         "  media codec/sample rate",
@@ -2262,7 +2253,7 @@ fn socket_help() -> String {
         "",
         "Source-local state:",
         "  Each socket connection has its own selected call, next ASR backend, and next TTS backend.",
-        "  A later socket starts from the startup defaults, not another source's choices.",
+        "  A later socket starts from the code defaults, not another source's choices.",
     ]
     .join("\n")
 }
@@ -2339,10 +2330,7 @@ mod tests {
             engine.context().session.next_asr_backend,
             LiveAsrBackend::Sherpa2023
         );
-        assert_eq!(
-            state.read().await.config.asr_backend,
-            LiveAsrBackend::Kroko2025
-        );
+        assert_eq!(LiveAsrBackend::default(), LiveAsrBackend::Kroko2025);
     }
 
     #[tokio::test]

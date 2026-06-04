@@ -90,7 +90,6 @@ async fn main() -> anyhow::Result<()> {
             format!("listener configured on {}", cli.bind),
         );
         guard.config.capture_dir = cli.capture_dir.clone();
-        guard.config.asr_backend = cli.asr_backend;
     }
 
     let api_key = std::env::var(&cli.telnyx_api_key_env).ok();
@@ -106,16 +105,20 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let server = tokio::spawn(serve(cli.bind, services));
-    let context = GatewayContext::with_services(state.clone(), telnyx, media, tts, cli.asr_backend);
+    let context = GatewayContext::with_services(
+        state.clone(),
+        telnyx,
+        media,
+        tts,
+        motlie_telnyx_gateway::adapter::LiveAsrBackend::default(),
+    );
     let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
 
     if let Some(path) = &cli.load {
         let _ = run_repl_file(&mut replay_engine, path).await?;
     }
-    let source_asr_backend = state.read().await.config.asr_backend;
-
     let socket_task = if let Some(path) = cli.socket.clone() {
-        let socket_context = Arc::new(context.for_new_source_with_asr_backend(source_asr_backend));
+        let socket_context = Arc::new(context.for_new_source());
         {
             let mut guard = state.write().await;
             guard.log(
@@ -131,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if cli.tui {
-        let tui_context = context.for_new_source_with_asr_backend(source_asr_backend);
+        let tui_context = context.for_new_source();
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(tui_context);
         motlie_telnyx_gateway::operator::tui::run_tui(&mut engine).await?;
     } else {

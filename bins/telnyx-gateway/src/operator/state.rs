@@ -42,7 +42,6 @@ pub struct GatewayConfig {
     pub selected_phone_number: Option<String>,
     pub default_from_number: Option<String>,
     pub state_path: Option<PathBuf>,
-    pub asr_backend: LiveAsrBackend,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -410,7 +409,6 @@ impl GatewayState {
         stream_id: String,
         media: MediaMetadata,
     ) -> StreamAttachOutcome {
-        let default_asr_backend = self.config.asr_backend;
         let Some(gateway_call_id) = self.call_control_index.get(call_control_id).cloned() else {
             return StreamAttachOutcome::UnknownCallControl;
         };
@@ -423,7 +421,7 @@ impl GatewayState {
                 status: call.status,
             };
         }
-        let asr_backend = call.asr_backend.unwrap_or(default_asr_backend);
+        let asr_backend = call.asr_backend.unwrap_or_default();
         call.asr_backend = Some(asr_backend);
         call.ids.stream_id = Some(stream_id.clone());
         call.media = media;

@@ -620,8 +620,8 @@ fn status_lines(state: &GatewayState, session: &OperatorSession) -> Vec<Line<'st
         )),
         Line::from(format!(
             "asr default: {} ({})",
-            state.config.asr_backend.label(),
-            state.config.asr_backend.model_label()
+            crate::adapter::LiveAsrBackend::default().label(),
+            crate::adapter::LiveAsrBackend::default().model_label()
         )),
         Line::from(format!(
             "webhook: {}",

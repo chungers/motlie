@@ -93,10 +93,7 @@ async fn handle_connection(
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let asr_backend = context.state.read().await.config.asr_backend;
-    let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(
-        context.for_new_source_with_asr_backend(asr_backend),
-    );
+    let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.for_new_source());
     let mut line = String::new();
 
     loop {

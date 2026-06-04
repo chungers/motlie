@@ -4,7 +4,6 @@ use std::{fmt, str::FromStr};
 use anyhow::bail;
 use async_trait::async_trait;
 use clap::ValueEnum;
-use motlie_model::typed::{AudioBuf, Mono};
 
 #[cfg(feature = "piper")]
 use anyhow::Context;
@@ -18,6 +17,36 @@ use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
 
 pub const PIPER_SAMPLE_RATE_HZ: u32 = 22_050;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtsAudio {
+    samples_i16: Vec<i16>,
+    sample_rate_hz: u32,
+}
+
+impl TtsAudio {
+    pub fn new(samples_i16: Vec<i16>, sample_rate_hz: u32) -> anyhow::Result<Self> {
+        if sample_rate_hz == 0 {
+            bail!("TTS sample rate must be non-zero");
+        }
+        Ok(Self {
+            samples_i16,
+            sample_rate_hz,
+        })
+    }
+
+    pub fn samples_i16(&self) -> &[i16] {
+        &self.samples_i16
+    }
+
+    pub fn sample_rate_hz(&self) -> u32 {
+        self.sample_rate_hz
+    }
+
+    pub fn into_samples_i16(self) -> Vec<i16> {
+        self.samples_i16
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum LiveTtsBackend {
@@ -77,10 +106,7 @@ impl FromStr for LiveTtsBackend {
 
 #[async_trait]
 pub trait OutboundTtsFactory: Send + Sync {
-    async fn synthesize_chunks(
-        &self,
-        text: String,
-    ) -> anyhow::Result<Vec<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>>>;
+    async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>>;
 
     fn label(&self) -> &'static str;
 
@@ -132,10 +158,7 @@ impl UnavailableTtsFactory {
 
 #[async_trait]
 impl OutboundTtsFactory for UnavailableTtsFactory {
-    async fn synthesize_chunks(
-        &self,
-        _text: String,
-    ) -> anyhow::Result<Vec<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>>> {
+    async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
         bail!(self.message)
     }
 
@@ -184,10 +207,7 @@ impl PiperTtsFactory {
 #[cfg(feature = "piper")]
 #[async_trait]
 impl OutboundTtsFactory for PiperTtsFactory {
-    async fn synthesize_chunks(
-        &self,
-        text: String,
-    ) -> anyhow::Result<Vec<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>>> {
+    async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
         let handle = self.handle().await?;
         let mut stream = handle
             .synthesize(SynthesisRequest {
@@ -202,7 +222,7 @@ impl OutboundTtsFactory for PiperTtsFactory {
             .await
             .context("read Piper speech chunk")?
         {
-            chunks.push(chunk);
+            chunks.push(TtsAudio::new(chunk.into_samples(), PIPER_SAMPLE_RATE_HZ)?);
         }
         stream
             .finish()
@@ -318,14 +338,19 @@ fn bail_missing_artifacts<T>(label: &str, artifact_root: &Path) -> anyhow::Resul
 
 #[cfg(test)]
 pub struct StaticTtsFactory {
-    chunks: Vec<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>>,
+    chunks: Vec<TtsAudio>,
 }
 
 #[cfg(test)]
 impl StaticTtsFactory {
     pub fn new(samples: Vec<i16>) -> Self {
+        Self::with_sample_rate(samples, PIPER_SAMPLE_RATE_HZ)
+    }
+
+    pub fn with_sample_rate(samples: Vec<i16>, sample_rate_hz: u32) -> Self {
         Self {
-            chunks: vec![AudioBuf::new(samples)],
+            chunks: vec![TtsAudio::new(samples, sample_rate_hz)
+                .expect("test TTS sample rate should be non-zero")],
         }
     }
 }
@@ -333,10 +358,7 @@ impl StaticTtsFactory {
 #[cfg(test)]
 #[async_trait]
 impl OutboundTtsFactory for StaticTtsFactory {
-    async fn synthesize_chunks(
-        &self,
-        _text: String,
-    ) -> anyhow::Result<Vec<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>>> {
+    async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
         Ok(self.chunks.clone())
     }
 
@@ -371,5 +393,12 @@ mod tests {
             split_speech_text("Hello, then continue: now stop;"),
             vec!["Hello,", "then continue:", "now stop;"]
         );
+    }
+
+    #[test]
+    fn tts_audio_requires_non_zero_sample_rate() {
+        let err = TtsAudio::new(vec![0], 0).expect_err("zero sample rate should fail");
+
+        assert!(err.to_string().contains("sample rate"));
     }
 }
