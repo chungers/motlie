@@ -484,8 +484,8 @@ mod tests {
     fn dial_request_body_starts_outbound_streaming_for_asr_test() {
         let body = dial_request_body(&DialRequest {
             connection_id: "conn-1",
-            to: "+15550000001",
-            from: "+15550000002",
+            to: "+1XXXXXXXXXX",
+            from: "+1XXXXXXXXXX",
             stream_url: "wss://example.test/telnyx/media",
             webhook_url: Some("https://example.test/telnyx/webhooks"),
             media: TelnyxMediaConfig::new(TelnyxStreamCodec::L16, 16_000)
@@ -493,8 +493,8 @@ mod tests {
         });
 
         assert_eq!(body["connection_id"], "conn-1");
-        assert_eq!(body["to"], "+15550000001");
-        assert_eq!(body["from"], "+15550000002");
+        assert_eq!(body["to"], "+1XXXXXXXXXX");
+        assert_eq!(body["from"], "+1XXXXXXXXXX");
         assert_eq!(body["stream_url"], "wss://example.test/telnyx/media");
         assert_eq!(body["stream_track"], "inbound_track");
         assert_eq!(body["stream_codec"], "L16");

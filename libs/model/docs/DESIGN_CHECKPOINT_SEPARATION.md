@@ -67,12 +67,6 @@ computation graph. GGUF stores only tensors and metadata; the runtime provides
 the graph. There is no conversion bridge. `BackendKind::Ort` will require its
 own `ModelCheckpoint` format variant, which this design accommodates cleanly.
 
-Any ORT/ONNX backend added through this architecture must follow
-[ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md): static ONNX Runtime linkage,
-Cargo's `ort/download-binaries` static archive path, no manual `ORT_LIB_PATH`,
-no dynamic-link runbooks, no vendored ONNX Runtime, and no ONNX Runtime source
-builds.
-
 ---
 
 ## 2. Proposed Architecture

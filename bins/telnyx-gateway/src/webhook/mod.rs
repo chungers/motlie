@@ -321,8 +321,8 @@ mod tests {
                     "call_control_id": "call-1",
                     "call_session_id": "sess-1",
                     "call_leg_id": "leg-1",
-                    "from": "+15550000001",
-                    "to": "+15550000002"
+                    "from": "+1XXXXXXXXXX",
+                    "to": "+1XXXXXXXXXX"
                 }
             }
         });
@@ -381,8 +381,8 @@ mod tests {
                     "call_control_id": "call-1",
                     "call_session_id": "sess-1",
                     "call_leg_id": "leg-1",
-                    "from": "+15550000001",
-                    "to": "+15550000002"
+                    "from": "+1XXXXXXXXXX",
+                    "to": "+1XXXXXXXXXX"
                 }
             }
         });

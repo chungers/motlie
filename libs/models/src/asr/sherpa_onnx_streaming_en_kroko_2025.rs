@@ -181,11 +181,9 @@ mod tests {
             "Sherpa ONNX Streaming Zipformer EN Kroko 2025"
         );
         assert_eq!(descriptor.backend, BackendKind::SherpaOnnx);
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Transcription)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Transcription));
     }
 
     #[test]
@@ -203,11 +201,9 @@ mod tests {
             catalog.model(&bundle_id).map(|model| model.id.clone()),
             Some(bundle_id.clone())
         );
-        assert!(
-            catalog
-                .bundles_for_track(EvalTrack::Transcription)
-                .any(|bundle| bundle.id == bundle_id)
-        );
+        assert!(catalog
+            .bundles_for_track(EvalTrack::Transcription)
+            .any(|bundle| bundle.id == bundle_id));
         assert_eq!(
             catalog.instantiate(&bundle_id),
             Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)

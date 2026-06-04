@@ -1,7 +1,7 @@
+use std::env;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::{env, fs};
 
 use thiserror::Error;
 
@@ -170,9 +170,8 @@ fn initialize_espeak() -> EspeakResult<()> {
 
     if sample_rate <= 0 {
         return Err(EspeakError::Initialization(format!(
-            "failed to initialize eSpeak-ng. Set `{PIPER_ESPEAKNG_DATA_DIRECTORY}` to the \
-             eSpeak-ng data directory, for example `/usr/lib/x86_64-linux-gnu/{ESPEAKNG_DATA_DIR_NAME}` \
-             or `/usr/share/{ESPEAKNG_DATA_DIR_NAME}`. Error code: `{sample_rate}`"
+            "failed to initialize eSpeak-ng. Set `{PIPER_ESPEAKNG_DATA_DIRECTORY}` to a \
+             directory containing `{ESPEAKNG_DATA_DIR_NAME}`. Error code: `{sample_rate}`"
         )));
     }
 
@@ -181,13 +180,13 @@ fn initialize_espeak() -> EspeakResult<()> {
 
 fn discover_data_dir() -> Option<PathBuf> {
     if let Some(path) = env::var_os(PIPER_ESPEAKNG_DATA_DIRECTORY).map(PathBuf::from) {
-        return normalize_data_dir(path);
+        return Some(path);
     }
 
     let cwd = env::current_dir().ok();
     if let Some(cwd) = cwd {
-        if let Some(path) = normalize_data_dir(cwd) {
-            return Some(path);
+        if cwd.join(ESPEAKNG_DATA_DIR_NAME).exists() {
+            return Some(cwd);
         }
     }
 
@@ -195,47 +194,12 @@ fn discover_data_dir() -> Option<PathBuf> {
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
     if let Some(parent) = exe_parent {
-        if let Some(path) = normalize_data_dir(parent) {
-            return Some(path);
-        }
-    }
-
-    for candidate in common_data_dir_candidates() {
-        if let Some(path) = normalize_data_dir(candidate) {
-            return Some(path);
+        if parent.join(ESPEAKNG_DATA_DIR_NAME).exists() {
+            return Some(parent);
         }
     }
 
     None
-}
-
-fn normalize_data_dir(path: PathBuf) -> Option<PathBuf> {
-    if is_data_dir(&path) {
-        return Some(path);
-    }
-    let nested = path.join(ESPEAKNG_DATA_DIR_NAME);
-    if is_data_dir(&nested) {
-        return Some(nested);
-    }
-    None
-}
-
-fn is_data_dir(path: &Path) -> bool {
-    path.join("phontab").is_file() && path.join("en_dict").is_file()
-}
-
-fn common_data_dir_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("/usr/share/espeak-ng-data"),
-        PathBuf::from("/usr/local/share/espeak-ng-data"),
-        PathBuf::from("/opt/homebrew/share/espeak-ng-data"),
-    ];
-    if let Ok(entries) = fs::read_dir("/usr/lib") {
-        for entry in entries.flatten() {
-            candidates.push(entry.path().join(ESPEAKNG_DATA_DIR_NAME));
-        }
-    }
-    candidates
 }
 
 fn strip_lang_switch_flags(input: &str) -> String {
@@ -289,19 +253,5 @@ mod tests {
     #[test]
     fn strips_stress_markers_without_regex() {
         assert_eq!(strip_stress_markers("hˈɛlˌoʊ"), "hɛloʊ");
-    }
-
-    #[test]
-    fn normalizes_parent_or_direct_espeak_data_dir() {
-        let root = env::temp_dir().join(format!("motlie-espeak-test-{}", std::process::id()));
-        let data = root.join(ESPEAKNG_DATA_DIR_NAME);
-        fs::create_dir_all(&data).expect("create test data dir");
-        fs::write(data.join("phontab"), b"").expect("write phontab");
-        fs::write(data.join("en_dict"), b"").expect("write dict");
-
-        assert_eq!(normalize_data_dir(root.clone()), Some(data.clone()));
-        assert_eq!(normalize_data_dir(data.clone()), Some(data.clone()));
-
-        fs::remove_dir_all(root).expect("remove test data dir");
     }
 }

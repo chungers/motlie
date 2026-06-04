@@ -1,10 +1,10 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use cel_cxx::{Activation, Env, Value};
 use motlie_model::{
     ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart, GenerationParams, ThinkingMode,
     Tool, ToolChoice, ToolName,
 };
-use motlie_models::{ToolDispatch, ToolList, tool_list};
+use motlie_models::{tool_list, ToolDispatch, ToolList};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

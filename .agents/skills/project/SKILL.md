@@ -888,12 +888,16 @@ mstream snapshot <workstream> --max-chars 12000
 Then use your own GitHub context to decide whether to post the synthesized log
 to the PR, the issue, both, or neither. The log should be concise: result,
 agents/roles, important timeline points, validation, remaining risks, and
-follow-up issues. Add timestamps with timezone to important milestones when the
-source data has them, especially workstream open, agent recruitment, PR open,
-review verdicts, fix pushes, merge, issue close, and workstream close. End the
-log with a short stats summary: elapsed wall-clock time from first known
-milestone to closeout, agent count by role/model, review rounds, commits or
-pushes, timer wakeups or orchestrator turns if known, and any follow-up issue
-count. If a timestamp or count is unavailable, omit it or mark it `unknown`
-rather than inventing precision. (Invariant 1: do not ask collaborator agents to
-use mstream for this.)
+follow-up issues. Every closeout log and posted transcript MUST include both,
+led by a compact stats block (table or list) before the narrative:
+1. **Timestamps** (with timezone) on key milestones: workstream open, agent
+   recruitment, PR open, each review verdict, fix pushes, merge, issue close,
+   and workstream close.
+2. **Stats:** number of **review rounds** (per project/skill), agent count by
+   role/model, elapsed wall-clock from first known milestone to closeout,
+   commits/pushes with merge/commit SHAs, timer wakeups or orchestrator turns if
+   known, and any follow-up issue count.
+
+If a timestamp or count is genuinely unavailable, mark it `unknown` rather than
+inventing precision or dropping the block. (Invariant 1: do not ask collaborator
+agents to use mstream for this.)

@@ -219,6 +219,8 @@ The WER and latency numbers in the validation report and the charts below were
 measured from this CPU-oriented release build on this host:
 
 ```bash
+export ORT_LIB_PATH=/tmp/onnxruntime-cuda/build/Linux-sm121/Release
+export LD_LIBRARY_PATH=/tmp/onnxruntime-cuda/build/Linux-sm121/Release${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export PIPER_ESPEAKNG_DATA_DIRECTORY=/usr/lib/aarch64-linux-gnu
 
 cargo build -p motlie-models --release \
@@ -238,6 +240,8 @@ Sherpa ONNX, and Whisper CPP. Moonshine does not currently expose a separate
 CUDA feature in this workspace.
 
 ```bash
+export ORT_LIB_PATH=/tmp/onnxruntime-cuda/build/Linux-sm121/Release
+export LD_LIBRARY_PATH=/tmp/onnxruntime-cuda/build/Linux-sm121/Release${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export PIPER_ESPEAKNG_DATA_DIRECTORY=/usr/lib/aarch64-linux-gnu
 
 cargo build -p motlie-models --release \

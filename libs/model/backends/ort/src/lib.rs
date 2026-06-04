@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use motlie_model::ModelError;
 #[cfg(feature = "cuda")]
 use motlie_model::metrics_runtime::should_force_cpu;
+use motlie_model::ModelError;
 use ort::session::Session;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

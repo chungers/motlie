@@ -14,12 +14,12 @@
 /// Environment variables:
 ///   MOTLIE_MODEL_FORCE_CPU=1  — force CPU even if built with CUDA
 ///   MOTLIE_PAGED_ATTN_CONTEXT=N — enable PagedAttention with N-token context budget (CUDA only)
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, QuantizationBits,
     StartOptions,
 };
-use motlie_models::{CuratedBundle, default_artifact_root, quantization_label_isq};
+use motlie_models::{default_artifact_root, quantization_label_isq, CuratedBundle};
 use std::time::Instant;
 
 #[tokio::main]
@@ -226,7 +226,7 @@ async fn run_one<C: ChatModel + ?Sized>(chat: &C, prompt: &str) -> Result<(usize
 }
 
 fn current_rss_mib() -> f64 {
-    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
     let pid = match get_current_pid() {
         Ok(pid) => pid,
         Err(_) => return 0.0,

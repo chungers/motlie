@@ -1691,8 +1691,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: None,
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("+1XXXXXXXXXX".to_string()),
+                Some("+1XXXXXXXXXX".to_string()),
                 CallStatus::Answering,
             )
         };
@@ -1777,8 +1777,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: None,
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("+1XXXXXXXXXX".to_string()),
+                Some("+1XXXXXXXXXX".to_string()),
                 CallStatus::Answering,
             )
         };
@@ -2154,8 +2154,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: None,
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("+1XXXXXXXXXX".to_string()),
+                Some("+1XXXXXXXXXX".to_string()),
                 CallStatus::Answering,
             );
             let call = guard
@@ -2234,8 +2234,8 @@ mod tests {
                 call_leg_id: Some("leg-1".to_string()),
                 stream_id: None,
             },
-            Some("+15550000001".to_string()),
-            Some("+15550000002".to_string()),
+            Some("+1XXXXXXXXXX".to_string()),
+            Some("+1XXXXXXXXXX".to_string()),
             status,
         )
     }

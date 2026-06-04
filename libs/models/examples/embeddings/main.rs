@@ -1,9 +1,9 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, EmbeddingModel, EmbeddingRequest, QuantizationBits, StartOptions,
 };
 use motlie_models::{
-    ModelSelector, default_artifact_root, download_bundle_artifacts, quantization_label_isq,
+    default_artifact_root, download_bundle_artifacts, quantization_label_isq, ModelSelector,
 };
 use std::time::Instant;
 

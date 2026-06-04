@@ -2005,7 +2005,7 @@ fn telnyx_help() -> String {
         "  config set webhook-url https://your-host/telnyx/webhooks",
         "  config set media-url wss://your-host/telnyx/media",
         "  telnyx app create motlie-test",
-        "  telnyx number bind +15551234567 <connection-id>",
+        "  telnyx number bind +1XXXXXXXXXX <connection-id>",
     ]
     .join("\n")
 }
@@ -2050,8 +2050,8 @@ fn telnyx_number_help() -> String {
         "",
         "Examples:",
         "  telnyx number list",
-        "  telnyx number use +15551234567",
-        "  telnyx number bind +15551234567 1234567890",
+        "  telnyx number use +1XXXXXXXXXX",
+        "  telnyx number bind +1XXXXXXXXXX 1234567890",
     ]
     .join("\n")
 }
@@ -2158,7 +2158,7 @@ fn outbound_help() -> String {
         "  Telnyx account/application has an Outbound Voice Profile assigned",
         "",
         "Examples:",
-        "  dial +15551234567",
+        "  dial +1XXXXXXXXXX",
         "  status",
         "  speak Hello from Motlie.",
         "  speak gwc_... Hello from Motlie.",
@@ -2175,7 +2175,7 @@ fn test_help() -> String {
         "This is for ASR quality testing; outbound TTS is not part of this command.",
         "",
         "Example:",
-        "  test dial-transcribe +15551234567 --from +15557654321",
+        "  test dial-transcribe +1XXXXXXXXXX --from +1XXXXXXXXXX",
     ]
     .join("\n")
 }
@@ -2639,7 +2639,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.config.selected_connection_id = Some("conn-1".to_string());
-            guard.config.selected_phone_number = Some("+15550000001".to_string());
+            guard.config.selected_phone_number = Some("+1XXXXXXXXXX".to_string());
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
             guard.config.public_webhook_url =
                 Some("https://example.test/telnyx/webhooks".to_string());
@@ -2655,7 +2655,7 @@ mod tests {
             .await
             .expect("asr use");
         let output = engine
-            .run_line("test dial-transcribe +15550000002")
+            .run_line("test dial-transcribe +1XXXXXXXXXX")
             .await
             .expect("dial-transcribe");
 
@@ -2673,8 +2673,8 @@ mod tests {
             crate::operator::state::CallDirection::Outbound
         );
         assert_eq!(call.status, CallStatus::Dialing);
-        assert_eq!(call.from.as_deref(), Some("+15550000001"));
-        assert_eq!(call.to.as_deref(), Some("+15550000002"));
+        assert_eq!(call.from.as_deref(), Some("+1XXXXXXXXXX"));
+        assert_eq!(call.to.as_deref(), Some("+1XXXXXXXXXX"));
         assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
     }
@@ -2685,7 +2685,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.config.selected_connection_id = Some("conn-1".to_string());
-            guard.config.default_from_number = Some("+15550000001".to_string());
+            guard.config.default_from_number = Some("+1XXXXXXXXXX".to_string());
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
             guard.config.public_webhook_url =
                 Some("https://example.test/telnyx/webhooks".to_string());
@@ -2695,7 +2695,7 @@ mod tests {
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine
-            .run_line("dial +15550000002")
+            .run_line("dial +1XXXXXXXXXX")
             .await
             .expect("dial should create dry-run outbound call");
 
@@ -2721,8 +2721,8 @@ mod tests {
             crate::operator::state::CallDirection::Outbound
         );
         assert_eq!(call.status, CallStatus::Dialing);
-        assert_eq!(call.from.as_deref(), Some("+15550000001"));
-        assert_eq!(call.to.as_deref(), Some("+15550000002"));
+        assert_eq!(call.from.as_deref(), Some("+1XXXXXXXXXX"));
+        assert_eq!(call.to.as_deref(), Some("+1XXXXXXXXXX"));
         assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
     }
@@ -2924,8 +2924,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: Some("stream-1".to_string()),
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("+1XXXXXXXXXX".to_string()),
+                Some("+1XXXXXXXXXX".to_string()),
                 CallStatus::Answered,
             );
             guard.add_transcript(
@@ -3034,8 +3034,8 @@ mod tests {
                 call_leg_id: Some(format!("leg-{call_control_id}")),
                 stream_id: Some(stream_id.to_string()),
             },
-            Some("+15550000001".to_string()),
-            Some("+15550000002".to_string()),
+            Some("+1XXXXXXXXXX".to_string()),
+            Some("+1XXXXXXXXXX".to_string()),
             CallStatus::MediaStarted,
         );
         let call = state

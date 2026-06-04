@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, CapabilityKind, ChatMessage, ChatModel, ChatRequest, ChatRole,
     CompletionModel, ContentPart, QuantizationBits, StartOptions,

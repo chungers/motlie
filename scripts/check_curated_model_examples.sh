@@ -31,20 +31,23 @@ note() {
   echo "[curated-examples] $*"
 }
 
-run_with_ort_policy() {
-  ./scripts/check_models_build_prereqs.sh --require-ort
-  env -u ORT_PREFER_DYNAMIC_LINK -u ORT_LIB_PATH -u ORT_LIB_LOCATION "$@"
+run_with_optional_ort() {
+  if [[ -n "${ORT_LIB_PATH:-}" ]]; then
+    ORT_LIB_PATH="${ORT_LIB_PATH}" "$@"
+  else
+    "$@"
+  fi
 }
 
 case "${mode}" in
   check)
     ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule
     cargo check -p motlie-model-espeak-ng -p motlie-model-piper --lib
-    run_with_ort_policy cargo check -p motlie-models --lib --examples --no-default-features --features "${features}"
+    run_with_optional_ort cargo check -p motlie-models --lib --examples --no-default-features --features "${features}"
     ;;
   build)
     ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule --require-ort
-    env -u ORT_PREFER_DYNAMIC_LINK -u ORT_LIB_PATH -u ORT_LIB_LOCATION cargo build -p motlie-models \
+    ORT_LIB_PATH="${ORT_LIB_PATH}" cargo build -p motlie-models \
       --example tts_piper \
       --example tts_qwen3_tts_cpp \
       --example asr_whisper \

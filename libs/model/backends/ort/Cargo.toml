@@ -17,4 +17,4 @@ cuda = ["ort/cuda"]
 [dependencies]
 motlie-model = { path = "../..", features = ["metrics-runtime"] }
 # TODO(@codex-tts): upgrade `ort` to stable 2.x once it is released.
-ort.workspace = true
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray"] }

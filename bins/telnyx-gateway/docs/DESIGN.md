@@ -990,12 +990,12 @@ Recommended dump format:
 # generated_at 2026-05-30T18:35:00Z
 config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
 config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
-config set from-number +15557654321
+config set from-number +1XXXXXXXXXX
 config set state-path ./telnyx-gateway.state.repl
 telnyx app use <connection-id>
 telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
-telnyx number use +15557654321
-telnyx number bind +15557654321 <connection-id>
+telnyx number use +1XXXXXXXXXX
+telnyx number bind +1XXXXXXXXXX <connection-id>
 webhook subscription upsert whsub_01HZ... https://app.example.com/motlie/events --events call.inbound.pending,transcript.final,call.ended --secret-ref env:MOTLIE_APP_WEBHOOK_SECRET
 inbound enable --manual
 ```
@@ -1037,7 +1037,7 @@ config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
 config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
 telnyx app create motlie-local
 telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
-telnyx number bind +15551234567 <connection-id>
+telnyx number bind +1XXXXXXXXXX <connection-id>
 inbound enable --manual
 calls
 answer <call>
@@ -1092,8 +1092,8 @@ All gateway-emitted webhooks should use one stable envelope:
     "id": "call_01HZ...",
     "direction": "inbound",
     "state": "pending",
-    "from": "+15551234567",
-    "to": "+15557654321"
+    "from": "+1XXXXXXXXXX",
+    "to": "+1XXXXXXXXXX"
   },
   "provider": {
     "name": "telnyx",
@@ -1227,8 +1227,8 @@ X-Motlie-Signature: v1=<hmac-sha256>
     "id": "call_01HZ...",
     "direction": "inbound",
     "state": "pending",
-    "from": "+15551234567",
-    "to": "+15557654321"
+    "from": "+1XXXXXXXXXX",
+    "to": "+1XXXXXXXXXX"
   },
   "data": {}
 }
@@ -1262,8 +1262,8 @@ Example response:
       "id": "call_01HZ...",
       "direction": "inbound",
       "state": "pending",
-      "from": "+15551234567",
-      "to": "+15557654321",
+      "from": "+1XXXXXXXXXX",
+      "to": "+1XXXXXXXXXX",
       "media": { "state": "not_started" },
       "transcription": { "state": "not_started" },
       "tts": { "state": "idle" },
@@ -1372,8 +1372,8 @@ Outbound dial request:
 
 ```json
 {
-  "to": "+15551234567",
-  "from": "+15557654321",
+  "to": "+1XXXXXXXXXX",
+  "from": "+1XXXXXXXXXX",
   "events": {
     "subscription_id": "whsub_01HZ..."
   },
@@ -3221,7 +3221,7 @@ curl -X POST \
   --header "Authorization: Bearer $TELNYX_API_KEY" \
   --data '{
     "phone_numbers": [
-      { "phone_number": "+13125551234" }
+      { "phone_number": "+1XXXXXXXXXX" }
     ]
   }' \
   "https://api.telnyx.com/v2/number_orders"
@@ -3256,8 +3256,8 @@ Telnyx phone numbers carry a `connection_id`. Set that to the Call Control Appli
 
 ```text
 telnyx number list
-telnyx number use +13125551234
-telnyx number bind +13125551234 <connection-id>
+telnyx number use +1XXXXXXXXXX
+telnyx number bind +1XXXXXXXXXX <connection-id>
 ```
 
 The right status area should show the Telnyx API request status and the currently selected application/number.

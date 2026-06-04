@@ -14,14 +14,14 @@ use motlie_model::{
     StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_espeak_ng::text_to_phonemes;
-use motlie_model_ort::{OrtExecutionTarget, build_session_with_target};
+use motlie_model_ort::{build_session_with_target, OrtExecutionTarget};
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    PiperArtifactPaths, PiperConfig, RuntimeMetricState, configure_artifact_policy, lock_metrics,
-    observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, PiperArtifactPaths, PiperConfig, RuntimeMetricState,
 };
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -536,8 +536,8 @@ fn ort_tensor_error(err: ort::Error) -> ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::SpeechParams;
     use motlie_model::typed::SpeechStream as _;
+    use motlie_model::SpeechParams;
 
     #[tokio::test]
     async fn stream_emits_chunks_and_finishes_once() {
@@ -550,13 +550,11 @@ mod tests {
         }
 
         assert_eq!(total, 10_000);
-        assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("stream should stay exhausted")
-                .is_none()
-        );
+        assert!(stream
+            .next_chunk()
+            .await
+            .expect("stream should stay exhausted")
+            .is_none());
     }
 
     #[test]

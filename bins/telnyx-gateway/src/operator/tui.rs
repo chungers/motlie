@@ -755,7 +755,7 @@ mod tests {
         state.config.public_webhook_url = Some("https://example.test/telnyx/webhooks".to_string());
         state.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
         state.config.selected_connection_id = Some("conn-1".to_string());
-        state.config.selected_phone_number = Some("+15550000001".to_string());
+        state.config.selected_phone_number = Some("+1XXXXXXXXXX".to_string());
 
         let text = status_bar_left_text(&state, "host-a");
 
@@ -768,7 +768,7 @@ mod tests {
         assert!(!text.contains("webhook="));
         assert!(!text.contains("media="));
         assert!(!text.contains("conn-1"));
-        assert!(!text.contains("+15550000001"));
+        assert!(!text.contains("+1XXXXXXXXXX"));
         assert!(!text.contains("disabled"));
         assert!(!text.contains("kroko-2025"));
     }

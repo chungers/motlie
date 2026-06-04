@@ -34,9 +34,9 @@ cat /path/to/audio.wav | cargo run -p motlie-models --example asr_moonshine \
 - The curated Moonshine artifacts must already be downloaded under the default
   HF cache root, or `--artifact-root` may point directly at the resolved
   artifact directory that contains the Moonshine `.ort` files.
-- ONNX Runtime is provided by Cargo through the workspace `ort/download-binaries`
-  static archive path. Do not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or
-  `LD_LIBRARY_PATH`.
+- A compatible ONNX Runtime installation must be provided explicitly for the
+  `ort` crate. Set `ORT_LIB_PATH` unless ONNX Runtime is already discoverable
+  via `pkg-config` or another explicit system installation path.
 - The `.wav` file must be PCM audio (`i16` or `f32`).
 
 ## Expected Behavior

@@ -63,6 +63,31 @@ find_espeak_dir() {
   return 1
 }
 
+find_ort_dir() {
+  if [[ -n "${ORT_LIB_PATH:-}" ]]; then
+    [[ -e "${ORT_LIB_PATH}/libonnxruntime.so" || -e "${ORT_LIB_PATH}/libonnxruntime.so.1" || -e "${ORT_LIB_PATH}/libonnxruntime.dylib" ]] && {
+      printf '%s\n' "${ORT_LIB_PATH}"
+      return 0
+    }
+  fi
+
+  if command -v ldconfig >/dev/null 2>&1; then
+    local match
+    match="$(ldconfig -p 2>/dev/null | grep 'libonnxruntime\.so' | head -n1 | awk '{print $NF}')"
+    if [[ -n "${match}" ]]; then
+      dirname "${match}"
+      return 0
+    fi
+  fi
+
+  if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists onnxruntime 2>/dev/null; then
+    pkg-config --variable=libdir onnxruntime
+    return 0
+  fi
+
+  return 1
+}
+
 check_espeak() {
   local dir
   dir="$(find_espeak_dir)" || fail "libespeak-ng not found. Install libespeak-ng-dev or set ESPEAK_NG_LIB_DIR."
@@ -70,31 +95,9 @@ check_espeak() {
 }
 
 check_ort() {
-  [[ -z "${ORT_LIB_PATH:-}" ]] || fail "ORT_LIB_PATH must not be set for Motlie model checks; ort/download-binaries fetches and statically links libonnxruntime.a."
-  [[ -z "${ORT_LIB_LOCATION:-}" ]] || fail "ORT_LIB_LOCATION must not be set for Motlie model checks; ort/download-binaries fetches and statically links libonnxruntime.a."
-
-  case "${ORT_PREFER_DYNAMIC_LINK:-}" in
-    1|true|TRUE|True)
-      fail "ORT_PREFER_DYNAMIC_LINK must not be set for Motlie model checks; ort/download-binaries statically links libonnxruntime.a."
-      ;;
-  esac
-  case "${ORT_SKIP_DOWNLOAD:-}" in
-    1|true|TRUE|True)
-      fail "ORT_SKIP_DOWNLOAD must not be set for Motlie model checks; ort/download-binaries must fetch the prebuilt static archive."
-      ;;
-  esac
-  case "${ORT_OFFLINE:-}" in
-    1|true|TRUE|True)
-      fail "ORT_OFFLINE must not be set for Motlie model checks; ort/download-binaries must fetch the prebuilt static archive."
-      ;;
-  esac
-  case "${CARGO_NET_OFFLINE:-}" in
-    1|true|TRUE|True)
-      fail "CARGO_NET_OFFLINE must not be set for Motlie ORT model checks; ort/download-binaries must fetch the prebuilt static archive."
-      ;;
-  esac
-
-  note "ORT prebuilt static archive download is enabled through the workspace ort dependency"
+  local dir
+  dir="$(find_ort_dir)" || fail "ONNX Runtime not found. Set ORT_LIB_PATH or install a system onnxruntime with pkg-config metadata."
+  note "found ONNX Runtime in ${dir}"
 }
 
 check_qwen_submodule() {

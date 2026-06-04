@@ -1824,11 +1824,9 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1847,11 +1845,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1870,11 +1866,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_6_27b_gguf");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Chat)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -2191,11 +2185,9 @@ mod tests {
         #[cfg(feature = "model-whisper-base-en")]
         {
             let descriptor = crate::asr::whisper_base_en::descriptor();
-            assert!(
-                descriptor
-                    .capabilities
-                    .supports(CapabilityKind::Transcription)
-            );
+            assert!(descriptor
+                .capabilities
+                .supports(CapabilityKind::Transcription));
             assert!(!descriptor.capabilities.supports(CapabilityKind::VoiceClone));
             assert_eq!(
                 descriptor.capabilities.descriptors(),
