@@ -15,8 +15,26 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::Terminal;
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
+use crate::operator::script::run_operator_line;
 use crate::operator::session::{ordered_call_ids, OperatorSession};
 use crate::operator::state::{CallStatus, GatewayState, LogLevel, TranscriptKind};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusedPane {
+    Shell,
+    Calls,
+    Detail,
+}
+
+impl FocusedPane {
+    fn next(self) -> Self {
+        match self {
+            Self::Shell => Self::Calls,
+            Self::Calls => Self::Detail,
+            Self::Detail => Self::Shell,
+        }
+    }
+}
 
 pub async fn run_tui(
     engine: &mut CommandEngine<GatewayContext, GatewayCommand>,
@@ -24,12 +42,13 @@ pub async fn run_tui(
     let mut terminal = TerminalGuard::enter()?;
     let mut input = String::new();
     let mut history = vec!["telnyx-gateway TUI ready".to_string()];
+    let mut focus = FocusedPane::Shell;
 
     loop {
         let state = engine.context().state.read().await.clone();
         engine.context_mut().session.ensure_valid_selection(&state);
         let session = engine.context().session.clone();
-        terminal.draw(|frame| draw(frame, &state, &session, &history, &input))?;
+        terminal.draw(|frame| draw(frame, &state, &session, &history, &input, focus))?;
 
         if state.shutdown_requested {
             break;
@@ -49,18 +68,15 @@ pub async fn run_tui(
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-            KeyCode::Char(ch) => input.push(ch),
-            KeyCode::Backspace => {
-                let _ = input.pop();
-            }
-            KeyCode::Enter => {
+            KeyCode::Tab => focus = focus.next(),
+            KeyCode::Enter if focus == FocusedPane::Shell => {
                 let command = input.trim().to_string();
                 input.clear();
                 if command.is_empty() {
                     continue;
                 }
                 history.push(format!("> {command}"));
-                match engine.run_line(&command).await {
+                match run_operator_line(engine, &command).await {
                     Ok(output) => {
                         history.extend(output.lines);
                         if output.effects.contains(&CommandEffect::ExitShell) {
@@ -69,14 +85,38 @@ pub async fn run_tui(
                     }
                     Err(error) => history.push(format!("error: {error}")),
                 }
-                while history.len() > 200 {
-                    history.remove(0);
-                }
+                trim_history(&mut history);
             }
-            KeyCode::Up => select_relative(engine.context_mut(), -1).await,
-            KeyCode::Down => select_relative(engine.context_mut(), 1).await,
-            KeyCode::PageUp => engine.context_mut().session.scroll_detail(-8),
-            KeyCode::PageDown => engine.context_mut().session.scroll_detail(8),
+            KeyCode::Char(ch) => match focus {
+                FocusedPane::Shell => input.push(ch),
+                FocusedPane::Calls if ch == 'a' => {
+                    let message = attach_selected(engine.context_mut()).await;
+                    history.push(message);
+                    trim_history(&mut history);
+                }
+                FocusedPane::Detail if ch == 'u' => engine.context_mut().session.scroll_detail(-1),
+                FocusedPane::Detail if ch == 'b' => engine.context_mut().session.scroll_detail(1),
+                _ => {}
+            },
+            KeyCode::Backspace if focus == FocusedPane::Shell => {
+                let _ = input.pop();
+            }
+            KeyCode::Up => match focus {
+                FocusedPane::Calls => select_relative(engine.context_mut(), -1).await,
+                FocusedPane::Detail => engine.context_mut().session.scroll_detail(-1),
+                FocusedPane::Shell => {}
+            },
+            KeyCode::Down => match focus {
+                FocusedPane::Calls => select_relative(engine.context_mut(), 1).await,
+                FocusedPane::Detail => engine.context_mut().session.scroll_detail(1),
+                FocusedPane::Shell => {}
+            },
+            KeyCode::PageUp if focus == FocusedPane::Detail => {
+                engine.context_mut().session.scroll_detail(-8);
+            }
+            KeyCode::PageDown if focus == FocusedPane::Detail => {
+                engine.context_mut().session.scroll_detail(8);
+            }
             KeyCode::Esc => break,
             _ => {}
         }
@@ -90,12 +130,31 @@ async fn select_relative(context: &mut GatewayContext, delta: isize) {
     let _ = context.session.move_selection(&mut guard, delta);
 }
 
+async fn attach_selected(context: &mut GatewayContext) -> String {
+    let Some(call_id) = context.session.selected_call.clone() else {
+        return "no call selected".to_string();
+    };
+    let mut guard = context.state.write().await;
+    if context.session.select_call(&mut guard, &call_id) {
+        format!("attached to {call_id}")
+    } else {
+        "selected call no longer exists".to_string()
+    }
+}
+
+fn trim_history(history: &mut Vec<String>) {
+    while history.len() > 200 {
+        history.remove(0);
+    }
+}
+
 fn draw(
     frame: &mut ratatui::Frame<'_>,
     state: &GatewayState,
     session: &OperatorSession,
     history: &[String],
     input: &str,
+    focus: FocusedPane,
 ) {
     let root = Layout::default()
         .direction(Direction::Horizontal)
@@ -111,11 +170,13 @@ fn draw(
     let shell_view = build_shell_view(history, input, shell_inner_height, shell_inner_width);
     frame.render_widget(
         Paragraph::new(shell_view.lines)
-            .block(Block::default().title("Shell").borders(Borders::ALL))
+            .block(focused_block("Shell", FocusedPane::Shell, focus))
             .wrap(Wrap { trim: false }),
         root[0],
     );
-    set_shell_cursor(frame, root[0], shell_view.prompt_row, input);
+    if focus == FocusedPane::Shell {
+        set_shell_cursor(frame, root[0], shell_view.prompt_row, input);
+    }
 
     let call_ids = ordered_call_ids(state);
     let call_items = if call_ids.is_empty() {
@@ -155,7 +216,7 @@ fn draw(
     call_list_state.select(selected_index);
     frame.render_stateful_widget(
         List::new(call_items)
-            .block(Block::default().title("Calls").borders(Borders::ALL))
+            .block(focused_block("Calls", FocusedPane::Calls, focus))
             .highlight_symbol("> "),
         right[0],
         &mut call_list_state,
@@ -164,15 +225,24 @@ fn draw(
     let detail_lines = selected_detail_lines(state, session);
     frame.render_widget(
         Paragraph::new(detail_lines)
-            .block(
-                Block::default()
-                    .title("Selected Call")
-                    .borders(Borders::ALL),
-            )
+            .block(focused_block("Selected Call", FocusedPane::Detail, focus))
             .wrap(Wrap { trim: false })
             .scroll((session.detail_scroll, 0)),
         right[1],
     );
+}
+
+fn focused_block(title: &'static str, pane: FocusedPane, focus: FocusedPane) -> Block<'static> {
+    let block = Block::default().title(title).borders(Borders::ALL);
+    if pane == focus {
+        block.border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        block
+    }
 }
 
 struct ShellView {
@@ -395,6 +465,13 @@ mod tests {
         assert_eq!(display_rows("", 8), 1);
         assert_eq!(display_rows("12345678", 8), 1);
         assert_eq!(display_rows("123456789", 8), 2);
+    }
+
+    #[test]
+    fn focused_pane_cycles_through_tui_regions() {
+        assert_eq!(FocusedPane::Shell.next(), FocusedPane::Calls);
+        assert_eq!(FocusedPane::Calls.next(), FocusedPane::Detail);
+        assert_eq!(FocusedPane::Detail.next(), FocusedPane::Shell);
     }
 
     #[test]

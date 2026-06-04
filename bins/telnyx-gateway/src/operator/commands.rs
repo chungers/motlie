@@ -250,6 +250,7 @@ pub enum InboundCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AsrCommand {
+    List,
     Status,
     Use {
         #[arg(value_enum)]
@@ -765,10 +766,22 @@ async fn asr_command(
     command: AsrCommand,
 ) -> DriverResult<CommandOutput> {
     match command {
+        AsrCommand::List => Ok(CommandOutput {
+            lines: LiveAsrBackend::available()
+                .into_iter()
+                .map(|backend| format!("{} {}", backend.label(), backend.model_label()))
+                .collect(),
+            effects: Vec::new(),
+        }),
         AsrCommand::Status => {
             let guard = context.state.read().await;
+            let available = LiveAsrBackend::available()
+                .into_iter()
+                .map(|backend| backend.label())
+                .collect::<Vec<_>>()
+                .join(",");
             Ok(CommandOutput::text(format!(
-                "next={}\nnext_model={}\ndefault={}\ndefault_model={}\navailable=sherpa-2023,kroko-2025",
+                "next={}\nnext_model={}\ndefault={}\ndefault_model={}\navailable={available}",
                 context.session.next_asr_backend.label(),
                 context.session.next_asr_backend.model_label(),
                 guard.config.asr_backend.label(),
@@ -1247,6 +1260,24 @@ mod tests {
         assert_eq!(
             state.read().await.config.asr_backend,
             LiveAsrBackend::Sherpa2023
+        );
+    }
+
+    #[tokio::test]
+    async fn asr_list_reports_available_live_backends() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("asr list").await.expect("asr list");
+
+        assert_eq!(
+            output.lines,
+            vec![
+                "kroko-2025 sherpa-zipformer-en-kroko-2025-08-06",
+                "sherpa-2023 sherpa-zipformer-en-2023-06-26"
+            ]
         );
     }
 

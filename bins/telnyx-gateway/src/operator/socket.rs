@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
+use crate::operator::script::run_operator_line;
 
 pub type SharedCommandContext = Arc<GatewayContext>;
 
@@ -103,7 +104,7 @@ async fn handle_connection(
             continue;
         }
 
-        let response = match engine.run_line(command).await {
+        let response = match run_operator_line(&mut engine, command).await {
             Ok(output) => SocketCommandResponse::ok(output.lines, output.effects),
             Err(error) => SocketCommandResponse::error(error.to_string()),
         };
