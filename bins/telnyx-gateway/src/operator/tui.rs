@@ -1,6 +1,7 @@
 use std::io::{self, Stdout};
 use std::time::Duration;
 
+use chrono::{DateTime, Local, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -8,28 +9,120 @@ use crossterm::terminal::{
 };
 use motlie_driver::{CommandEffect, CommandEngine};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Position};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
+use crate::operator::script::run_operator_line;
 use crate::operator::session::{ordered_call_ids, OperatorSession};
-use crate::operator::state::{CallStatus, GatewayState, LogLevel, TranscriptKind};
+use crate::operator::state::{CallStatus, GatewayState, LogLevel};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusedPane {
+    Shell,
+    Calls,
+    Detail,
+}
+
+impl FocusedPane {
+    fn next(self) -> Self {
+        match self {
+            Self::Shell => Self::Calls,
+            Self::Calls => Self::Detail,
+            Self::Detail => Self::Shell,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ShellInput {
+    text: String,
+    cursor_chars: usize,
+}
+
+impl ShellInput {
+    fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor_chars = 0;
+    }
+
+    fn insert(&mut self, ch: char) {
+        let byte_index = char_to_byte_index(&self.text, self.cursor_chars);
+        self.text.insert(byte_index, ch);
+        self.cursor_chars = self.cursor_chars.saturating_add(1);
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_chars == 0 {
+            return;
+        }
+        let start = char_to_byte_index(&self.text, self.cursor_chars - 1);
+        let end = char_to_byte_index(&self.text, self.cursor_chars);
+        self.text.replace_range(start..end, "");
+        self.cursor_chars -= 1;
+    }
+
+    fn delete(&mut self) {
+        if self.cursor_chars >= self.text.chars().count() {
+            return;
+        }
+        let start = char_to_byte_index(&self.text, self.cursor_chars);
+        let end = char_to_byte_index(&self.text, self.cursor_chars + 1);
+        self.text.replace_range(start..end, "");
+    }
+
+    fn move_left(&mut self) {
+        self.cursor_chars = self.cursor_chars.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        self.cursor_chars = self
+            .cursor_chars
+            .saturating_add(1)
+            .min(self.text.chars().count());
+    }
+
+    fn move_home(&mut self) {
+        self.cursor_chars = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor_chars = self.text.chars().count();
+    }
+
+    fn cursor_chars(&self) -> usize {
+        self.cursor_chars
+    }
+}
+
+fn char_to_byte_index(text: &str, cursor_chars: usize) -> usize {
+    text.char_indices()
+        .nth(cursor_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
 
 pub async fn run_tui(
     engine: &mut CommandEngine<GatewayContext, GatewayCommand>,
 ) -> anyhow::Result<()> {
     let mut terminal = TerminalGuard::enter()?;
-    let mut input = String::new();
+    let host = host_label();
+    let mut input = ShellInput::default();
     let mut history = vec!["telnyx-gateway TUI ready".to_string()];
+    let mut focus = FocusedPane::Shell;
 
     loop {
         let state = engine.context().state.read().await.clone();
         engine.context_mut().session.ensure_valid_selection(&state);
         let session = engine.context().session.clone();
-        terminal.draw(|frame| draw(frame, &state, &session, &history, &input))?;
+        terminal.draw(|frame| draw(frame, &state, &session, &history, &input, focus, &host))?;
 
         if state.shutdown_requested {
             break;
@@ -49,18 +142,15 @@ pub async fn run_tui(
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-            KeyCode::Char(ch) => input.push(ch),
-            KeyCode::Backspace => {
-                let _ = input.pop();
-            }
-            KeyCode::Enter => {
-                let command = input.trim().to_string();
+            KeyCode::Tab => focus = focus.next(),
+            KeyCode::Enter if focus == FocusedPane::Shell => {
+                let command = input.as_str().trim().to_string();
                 input.clear();
                 if command.is_empty() {
                     continue;
                 }
                 history.push(format!("> {command}"));
-                match engine.run_line(&command).await {
+                match run_operator_line(engine, &command).await {
                     Ok(output) => {
                         history.extend(output.lines);
                         if output.effects.contains(&CommandEffect::ExitShell) {
@@ -69,14 +159,59 @@ pub async fn run_tui(
                     }
                     Err(error) => history.push(format!("error: {error}")),
                 }
-                while history.len() > 200 {
-                    history.remove(0);
-                }
+                trim_history(&mut history);
             }
-            KeyCode::Up => select_relative(engine.context_mut(), -1).await,
-            KeyCode::Down => select_relative(engine.context_mut(), 1).await,
-            KeyCode::PageUp => engine.context_mut().session.scroll_detail(-8),
-            KeyCode::PageDown => engine.context_mut().session.scroll_detail(8),
+            KeyCode::Char(ch) => match focus {
+                FocusedPane::Shell
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    input.insert(ch);
+                }
+                FocusedPane::Calls if ch == 'a' => {
+                    let message = attach_selected(engine.context_mut()).await;
+                    history.push(message);
+                    trim_history(&mut history);
+                }
+                FocusedPane::Detail if ch == 'u' => engine.context_mut().session.scroll_detail(-1),
+                FocusedPane::Detail if ch == 'b' => engine.context_mut().session.scroll_detail(1),
+                _ => {}
+            },
+            KeyCode::Backspace if focus == FocusedPane::Shell => {
+                input.backspace();
+            }
+            KeyCode::Delete if focus == FocusedPane::Shell => {
+                input.delete();
+            }
+            KeyCode::Left if focus == FocusedPane::Shell => {
+                input.move_left();
+            }
+            KeyCode::Right if focus == FocusedPane::Shell => {
+                input.move_right();
+            }
+            KeyCode::Home if focus == FocusedPane::Shell => {
+                input.move_home();
+            }
+            KeyCode::End if focus == FocusedPane::Shell => {
+                input.move_end();
+            }
+            KeyCode::Up => match focus {
+                FocusedPane::Calls => select_relative(engine.context_mut(), -1).await,
+                FocusedPane::Detail => engine.context_mut().session.scroll_detail(-1),
+                FocusedPane::Shell => {}
+            },
+            KeyCode::Down => match focus {
+                FocusedPane::Calls => select_relative(engine.context_mut(), 1).await,
+                FocusedPane::Detail => engine.context_mut().session.scroll_detail(1),
+                FocusedPane::Shell => {}
+            },
+            KeyCode::PageUp if focus == FocusedPane::Detail => {
+                engine.context_mut().session.scroll_detail(-8);
+            }
+            KeyCode::PageDown if focus == FocusedPane::Detail => {
+                engine.context_mut().session.scroll_detail(8);
+            }
             KeyCode::Esc => break,
             _ => {}
         }
@@ -90,17 +225,43 @@ async fn select_relative(context: &mut GatewayContext, delta: isize) {
     let _ = context.session.move_selection(&mut guard, delta);
 }
 
+async fn attach_selected(context: &mut GatewayContext) -> String {
+    let Some(call_id) = context.session.selected_call.clone() else {
+        return "no call selected".to_string();
+    };
+    let mut guard = context.state.write().await;
+    if context.session.select_call(&mut guard, &call_id) {
+        format!("attached to {call_id}")
+    } else {
+        "selected call no longer exists".to_string()
+    }
+}
+
+fn trim_history(history: &mut Vec<String>) {
+    while history.len() > 200 {
+        history.remove(0);
+    }
+}
+
 fn draw(
     frame: &mut ratatui::Frame<'_>,
     state: &GatewayState,
     session: &OperatorSession,
     history: &[String],
-    input: &str,
+    input: &ShellInput,
+    focus: FocusedPane,
+    host: &str,
 ) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(frame.area());
+    render_status_bar(frame, outer[0], state, host);
+
     let root = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(frame.area());
+        .split(outer[1]);
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
@@ -108,14 +269,21 @@ fn draw(
 
     let shell_inner_height = root[0].height.saturating_sub(2) as usize;
     let shell_inner_width = root[0].width.saturating_sub(2) as usize;
-    let shell_view = build_shell_view(history, input, shell_inner_height, shell_inner_width);
+    let shell_view = build_shell_view(
+        history,
+        input.as_str(),
+        shell_inner_height,
+        shell_inner_width,
+    );
     frame.render_widget(
         Paragraph::new(shell_view.lines)
-            .block(Block::default().title("Shell").borders(Borders::ALL))
+            .block(focused_block("Shell", FocusedPane::Shell, focus))
             .wrap(Wrap { trim: false }),
         root[0],
     );
-    set_shell_cursor(frame, root[0], shell_view.prompt_row, input);
+    if focus == FocusedPane::Shell {
+        set_shell_cursor(frame, root[0], shell_view.prompt_row, input);
+    }
 
     let call_ids = ordered_call_ids(state);
     let call_items = if call_ids.is_empty() {
@@ -155,7 +323,7 @@ fn draw(
     call_list_state.select(selected_index);
     frame.render_stateful_widget(
         List::new(call_items)
-            .block(Block::default().title("Calls").borders(Borders::ALL))
+            .block(focused_block("Calls", FocusedPane::Calls, focus))
             .highlight_symbol("> "),
         right[0],
         &mut call_list_state,
@@ -164,15 +332,128 @@ fn draw(
     let detail_lines = selected_detail_lines(state, session);
     frame.render_widget(
         Paragraph::new(detail_lines)
-            .block(
-                Block::default()
-                    .title("Selected Call")
-                    .borders(Borders::ALL),
-            )
+            .block(focused_block("Selected Call", FocusedPane::Detail, focus))
             .wrap(Wrap { trim: false })
             .scroll((session.detail_scroll, 0)),
         right[1],
     );
+}
+
+const STATUS_BAR_BG: Color = Color::Rgb(0, 43, 85);
+const STATUS_BAR_FG: Color = Color::White;
+const STATUS_BAR_KEY_FG: Color = Color::LightCyan;
+
+fn render_status_bar(frame: &mut ratatui::Frame<'_>, area: Rect, state: &GatewayState, host: &str) {
+    let now = Local::now();
+    let line = status_bar_line(state, host, now, area.width as usize);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG)),
+        area,
+    );
+}
+
+fn status_bar_line(
+    state: &GatewayState,
+    host: &str,
+    now: DateTime<Local>,
+    width: usize,
+) -> Line<'static> {
+    let right_text = status_bar_right_text(state, now);
+    let right_text = truncate_chars(&right_text, right_text.chars().count().min(width));
+    let max_left_width = width.saturating_sub(right_text.chars().count());
+    let left_text = truncate_chars(&status_bar_left_text(state, host), max_left_width);
+    let padding = width.saturating_sub(left_text.chars().count() + right_text.chars().count());
+
+    Line::from(vec![
+        Span::styled(
+            left_text,
+            Style::default()
+                .fg(STATUS_BAR_FG)
+                .bg(STATUS_BAR_BG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " ".repeat(padding),
+            Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG),
+        ),
+        Span::styled(
+            right_text,
+            Style::default().fg(STATUS_BAR_KEY_FG).bg(STATUS_BAR_BG),
+        ),
+    ])
+}
+
+fn status_bar_left_text(state: &GatewayState, host: &str) -> String {
+    format!(
+        " telnyx | {} | {} | {}",
+        host,
+        state
+            .config
+            .public_webhook_url
+            .as_deref()
+            .unwrap_or("<webhook unset>"),
+        state
+            .config
+            .public_media_url
+            .as_deref()
+            .unwrap_or("<media unset>")
+    )
+}
+
+fn status_bar_right_text(state: &GatewayState, now: DateTime<Local>) -> String {
+    let now_utc = now.with_timezone(&Utc);
+    let age = format_age(now_utc.signed_duration_since(state.started_at));
+    let started = state
+        .started_at
+        .with_timezone(&Local)
+        .format("%m-%d %H:%M:%S")
+        .to_string();
+    format!(" {started} / {} / {age} ", now.format("%H:%M:%S"))
+}
+
+fn format_age(age: chrono::Duration) -> String {
+    let total_seconds = age.num_seconds().max(0);
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m{seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn truncate_chars(text: &str, width: usize) -> String {
+    text.chars().take(width).collect()
+}
+
+fn host_label() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn focused_block(title: &'static str, pane: FocusedPane, focus: FocusedPane) -> Block<'static> {
+    let block = Block::default().title(title).borders(Borders::ALL);
+    if pane == focus {
+        block.border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        block
+    }
 }
 
 struct ShellView {
@@ -226,9 +507,9 @@ fn display_rows(text: &str, width: usize) -> usize {
 
 fn set_shell_cursor(
     frame: &mut ratatui::Frame<'_>,
-    area: ratatui::layout::Rect,
+    area: Rect,
     prompt_row: u16,
-    input: &str,
+    input: &ShellInput,
 ) {
     if area.width <= 2 || area.height <= 2 {
         return;
@@ -236,7 +517,7 @@ fn set_shell_cursor(
 
     let inner_width = area.width.saturating_sub(2);
     let prompt_y = area.y + 1 + prompt_row.min(area.height.saturating_sub(3));
-    let prompt_offset = 2 + input.chars().count() as u16;
+    let prompt_offset = 2 + input.cursor_chars() as u16;
     let cursor_offset = prompt_offset.min(inner_width.saturating_sub(1));
     frame.set_cursor_position(Position::new(area.x + 1 + cursor_offset, prompt_y));
 }
@@ -286,19 +567,9 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
     }
     lines.extend([
         Line::from(""),
-        Line::from("assembled transcript:"),
+        Line::from("assembled transcription:"),
         Line::from(call.assembled_transcript_text()),
-        Line::from(""),
-        Line::from("recent events:"),
     ]);
-
-    for transcript in call.transcripts.iter().rev().take(12).rev() {
-        let prefix = match transcript.kind {
-            TranscriptKind::Partial => "partial",
-            TranscriptKind::Final => "final",
-        };
-        lines.push(Line::from(format!("{prefix}: {}", transcript.text)));
-    }
     if let Some(error) = &call.last_error {
         lines.push(Line::from(""));
         lines.push(Line::from(format!("error: {error}")));
@@ -389,12 +660,20 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn display_rows_counts_wrapped_terminal_rows() {
         assert_eq!(display_rows("", 8), 1);
         assert_eq!(display_rows("12345678", 8), 1);
         assert_eq!(display_rows("123456789", 8), 2);
+    }
+
+    #[test]
+    fn focused_pane_cycles_through_tui_regions() {
+        assert_eq!(FocusedPane::Shell.next(), FocusedPane::Calls);
+        assert_eq!(FocusedPane::Calls.next(), FocusedPane::Detail);
+        assert_eq!(FocusedPane::Detail.next(), FocusedPane::Shell);
     }
 
     #[test]
@@ -413,5 +692,85 @@ mod tests {
 
         assert_eq!(view.prompt_row, 0);
         assert_eq!(view.lines.len(), 1);
+    }
+
+    #[test]
+    fn shell_input_edits_at_cursor() {
+        let mut input = ShellInput::default();
+        for ch in "abcd".chars() {
+            input.insert(ch);
+        }
+
+        input.move_left();
+        input.move_left();
+        input.insert('X');
+
+        assert_eq!(input.as_str(), "abXcd");
+        assert_eq!(input.cursor_chars(), 3);
+    }
+
+    #[test]
+    fn shell_input_backspace_and_delete_are_unicode_safe() {
+        let mut input = ShellInput::default();
+        for ch in "aé日b".chars() {
+            input.insert(ch);
+        }
+
+        input.move_left();
+        input.backspace();
+        input.delete();
+
+        assert_eq!(input.as_str(), "aé");
+        assert_eq!(input.cursor_chars(), 2);
+    }
+
+    #[test]
+    fn status_bar_left_text_uses_compact_unlabeled_fields() {
+        let mut state = GatewayState::new("127.0.0.1:8080".parse().expect("valid addr"));
+        state.config.public_webhook_url = Some("https://example.test/telnyx/webhooks".to_string());
+        state.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+        state.config.selected_connection_id = Some("conn-1".to_string());
+        state.config.selected_phone_number = Some("+15550000001".to_string());
+
+        let text = status_bar_left_text(&state, "host-a");
+
+        assert_eq!(
+            text,
+            " telnyx | host-a | https://example.test/telnyx/webhooks | wss://example.test/telnyx/media"
+        );
+        assert!(!text.contains("host="));
+        assert!(!text.contains("bind="));
+        assert!(!text.contains("webhook="));
+        assert!(!text.contains("media="));
+        assert!(!text.contains("conn-1"));
+        assert!(!text.contains("+15550000001"));
+        assert!(!text.contains("disabled"));
+        assert!(!text.contains("kroko-2025"));
+    }
+
+    #[test]
+    fn status_bar_right_text_uses_start_now_age_order() {
+        let mut state = GatewayState::new("127.0.0.1:8080".parse().expect("valid addr"));
+        state.started_at = Utc
+            .with_ymd_and_hms(2026, 6, 3, 20, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let now = state.started_at.with_timezone(&Local) + chrono::Duration::seconds(65);
+
+        let text = status_bar_right_text(&state, now);
+
+        assert!(text.contains(" / "));
+        assert!(text.ends_with(" / 1m05s "));
+        assert!(!text.contains("start="));
+        assert!(!text.contains("now="));
+        assert!(!text.contains("age="));
+    }
+
+    #[test]
+    fn status_age_is_compact() {
+        assert_eq!(format_age(chrono::Duration::seconds(-1)), "0s");
+        assert_eq!(format_age(chrono::Duration::seconds(9)), "9s");
+        assert_eq!(format_age(chrono::Duration::seconds(65)), "1m05s");
+        assert_eq!(format_age(chrono::Duration::seconds(3661)), "1h01m01s");
     }
 }

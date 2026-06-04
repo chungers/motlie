@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
+use crate::operator::script::run_operator_line;
 
 pub type SharedCommandContext = Arc<GatewayContext>;
 
@@ -103,7 +104,7 @@ async fn handle_connection(
             continue;
         }
 
-        let response = match engine.run_line(command).await {
+        let response = match run_operator_line(&mut engine, command).await {
             Ok(output) => SocketCommandResponse::ok(output.lines, output.effects),
             Err(error) => SocketCommandResponse::error(error.to_string()),
         };
@@ -150,6 +151,29 @@ mod tests {
             .as_str()
             .expect("line should be a string")
             .starts_with("listener:"));
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn command_socket_exposes_help_to_agents() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
+
+        let mut client = SocketTestClient::connect(&path).await;
+        let response = client.command("help socket").await;
+        let lines = response_lines(&response).join("\n");
+
+        assert!(lines.contains("Agent socket interface"));
+        assert!(lines.contains("Receive one JSON object"));
+        assert!(lines.contains("Operational parity"));
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);
@@ -208,17 +232,17 @@ mod tests {
         let mut client_one = SocketTestClient::connect(&path).await;
         let mut client_two = SocketTestClient::connect(&path).await;
 
-        let first_use = client_one.command("asr use kroko-2025").await;
+        let first_use = client_one.command("asr use sherpa-2023").await;
         assert_eq!(first_use["ok"], true);
         let first_status = client_one.command("asr status").await;
         let second_status = client_two.command("asr status").await;
 
         assert!(response_lines(&first_status)
             .iter()
-            .any(|line| line == "next=kroko-2025"));
+            .any(|line| line == "next=sherpa-2023"));
         assert!(response_lines(&second_status)
             .iter()
-            .any(|line| line == "next=sherpa-2023"));
+            .any(|line| line == "next=kroko-2025"));
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);
@@ -236,7 +260,7 @@ mod tests {
         let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
 
         let mut client_one = SocketTestClient::connect(&path).await;
-        let first_use = client_one.command("asr use kroko-2025").await;
+        let first_use = client_one.command("asr use sherpa-2023").await;
         assert_eq!(first_use["ok"], true);
 
         let mut client_two = SocketTestClient::connect(&path).await;
@@ -245,10 +269,10 @@ mod tests {
 
         assert!(response_lines(&first_status)
             .iter()
-            .any(|line| line == "next=kroko-2025"));
+            .any(|line| line == "next=sherpa-2023"));
         assert!(response_lines(&second_status)
             .iter()
-            .any(|line| line == "next=sherpa-2023"));
+            .any(|line| line == "next=kroko-2025"));
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);

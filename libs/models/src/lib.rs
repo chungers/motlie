@@ -868,6 +868,7 @@ fn download_checkpoint_artifacts_with_options(
             let api = ApiBuilder::new()
                 .with_cache_dir(artifact_root.to_path_buf())
                 .with_token(options.hf_token.clone())
+                .with_progress(false)
                 .build()
                 .map_err(|source| ModelsError::HuggingFaceClient {
                     message: source.to_string(),

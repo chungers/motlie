@@ -250,6 +250,7 @@ pub enum InboundCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AsrCommand {
+    List,
     Status,
     Use {
         #[arg(value_enum)]
@@ -313,6 +314,10 @@ impl CommandSet<GatewayContext> for GatewayCommand {
     }
 
     fn completion_context(_context: &GatewayContext) -> Self::CompletionContext {}
+
+    fn help(topic: &[String]) -> Option<String> {
+        gateway_help(topic)
+    }
 
     fn resolve_command(self, _context: &GatewayContext) -> DriverResult<Self::Resolved> {
         Ok(self)
@@ -765,10 +770,22 @@ async fn asr_command(
     command: AsrCommand,
 ) -> DriverResult<CommandOutput> {
     match command {
+        AsrCommand::List => Ok(CommandOutput {
+            lines: LiveAsrBackend::available()
+                .into_iter()
+                .map(|backend| format!("{} {}", backend.label(), backend.model_label()))
+                .collect(),
+            effects: Vec::new(),
+        }),
         AsrCommand::Status => {
             let guard = context.state.read().await;
+            let available = LiveAsrBackend::available()
+                .into_iter()
+                .map(|backend| backend.label())
+                .collect::<Vec<_>>()
+                .join(",");
             Ok(CommandOutput::text(format!(
-                "next={}\nnext_model={}\ndefault={}\ndefault_model={}\navailable=sherpa-2023,kroko-2025",
+                "next={}\nnext_model={}\ndefault={}\ndefault_model={}\navailable={available}",
                 context.session.next_asr_backend.label(),
                 context.session.next_asr_backend.model_label(),
                 guard.config.asr_backend.label(),
@@ -1179,6 +1196,440 @@ fn driver_anyhow(error: anyhow::Error) -> DriverError {
     DriverError::message(format!("{error:#}"))
 }
 
+fn gateway_help(topic: &[String]) -> Option<String> {
+    match topic {
+        [] => Some(gateway_root_help()),
+        [topic] if topic == "status" => Some(status_help()),
+        [topic] if topic == "listener" => Some(listener_help()),
+        [topic] if topic == "config" => Some(config_help()),
+        [topic] if topic == "state" => Some(state_help()),
+        [topic] if topic == "quit" || topic == "shutdown" => Some(quit_help()),
+        [topic] if topic == "load" || topic == "source" => Some(load_help()),
+        [topic] if topic == "telnyx" => Some(telnyx_help()),
+        [root, topic] if root == "telnyx" && topic == "app" => Some(telnyx_app_help()),
+        [root, topic] if root == "telnyx" && topic == "number" => Some(telnyx_number_help()),
+        [root, topic, nested] if root == "telnyx" && topic == "app" && nested == "webhook" => {
+            Some(telnyx_app_webhook_help())
+        }
+        [topic] if topic == "inbound" => Some(inbound_help()),
+        [topic] if topic == "asr" => Some(asr_help()),
+        [topic] if topic == "calls" || topic == "call" => Some(call_help()),
+        [topic] if topic == "answer" || topic == "reject" || topic == "hangup" => {
+            Some(call_control_help())
+        }
+        [topic] if topic == "test" => Some(test_help()),
+        [root, topic] if root == "test" && topic == "dial-transcribe" => {
+            Some(dial_transcribe_help())
+        }
+        [topic] if topic == "transcript" => Some(transcript_help()),
+        [topic] if topic == "log" => Some(log_help()),
+        [topic] if topic == "socket" || topic == "agent" => Some(socket_help()),
+        _ => None,
+    }
+}
+
+fn gateway_root_help() -> String {
+    [
+        "telnyx-gateway operator commands",
+        "",
+        "The TUI shell and each agent socket connection execute the same command language.",
+        "Selections are source-local: a TUI-selected call or ASR backend does not leak into another socket.",
+        "",
+        "Core:",
+        "  status                         Show listener, Telnyx, ASR, media, capture, and call state",
+        "  listener status                Show the local HTTP/WebSocket bind address",
+        "  config show                    Show replayable gateway config values",
+        "  config set <key> <value>       Set webhook-url, media-url, codec, capture dir, etc.",
+        "  load <path>                    Replay a .repl command file; comments and blanks are ignored",
+        "  source <path>                  Alias for load",
+        "  quit [dump_path]               Optionally dump replay commands, then stop the gateway",
+        "",
+        "Telnyx setup:",
+        "  telnyx app list",
+        "  telnyx app create <name>",
+        "  telnyx app use <connection-id>",
+        "  telnyx app show",
+        "  telnyx app webhook set <https-url>",
+        "  telnyx number list",
+        "  telnyx number use <+e164>",
+        "  telnyx number bind <+e164> <connection-id>",
+        "",
+        "Inbound calls and ASR:",
+        "  inbound status",
+        "  inbound enable --manual        Surface calls as waiting until answer",
+        "  inbound enable --auto-transcribe",
+        "  inbound disable",
+        "  asr list",
+        "  asr status",
+        "  asr use kroko-2025|sherpa-2023 Select backend for the next answered/dialed call",
+        "",
+        "Calls:",
+        "  calls                          List calls in operator roster order",
+        "  call use <call-id>             Select a call for this TUI/socket source",
+        "  call show [call-id]            Show selected call detail and assembled transcript",
+        "  answer [call-id]               Answer one waiting inbound call",
+        "  reject [call-id]",
+        "  hangup [call-id]",
+        "  transcript follow [call-id]",
+        "  transcript clear [call-id]",
+        "  log clear",
+        "",
+        "Testing:",
+        "  test dial-transcribe <+e164> [--from +e164]",
+        "",
+        "Helpful topics:",
+        "  help config       help telnyx       help inbound      help asr",
+        "  help call         help transcript   help test         help socket",
+    ]
+    .join("\n")
+}
+
+fn status_help() -> String {
+    [
+        "status",
+        "",
+        "Show the gateway's current operational state.",
+        "",
+        "Includes:",
+        "  listener bind address",
+        "  inbound mode",
+        "  source-local next ASR backend and process default ASR backend",
+        "  public webhook/media URLs",
+        "  selected Telnyx app and phone number",
+        "  media codec/sample rate",
+        "  capture directory",
+        "  call count",
+        "",
+        "Example:",
+        "  status",
+    ]
+    .join("\n")
+}
+
+fn listener_help() -> String {
+    [
+        "listener status",
+        "",
+        "Show the local HTTP/WebSocket bind address the gateway is serving.",
+        "",
+        "Example:",
+        "  listener status",
+    ]
+    .join("\n")
+}
+
+fn config_help() -> String {
+    [
+        "config show",
+        "config set <key> <value>",
+        "",
+        "Inspect or update gateway configuration used by Telnyx API calls and media streaming.",
+        "",
+        "Keys:",
+        "  webhook-url          Public HTTPS URL for Telnyx call-control webhooks",
+        "  media-url            Public WSS URL for Telnyx media streaming",
+        "  media-codec          PCMU, PCMA, or L16",
+        "  media-sample-rate    Sample rate requested from Telnyx for the selected codec",
+        "  capture-dir          Directory for replay/capture artifacts",
+        "  from-number          Default outbound caller ID for test dial-transcribe",
+        "  state-path           Default path used by quit/shutdown when no dump path is supplied",
+        "",
+        "Examples:",
+        "  config set webhook-url https://host.example/telnyx/webhooks",
+        "  config set media-url wss://host.example/telnyx/media",
+        "  config set media-codec PCMU",
+        "  config set capture-dir ~/telnyx-test/captures",
+        "  config show",
+    ]
+    .join("\n")
+}
+
+fn state_help() -> String {
+    [
+        "state dump <path>",
+        "",
+        "Write replayable commands for the current gateway configuration.",
+        "Use `load <path>` or start with `--load <path>` to rehydrate a later session.",
+        "",
+        "Example:",
+        "  state dump ~/telnyx-test/config.repl",
+    ]
+    .join("\n")
+}
+
+fn quit_help() -> String {
+    [
+        "quit [dump_path]",
+        "shutdown [dump_path]",
+        "",
+        "Stop the gateway. If a path is supplied, or state-path is configured, the gateway writes",
+        "replayable commands before exiting.",
+        "",
+        "Operator-facing spelling is `quit`; `shutdown` remains available as the low-level command.",
+        "",
+        "Examples:",
+        "  quit",
+        "  quit ~/telnyx-test/config.repl",
+    ]
+    .join("\n")
+}
+
+fn load_help() -> String {
+    [
+        "load <path>",
+        "source <path>",
+        "",
+        "Replay commands from a .repl file in the current TUI or socket source.",
+        "Blank lines and lines beginning with # are ignored. `~` and `~/...` are expanded.",
+        "",
+        "Examples:",
+        "  load ~/telnyx-test/config.repl",
+        "  source /tmp/telnyx.repl",
+    ]
+    .join("\n")
+}
+
+fn telnyx_help() -> String {
+    [
+        "telnyx app ...",
+        "telnyx number ...",
+        "",
+        "Configure Telnyx Call Control resources from the gateway.",
+        "",
+        "Application commands:",
+        "  telnyx app list",
+        "  telnyx app create <name>",
+        "  telnyx app use <connection-id>",
+        "  telnyx app show",
+        "  telnyx app webhook set <https-url>",
+        "",
+        "Number commands:",
+        "  telnyx number list",
+        "  telnyx number use <+e164>",
+        "  telnyx number bind <+e164> <connection-id>",
+        "",
+        "Common setup flow:",
+        "  config set webhook-url https://your-host/telnyx/webhooks",
+        "  config set media-url wss://your-host/telnyx/media",
+        "  telnyx app create motlie-test",
+        "  telnyx number bind +15551234567 <connection-id>",
+    ]
+    .join("\n")
+}
+
+fn telnyx_app_help() -> String {
+    [
+        "telnyx app list",
+        "telnyx app create <name>",
+        "telnyx app use <connection-id>",
+        "telnyx app show",
+        "telnyx app webhook set <https-url>",
+        "",
+        "Manage the selected Telnyx Call Control application.",
+        "",
+        "Notes:",
+        "  create requires config webhook-url first",
+        "  use selects an existing Telnyx connection/application id",
+        "  webhook set updates the selected app and stores the URL in gateway config",
+    ]
+    .join("\n")
+}
+
+fn telnyx_app_webhook_help() -> String {
+    [
+        "telnyx app webhook set <https-url>",
+        "",
+        "Update the selected Telnyx application's webhook URL.",
+        "",
+        "Example:",
+        "  telnyx app webhook set https://host.example/telnyx/webhooks",
+    ]
+    .join("\n")
+}
+
+fn telnyx_number_help() -> String {
+    [
+        "telnyx number list",
+        "telnyx number use <+e164>",
+        "telnyx number bind <+e164> <connection-id>",
+        "",
+        "Select and bind Telnyx phone numbers.",
+        "",
+        "Examples:",
+        "  telnyx number list",
+        "  telnyx number use +15551234567",
+        "  telnyx number bind +15551234567 1234567890",
+    ]
+    .join("\n")
+}
+
+fn inbound_help() -> String {
+    [
+        "inbound status",
+        "inbound enable --manual",
+        "inbound enable --auto-transcribe",
+        "inbound disable",
+        "",
+        "Control whether inbound calls are handled.",
+        "",
+        "Modes:",
+        "  disabled         Default at startup; inbound webhooks are ignored",
+        "  manual           Calls enter the roster as waiting; operator/agent must answer",
+        "  auto-transcribe  Gateway answers/transcribes automatically when configured",
+        "",
+        "Examples:",
+        "  inbound enable --manual",
+        "  calls",
+        "  answer <call-id>",
+        "  inbound disable",
+    ]
+    .join("\n")
+}
+
+fn asr_help() -> String {
+    [
+        "asr list",
+        "asr status",
+        "asr use kroko-2025",
+        "asr use sherpa-2023",
+        "",
+        "Select the live ASR backend for the next call answered or dialed by this source.",
+        "",
+        "Important:",
+        "  Switching is between-call only. It does not change an active call.",
+        "  The selection is source-local. A TUI choice does not affect a socket connection,",
+        "  and one socket's choice does not affect another socket.",
+        "",
+        "Examples:",
+        "  asr list",
+        "  asr status",
+        "  asr use kroko-2025",
+    ]
+    .join("\n")
+}
+
+fn call_help() -> String {
+    [
+        "calls",
+        "call use <call-id>",
+        "call show [call-id]",
+        "",
+        "Inspect and select calls.",
+        "",
+        "TUI parity:",
+        "  The Calls pane cursor is a visual shortcut for choosing a call.",
+        "  Socket agents use `calls`, `call use <call-id>`, and `call show` for the same state.",
+        "",
+        "Examples:",
+        "  calls",
+        "  call use gwc_...",
+        "  call show",
+        "  call show gwc_...",
+    ]
+    .join("\n")
+}
+
+fn call_control_help() -> String {
+    [
+        "answer [call-id]",
+        "reject [call-id]",
+        "hangup [call-id]",
+        "",
+        "Control a call. If call-id is omitted, the command uses this source's selected call",
+        "or the single waiting inbound call when that is unambiguous.",
+        "",
+        "Examples:",
+        "  answer",
+        "  answer gwc_...",
+        "  hangup",
+        "  reject gwc_...",
+    ]
+    .join("\n")
+}
+
+fn test_help() -> String {
+    [
+        "test dial-transcribe <+e164> [--from +e164]",
+        "",
+        "Place an outbound test call, attach media streaming, and transcribe what the callee says.",
+        "This is for ASR quality testing; outbound TTS is not part of this command.",
+        "",
+        "Example:",
+        "  test dial-transcribe +15551234567 --from +15557654321",
+    ]
+    .join("\n")
+}
+
+fn dial_transcribe_help() -> String {
+    test_help()
+}
+
+fn transcript_help() -> String {
+    [
+        "transcript follow [call-id]",
+        "transcript clear [call-id]",
+        "",
+        "Inspect or clear retained transcript lines for a call.",
+        "",
+        "Notes:",
+        "  call show displays the assembled transcript.",
+        "  transcript follow returns retained transcript events for polling-style agents.",
+        "  transcript clear clears transcript state for the selected or specified call.",
+        "",
+        "Examples:",
+        "  transcript follow",
+        "  transcript follow gwc_...",
+        "  transcript clear gwc_...",
+    ]
+    .join("\n")
+}
+
+fn log_help() -> String {
+    [
+        "log clear",
+        "",
+        "Clear the gateway's retained in-memory operator log buffer.",
+        "",
+        "Example:",
+        "  log clear",
+    ]
+    .join("\n")
+}
+
+fn socket_help() -> String {
+    [
+        "Agent socket interface",
+        "",
+        "Start with:",
+        "  telnyx-gateway --socket /tmp/telnyx-gateway.sock",
+        "",
+        "Protocol:",
+        "  Send one command line terminated by newline.",
+        "  Receive one JSON object per command:",
+        "    {\"ok\":true,\"lines\":[...],\"effects\":[...],\"error\":null}",
+        "",
+        "Discovery:",
+        "  help",
+        "  help socket",
+        "  help inbound",
+        "  help asr",
+        "  help call",
+        "",
+        "Operational parity:",
+        "  TUI and socket both use the same typed command language.",
+        "  TUI-only keystrokes have command equivalents:",
+        "    Tab focus change       no socket equivalent needed",
+        "    Calls pane cursor     calls + call use <call-id>",
+        "    Calls pane `a` attach call use <call-id>",
+        "    Detail pane scroll    transcript follow / call show polling",
+        "",
+        "Source-local state:",
+        "  Each socket connection has its own selected call and next ASR backend.",
+        "  A later socket starts from the startup default ASR backend, not another source's choice.",
+    ]
+    .join("\n")
+}
+
 fn expand_user_path(value: &str) -> PathBuf {
     if let Some(rest) = value.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME") {
@@ -1232,22 +1683,73 @@ mod tests {
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine
-            .run_line("asr use kroko-2025")
+            .run_line("asr use sherpa-2023")
             .await
             .expect("asr use");
 
         assert_eq!(
             output.lines,
-            vec!["asr backend for next calls: kroko-2025 (sherpa-zipformer-en-kroko-2025-08-06)"]
+            vec!["asr backend for next calls: sherpa-2023 (sherpa-zipformer-en-2023-06-26)"]
         );
         assert_eq!(
             engine.context().session.next_asr_backend,
-            LiveAsrBackend::Kroko2025
+            LiveAsrBackend::Sherpa2023
         );
         assert_eq!(
             state.read().await.config.asr_backend,
-            LiveAsrBackend::Sherpa2023
+            LiveAsrBackend::Kroko2025
         );
+    }
+
+    #[tokio::test]
+    async fn asr_list_reports_available_live_backends() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("asr list").await.expect("asr list");
+
+        assert_eq!(
+            output.lines,
+            vec![
+                "kroko-2025 sherpa-zipformer-en-kroko-2025-08-06",
+                "sherpa-2023 sherpa-zipformer-en-2023-06-26"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_help_documents_shared_tui_and_socket_commands() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("help").await.expect("help output");
+        let rendered = output.lines.join("\n");
+
+        assert!(rendered.contains("TUI shell and each agent socket connection"));
+        assert!(rendered.contains("load <path>"));
+        assert!(rendered.contains("quit [dump_path]"));
+        assert!(rendered.contains("help socket"));
+    }
+
+    #[tokio::test]
+    async fn gateway_help_topics_cover_agent_relevant_commands() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let asr = engine.run_line("help asr").await.expect("asr help");
+        let call = engine.run_line("help call").await.expect("call help");
+        let socket = engine.run_line("help socket").await.expect("socket help");
+
+        assert!(asr.lines.join("\n").contains("source-local"));
+        assert!(call.lines.join("\n").contains("call use <call-id>"));
+        assert!(socket.lines.join("\n").contains("Receive one JSON object"));
+        assert!(socket.lines.join("\n").contains("Operational parity"));
     }
 
     #[tokio::test]
@@ -1288,7 +1790,7 @@ mod tests {
             CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
 
         tui_engine
-            .run_line("asr use kroko-2025")
+            .run_line("asr use sherpa-2023")
             .await
             .expect("tui asr use");
         tui_engine
@@ -1307,7 +1809,7 @@ mod tests {
                 .get(&call_one)
                 .expect("call one should exist")
                 .asr_backend,
-            Some(LiveAsrBackend::Kroko2025)
+            Some(LiveAsrBackend::Sherpa2023)
         );
         assert_eq!(
             guard
@@ -1315,7 +1817,7 @@ mod tests {
                 .get(&call_two)
                 .expect("call two should exist")
                 .asr_backend,
-            Some(LiveAsrBackend::Sherpa2023)
+            Some(LiveAsrBackend::Kroko2025)
         );
     }
 
@@ -1347,7 +1849,7 @@ mod tests {
         let guard = state.read().await;
         let call = guard.calls.values().next().expect("call exists");
         assert_eq!(call.status, CallStatus::Answering);
-        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Sherpa2023));
+        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
     }
 
     #[tokio::test]
