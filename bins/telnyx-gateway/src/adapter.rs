@@ -112,9 +112,9 @@ pub type SharedAsrFactory = Arc<dyn InboundAsrFactory>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum LiveAsrBackend {
-    #[default]
     #[value(name = "sherpa-2023", alias = "sherpa-zipformer-2023")]
     Sherpa2023,
+    #[default]
     #[value(name = "kroko-2025", alias = "sherpa-zipformer-kroko-2025")]
     Kroko2025,
 }

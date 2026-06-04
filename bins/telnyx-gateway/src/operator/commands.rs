@@ -1245,21 +1245,21 @@ mod tests {
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine
-            .run_line("asr use kroko-2025")
+            .run_line("asr use sherpa-2023")
             .await
             .expect("asr use");
 
         assert_eq!(
             output.lines,
-            vec!["asr backend for next calls: kroko-2025 (sherpa-zipformer-en-kroko-2025-08-06)"]
+            vec!["asr backend for next calls: sherpa-2023 (sherpa-zipformer-en-2023-06-26)"]
         );
         assert_eq!(
             engine.context().session.next_asr_backend,
-            LiveAsrBackend::Kroko2025
+            LiveAsrBackend::Sherpa2023
         );
         assert_eq!(
             state.read().await.config.asr_backend,
-            LiveAsrBackend::Sherpa2023
+            LiveAsrBackend::Kroko2025
         );
     }
 
@@ -1319,7 +1319,7 @@ mod tests {
             CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
 
         tui_engine
-            .run_line("asr use kroko-2025")
+            .run_line("asr use sherpa-2023")
             .await
             .expect("tui asr use");
         tui_engine
@@ -1338,7 +1338,7 @@ mod tests {
                 .get(&call_one)
                 .expect("call one should exist")
                 .asr_backend,
-            Some(LiveAsrBackend::Kroko2025)
+            Some(LiveAsrBackend::Sherpa2023)
         );
         assert_eq!(
             guard
@@ -1346,7 +1346,7 @@ mod tests {
                 .get(&call_two)
                 .expect("call two should exist")
                 .asr_backend,
-            Some(LiveAsrBackend::Sherpa2023)
+            Some(LiveAsrBackend::Kroko2025)
         );
     }
 
@@ -1378,7 +1378,7 @@ mod tests {
         let guard = state.read().await;
         let call = guard.calls.values().next().expect("call exists");
         assert_eq!(call.status, CallStatus::Answering);
-        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Sherpa2023));
+        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
     }
 
     #[tokio::test]
