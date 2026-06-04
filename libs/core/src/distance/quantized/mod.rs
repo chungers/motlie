@@ -100,7 +100,7 @@ pub fn dot_1bit(query: &[f32], code: &[u8]) -> f32 {
         unsafe { neon::dot_1bit(query, code) }
     }
 
-    #[cfg(simd_level = "scalar")]
+    #[cfg(any(simd_level = "avx512", simd_level = "scalar"))]
     {
         scalar::dot_1bit(query, code)
     }
@@ -158,7 +158,7 @@ pub fn dot_2bit_lookup(query: &[f32], code: &[u8], values: &[f32; 4]) -> f32 {
         unsafe { neon::dot_2bit_lookup(query, code, values) }
     }
 
-    #[cfg(simd_level = "scalar")]
+    #[cfg(any(simd_level = "avx512", simd_level = "scalar"))]
     {
         scalar::dot_2bit_lookup(query, code, values)
     }
@@ -221,7 +221,7 @@ pub fn dot_4bit_linear(query: &[f32], code: &[u8], scale: f32, offset: f32) -> f
         unsafe { neon::dot_4bit_linear(query, code, scale, offset) }
     }
 
-    #[cfg(simd_level = "scalar")]
+    #[cfg(any(simd_level = "avx512", simd_level = "scalar"))]
     {
         scalar::dot_4bit_linear(query, code, scale, offset)
     }

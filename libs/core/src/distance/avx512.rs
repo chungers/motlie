@@ -119,15 +119,15 @@ pub unsafe fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
     for i in 0..chunks {
         let offset = i * 64;
         // Load 64 bytes from each array
-        let va = _mm512_loadu_si512(a.as_ptr().add(offset) as *const i32);
-        let vb = _mm512_loadu_si512(b.as_ptr().add(offset) as *const i32);
+        let va = _mm512_loadu_si512(a.as_ptr().add(offset) as *const __m512i);
+        let vb = _mm512_loadu_si512(b.as_ptr().add(offset) as *const __m512i);
 
         // XOR to find differing bits
         let xor_result = _mm512_xor_si512(va, vb);
 
         // Extract as 8 x u64 and count bits
         let mut xor_bytes = [0u64; 8];
-        _mm512_storeu_si512(xor_bytes.as_mut_ptr() as *mut i32, xor_result);
+        _mm512_storeu_si512(xor_bytes.as_mut_ptr() as *mut __m512i, xor_result);
 
         result += _popcnt64(xor_bytes[0] as i64) as u32;
         result += _popcnt64(xor_bytes[1] as i64) as u32;
