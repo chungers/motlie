@@ -117,28 +117,28 @@ pub enum LiveAsrBackend {
     #[default]
     #[value(name = "kroko-2025", alias = "sherpa-zipformer-kroko-2025")]
     Kroko2025,
-    #[value(name = "moonshine", alias = "moonshine-streaming-en")]
-    Moonshine,
 }
 
 impl LiveAsrBackend {
-    pub const fn available() -> [Self; 3] {
-        [Self::Kroko2025, Self::Sherpa2023, Self::Moonshine]
+    pub const fn available() -> [Self; 2] {
+        [Self::Kroko2025, Self::Sherpa2023]
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Sherpa2023 => "sherpa-2023",
             Self::Kroko2025 => "kroko-2025",
-            Self::Moonshine => "moonshine",
         }
     }
 
     pub fn model_label(self) -> &'static str {
+        self.artifact().label()
+    }
+
+    pub fn artifact(self) -> SherpaAsrArtifact {
         match self {
-            Self::Sherpa2023 => SherpaAsrArtifact::ZipformerEn20230626.label(),
-            Self::Kroko2025 => SherpaAsrArtifact::ZipformerEnKroko20250806.label(),
-            Self::Moonshine => "moonshine-streaming-en",
+            Self::Sherpa2023 => SherpaAsrArtifact::ZipformerEn20230626,
+            Self::Kroko2025 => SherpaAsrArtifact::ZipformerEnKroko20250806,
         }
     }
 }
@@ -150,7 +150,7 @@ impl fmt::Display for LiveAsrBackend {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("unsupported live ASR backend `{value}`; expected kroko-2025, sherpa-2023, or moonshine")]
+#[error("unsupported live ASR backend `{value}`; expected sherpa-2023 or kroko-2025")]
 pub struct LiveAsrBackendParseError {
     value: String,
 }
@@ -166,7 +166,6 @@ impl FromStr for LiveAsrBackend {
             "kroko-2025"
             | "sherpa-zipformer-kroko-2025"
             | "sherpa-zipformer-en-kroko-2025-08-06" => Ok(Self::Kroko2025),
-            "moonshine" | "moonshine-streaming-en" => Ok(Self::Moonshine),
             other => Err(LiveAsrBackendParseError {
                 value: other.to_string(),
             }),
@@ -178,21 +177,15 @@ impl FromStr for LiveAsrBackend {
 pub struct AsrRegistry {
     sherpa_2023: SharedAsrFactory,
     kroko_2025: SharedAsrFactory,
-    moonshine: SharedAsrFactory,
 }
 
 pub type SharedAsrRegistry = Arc<AsrRegistry>;
 
 impl AsrRegistry {
-    pub fn new(
-        sherpa_2023: SharedAsrFactory,
-        kroko_2025: SharedAsrFactory,
-        moonshine: SharedAsrFactory,
-    ) -> Self {
+    pub fn new(sherpa_2023: SharedAsrFactory, kroko_2025: SharedAsrFactory) -> Self {
         Self {
             sherpa_2023,
             kroko_2025,
-            moonshine,
         }
     }
 
@@ -200,7 +193,6 @@ impl AsrRegistry {
         match backend {
             LiveAsrBackend::Sherpa2023 => self.sherpa_2023.clone(),
             LiveAsrBackend::Kroko2025 => self.kroko_2025.clone(),
-            LiveAsrBackend::Moonshine => self.moonshine.clone(),
         }
     }
 
@@ -376,9 +368,6 @@ impl MoonshineAsrFactory {
 }
 
 #[cfg(feature = "moonshine")]
-const MOONSHINE_INGEST_CHUNK_SAMPLES: usize = 1_280;
-
-#[cfg(feature = "moonshine")]
 #[async_trait]
 impl InboundAsrFactory for MoonshineAsrFactory {
     async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
@@ -387,63 +376,13 @@ impl InboundAsrFactory for MoonshineAsrFactory {
             .open_session(transcription_params(true))
             .await
             .context("open Moonshine streaming ASR session")?;
-        Ok(Box::new(MoonshineAsrSession {
-            session,
-            pending_samples: Vec::new(),
-        }))
+        Ok(Box::new(MoonshineAsrSession { session }))
     }
 }
 
 #[cfg(feature = "moonshine")]
 struct MoonshineAsrSession {
     session: motlie_model_moonshine::MoonshineStream,
-    pending_samples: Vec<i16>,
-}
-
-#[cfg(feature = "moonshine")]
-fn drain_moonshine_ingest_windows(pending_samples: &mut Vec<i16>) -> Vec<Vec<i16>> {
-    let window_count = pending_samples.len() / MOONSHINE_INGEST_CHUNK_SAMPLES;
-    let mut windows = Vec::with_capacity(window_count);
-    for _ in 0..window_count {
-        windows.push(
-            pending_samples
-                .drain(..MOONSHINE_INGEST_CHUNK_SAMPLES)
-                .collect(),
-        );
-    }
-    windows
-}
-
-#[cfg(feature = "moonshine")]
-fn events_from_moonshine_update(
-    update: Option<motlie_model::TranscriptionUpdate>,
-) -> Vec<AsrTranscriptEvent> {
-    update
-        .map(events_from_update)
-        .unwrap_or_default()
-        .into_iter()
-        .map(AsrTranscriptEvent::emit)
-        .collect()
-}
-
-#[cfg(feature = "moonshine")]
-impl MoonshineAsrSession {
-    async fn ingest_window(&mut self, window: Vec<i16>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
-        let update = self
-            .session
-            .ingest(AudioBuf::<i16, 16_000, Mono>::new(window))
-            .await
-            .context("ingest audio into Moonshine ASR")?;
-        Ok(events_from_moonshine_update(update))
-    }
-
-    async fn flush_pending_samples(&mut self) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
-        if self.pending_samples.is_empty() {
-            return Ok(Vec::new());
-        }
-        let window = std::mem::take(&mut self.pending_samples);
-        self.ingest_window(window).await
-    }
 }
 
 #[cfg(feature = "moonshine")]
@@ -453,28 +392,29 @@ impl InboundAsrSession for MoonshineAsrSession {
         &mut self,
         audio: AudioBuf<i16, 16_000, Mono>,
     ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
-        self.pending_samples.extend(audio.into_samples());
-        let mut events = Vec::new();
-        for window in drain_moonshine_ingest_windows(&mut self.pending_samples) {
-            events.extend(self.ingest_window(window).await?);
-        }
-        Ok(events)
+        let update = self
+            .session
+            .ingest(audio)
+            .await
+            .context("ingest audio into Moonshine ASR")?;
+        Ok(update
+            .map(events_from_update)
+            .unwrap_or_default()
+            .into_iter()
+            .map(AsrTranscriptEvent::emit)
+            .collect())
     }
 
     async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
-        let mut session = *self;
-        let mut events = session.flush_pending_samples().await?;
-        let update = session
+        let update = self
             .session
             .finish()
             .await
             .context("finish Moonshine ASR session")?;
-        events.extend(
-            events_from_update(update)
-                .into_iter()
-                .map(AsrTranscriptEvent::emit),
-        );
-        Ok(events)
+        Ok(events_from_update(update)
+            .into_iter()
+            .map(AsrTranscriptEvent::emit)
+            .collect())
     }
 }
 
@@ -866,29 +806,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn live_asr_backend_labels_and_parsing_include_moonshine() {
-        assert_eq!(
-            LiveAsrBackend::available(),
-            [
-                LiveAsrBackend::Kroko2025,
-                LiveAsrBackend::Sherpa2023,
-                LiveAsrBackend::Moonshine
-            ]
-        );
-        assert_eq!(LiveAsrBackend::Moonshine.label(), "moonshine");
-        assert_eq!(
-            LiveAsrBackend::Moonshine.model_label(),
-            "moonshine-streaming-en"
-        );
-        assert_eq!(
-            "moonshine-streaming-en"
-                .parse::<LiveAsrBackend>()
-                .expect("moonshine alias should parse"),
-            LiveAsrBackend::Moonshine
-        );
-    }
-
     #[cfg(feature = "sherpa")]
     #[test]
     fn sherpa_policy_suppresses_repeated_token_hallucinations() {
@@ -909,34 +826,5 @@ mod tests {
 
         assert!(!event.is_suppressed());
         assert!(!event.requires_session_reset());
-    }
-
-    #[cfg(feature = "moonshine")]
-    #[test]
-    fn moonshine_rechunker_buffers_telnyx_sized_frames_until_runtime_window() {
-        let mut pending = Vec::new();
-
-        for _ in 0..3 {
-            pending.extend(vec![1; 320]);
-            assert!(drain_moonshine_ingest_windows(&mut pending).is_empty());
-        }
-
-        pending.extend(vec![1; 320]);
-        let windows = drain_moonshine_ingest_windows(&mut pending);
-
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].len(), MOONSHINE_INGEST_CHUNK_SAMPLES);
-        assert!(pending.is_empty());
-    }
-
-    #[cfg(feature = "moonshine")]
-    #[test]
-    fn moonshine_rechunker_keeps_partial_tail_for_finish_flush() {
-        let mut pending = vec![1; MOONSHINE_INGEST_CHUNK_SAMPLES + 319];
-        let windows = drain_moonshine_ingest_windows(&mut pending);
-
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].len(), MOONSHINE_INGEST_CHUNK_SAMPLES);
-        assert_eq!(pending.len(), 319);
     }
 }

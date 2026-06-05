@@ -2166,12 +2166,7 @@ mod tests {
         }
         let sherpa_2023 = Arc::new(CountingAsrFactory::default());
         let kroko_2025 = Arc::new(CountingAsrFactory::default());
-        let moonshine = Arc::new(CountingAsrFactory::default());
-        let asr = Arc::new(AsrRegistry::new(
-            sherpa_2023.clone(),
-            kroko_2025.clone(),
-            moonshine.clone(),
-        ));
+        let asr = Arc::new(AsrRegistry::new(sherpa_2023.clone(), kroko_2025.clone()));
         let mut media_state = MediaSocketState::new();
 
         handle_text(
@@ -2185,59 +2180,11 @@ mod tests {
 
         assert_eq!(sherpa_2023.opens(), 0);
         assert_eq!(kroko_2025.opens(), 1);
-        assert_eq!(moonshine.opens(), 0);
         assert_eq!(media_state.asr_backend, Some(LiveAsrBackend::Kroko2025));
     }
 
-    #[tokio::test]
-    async fn media_start_opens_moonshine_when_call_is_bound_to_moonshine() {
-        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
-        {
-            let mut guard = state.write().await;
-            let gateway_call_id = guard.add_or_update_inbound_call(
-                TelnyxIds {
-                    call_control_id: "call-1".to_string(),
-                    call_session_id: Some("sess-1".to_string()),
-                    call_leg_id: Some("leg-1".to_string()),
-                    stream_id: None,
-                },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
-                CallStatus::Answering,
-            );
-            let call = guard
-                .calls
-                .get_mut(&gateway_call_id)
-                .expect("seeded call should exist");
-            call.asr_backend = Some(LiveAsrBackend::Moonshine);
-        }
-        let sherpa_2023 = Arc::new(CountingAsrFactory::default());
-        let kroko_2025 = Arc::new(CountingAsrFactory::default());
-        let moonshine = Arc::new(CountingAsrFactory::default());
-        let asr = Arc::new(AsrRegistry::new(
-            sherpa_2023.clone(),
-            kroko_2025.clone(),
-            moonshine.clone(),
-        ));
-        let mut media_state = MediaSocketState::new();
-
-        handle_text(
-            &start_event("call-1", "stream-1", "L16"),
-            &state,
-            &asr,
-            &mut media_state,
-        )
-        .await
-        .expect("start event should open Moonshine ASR");
-
-        assert_eq!(sherpa_2023.opens(), 0);
-        assert_eq!(kroko_2025.opens(), 0);
-        assert_eq!(moonshine.opens(), 1);
-        assert_eq!(media_state.asr_backend, Some(LiveAsrBackend::Moonshine));
-    }
-
     fn registry_with_factory(factory: SharedAsrFactory) -> SharedAsrRegistry {
-        Arc::new(AsrRegistry::new(factory.clone(), factory.clone(), factory))
+        Arc::new(AsrRegistry::new(factory.clone(), factory))
     }
 
     fn l16_samples(count: usize, sample: i16) -> Vec<u8> {

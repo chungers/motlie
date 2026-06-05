@@ -13,8 +13,8 @@
 | 2026-05-31 | @codex-364-impl: Superseded the earlier manual ONNX Runtime provisioning guidance with a general static-linkage policy for all `libs/model` ORT/ONNX backends. | All |
 
 This policy applies to every Motlie model backend that uses ONNX Runtime or
-loads `.onnx` artifacts. Motlie-owned Pyke `ort` backends such as Piper,
-Moonshine, and future ORT-backed bundles follow the workspace `ort` path below.
+loads `.onnx` artifacts. Motlie-owned Pyke `ort` backends such as Piper and
+future ORT-backed bundles follow the workspace `ort` path below.
 The Sherpa ASR backend still delegates recognition semantics to the upstream
 `sherpa-onnx` Rust crate, but it no longer owns a separate ONNX Runtime instance
 inside the Motlie gateway. The process-level rule is now simple: one binary gets
@@ -91,7 +91,7 @@ The native-link boundary is different from the recognizer boundary:
 | Motlie ASR contract adapter | `libs/model/backends/sherpa_onnx` | Motlie | Implements Motlie typed contracts and depends on upstream `sherpa-onnx`. |
 | Upstream Sherpa Rust wrapper | `sherpa-onnx = "1.13.2"` | crates.io / k2-fsa | Provides `OnlineRecognizer` and `OnlineStream`; leave recognition semantics upstream. |
 | Upstream Sherpa FFI/sys crate | `sherpa-onnx-sys = "1.13.2"` | Patched locally through `[patch.crates-io]` | Downloads/links Sherpa native archives, but Motlie filters out Sherpa's own emitted `onnxruntime` link so it cannot link a second ORT. |
-| ONNX Runtime provider | patched workspace `ort-sys v2.0.0-rc.12` | Motlie workspace dependency | Downloads the k2-fsa Sherpa static package and supplies its `libonnxruntime.a` as the single static ORT archive for Sherpa, Moonshine, Piper, and future direct-ORT backends. |
+| ONNX Runtime provider | patched workspace `ort-sys v2.0.0-rc.12` | Motlie workspace dependency | Downloads the k2-fsa Sherpa static package and supplies its `libonnxruntime.a` as the single static ORT archive for Sherpa, Piper, and future direct-ORT backends. |
 
 The root workspace patch is:
 
@@ -185,7 +185,7 @@ drives both the implementation shape and the long-term maintenance burden.
 ### Scenario A: Upstream Wrapper Or Sys Crate Bundles ONNX Runtime
 
 This is the risky path. It was the Sherpa failure mode before PR #393: the
-gateway linked workspace `ort-sys` for Moonshine/Piper and also linked Sherpa's
+gateway linked workspace `ort-sys` for direct-ORT backends and also linked Sherpa's
 bundled static `libonnxruntime.a`. The all-in-one ASR binary then had duplicate
 ORT global state and aborted with `free(): invalid pointer`.
 
@@ -209,8 +209,11 @@ Accepted implementation shapes for this scenario:
 The PR #393 Sherpa patch is the reference implementation for this scenario. It
 keeps upstream recognition behavior, filters native ORT linkage from
 `sherpa-onnx-sys`, and patches workspace `ort-sys` to link the k2-fsa Sherpa ORT
-archive as the single provider. This is the combination that made the all-in-one
-Telnyx gateway run Sherpa/Kroko plus Moonshine/Piper without the native abort.
+archive as the single provider. This is the combination that allows the Telnyx
+gateway to run upstream Sherpa/Kroko plus Piper in one statically linked process
+without reintroducing duplicate ORT state. A temporary Moonshine all-in-one
+evaluation also validated the duplicate-ORT fix, but Moonshine is not an active
+Telnyx live backend after #191/#394.
 
 ### Scenario B: Model Runs Directly On Workspace `ort`
 
@@ -255,7 +258,7 @@ the same binary.
 |------------------------|-------------------|--------------------|--------------------------------------|-------|
 | `sherpa-2023` | Yes | Upstream Sherpa recognizer resolves ORT symbols from patched workspace `ort-sys`, which links k2-fsa's Sherpa ORT archive | Yes | Same Sherpa runtime family as kroko; validates call-center profile. |
 | `kroko-2025` | Yes | Upstream Sherpa recognizer resolves ORT symbols from patched workspace `ort-sys`, which links k2-fsa's Sherpa ORT archive | Yes | Same Sherpa runtime family; Telnyx balanced live default. |
-| Moonshine | Yes | Direct workspace `ort` / patched `ort-sys`, using k2-fsa's Sherpa ORT archive | No | Benefits from duplicate-ORT removal in combined binaries; validated against the same replay in PR #393. |
+| Moonshine | Yes | Direct workspace `ort` / patched `ort-sys`, using k2-fsa's Sherpa ORT archive if built with the gateway | No | Historical research candidate only for Telnyx after #191/#394; benefits from duplicate-ORT removal in combined binaries but is not an active live backend. |
 | Piper TTS | Yes | Direct workspace `ort` / `motlie-model-ort`, using patched `ort-sys` | No | Telnyx outbound TTS path shares the single workspace ORT; no Sherpa maintenance burden. |
 | Whisper | No | `whisper.cpp` native runtime | No | Batch/final-pass candidate; not an ORT provider. |
 | Qwen3-TTS CPP | No | qwen3-tts.cpp / GGML | No | Not affected by ORT version or Sherpa sys patch; validate GGML coexistence separately. |
@@ -281,7 +284,7 @@ the same binary.
 | Step | Check |
 |------|-------|
 | Update root `Cargo.toml` and the patched `third_party/ort-sys` source together | Keep `download-binaries`, `tls-native`, and the intended `api-*` feature explicit, and preserve the k2-fsa/Sherpa ORT source unless a full all-in-one validation proves a replacement. |
-| Rebuild direct ORT backends | Piper, Moonshine, and any future direct-ORT models must compile and run model-specific tests. |
+| Rebuild direct ORT backends | Piper and any future direct-ORT models must compile and run model-specific tests. If Moonshine is revived, it must pass this gate before gateway exposure. |
 | Rebuild Sherpa | `cargo build -p motlie-telnyx-gateway --features sherpa` must still resolve ORT symbols from patched workspace `ort-sys`. |
 | Re-run combined validation | Use an all-in-one binary containing Sherpa plus direct-ORT backends. |
 | Re-check link evidence | `ldd` has no ORT, `cargo tree -i ort-sys` has one version, and no upstream bundled `libonnxruntime.a` is on a live link path. |

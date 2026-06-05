@@ -1821,7 +1821,7 @@ fn gateway_root_help() -> String {
         "  inbound disable",
         "  asr list",
         "  asr status",
-        "  asr use kroko-2025|sherpa-2023|moonshine Select backend for the next answered/dialed call",
+        "  asr use kroko-2025|sherpa-2023 Select backend for the next answered/dialed call",
         "  tts list",
         "  tts status",
         "  tts use piper                 Select TTS backend for the next speak command",
@@ -2085,7 +2085,6 @@ fn asr_help() -> String {
         "asr status",
         "asr use kroko-2025",
         "asr use sherpa-2023",
-        "asr use moonshine",
         "",
         "Select the live ASR backend for the next call answered or dialed by this source.",
         "",
@@ -2098,7 +2097,6 @@ fn asr_help() -> String {
         "  asr list",
         "  asr status",
         "  asr use kroko-2025",
-        "  asr use moonshine",
     ]
     .join("\n")
 }
@@ -2319,15 +2317,18 @@ mod tests {
         let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
-        let output = engine.run_line("asr use moonshine").await.expect("asr use");
+        let output = engine
+            .run_line("asr use sherpa-2023")
+            .await
+            .expect("asr use");
 
         assert_eq!(
             output.lines,
-            vec!["asr backend for next calls: moonshine (moonshine-streaming-en)"]
+            vec!["asr backend for next calls: sherpa-2023 (sherpa-zipformer-en-2023-06-26)"]
         );
         assert_eq!(
             engine.context().session.next_asr_backend,
-            LiveAsrBackend::Moonshine
+            LiveAsrBackend::Sherpa2023
         );
         assert_eq!(LiveAsrBackend::default(), LiveAsrBackend::Kroko2025);
     }
@@ -2345,8 +2346,7 @@ mod tests {
             output.lines,
             vec![
                 "kroko-2025 sherpa-zipformer-en-kroko-2025-08-06",
-                "sherpa-2023 sherpa-zipformer-en-2023-06-26",
-                "moonshine moonshine-streaming-en"
+                "sherpa-2023 sherpa-zipformer-en-2023-06-26"
             ]
         );
     }
@@ -2362,7 +2362,6 @@ mod tests {
         let rendered = output.lines.join("\n");
 
         assert!(rendered.contains("TUI shell and each agent socket connection"));
-        assert!(rendered.contains("asr use kroko-2025|sherpa-2023|moonshine"));
         assert!(rendered.contains("load <path>"));
         assert!(rendered.contains("quit [dump_path]"));
         assert!(rendered.contains("tts list"));
@@ -2383,7 +2382,6 @@ mod tests {
         let socket = engine.run_line("help socket").await.expect("socket help");
 
         assert!(asr.lines.join("\n").contains("source-local"));
-        assert!(asr.lines.join("\n").contains("asr use moonshine"));
         assert!(tts.lines.join("\n").contains("tts list"));
         assert!(tts.lines.join("\n").contains("speak <text...>"));
         assert!(call.lines.join("\n").contains("call use <call-id>"));
@@ -2484,7 +2482,7 @@ mod tests {
             CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
 
         tui_engine
-            .run_line("asr use moonshine")
+            .run_line("asr use sherpa-2023")
             .await
             .expect("tui asr use");
         tui_engine
@@ -2503,7 +2501,7 @@ mod tests {
                 .get(&call_one)
                 .expect("call one should exist")
                 .asr_backend,
-            Some(LiveAsrBackend::Moonshine)
+            Some(LiveAsrBackend::Sherpa2023)
         );
         assert_eq!(
             guard

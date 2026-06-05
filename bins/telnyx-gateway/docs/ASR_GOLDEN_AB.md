@@ -3,8 +3,8 @@
 ## Changelog
 
 - 2026-06-05 10:15:00 PDT, @codex-369-rv -- Corrected the PR #393 native-link note after live-answer replay showed Pyke ORT unification still crashed; patched workspace `ort-sys` now downloads/links the k2-fsa Sherpa ORT archive as the single ONNX Runtime provider.
-- 2026-06-05 09:35:00 PDT, @codex-369-rv -- Recorded the #394 gateway integration decision: repaired Moonshine is exposed as an opt-in live ASR backend for between-call A/B, while `kroko-2025` stays the default because Moonshine still lacks CPU real-time headroom.
-- 2026-06-04 23:54:00 PDT, @codex-369-rv -- Documented the PR #393 unified-ORT fix: the all-in-one `golden-ab` executable now runs Sherpa, Moonshine, and Whisper together without the `free(): invalid pointer` abort by linking one workspace `ort-sys` static ONNX Runtime.
+- 2026-06-05 11:39:00 PDT, @codex-369-rv -- Recorded the #191/#394 decision after live Telnyx testing: repaired Moonshine remains useful historical research data, but it is paused as a live gateway backend because telephony quality, CPU headroom, and maintenance cost are not acceptable.
+- 2026-06-04 23:54:00 PDT, @codex-369-rv -- Documented the PR #393 unified-ORT fix: the temporary all-in-one `golden-ab` executable ran Sherpa, Moonshine, and Whisper together without the `free(): invalid pointer` abort by linking one workspace `ort-sys` static ONNX Runtime.
 - 2026-06-04 22:22:00 PDT, @codex-369-rv -- Clarified that Moonshine is not worse than kroko on PM/orchestration WER after #393; the non-default live decision is due to CPU real-time factor/headroom and final-flush latency.
 - 2026-06-04 22:15:00 PDT, @codex-369-rv -- Updated the matrix with PR #393 validation after the Moonshine rechunk fix plus #376 backend hardening: Moonshine now produces real transcripts, all 8 backend/codec cells populate with no skips, and PM kroko variance is documented as Qwen3-TTS WAV provenance drift.
 - 2026-06-03 20:48:10 PDT, @codex-369-rv -- Replaced the contaminated pre-pad kroko matrix with the validated post-#378 padded call-center results and recorded the balanced default policy: `kroko-2025` for mixed call-center plus PM/technical use, `sherpa-2023` for call-center-only deployments.
@@ -32,16 +32,16 @@ cargo run -p motlie-telnyx-gateway --features golden-ab --   asr-golden-ab bins/
 
 The harness materializes codec-specific audit WAVs under `/tmp/motlie-qwen3-call-center-golden/asr-inputs/`.
 
-## PR #393 Validation Run
+## Historical PR #393 Moonshine Evaluation
 
-Run on amd1 on 2026-06-04 PDT after retargeting the Moonshine rechunk fix and #376 backend hardening to `feature/telnyx-voice`, then applying the unified-ORT native-link fix for PR #393 / #396.
+Run on amd1 on 2026-06-04 PDT on a temporary PR #393 head after retargeting the Moonshine rechunk fix and #376 backend hardening to `feature/telnyx-voice`, then applying the unified-ORT native-link fix for PR #393 / #396.
 
 The validation generated local Qwen3-TTS WAVs for both 72-sample corpora:
 
 - `/tmp/motlie-qwen3-call-center-golden`
 - `/tmp/motlie-pm-golden`
 
-The matrix used `chunk_ms=20`, `trailing_silence_pad_ms=800`, and both `L16-16k` and `PCMU-8k` codec round-trips. The final validation ran the all-in-one `golden-ab` executable with Sherpa, Moonshine, Whisper, and Qwen linked together. It no longer requires per-backend feature binaries: PR #393 patches `sherpa-onnx-sys` so upstream Sherpa keeps `OnlineRecognizer` but does not link its bundled `libonnxruntime.a`; patched workspace `ort-sys` downloads the k2-fsa Sherpa static package and links that package's `libonnxruntime.a` as the single static ONNX Runtime for Sherpa and Moonshine. Each corpus produced 576 entries, all 8 backend/codec cells populated, and no skipped cells or `free(): invalid pointer` abort.
+The matrix used `chunk_ms=20`, `trailing_silence_pad_ms=800`, and both `L16-16k` and `PCMU-8k` codec round-trips. The temporary validation ran the all-in-one `golden-ab` executable with Sherpa, Moonshine, Whisper, and Qwen linked together. It no longer required per-backend feature binaries: PR #393 patches `sherpa-onnx-sys` so upstream Sherpa keeps `OnlineRecognizer` but does not link its bundled `libonnxruntime.a`; patched workspace `ort-sys` downloads the k2-fsa Sherpa static package and links that package's `libonnxruntime.a` as the single static ONNX Runtime provider for Sherpa, Piper, and future direct-ORT backends. Each corpus produced 576 entries, all 8 backend/codec cells populated, and no skipped cells or `free(): invalid pointer` abort.
 
 ### Call-Center Corpus
 
@@ -75,7 +75,7 @@ Fresh PR #393 Qwen3-TTS WAVs, total reference words: 556.
 
 PM/orchestration `kroko-2025` is sensitive to regenerated Qwen3-TTS WAV provenance. On the fresh PR #393 PM WAVs it measures `15.8% / 15.8%`; on the earlier local PM WAV directory from the previous validation, the same PR #393 head measures `14.0% / 14.0%` with the same manifest, chunking, and trailing-silence pad. Treat this as audio-provenance variance, not a code-path regression.
 
-Moonshine is no longer the old canned-output failure after PR #393. It now produces real transcripts through the same replay harness, and on PM/orchestration it is not worse than kroko on WER (`15.8% / 14.2%` versus kroko's `15.8% / 15.6%` on fresh PR #393 WAVs). The live-default concern is CPU streaming headroom: kroko processes average PM samples in about `0.32x` real time, while Moonshine runs around `1.34x` real time plus a `~257 ms` final flush; on call-center audio Moonshine is `1.49-1.51x` real time while kroko is about `0.31x`. #394 therefore exposes Moonshine as an opt-in next-call backend for manual live A/B and #191 validation, but `kroko-2025` remains the live gateway default.
+Moonshine is no longer the old canned-output failure after the rechunk/backend-hardening experiment. It produced real transcripts through the replay harness, and on PM/orchestration it was not worse than kroko on WER (`15.8% / 14.2%` versus kroko's `15.8% / 15.6%` on fresh PR #393 WAVs). That offline PM signal did not carry the live gateway decision. Live Telnyx testing was disappointing, call-center WER stayed around `31% / 30%`, and the CPU path had poor real-time headroom: kroko processes average PM samples in about `0.32x` real time, while Moonshine runs around `1.34x` real time plus a `~257 ms` final flush; on call-center audio Moonshine is `1.49-1.51x` real time while kroko is about `0.31x`. #394 is therefore paused/not planned, and the gateway live ASR surface remains `kroko-2025` plus `sherpa-2023`.
 
 ## Previous Valid Padded DGX Run
 

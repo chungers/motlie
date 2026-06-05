@@ -6,7 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
-| 2026-06-05 | @codex-369-rv: Added Moonshine as a non-default runtime-selectable live ASR backend for operators and agent sockets. `kroko-2025` remains the balanced default, `sherpa-2023` remains the call-center profile, and `moonshine` is available for between-call A/B with explicit CPU-headroom caveats. | Overview, Milestone 1.5: Sherpa ASR Quality Tuning, Recommended ASR/TTS Stack |
+| 2026-06-05 | @codex-369-rv: Recorded the Moonshine decision from #191/#394 live Telnyx testing: keep the WER/build findings as historical data, but pause Moonshine as a live gateway backend because telephony quality, CPU headroom, and maintenance cost do not justify exposing it. PR #393 is scoped to common static ORT linkage for Sherpa/Piper and future direct-ORT backends. | Overview, Milestone 1.5: Sherpa ASR Quality Tuning, Recommended ASR/TTS Stack |
 | 2026-06-04 | @codex-369-rv: Removed ASR startup-default configuration in favor of code defaults plus source-local `asr use`, and normalized gateway TTS output to backend-neutral signed 16-bit PCM plus sample-rate metadata before Telnyx packetization so Piper and future Qwen3-TTS.cpp share one media path. | Operator REPL and TUI Control Surface, Returning TTS Audio, Recommended TTS: Piper |
 | 2026-06-04 | @codex-369-rv: Aligned TTS operator commands with the ASR command pattern: `tts list`, `tts status`, and `tts use piper` are available through the shared TUI/socket command engine, and `dial` output now tells operators to wait for media before running `speak`. | Operator REPL and TUI Control Surface, Driver REPL Dialer Surface, Recommended TTS: Piper |
 | 2026-06-03 | @codex-369-rv: Recorded M2 live-test findings for Piper: eSpeak-ng phonemization data must be present or auto-discovered, outbound TTS is packetized from continuous utterance audio, frames are paced by the media task, silence keepalive is not injected during active speech, and frame interval/underrun telemetry is required for live diagnosis. | Milestone 2: Outbound Dialer and TTS, Returning TTS Audio, M2-Safe Bidirectional Media Contract, Recommended TTS: Piper, Testing Scope |
@@ -91,7 +91,7 @@ This document defines a brownfield design for integrating Telnyx programmable vo
 Motlie now has:
 
 - typed TTS and ASR contracts in `motlie_model::typed`, including `AudioBuf`, `StreamingTranscriber`, `TranscriptionSession`, `SpeechSynthesizer`, and `SpeechStream`
-- a working Piper backend and streaming ASR backends such as `sherpa-onnx` and Moonshine
+- a working Piper backend and streaming Sherpa ASR backends; Moonshine has been measured as a follow-on candidate but is not part of the live Telnyx gateway backend set
 - a landed provider-neutral `motlie-voice` crate from PR #209 with `PcmFrame<const RATE_HZ, C, E>`, WAV stream helpers, sample conversion helpers, downmixing, and a placeholder `Resampler`
 
 It does not yet have a telephony transport layer that can:
@@ -126,7 +126,7 @@ Execution policy for v1:
 - milestone 3 is full-duplex conversation driven by a TUI chat interface over the selected call
 - milestone 4 is external integration: Unix-domain socket mux, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
 - `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
-- `Moonshine` is a follow-on ASR slice, not a milestone 1 or 2 acceptance dependency; once integrated it is an opt-in live ASR backend for manual A/B and #191 validation, not the default
+- `Moonshine` is a historical follow-on ASR research slice, not a milestone 1 or 2 acceptance dependency and not a live gateway backend after #191/#394 validation
 - `Qwen3-TTS` remains a supported design target for follow-on TTS work, not a peer initial implementation target
 - provider-neutral abstractions in `libs/voice` must be broad enough to support those later pairings without redesign, but milestone 1 and milestone 2 acceptance must not depend on them
 
@@ -432,9 +432,9 @@ The validated Qwen3-TTS golden A/B after the #378 trailing-silence pad fix chang
 
 - `sherpa-2023`: `10.5% / 12.0%` call-center WER, `19.8% / 22.1%` PM/technical WER (`L16-16k / PCMU-8k`)
 - `kroko-2025`: `14.1% / 13.9%` call-center WER, `14.0% / 14.0%` PM/technical WER (`L16-16k / PCMU-8k`)
-- `moonshine`: `31.2% / 30.2%` call-center WER, `15.8% / 14.2%` PM/technical WER on the PR #393 all-in-one run (`L16-16k / PCMU-8k`), with CPU replay slower than real time on the current host
+- `moonshine`: `31.2% / 30.2%` call-center WER, `15.8% / 14.2%` PM/technical WER on the PR #393 all-in-one research run (`L16-16k / PCMU-8k`), with CPU replay slower than real time on the current host and disappointing live Telnyx behavior
 
-Therefore the live gateway default is intentionally `kroko-2025`, while `sherpa-2023` is a recommended operator-selected backend for call-center-only runs. Moonshine is also operator-selectable for between-call A/B and PM/technical experiments, but its current CPU real-time factor makes it a non-default live backend. This is not a hidden default flip: the code default, `asr list`, `asr status`, and `asr use` operator commands must make available and selected backends observable and switchable between calls.
+Therefore the live gateway default is intentionally `kroko-2025`, while `sherpa-2023` is a recommended operator-selected backend for call-center-only runs. Moonshine is paused for live Telnyx use: the offline PM score is not enough to offset call-center WER, poor live telephony behavior, CPU real-time risk, and the added native-link maintenance burden. This is not a hidden default flip: the code default, `asr list`, `asr status`, and `asr use` operator commands must make available and selected Sherpa backends observable and switchable between calls.
 
 M1.5 should proceed in this order:
 
@@ -2159,7 +2159,7 @@ This design should make model requirements explicit instead of hiding them in th
 Examples:
 
 - Sherpa ONNX streaming may want mono `16 kHz` PCM frames with a chunk cadence aligned to its streaming decoder.
-- Moonshine streaming may also be telephony-friendly, but it should still get its own chunker configuration if its best frame sizing differs.
+- Moonshine streaming was evaluated as a telephony candidate, but live Telnyx testing paused it; if revived, it must keep its own chunker configuration because its fixed frame sizing differs from Sherpa.
 - Whisper can satisfy the typed batch ASR interface, but it likely needs a different buffering policy and should not reuse the low-latency streaming defaults blindly.
 - Piper emits `AudioBuf<i16, 22_050, Mono>`, while Qwen3-TTS.cpp emits `AudioBuf<f32, 24_000, Mono>`; the outbound side must adapt from the actual emitted type, not from a hardcoded assumption.
 
@@ -2484,8 +2484,8 @@ Recommended design rule:
 - Telnyx v1 should treat upstream `sherpa-onnx` streaming Zipformer models as the default recommended ASR family for the real-time conversational flow
 - the live gateway default is `kroko-2025` (`sherpa-zipformer-en-kroko-2025-08-06`) because the M1.5 A/B results show it is the balanced cross-domain choice: call-center WER is `14.1% / 13.9%` on `L16-16k / PCMU-8k`, and PM/technical WER is `14.0% / 14.0%`
 - `sherpa-2023` (`sherpa-zipformer-en-2023-06-26`) remains the recommended profile for call-center-only deployments: it measured `10.5% / 12.0%` on the call-center corpus but `19.8% / 22.1%` on the PM/technical corpus
-- `moonshine` (`moonshine-streaming-en`) is an opt-in backend for between-call live A/B and #191 validation: after the Telnyx rechunker and backend hardening it emits real transcripts and is competitive with kroko on PM/technical WER, but it remains non-default because CPU replay is near or slower than real time
-- operators and agents can switch the next-call backend between `kroko-2025`, `sherpa-2023`, and `moonshine` with `asr use <backend>`; switching is source-local and takes effect only for calls answered or dialed after the command
+- `moonshine` (`moonshine-streaming-en`) is not exposed as a live gateway backend after #191/#394: after rechunking and backend hardening it emitted real offline transcripts and was competitive with kroko on PM/technical WER, but live Telnyx testing was poor and CPU replay was near or slower than real time
+- operators and agents can switch the next-call backend between `kroko-2025` and `sherpa-2023` with `asr use <backend>`; switching is source-local and takes effect only for calls answered or dialed after the command
 - the gateway itself should still accept any injected typed ASR that implements `StreamingTranscriber`
 - gateway live-test and deployment runbooks must use the upstream `sherpa-onnx` Rust crate for Sherpa; Cargo downloads and statically links the upstream prebuilt `sherpa-onnx` native archive, including the ONNX Runtime library Sherpa uses internally
 - gateway runbooks must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not require building ONNX Runtime from source or vendoring ONNX Runtime
