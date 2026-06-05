@@ -342,12 +342,13 @@ async fn wait_for_shutdown(
 fn build_live_asr_registry(cli: &Cli) -> SharedAsrRegistry {
     if std::env::var_os("MOTLIE_TELNYX_ECHO_ASR").is_some() {
         let echo: SharedAsrFactory = Arc::new(EchoAsrFactory);
-        return Arc::new(AsrRegistry::new(echo.clone(), echo));
+        return Arc::new(AsrRegistry::new(echo.clone(), echo.clone(), echo));
     }
 
     Arc::new(AsrRegistry::new(
         build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEn20230626),
         build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEnKroko20250806),
+        build_moonshine_asr_factory(cli),
     ))
 }
 

@@ -117,28 +117,28 @@ pub enum LiveAsrBackend {
     #[default]
     #[value(name = "kroko-2025", alias = "sherpa-zipformer-kroko-2025")]
     Kroko2025,
+    #[value(name = "moonshine", alias = "moonshine-streaming-en")]
+    Moonshine,
 }
 
 impl LiveAsrBackend {
-    pub const fn available() -> [Self; 2] {
-        [Self::Kroko2025, Self::Sherpa2023]
+    pub const fn available() -> [Self; 3] {
+        [Self::Kroko2025, Self::Sherpa2023, Self::Moonshine]
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Sherpa2023 => "sherpa-2023",
             Self::Kroko2025 => "kroko-2025",
+            Self::Moonshine => "moonshine",
         }
     }
 
     pub fn model_label(self) -> &'static str {
-        self.artifact().label()
-    }
-
-    pub fn artifact(self) -> SherpaAsrArtifact {
         match self {
-            Self::Sherpa2023 => SherpaAsrArtifact::ZipformerEn20230626,
-            Self::Kroko2025 => SherpaAsrArtifact::ZipformerEnKroko20250806,
+            Self::Sherpa2023 => SherpaAsrArtifact::ZipformerEn20230626.label(),
+            Self::Kroko2025 => SherpaAsrArtifact::ZipformerEnKroko20250806.label(),
+            Self::Moonshine => "moonshine-streaming-en",
         }
     }
 }
@@ -150,7 +150,7 @@ impl fmt::Display for LiveAsrBackend {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("unsupported live ASR backend `{value}`; expected sherpa-2023 or kroko-2025")]
+#[error("unsupported live ASR backend `{value}`; expected kroko-2025, sherpa-2023, or moonshine")]
 pub struct LiveAsrBackendParseError {
     value: String,
 }
@@ -166,6 +166,7 @@ impl FromStr for LiveAsrBackend {
             "kroko-2025"
             | "sherpa-zipformer-kroko-2025"
             | "sherpa-zipformer-en-kroko-2025-08-06" => Ok(Self::Kroko2025),
+            "moonshine" | "moonshine-streaming-en" => Ok(Self::Moonshine),
             other => Err(LiveAsrBackendParseError {
                 value: other.to_string(),
             }),
@@ -177,15 +178,21 @@ impl FromStr for LiveAsrBackend {
 pub struct AsrRegistry {
     sherpa_2023: SharedAsrFactory,
     kroko_2025: SharedAsrFactory,
+    moonshine: SharedAsrFactory,
 }
 
 pub type SharedAsrRegistry = Arc<AsrRegistry>;
 
 impl AsrRegistry {
-    pub fn new(sherpa_2023: SharedAsrFactory, kroko_2025: SharedAsrFactory) -> Self {
+    pub fn new(
+        sherpa_2023: SharedAsrFactory,
+        kroko_2025: SharedAsrFactory,
+        moonshine: SharedAsrFactory,
+    ) -> Self {
         Self {
             sherpa_2023,
             kroko_2025,
+            moonshine,
         }
     }
 
@@ -193,6 +200,7 @@ impl AsrRegistry {
         match backend {
             LiveAsrBackend::Sherpa2023 => self.sherpa_2023.clone(),
             LiveAsrBackend::Kroko2025 => self.kroko_2025.clone(),
+            LiveAsrBackend::Moonshine => self.moonshine.clone(),
         }
     }
 
@@ -855,6 +863,29 @@ mod tests {
         assert_eq!(
             SherpaAsrArtifact::ZipformerEnKroko20250806.label(),
             "sherpa-zipformer-en-kroko-2025-08-06"
+        );
+    }
+
+    #[test]
+    fn live_asr_backend_labels_and_parsing_include_moonshine() {
+        assert_eq!(
+            LiveAsrBackend::available(),
+            [
+                LiveAsrBackend::Kroko2025,
+                LiveAsrBackend::Sherpa2023,
+                LiveAsrBackend::Moonshine
+            ]
+        );
+        assert_eq!(LiveAsrBackend::Moonshine.label(), "moonshine");
+        assert_eq!(
+            LiveAsrBackend::Moonshine.model_label(),
+            "moonshine-streaming-en"
+        );
+        assert_eq!(
+            "moonshine-streaming-en"
+                .parse::<LiveAsrBackend>()
+                .expect("moonshine alias should parse"),
+            LiveAsrBackend::Moonshine
         );
     }
 

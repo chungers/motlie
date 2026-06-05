@@ -2,6 +2,7 @@
 
 ## Changelog
 
+- 2026-06-05 09:35:00 PDT, @codex-369-rv -- Recorded the #394 gateway integration decision: repaired Moonshine is exposed as an opt-in live ASR backend for between-call A/B, while `kroko-2025` stays the default because Moonshine still lacks CPU real-time headroom.
 - 2026-06-04 23:54:00 PDT, @codex-369-rv -- Documented the PR #393 unified-ORT fix: the all-in-one `golden-ab` executable now runs Sherpa, Moonshine, and Whisper together without the `free(): invalid pointer` abort by linking one workspace `ort-sys` static ONNX Runtime.
 - 2026-06-04 22:22:00 PDT, @codex-369-rv -- Clarified that Moonshine is not worse than kroko on PM/orchestration WER after #393; the non-default live decision is due to CPU real-time factor/headroom and final-flush latency.
 - 2026-06-04 22:15:00 PDT, @codex-369-rv -- Updated the matrix with PR #393 validation after the Moonshine rechunk fix plus #376 backend hardening: Moonshine now produces real transcripts, all 8 backend/codec cells populate with no skips, and PM kroko variance is documented as Qwen3-TTS WAV provenance drift.
@@ -73,7 +74,7 @@ Fresh PR #393 Qwen3-TTS WAVs, total reference words: 556.
 
 PM/orchestration `kroko-2025` is sensitive to regenerated Qwen3-TTS WAV provenance. On the fresh PR #393 PM WAVs it measures `15.8% / 15.8%`; on the earlier local PM WAV directory from the previous validation, the same PR #393 head measures `14.0% / 14.0%` with the same manifest, chunking, and trailing-silence pad. Treat this as audio-provenance variance, not a code-path regression.
 
-Moonshine is no longer the old canned-output failure after PR #393. It now produces real transcripts through the same replay harness, and on PM/orchestration it is not worse than kroko on WER (`15.8% / 14.2%` versus kroko's `15.8% / 15.6%` on fresh PR #393 WAVs). The live-default concern is CPU streaming headroom: kroko processes average PM samples in about `0.32x` real time, while Moonshine runs around `1.34x` real time plus a `~257 ms` final flush; on call-center audio Moonshine is `1.49-1.51x` real time while kroko is about `0.31x`. Moonshine therefore remains an offline/final-pass or future-optimization candidate rather than the live gateway default.
+Moonshine is no longer the old canned-output failure after PR #393. It now produces real transcripts through the same replay harness, and on PM/orchestration it is not worse than kroko on WER (`15.8% / 14.2%` versus kroko's `15.8% / 15.6%` on fresh PR #393 WAVs). The live-default concern is CPU streaming headroom: kroko processes average PM samples in about `0.32x` real time, while Moonshine runs around `1.34x` real time plus a `~257 ms` final flush; on call-center audio Moonshine is `1.49-1.51x` real time while kroko is about `0.31x`. #394 therefore exposes Moonshine as an opt-in next-call backend for manual live A/B and #191 validation, but `kroko-2025` remains the live gateway default.
 
 ## Previous Valid Padded DGX Run
 

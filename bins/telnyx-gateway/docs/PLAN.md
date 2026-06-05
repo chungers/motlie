@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-05 09:35 PDT | @codex-369-rv | Added milestone 1.7 Moonshine live ASR selection: `moonshine` joins `kroko-2025` and `sherpa-2023` behind the same source-local TUI/socket `asr list/status/use` surface, with fixed `1280`-sample rechunking and non-default CPU-headroom caveats. |
 | 2026-06-04 | @codex-369-rv | Removed the ASR startup-default flag/config path while keeping `kroko-2025` as the code default, and made the TTS factory boundary backend-neutral by normalizing synthesized output to signed 16-bit PCM plus source sample-rate metadata before packetization. |
 | 2026-06-04 | @codex-369-rv | Aligned milestone 2 TTS operator UX with ASR: `tts list`, `tts status`, and `tts use piper` are shared TUI/socket commands, `tts status` reports clear availability, and `dial` tells operators to wait for media before running `speak`. |
 | 2026-06-03 23:30 PDT | @codex-369-rv | Captured M2 live-test hardening: Piper eSpeak-ng data must be auto-detected or fail loudly, outbound speech is prebuffered as continuous utterance audio before resample/packetize, the media task owns 20 ms pacing, silence keepalive is withheld during active speech, and frame interval/underrun logs diagnose choppy playback. |
@@ -489,12 +490,25 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`, `Recommended ASR/TTS Stack`
 - [x] Wire backend selection for replay A/B so candidates can be compared behind the existing typed ASR backbone without changing Telnyx media decode/capture behavior. (@codex-371-impl, 2026-06-01 PDT)
   DESIGN reference: `Recommended ASR/TTS Stack`
-- [ ] Integrate and benchmark candidate models on the same golden corpus: newer Sherpa Zipformer first, then Nemotron/Parakeet candidates coordinated with #191/#369. (@codex-371-impl, 2026-06-02 PDT: `sherpa-zipformer-2023` and `sherpa-zipformer-kroko-2025` replay selectors are wired; WER/latency scoring is blocked until the L16 baseline and PCMU golden capture WAVs/reference are present. See `docs/ASR_ARTIFACT_AB.md`.)
+- [x] Integrate and benchmark candidate models on the same golden corpus: newer Sherpa Zipformer first, then Moonshine/Whisper comparisons coordinated with #191/#369. (@codex-369-rv, 2026-06-05 PDT: PR #393 all-in-one validation populated all Sherpa, Moonshine, and Whisper backend/codec cells with no skips after the Moonshine rechunker and unified-ORT fix. See `docs/ASR_GOLDEN_AB.md`.)
   DESIGN reference: `Recommended ASR/TTS Stack`
 - [ ] Defer Sherpa hotwords/context bias, endpointing tuning, decoder tuning, and post-ASR normalization until the model A/B results establish best-model WER and latency on the golden corpus.
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`
 - [ ] Keep raw ASR transcript, normalized transcript, and agent/LLM-corrected transcript as separate outputs if normalization is later implemented. WER acceptance must score raw ASR separately from any normalized-output metric.
   DESIGN reference: `Milestone 1.5: Sherpa ASR Quality Tuning`
+
+### 8.1.6 - Milestone 1.7 Moonshine live ASR selection (#394)
+
+- [x] Add `moonshine` to the live ASR backend enum, display labels, parsing aliases, and shared `asr list/status/use` command grammar. (@codex-369-rv, 2026-06-05 PDT)
+  DESIGN reference: `Recommended ASR/TTS Stack`, `Operator REPL and TUI Control Surface`
+- [x] Keep `kroko-2025` as the code default while allowing operators and agent sockets to select `moonshine` source-locally for the next answered or dialed call. (@codex-369-rv, 2026-06-05 PDT)
+  DESIGN reference: `Recommended ASR/TTS Stack`, `Agent Socket Interface`
+- [x] Route Moonshine through the same Telnyx media read loop as Sherpa, with decode/downmix/resample followed by a Moonshine-specific fixed `1280`-sample rechunker before the `StreamingTranscriber` session. (@codex-369-rv, 2026-06-05 PDT)
+  DESIGN reference: `Concrete Combination Requirements`, `Concrete Backend Requirements Matrix`
+- [x] Add source-local TUI/socket tests and media-start tests proving `asr use moonshine` binds only that source's next call and opens the Moonshine factory when Telnyx media starts. (@codex-369-rv, 2026-06-05 PDT)
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Testing Scope for PLAN`
+- [ ] Keep Moonshine non-default until live host CPU headroom is improved: PR #393 shows valid PM/technical WER but current CPU replay runs near or slower than real time.
+  DESIGN reference: `Recommended ASR/TTS Stack`
 
 ### 8.2 - Milestone 2 outbound TUI/socket dialer/TTS flow (#365)
 
@@ -659,10 +673,10 @@ After the Sherpa + Piper duplex milestone is implemented and validated end to en
 
 ### 10.2 - Moonshine + Qwen3-TTS
 
-- [ ] Implement the Moonshine inbound path:
-  Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> fixed `1280`-sample rechunking.
+- [x] Implement the Moonshine inbound path:
+  Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> fixed `1280`-sample rechunking. (@codex-369-rv, 2026-06-05 PDT: completed for ASR-only Moonshine live selection in #394; Qwen3-TTS remains separate TTS follow-on work.)
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Validate that Moonshine's fixed `1280`-sample cadence remains acceptable under Telnyx media pacing and jitter conditions.
+- [ ] Validate that Moonshine's fixed `1280`-sample cadence remains acceptable under Telnyx media pacing and jitter conditions in a live call after CPU-headroom improvements; offline PR #393 validation proves transcript correctness but not live real-time safety.
   DESIGN reference: `Concrete Combination Requirements`
 
 ### 10.3 - Additional pairings and provider expansion

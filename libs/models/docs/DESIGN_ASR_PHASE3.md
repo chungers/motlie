@@ -3,6 +3,7 @@
 ## Changelog
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-05 09:35 PDT | @codex-369-rv | Promoted repaired Moonshine to an opt-in Telnyx gateway live ASR backend for between-call A/B while keeping it non-default because current CPU throughput lacks real-time headroom. |
 | 2026-06-04 23:54 PDT | @codex-369-rv | Recorded the PR #393 / #396 unified-ORT fix: upstream Sherpa keeps `OnlineRecognizer`, but `sherpa-onnx-sys` is patched to exclude its bundled `libonnxruntime.a` and link the single workspace `ort-sys` static ONNX Runtime used by Moonshine. |
 | 2026-06-04 22:22 PDT | @codex-369-rv | Clarified the Moonshine interpretation from PR #393: Moonshine is competitive with kroko on PM/orchestration WER, but remains non-default for live telephony because CPU replay runs near or slower than real time with little streaming headroom. |
 | 2026-06-04 22:15 PDT | @codex-369-rv | Updated the ASR A/B matrix after PR #393 retargeted the Moonshine rechunk fix plus #376 backend hardening onto `feature/telnyx-voice`: Moonshine now produces real transcripts instead of canned output, with call-center ~31% / 30% and PM ~16% / 14% WER. |
@@ -74,20 +75,20 @@ The first A/B run reported inflated WER (sherpa 24%, kroko 38%) because the gold
 - "Newer is better" is domain-dependent: sherpa-2023 wins call-center (~11%), while kroko-2025 remains the better mixed-domain Sherpa profile (`15.8% / 15.8%` on fresh PM WAVs and `14.0% / 14.0%` on the earlier PM WAV set). Both remain below the ~20% call-center target; the digit-handling tuning track is deprioritized for call-center.
 - Hotword or contextual bias is warranted only for a technical/PM lexicon, not call-center: sherpa hits 30.6% on `technical_term` (zipformer, mu-law, ONNX, endpointing) versus 7-11% on call-center words. Spoken-number normalization (`metric_readout` 36-44%) is a second lever.
 - Whisper stays a complementary word-heavy final-pass only: unfit for live where IDs/numbers occur (digit strings 47-70%) and batch-only at ~2.2 s.
-- Moonshine is repaired as a valid ASR backend in PR #393 and is competitive with kroko on PM/orchestration WER, but its CPU real-time factor is above `1.0x` on both corpora, so it is not the live telephony default without further runtime work.
+- Moonshine is repaired as a valid ASR backend in PR #393 and is competitive with kroko on PM/orchestration WER. It is available for Telnyx between-call live A/B, but its CPU real-time factor is above `1.0x` on both corpora, so it is not the live telephony default without further runtime work.
 - Codec L16 versus PCMU differs <2 pts everywhere; model and trailing-silence/endpointing handling are the dominant levers, not the codec.
 
 ## Recommendation
 
 - Use `kroko-2025` as the Telnyx gateway live default for mixed production traffic because it balances call-center and PM/technical accuracy at about 14% WER on both corpora.
 - Use `sherpa-2023` for call-center-only deployments where the narrower corpus matters more than PM/technical robustness.
-- Keep runtime selection between `kroko-2025` and `sherpa-2023` as a first-class gateway control so operators and agents can alternate backends between calls during A/B validation.
+- Keep runtime selection between `kroko-2025`, `sherpa-2023`, and opt-in `moonshine` as a first-class gateway control so operators and agents can alternate backends between calls during A/B validation.
 - Keep Whisper, faster-whisper, Parakeet, Canary, and Nemotron as batched final-pass or appserver-side investigations; none replace the live streaming default.
 - Keep hotword/context-bias work separate from raw backend selection. The measured need is technical/PM lexicon support, not a general call-center fix.
 
 ### Moonshine status
 
-PR #393 combines the Telnyx rechunker with #376's Moonshine backend hardening and fixes the prior canned-output failure. Moonshine now emits real transcripts through the same `StreamingTranscriber` contract and scores `31.2% / 30.2%` on call-center and `15.8% / 14.2%` on PM/orchestration (`L16-16k / PCMU-8k`). The remaining blocker is not transcript validity or PM accuracy but live CPU headroom: wall averages are roughly `4.0-5.0 s/sample`, corresponding to about `1.34x` real-time factor on PM and `1.49-1.51x` on call-center. Moonshine therefore remains a non-default candidate for offline/final-pass or future optimization rather than the live telephony baseline.
+PR #393 combines the Telnyx rechunker with #376's Moonshine backend hardening and fixes the prior canned-output failure. Moonshine now emits real transcripts through the same `StreamingTranscriber` contract and scores `31.2% / 30.2%` on call-center and `15.8% / 14.2%` on PM/orchestration (`L16-16k / PCMU-8k`). The remaining blocker is not transcript validity or PM accuracy but live CPU headroom: wall averages are roughly `4.0-5.0 s/sample`, corresponding to about `1.34x` real-time factor on PM and `1.49-1.51x` on call-center. Moonshine is therefore safe to expose as an opt-in Telnyx next-call backend for manual A/B and #191 closure validation, but it remains non-default until runtime throughput improves.
 
 ## Rationale
 
