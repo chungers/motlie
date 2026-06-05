@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-05 | @codex-369-rv: Made DGX/aarch64 CPU validation a required gate for PR #393 and future gateway ORT linkage changes. CUDA ORT remains out of scope, but the `linux-aarch64` k2-fsa Sherpa static archive must build and link cleanly on the DGX deployment host. | Maintenance Procedures, Verification Commands |
 | 2026-06-05 | @codex-369-rv: Corrected PR #393 after live Telnyx answer reproduced `free(): invalid pointer` with the rejected Pyke-ORT unification. The accepted single ORT provider is now workspace `ort-sys` patched to download/link the k2-fsa `sherpa-onnx` ORT archive that the upstream Sherpa C++ static bundle is built against. | Policy, Process-Level Rule, Sherpa ONNX Runtime Boundary, Canonical Cargo Path, Maintenance Procedures |
 | 2026-06-05 | @codex-369-rv: Replaced the old Sherpa bundled-ORT exception with the unified one-process/one-ORT rule from PR #393 / #396. Added detailed integration scenarios for direct workspace `ort` backends versus upstream crates that bundle ONNX Runtime, plus model-family impact and maintenance procedures. | Policy, Sherpa ONNX Runtime Boundary, Future Model Integration Scenarios, Maintenance Procedures |
 | 2026-06-01 | @codex-364-impl: Split the policy between Motlie-owned Pyke `ort` backends and the upstream `sherpa-onnx` backend, which must use the crate's downloaded static native archives instead of Motlie's workspace `ort` dependency. | Policy, Sherpa ONNX Exception |
@@ -265,6 +266,31 @@ the same binary.
 
 ## Maintenance Procedures
 
+### Required DGX / AArch64 Gateway Validation
+
+The Telnyx gateway is expected to run on the DGX/aarch64 host as well as amd1.
+Any PR that changes the gateway ORT linkage policy, `ort-sys`,
+`sherpa-onnx-sys`, or the shared Sherpa/Piper feature set must validate the CPU
+static path on DGX before merge.
+
+This is a CPU static-link gate, not a CUDA ORT gate. Do not enable CUDA ORT
+features and do not require dynamic CUDA libraries for this validation. The
+patched `ort-sys` must select the k2-fsa `linux-aarch64` Sherpa static package,
+for example `sherpa-onnx-v1.13.2-linux-aarch64-static-lib.tar.bz2`, and link
+that package's `libonnxruntime.a` as the single ORT provider.
+
+Required DGX checks:
+
+1. `unset ORT_LIB_PATH ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK LD_LIBRARY_PATH`.
+2. `cargo build -p motlie-telnyx-gateway --release --features "sherpa piper"`.
+3. `target/release/telnyx-gateway --help` must start without native-link aborts.
+4. `ldd target/release/telnyx-gateway | grep -Ei 'onnx|ort'` must return no
+   ONNX Runtime shared library.
+5. `cargo tree -p motlie-telnyx-gateway --features "sherpa piper" -i ort-sys`
+   must show one workspace `ort-sys`.
+6. Run at least one Sherpa replay or live smoke and one Piper synthesis smoke
+   when the required artifacts are present on DGX.
+
 ### Adding A New ORT-Backed Model
 
 1. Classify the model as Scenario A or Scenario B.
@@ -288,6 +314,7 @@ the same binary.
 | Rebuild Sherpa | `cargo build -p motlie-telnyx-gateway --features sherpa` must still resolve ORT symbols from patched workspace `ort-sys`. |
 | Re-run combined validation | Use an all-in-one binary containing Sherpa plus direct-ORT backends. |
 | Re-check link evidence | `ldd` has no ORT, `cargo tree -i ort-sys` has one version, and no upstream bundled `libonnxruntime.a` is on a live link path. |
+| Validate gateway deployment architecture | Run the required DGX/aarch64 CPU static gateway validation before merge if the gateway ORT path changed. |
 
 ### Upgrading `sherpa-onnx` / `sherpa-onnx-sys`
 
