@@ -18,6 +18,7 @@ cuda = []
 [dependencies]
 async-trait = "0.1.89"
 motlie-model = { path = "../..", features = ["metrics-runtime"] }
+ort.workspace = true
 sherpa-onnx = "1.13.2"
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"

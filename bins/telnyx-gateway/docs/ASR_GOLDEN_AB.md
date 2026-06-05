@@ -2,6 +2,7 @@
 
 ## Changelog
 
+- 2026-06-04 23:54:00 PDT, @codex-369-rv -- Documented the PR #393 unified-ORT fix: the all-in-one `golden-ab` executable now runs Sherpa, Moonshine, and Whisper together without the `free(): invalid pointer` abort by linking one workspace `ort-sys` static ONNX Runtime.
 - 2026-06-04 22:22:00 PDT, @codex-369-rv -- Clarified that Moonshine is not worse than kroko on PM/orchestration WER after #393; the non-default live decision is due to CPU real-time factor/headroom and final-flush latency.
 - 2026-06-04 22:15:00 PDT, @codex-369-rv -- Updated the matrix with PR #393 validation after the Moonshine rechunk fix plus #376 backend hardening: Moonshine now produces real transcripts, all 8 backend/codec cells populate with no skips, and PM kroko variance is documented as Qwen3-TTS WAV provenance drift.
 - 2026-06-03 20:48:10 PDT, @codex-369-rv -- Replaced the contaminated pre-pad kroko matrix with the validated post-#378 padded call-center results and recorded the balanced default policy: `kroko-2025` for mixed call-center plus PM/technical use, `sherpa-2023` for call-center-only deployments.
@@ -31,14 +32,14 @@ The harness materializes codec-specific audit WAVs under `/tmp/motlie-qwen3-call
 
 ## PR #393 Validation Run
 
-Run on amd1 on 2026-06-04 PDT at PR #393 head `ae61c9dbe90e223d2d559aa9af65977ff749fc32` after retargeting the Moonshine rechunk fix and #376 backend hardening to `feature/telnyx-voice`.
+Run on amd1 on 2026-06-04 PDT after retargeting the Moonshine rechunk fix and #376 backend hardening to `feature/telnyx-voice`, then applying the unified-ORT native-link fix for PR #393 / #396.
 
 The validation generated local Qwen3-TTS WAVs for both 72-sample corpora:
 
 - `/tmp/motlie-qwen3-call-center-golden`
 - `/tmp/motlie-pm-golden`
 
-The matrix used `chunk_ms=20`, `trailing_silence_pad_ms=800`, and both `L16-16k` and `PCMU-8k` codec round-trips. Because the all-in-one `golden-ab` executable aborts with `free(): invalid pointer` when Sherpa and Moonshine are linked into the same process on this host, the final validation ran per-backend feature binaries (`sherpa`, `moonshine`, `whisper`). The resulting matrix has 576 entries and all 8 backend/codec cells populated for each corpus; no cells are skipped.
+The matrix used `chunk_ms=20`, `trailing_silence_pad_ms=800`, and both `L16-16k` and `PCMU-8k` codec round-trips. The final validation ran the all-in-one `golden-ab` executable with Sherpa, Moonshine, Whisper, and Qwen linked together. It no longer requires per-backend feature binaries: PR #393 patches `sherpa-onnx-sys` so upstream Sherpa keeps `OnlineRecognizer` but does not link its bundled `libonnxruntime.a`; the workspace `ort-sys` archive supplies the single static ONNX Runtime for Sherpa and Moonshine. Each corpus produced 576 entries, all 8 backend/codec cells populated, and no skipped cells or `free(): invalid pointer` abort.
 
 ### Call-Center Corpus
 
@@ -46,14 +47,14 @@ Total reference words: 626.
 
 | Backend | Codec | Agg WER | Errors / Words | Avg wall latency | Selection signal |
 |---|---:|---:|---:|---:|---|
-| sherpa-zipformer-en-2023-06-26 | L16-16k | 11.0% | 69 / 626 | ~1208 ms | Best call-center-only backend |
-| sherpa-zipformer-en-2023-06-26 | PCMU-8k | 11.2% | 70 / 626 | ~1206 ms | Best call-center-only backend |
-| sherpa-zipformer-en-kroko-2025-08-06 | L16-16k | 15.3% | 96 / 626 | ~1042 ms | Balanced live default candidate |
-| sherpa-zipformer-en-kroko-2025-08-06 | PCMU-8k | 15.0% | 94 / 626 | ~1041 ms | Balanced live default candidate |
-| moonshine-streaming-en | L16-16k | 31.2% | 195 / 626 | ~5155 ms | Valid after #393; CPU headroom is the blocker |
-| moonshine-streaming-en | PCMU-8k | 30.2% | 189 / 626 | ~5088 ms | Valid after #393; CPU headroom is the blocker |
-| whisper-base-en | L16-16k | 29.7% | 186 / 626 | ~2374 ms | Batch/final-pass only; weak on digit-heavy categories |
-| whisper-base-en | PCMU-8k | 30.2% | 189 / 626 | ~2375 ms | Batch/final-pass only; weak on digit-heavy categories |
+| sherpa-zipformer-en-2023-06-26 | L16-16k | 11.2% | 70 / 626 | ~1163 ms | Best call-center-only backend |
+| sherpa-zipformer-en-2023-06-26 | PCMU-8k | 11.3% | 71 / 626 | ~1162 ms | Best call-center-only backend |
+| sherpa-zipformer-en-kroko-2025-08-06 | L16-16k | 15.2% | 95 / 626 | ~1034 ms | Balanced live default candidate |
+| sherpa-zipformer-en-kroko-2025-08-06 | PCMU-8k | 15.2% | 95 / 626 | ~1034 ms | Balanced live default candidate |
+| moonshine-streaming-en | L16-16k | 31.2% | 195 / 626 | ~5018 ms | Valid after #393; CPU headroom is the blocker |
+| moonshine-streaming-en | PCMU-8k | 30.2% | 189 / 626 | ~4955 ms | Valid after #393; CPU headroom is the blocker |
+| whisper-base-en | L16-16k | 29.7% | 186 / 626 | ~2321 ms | Batch/final-pass only; weak on digit-heavy categories |
+| whisper-base-en | PCMU-8k | 30.2% | 189 / 626 | ~2322 ms | Batch/final-pass only; weak on digit-heavy categories |
 
 ### PM / Orchestration Corpus
 
@@ -61,18 +62,18 @@ Fresh PR #393 Qwen3-TTS WAVs, total reference words: 556.
 
 | Backend | Codec | Agg WER | Errors / Words | Avg wall latency | Selection signal |
 |---|---:|---:|---:|---:|---|
-| sherpa-zipformer-en-2023-06-26 | L16-16k | 19.1% | 106 / 556 | ~1106 ms | Call-center-only profile |
-| sherpa-zipformer-en-2023-06-26 | PCMU-8k | 19.4% | 108 / 556 | ~1106 ms | Call-center-only profile |
+| sherpa-zipformer-en-2023-06-26 | L16-16k | 18.9% | 105 / 556 | ~1075 ms | Call-center-only profile |
+| sherpa-zipformer-en-2023-06-26 | PCMU-8k | 19.4% | 108 / 556 | ~1076 ms | Call-center-only profile |
 | sherpa-zipformer-en-kroko-2025-08-06 | L16-16k | 15.8% | 88 / 556 | ~956 ms | Balanced live default candidate |
-| sherpa-zipformer-en-kroko-2025-08-06 | PCMU-8k | 15.8% | 88 / 556 | ~956 ms | Balanced live default candidate |
-| moonshine-streaming-en | L16-16k | 15.8% | 88 / 556 | ~4120 ms | PM WER is competitive with kroko; CPU headroom is the blocker |
-| moonshine-streaming-en | PCMU-8k | 14.2% | 79 / 556 | ~4102 ms | PM WER is competitive with kroko; CPU headroom is the blocker |
-| whisper-base-en | L16-16k | 16.5% | 92 / 556 | ~2358 ms | Batch/final-pass only |
-| whisper-base-en | PCMU-8k | 16.5% | 92 / 556 | ~2358 ms | Batch/final-pass only |
+| sherpa-zipformer-en-kroko-2025-08-06 | PCMU-8k | 15.6% | 87 / 556 | ~954 ms | Balanced live default candidate |
+| moonshine-streaming-en | L16-16k | 15.8% | 88 / 556 | ~4032 ms | PM WER is competitive with kroko; CPU headroom is the blocker |
+| moonshine-streaming-en | PCMU-8k | 14.2% | 79 / 556 | ~4014 ms | PM WER is competitive with kroko; CPU headroom is the blocker |
+| whisper-base-en | L16-16k | 16.5% | 92 / 556 | ~2319 ms | Batch/final-pass only |
+| whisper-base-en | PCMU-8k | 16.5% | 92 / 556 | ~2322 ms | Batch/final-pass only |
 
 PM/orchestration `kroko-2025` is sensitive to regenerated Qwen3-TTS WAV provenance. On the fresh PR #393 PM WAVs it measures `15.8% / 15.8%`; on the earlier local PM WAV directory from the previous validation, the same PR #393 head measures `14.0% / 14.0%` with the same manifest, chunking, and trailing-silence pad. Treat this as audio-provenance variance, not a code-path regression.
 
-Moonshine is no longer the old canned-output failure after PR #393. It now produces real transcripts through the same replay harness, and on PM/orchestration it is not worse than kroko on WER (`15.8% / 14.2%` versus kroko's `15.8% / 15.8%` on fresh PR #393 WAVs). The live-default concern is CPU streaming headroom: kroko processes average PM samples in about `0.32x` real time, while Moonshine runs around `1.37x` real time plus a `~262 ms` final flush; on call-center audio Moonshine is `1.53-1.55x` real time while kroko is about `0.31x`. Moonshine therefore remains an offline/final-pass or future-optimization candidate rather than the live gateway default.
+Moonshine is no longer the old canned-output failure after PR #393. It now produces real transcripts through the same replay harness, and on PM/orchestration it is not worse than kroko on WER (`15.8% / 14.2%` versus kroko's `15.8% / 15.6%` on fresh PR #393 WAVs). The live-default concern is CPU streaming headroom: kroko processes average PM samples in about `0.32x` real time, while Moonshine runs around `1.34x` real time plus a `~257 ms` final flush; on call-center audio Moonshine is `1.49-1.51x` real time while kroko is about `0.31x`. Moonshine therefore remains an offline/final-pass or future-optimization candidate rather than the live gateway default.
 
 ## Previous Valid Padded DGX Run
 
