@@ -2,6 +2,7 @@
 
 ## Changelog
 
+- 2026-06-04 22:22:00 PDT, @codex-369-rv -- Clarified that Moonshine is not worse than kroko on PM/orchestration WER after #393; the non-default live decision is due to CPU real-time factor/headroom and final-flush latency.
 - 2026-06-04 22:15:00 PDT, @codex-369-rv -- Updated the matrix with PR #393 validation after the Moonshine rechunk fix plus #376 backend hardening: Moonshine now produces real transcripts, all 8 backend/codec cells populate with no skips, and PM kroko variance is documented as Qwen3-TTS WAV provenance drift.
 - 2026-06-03 20:48:10 PDT, @codex-369-rv -- Replaced the contaminated pre-pad kroko matrix with the validated post-#378 padded call-center results and recorded the balanced default policy: `kroko-2025` for mixed call-center plus PM/technical use, `sherpa-2023` for call-center-only deployments.
 - 2026-06-02 14:24:49 PDT, @codex-191-impl -- Added the offline Qwen3-TTS call-center golden corpus workflow and recorded the first full DGX run for #371/#191.
@@ -49,8 +50,8 @@ Total reference words: 626.
 | sherpa-zipformer-en-2023-06-26 | PCMU-8k | 11.2% | 70 / 626 | ~1206 ms | Best call-center-only backend |
 | sherpa-zipformer-en-kroko-2025-08-06 | L16-16k | 15.3% | 96 / 626 | ~1042 ms | Balanced live default candidate |
 | sherpa-zipformer-en-kroko-2025-08-06 | PCMU-8k | 15.0% | 94 / 626 | ~1041 ms | Balanced live default candidate |
-| moonshine-streaming-en | L16-16k | 31.2% | 195 / 626 | ~5155 ms | Valid after #393, but too slow for live telephony |
-| moonshine-streaming-en | PCMU-8k | 30.2% | 189 / 626 | ~5088 ms | Valid after #393, but too slow for live telephony |
+| moonshine-streaming-en | L16-16k | 31.2% | 195 / 626 | ~5155 ms | Valid after #393; CPU headroom is the blocker |
+| moonshine-streaming-en | PCMU-8k | 30.2% | 189 / 626 | ~5088 ms | Valid after #393; CPU headroom is the blocker |
 | whisper-base-en | L16-16k | 29.7% | 186 / 626 | ~2374 ms | Batch/final-pass only; weak on digit-heavy categories |
 | whisper-base-en | PCMU-8k | 30.2% | 189 / 626 | ~2375 ms | Batch/final-pass only; weak on digit-heavy categories |
 
@@ -64,14 +65,14 @@ Fresh PR #393 Qwen3-TTS WAVs, total reference words: 556.
 | sherpa-zipformer-en-2023-06-26 | PCMU-8k | 19.4% | 108 / 556 | ~1106 ms | Call-center-only profile |
 | sherpa-zipformer-en-kroko-2025-08-06 | L16-16k | 15.8% | 88 / 556 | ~956 ms | Balanced live default candidate |
 | sherpa-zipformer-en-kroko-2025-08-06 | PCMU-8k | 15.8% | 88 / 556 | ~956 ms | Balanced live default candidate |
-| moonshine-streaming-en | L16-16k | 15.8% | 88 / 556 | ~4120 ms | Valid after #393, but too slow for live telephony |
-| moonshine-streaming-en | PCMU-8k | 14.2% | 79 / 556 | ~4102 ms | Valid after #393, but too slow for live telephony |
+| moonshine-streaming-en | L16-16k | 15.8% | 88 / 556 | ~4120 ms | PM WER is competitive with kroko; CPU headroom is the blocker |
+| moonshine-streaming-en | PCMU-8k | 14.2% | 79 / 556 | ~4102 ms | PM WER is competitive with kroko; CPU headroom is the blocker |
 | whisper-base-en | L16-16k | 16.5% | 92 / 556 | ~2358 ms | Batch/final-pass only |
 | whisper-base-en | PCMU-8k | 16.5% | 92 / 556 | ~2358 ms | Batch/final-pass only |
 
 PM/orchestration `kroko-2025` is sensitive to regenerated Qwen3-TTS WAV provenance. On the fresh PR #393 PM WAVs it measures `15.8% / 15.8%`; on the earlier local PM WAV directory from the previous validation, the same PR #393 head measures `14.0% / 14.0%` with the same manifest, chunking, and trailing-silence pad. Treat this as audio-provenance variance, not a code-path regression.
 
-Moonshine is no longer the old canned-output failure after PR #393. It now produces real transcripts through the same replay harness, but its wall latency remains several seconds per sample, so it remains an offline/final-pass or future-optimization candidate rather than the live gateway default.
+Moonshine is no longer the old canned-output failure after PR #393. It now produces real transcripts through the same replay harness, and on PM/orchestration it is not worse than kroko on WER (`15.8% / 14.2%` versus kroko's `15.8% / 15.8%` on fresh PR #393 WAVs). The live-default concern is CPU streaming headroom: kroko processes average PM samples in about `0.32x` real time, while Moonshine runs around `1.37x` real time plus a `~262 ms` final flush; on call-center audio Moonshine is `1.53-1.55x` real time while kroko is about `0.31x`. Moonshine therefore remains an offline/final-pass or future-optimization candidate rather than the live gateway default.
 
 ## Previous Valid Padded DGX Run
 
