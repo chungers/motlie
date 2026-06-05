@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-05 | @codex-369-rv: Corrected PR #393 after live Telnyx answer reproduced `free(): invalid pointer` with the rejected Pyke-ORT unification. The accepted single ORT provider is now workspace `ort-sys` patched to download/link the k2-fsa `sherpa-onnx` ORT archive that the upstream Sherpa C++ static bundle is built against. | Policy, Process-Level Rule, Sherpa ONNX Runtime Boundary, Canonical Cargo Path, Maintenance Procedures |
 | 2026-06-05 | @codex-369-rv: Replaced the old Sherpa bundled-ORT exception with the unified one-process/one-ORT rule from PR #393 / #396. Added detailed integration scenarios for direct workspace `ort` backends versus upstream crates that bundle ONNX Runtime, plus model-family impact and maintenance procedures. | Policy, Sherpa ONNX Runtime Boundary, Future Model Integration Scenarios, Maintenance Procedures |
 | 2026-06-01 | @codex-364-impl: Split the policy between Motlie-owned Pyke `ort` backends and the upstream `sherpa-onnx` backend, which must use the crate's downloaded static native archives instead of Motlie's workspace `ort` dependency. | Policy, Sherpa ONNX Exception |
 | 2026-05-31 | @codex-364-impl: Changed the ORT/ONNX policy from source-built ONNX Runtime to the `ort/download-binaries` path, which downloads and statically links Pyke's `libonnxruntime.a` archive. | All |
@@ -25,8 +26,9 @@ one static ONNX Runtime provider.
   validation, CI, live tests, and deployment.
 - Motlie ORT/ONNX backends must use the workspace `ort` dependency with
   `download-binaries`, `tls-native`, and `api-24` enabled.
-- The accepted default path is the `ort-sys` prebuilt download for the target,
-  statically linked as `libonnxruntime.a`.
+- The accepted default path is the patched workspace `ort-sys` prebuilt
+  download, which fetches the k2-fsa `sherpa-onnx` static package and links its
+  `libonnxruntime.a` as the single process-wide ORT provider.
 - `ORT_LIB_PATH` and `ORT_LIB_LOCATION` must remain unset so builds do not
   bypass the downloaded static archive with a user-provided or source-built ORT.
 - `ORT_PREFER_DYNAMIC_LINK` must remain unset.
@@ -48,7 +50,7 @@ shared libraries.
 
 | Case | Accepted? | Reason |
 |------|-----------|--------|
-| One workspace `ort-sys` static `libonnxruntime.a` linked by all ORT-backed backends | Yes | One process-wide ORT environment and allocator surface. |
+| One patched workspace `ort-sys` static `libonnxruntime.a` linked by all ORT-backed backends | Yes | One process-wide ORT environment and allocator surface. In the Telnyx all-in-one binary this archive must come from the k2-fsa `sherpa-onnx` static package, not Pyke's `ms@1.24.2` archive. |
 | Workspace `ort-sys` plus an upstream crate's bundled static `libonnxruntime.a` | No | Duplicates ORT global state and can crash at init, teardown, or allocator use. PR #393 reproduced this as `free(): invalid pointer`. |
 | Workspace `ort-sys` plus a system or manually extracted `libonnxruntime.so` | No | Violates static-link policy and can still duplicate ORT state. |
 | Multiple non-ORT native runtimes, such as `whisper.cpp` / GGML and Qwen3-TTS CPP, alongside workspace ORT | Yes, after validation | These are separate runtime stacks. They still need symbol-collision checks, but they are not ONNX Runtime providers. |
@@ -59,9 +61,20 @@ The current workspace provider is:
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "api-24"] }
 ```
 
-On `x86_64-unknown-linux-gnu`, that path resolves the Pyke static
-ONNX Runtime 1.24.x archive through `ort-sys`. This policy is not an ORT 1.22
-policy and should not be documented as one.
+The workspace also patches `ort-sys`:
+
+```toml
+[patch.crates-io]
+ort-sys = { path = "third_party/ort-sys" }
+```
+
+On `x86_64-unknown-linux-gnu`, the patched `ort-sys` downloads
+`sherpa-onnx-v1.13.2-linux-x64-static-lib.tar.bz2` and links that package's
+`libonnxruntime.a`. The archive reports ONNX Runtime 1.24.4 and is ABI-safe for
+the upstream `sherpa-onnx` C++ static bundle. Pyke's `ms@1.24.2` archive, and
+the later Pyke `ms@1.24.4` archive tested during PR #393, both reproduced
+`free(): invalid pointer` when Sherpa opened its upstream `OnlineRecognizer`.
+This policy is not an ORT 1.22 policy and should not be documented as one.
 
 ## Sherpa ONNX Runtime Boundary
 
@@ -77,15 +90,24 @@ The native-link boundary is different from the recognizer boundary:
 |------|------------------|-------|--------|
 | Motlie ASR contract adapter | `libs/model/backends/sherpa_onnx` | Motlie | Implements Motlie typed contracts and depends on upstream `sherpa-onnx`. |
 | Upstream Sherpa Rust wrapper | `sherpa-onnx = "1.13.2"` | crates.io / k2-fsa | Provides `OnlineRecognizer` and `OnlineStream`; leave recognition semantics upstream. |
-| Upstream Sherpa FFI/sys crate | `sherpa-onnx-sys = "1.13.2"` | Patched locally through `[patch.crates-io]` | Downloads/links Sherpa native archives, but Motlie filters out bundled `libonnxruntime.a`. |
-| ONNX Runtime provider | workspace `ort-sys v2.0.0-rc.12` | Motlie workspace dependency | Supplies the single static ORT archive for Sherpa, Moonshine, Piper, and future direct-ORT backends. |
+| Upstream Sherpa FFI/sys crate | `sherpa-onnx-sys = "1.13.2"` | Patched locally through `[patch.crates-io]` | Downloads/links Sherpa native archives, but Motlie filters out Sherpa's own emitted `onnxruntime` link so it cannot link a second ORT. |
+| ONNX Runtime provider | patched workspace `ort-sys v2.0.0-rc.12` | Motlie workspace dependency | Downloads the k2-fsa Sherpa static package and supplies its `libonnxruntime.a` as the single static ORT archive for Sherpa, Moonshine, Piper, and future direct-ORT backends. |
 
 The root workspace patch is:
 
 ```toml
 [patch.crates-io]
+ort-sys = { path = "third_party/ort-sys" }
 sherpa-onnx-sys = { path = "third_party/sherpa-onnx-sys" }
 ```
+
+The patched `third_party/ort-sys/build/main.rs` must continue to:
+
+- default to `MOTLIE_ORT_SOURCE=sherpa-onnx`;
+- fetch the k2-fsa `sherpa-onnx` static package for the target;
+- link only that package's `libonnxruntime.a` through workspace `ort-sys`;
+- keep `MOTLIE_ORT_SOURCE=pyke` as a debug escape hatch, not as an accepted
+  Telnyx runbook path.
 
 The patched `third_party/sherpa-onnx-sys/build.rs` must continue to:
 
@@ -131,7 +153,7 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "n
 ```
 
 For `x86_64-unknown-linux-gnu`, `ort-sys 2.0.0-rc.12` resolves the
-`ms@1.24.2` Pyke archive and links the downloaded file as:
+patched Motlie `sherpa-onnx` ORT source and links the downloaded file as:
 
 ```sh
 cargo:rustc-link-lib=static=onnxruntime
@@ -141,8 +163,8 @@ Operator runbooks for ORT-backed builds should not set ORT-specific
 environment variables.
 
 Do not use `cargo --offline` for the first ORT-backed build. The downloaded
-archive is cached under Cargo's cache directory after `ort-sys` fetches and
-verifies it.
+archive is cached under Cargo's cache directory after patched `ort-sys` fetches
+and extracts it.
 
 ## Crate Expectations
 
@@ -172,7 +194,7 @@ ORT global state and aborted with `free(): invalid pointer`.
 | Does the upstream crate emit `cargo:rustc-link-lib=static=onnxruntime` or `dylib=onnxruntime`? | If yes, block until it can be disabled or redirected to workspace `ort-sys`. |
 | Does the upstream crate put a bundled `libonnxruntime.a` or `.so` on the link search path? | If yes, block or filter the directory so workspace `ort-sys` cannot accidentally pick the bundled archive. |
 | Does the upstream crate expose `system-ort`, `external-ort`, `no-bundled-ort`, or equivalent? | Use that feature if it results in exactly one workspace ORT provider. |
-| Does the upstream crate require a different ORT API/ABI than workspace `ort-sys`? | Align versions through the workspace ORT if possible; otherwise isolate the model in another process. |
+| Does the upstream crate require a different ORT API/ABI than workspace `ort-sys`? | Align the workspace ORT source to the upstream-compatible archive if possible; otherwise isolate the model in another process. |
 | Does the upstream crate own non-ORT native libraries too? | Validate those separately for symbol collisions, especially C++ or allocator-heavy libraries. |
 
 Accepted implementation shapes for this scenario:
@@ -184,10 +206,11 @@ Accepted implementation shapes for this scenario:
 | Upstream crate still links its bundled ORT while Motlie also links workspace ORT | No | Reintroduces duplicate ORT risk. |
 | Upstream model runs in a separate process or service with its own ORT | Possible fallback | Avoids same-process duplicate ORT, but adds IPC/service complexity and is not the gateway default. |
 
-The PR #393 Sherpa patch is the reference implementation for this scenario.
-It keeps upstream recognition behavior, filters native ORT linkage, and proves
-the all-in-one binary can run Sherpa, Moonshine, Whisper, and Qwen without the
-native abort.
+The PR #393 Sherpa patch is the reference implementation for this scenario. It
+keeps upstream recognition behavior, filters native ORT linkage from
+`sherpa-onnx-sys`, and patches workspace `ort-sys` to link the k2-fsa Sherpa ORT
+archive as the single provider. This is the combination that made the all-in-one
+Telnyx gateway run Sherpa/Kroko plus Moonshine/Piper without the native abort.
 
 ### Scenario B: Model Runs Directly On Workspace `ort`
 
@@ -230,10 +253,10 @@ the same binary.
 
 | Backend / model family | Uses ONNX Runtime? | Current ORT source | Affected by `sherpa-onnx-sys` patch? | Notes |
 |------------------------|-------------------|--------------------|--------------------------------------|-------|
-| `sherpa-2023` | Yes | Upstream Sherpa recognizer resolves ORT symbols from workspace `ort-sys` | Yes | Same Sherpa runtime family as kroko; validates call-center profile. |
-| `kroko-2025` | Yes | Upstream Sherpa recognizer resolves ORT symbols from workspace `ort-sys` | Yes | Same Sherpa runtime family; Telnyx balanced live default. |
-| Moonshine | Yes | Direct workspace `ort` / `ort-sys` | No | Benefits from duplicate-ORT removal in combined binaries. |
-| Piper TTS | Yes | Direct workspace `ort` / `motlie-model-ort` | No | Telnyx outbound TTS path shares the single workspace ORT; no Sherpa maintenance burden. |
+| `sherpa-2023` | Yes | Upstream Sherpa recognizer resolves ORT symbols from patched workspace `ort-sys`, which links k2-fsa's Sherpa ORT archive | Yes | Same Sherpa runtime family as kroko; validates call-center profile. |
+| `kroko-2025` | Yes | Upstream Sherpa recognizer resolves ORT symbols from patched workspace `ort-sys`, which links k2-fsa's Sherpa ORT archive | Yes | Same Sherpa runtime family; Telnyx balanced live default. |
+| Moonshine | Yes | Direct workspace `ort` / patched `ort-sys`, using k2-fsa's Sherpa ORT archive | No | Benefits from duplicate-ORT removal in combined binaries; validated against the same replay in PR #393. |
+| Piper TTS | Yes | Direct workspace `ort` / `motlie-model-ort`, using patched `ort-sys` | No | Telnyx outbound TTS path shares the single workspace ORT; no Sherpa maintenance burden. |
 | Whisper | No | `whisper.cpp` native runtime | No | Batch/final-pass candidate; not an ORT provider. |
 | Qwen3-TTS CPP | No | qwen3-tts.cpp / GGML | No | Not affected by ORT version or Sherpa sys patch; validate GGML coexistence separately. |
 
@@ -257,9 +280,9 @@ the same binary.
 
 | Step | Check |
 |------|-------|
-| Update root `Cargo.toml` only | Keep `download-binaries`, `tls-native`, and the intended `api-*` feature explicit. |
+| Update root `Cargo.toml` and the patched `third_party/ort-sys` source together | Keep `download-binaries`, `tls-native`, and the intended `api-*` feature explicit, and preserve the k2-fsa/Sherpa ORT source unless a full all-in-one validation proves a replacement. |
 | Rebuild direct ORT backends | Piper, Moonshine, and any future direct-ORT models must compile and run model-specific tests. |
-| Rebuild Sherpa | `cargo build -p motlie-telnyx-gateway --features sherpa` must still resolve ORT symbols from workspace `ort-sys`. |
+| Rebuild Sherpa | `cargo build -p motlie-telnyx-gateway --features sherpa` must still resolve ORT symbols from patched workspace `ort-sys`. |
 | Re-run combined validation | Use an all-in-one binary containing Sherpa plus direct-ORT backends. |
 | Re-check link evidence | `ldd` has no ORT, `cargo tree -i ort-sys` has one version, and no upstream bundled `libonnxruntime.a` is on a live link path. |
 
@@ -273,7 +296,7 @@ patch for the sys crate.
 | Update `sherpa-onnx` version | Start with the wrapper crate version required by the upstream release. |
 | Refresh `third_party/sherpa-onnx-sys` to the matching version | Do not keep stale FFI bindings or build-script assumptions across versions. |
 | Reapply Motlie's ORT filter | The sys build must not emit `static=onnxruntime`, and the filtered lib dir must not contain `libonnxruntime.a`. |
-| Validate ORT ABI/API compatibility | If upstream Sherpa requires a newer ORT API than workspace `ort-sys`, align workspace `ort` rather than linking a second ORT. |
+| Validate ORT ABI/API compatibility | If upstream Sherpa requires a newer ORT API/ABI than the current patched workspace `ort-sys` source, align the workspace ORT source rather than linking a second ORT. |
 | Build Sherpa-only | `cargo build -p motlie-telnyx-gateway --features sherpa` must pass. |
 | Build and run all-in-one | The all-in-one ASR/TTS harness must run without duplicate-ORT crashes. |
 | Re-run WER/latency gate if ASR behavior can change | Both `sherpa-2023` and `kroko-2025` are affected by Sherpa runtime upgrades. |
@@ -290,6 +313,7 @@ review.
 | Verify one workspace ORT crate | `cargo tree -p motlie-telnyx-gateway --features golden-ab -i ort-sys` |
 | Verify no dynamic ORT in the binary | `ldd target/debug/telnyx-gateway \| rg -i 'onnx\|ort' \|\| true` |
 | Verify patched Sherpa filtered dir excludes bundled ORT | `find target/debug/build/sherpa-onnx-sys-*/out/sherpa-onnx-static-without-ort -name libonnxruntime.a -print` |
+| Verify patched workspace ORT source | `find ~/.cache -path '*motlie-sherpa-ort*' -name libonnxruntime.a -print` |
 | Verify ORT symbol exists in final static binary | `nm target/debug/telnyx-gateway \| rg ' OrtGetApiBase$'` |
 
 The `find` command above should print nothing. The `ldd` command should print

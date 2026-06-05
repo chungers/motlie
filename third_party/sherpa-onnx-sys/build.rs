@@ -23,8 +23,9 @@ const SHERPA_ONNX_STATIC_LIBS: &[&str] = &[
     "piper_phonemize",
     "espeak-ng",
     "ucd",
-    // Motlie links one process-wide static ONNX Runtime via the workspace `ort`
-    // crate. Do not link sherpa-onnx's bundled libonnxruntime.a here.
+    // Motlie links one process-wide static ONNX Runtime via patched workspace
+    // `ort-sys`, which uses the k2-fsa sherpa-onnx ORT archive. Do not emit a
+    // second onnxruntime link from sherpa-onnx-sys here.
     "ssentencepiece_core",
 ];
 

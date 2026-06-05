@@ -2,6 +2,7 @@
 
 ## Changelog
 
+- 2026-06-05 10:15:00 PDT, @codex-369-rv -- Corrected the PR #393 native-link note after live-answer replay showed Pyke ORT unification still crashed; patched workspace `ort-sys` now downloads/links the k2-fsa Sherpa ORT archive as the single ONNX Runtime provider.
 - 2026-06-05 09:35:00 PDT, @codex-369-rv -- Recorded the #394 gateway integration decision: repaired Moonshine is exposed as an opt-in live ASR backend for between-call A/B, while `kroko-2025` stays the default because Moonshine still lacks CPU real-time headroom.
 - 2026-06-04 23:54:00 PDT, @codex-369-rv -- Documented the PR #393 unified-ORT fix: the all-in-one `golden-ab` executable now runs Sherpa, Moonshine, and Whisper together without the `free(): invalid pointer` abort by linking one workspace `ort-sys` static ONNX Runtime.
 - 2026-06-04 22:22:00 PDT, @codex-369-rv -- Clarified that Moonshine is not worse than kroko on PM/orchestration WER after #393; the non-default live decision is due to CPU real-time factor/headroom and final-flush latency.
@@ -40,7 +41,7 @@ The validation generated local Qwen3-TTS WAVs for both 72-sample corpora:
 - `/tmp/motlie-qwen3-call-center-golden`
 - `/tmp/motlie-pm-golden`
 
-The matrix used `chunk_ms=20`, `trailing_silence_pad_ms=800`, and both `L16-16k` and `PCMU-8k` codec round-trips. The final validation ran the all-in-one `golden-ab` executable with Sherpa, Moonshine, Whisper, and Qwen linked together. It no longer requires per-backend feature binaries: PR #393 patches `sherpa-onnx-sys` so upstream Sherpa keeps `OnlineRecognizer` but does not link its bundled `libonnxruntime.a`; the workspace `ort-sys` archive supplies the single static ONNX Runtime for Sherpa and Moonshine. Each corpus produced 576 entries, all 8 backend/codec cells populated, and no skipped cells or `free(): invalid pointer` abort.
+The matrix used `chunk_ms=20`, `trailing_silence_pad_ms=800`, and both `L16-16k` and `PCMU-8k` codec round-trips. The final validation ran the all-in-one `golden-ab` executable with Sherpa, Moonshine, Whisper, and Qwen linked together. It no longer requires per-backend feature binaries: PR #393 patches `sherpa-onnx-sys` so upstream Sherpa keeps `OnlineRecognizer` but does not link its bundled `libonnxruntime.a`; patched workspace `ort-sys` downloads the k2-fsa Sherpa static package and links that package's `libonnxruntime.a` as the single static ONNX Runtime for Sherpa and Moonshine. Each corpus produced 576 entries, all 8 backend/codec cells populated, and no skipped cells or `free(): invalid pointer` abort.
 
 ### Call-Center Corpus
 

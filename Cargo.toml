@@ -46,6 +46,7 @@ env_logger = "0.10"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "api-24"] }
 
 [patch.crates-io]
+ort-sys = { path = "third_party/ort-sys" }
 sherpa-onnx-sys = { path = "third_party/sherpa-onnx-sys" }
 
 # Root package for examples
