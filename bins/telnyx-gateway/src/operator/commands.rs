@@ -1980,9 +1980,10 @@ fn gateway_root_help() -> String {
         "",
         "The TUI shell and each agent socket connection execute the same command language.",
         "Selections are source-local: a TUI-selected call or ASR backend does not leak into another socket.",
+        "Run `help conversation` for M3 call flows and `help socket` for agent protocol details.",
         "",
         "Core:",
-        "  status                         Show listener, Telnyx, ASR, media, capture, and call state",
+        "  status                         Show listener, Telnyx, ASR, media, conversation handler, and calls",
         "  listener status                Show the local HTTP/WebSocket bind address",
         "  config show                    Show replayable gateway config values",
         "  config set <key> <value>       Set webhook-url, media-url, codec, capture dir, etc.",
@@ -2017,10 +2018,13 @@ fn gateway_root_help() -> String {
         "  call use <call-id>             Select a call for this TUI/socket source",
         "  call show [call-id]            Show selected call detail and assembled transcript",
         "  status [call-id]               Show gateway status or selected call status",
-        "  answer [call-id]               Answer one waiting inbound call",
-        "  dial <+e164> [--from +e164]    Place an outbound call",
+        "  answer [call-id]               Answer one waiting inbound call; auto-attach conversation",
+        "  dial <+e164> [--from +e164]    Place an outbound call; auto-attach conversation",
         "  speak [call-id] <text...>      Queue cancellable Piper TTS over the media socket",
         "  speak cancel [call-id]         Clear active TTS on the selected call",
+        "  conversation status [call-id]  Show attachment, mode, handler, and latest turns",
+        "  conversation smoke-test on|off Enable or disable test-only echo replies",
+        "  conversation disapprove [call-id] Stop TTS and detach conversation",
         "  reject [call-id]",
         "  hangup [call-id]",
         "  transcript follow [call-id]",
@@ -2028,7 +2032,7 @@ fn gateway_root_help() -> String {
         "  log clear",
         "",
         "Testing:",
-        "  conversation smoke-test on    Enable echo reply handler for M3 smoke tests",
+        "  conversation smoke-test on    Enable test-only echo reply handler for M3 smoke tests",
         "  test dial-transcribe <+e164> [--from +e164]",
         "",
         "Helpful topics:",
@@ -2054,6 +2058,7 @@ fn status_help() -> String {
         "  media codec/sample rate",
         "  capture directory",
         "  TTS backend",
+        "  conversation handler mode",
         "  call count",
         "",
         "Example:",
@@ -2295,6 +2300,14 @@ fn conversation_help() -> String {
         "Attach or detach the selected call from the gateway-local conversation handler.",
         "The TUI and command socket share this command path.",
         "",
+        "Default live behavior:",
+        "  answer auto-attaches inbound calls in auto mode.",
+        "  dial auto-attaches outbound calls in auto mode.",
+        "  The built-in handler is disabled by default; attached calls transcribe",
+        "  and record user turns without speaking.",
+        "  Use `conversation smoke-test on` or startup `--conversation-smoke-test`",
+        "  only when intentionally testing the echo/repeat TTS loop.",
+        "",
         "Usage:",
         "  conversation status [call-id]",
         "  conversation smoke-test <on|off>",
@@ -2305,12 +2318,29 @@ fn conversation_help() -> String {
         "  conversation say [call-id]",
         "  conversation mode <manual|auto> [call-id]",
         "",
-        "`answer`, `dial`, and `conversation attach` attach in auto mode by default,",
-        "but echo replies are disabled unless `conversation smoke-test on` or startup",
-        "`--conversation-smoke-test` is used. Disapprove cancels active conversation",
-        "TTS and leaves the call in transcription-only mode.",
-        "Manual mode records the assistant response for operator review; approve/say",
-        "speaks the pending proposal using this source's selected TTS backend.",
+        "Normal inbound TUI/socket flow:",
+        "  inbound enable --manual",
+        "  answer",
+        "  conversation status",
+        "",
+        "Normal outbound TUI/socket flow:",
+        "  dial <callee-e164>",
+        "  conversation status",
+        "",
+        "Smoke-test two-way loop:",
+        "  conversation smoke-test on",
+        "  answer    # or: dial <callee-e164>",
+        "  conversation status",
+        "  speak cancel",
+        "  conversation smoke-test off",
+        "",
+        "Controls:",
+        "  disapprove cancels active conversation TTS and leaves transcription-only mode.",
+        "  mode manual records assistant proposals; approve/say speaks the pending proposal",
+        "  using this source's selected TTS backend.",
+        "",
+        "Socket agents send the same commands over the newline protocol; `status`,",
+        "`calls`, `call show`, and TTS discovery commands also return structured JSON data.",
     ]
     .join("\n")
 }
@@ -2344,6 +2374,8 @@ fn call_control_help() -> String {
         "",
         "Control a call. If call-id is omitted, the command uses this source's selected call",
         "or the single waiting inbound call when that is unambiguous.",
+        "Answering attaches conversation in auto mode; the handler stays disabled unless",
+        "`conversation smoke-test on` or startup `--conversation-smoke-test` is used.",
         "",
         "Examples:",
         "  answer",
@@ -2361,9 +2393,15 @@ fn outbound_help() -> String {
         "speak cancel [call-id]",
         "status [call-id]",
         "",
-        "Place an outbound call and send Motlie-generated TTS over the existing bidirectional",
-        "Telnyx media WebSocket. `speak` is non-blocking and cancellable; `speak cancel` sends",
-        "Telnyx clear and drops local queued outbound audio.",
+        "Place an outbound call over the existing bidirectional Telnyx media WebSocket.",
+        "`dial` selects the new call and auto-attaches conversation in auto mode. The",
+        "built-in conversation handler remains disabled by default, so normal live calls",
+        "transcribe without echo replies. `speak` is manual, non-blocking, and cancellable;",
+        "`speak cancel` sends Telnyx clear and drops local queued outbound audio.",
+        "",
+        "Conversation smoke test:",
+        "  conversation smoke-test on enables the test-only `I heard: ...` reply loop.",
+        "  conversation smoke-test off returns attached calls to transcription-only behavior.",
         "",
         "Prerequisites:",
         "  telnyx app use <connection-id>",
@@ -2372,8 +2410,10 @@ fn outbound_help() -> String {
         "  Telnyx account/application has an Outbound Voice Profile assigned",
         "",
         "Examples:",
-        "  dial +15551234567",
+        "  dial <callee-e164>",
         "  status",
+        "  conversation status",
+        "  conversation smoke-test on",
         "  speak Hello from Motlie.",
         "  speak gwc_... Hello from Motlie.",
         "  speak cancel",
@@ -2436,6 +2476,8 @@ fn socket_help() -> String {
         "",
         "Start with:",
         "  telnyx-gateway --socket /tmp/telnyx-gateway.sock",
+        "  telnyx-gateway --tui --socket /tmp/telnyx-gateway.sock",
+        "  telnyx-gateway --conversation-smoke-test --socket /tmp/telnyx-gateway.sock",
         "",
         "Protocol:",
         "  Send one command line terminated by newline.",
@@ -2449,8 +2491,17 @@ fn socket_help() -> String {
         "  help inbound",
         "  help asr",
         "  help tts",
+        "  help conversation",
+        "  help transcript",
         "  help call",
-        "  help dial",
+        "  help outbound",
+        "",
+        "Agent workflows:",
+        "  inbound: calls -> answer [call-id] -> conversation status [call-id]",
+        "  outbound: dial <callee-e164> -> conversation status",
+        "  smoke test: conversation smoke-test on -> answer or dial -> speak cancel if needed",
+        "  stop assistant audio: conversation disapprove [call-id]",
+        "  inspect: status, calls, call show [call-id], transcript follow [call-id]",
         "",
         "Operational parity:",
         "  TUI and socket both use the same typed command language.",
@@ -2459,10 +2510,12 @@ fn socket_help() -> String {
         "    Calls pane cursor     calls + call use <call-id>",
         "    Calls pane `a` attach call use <call-id>",
         "    Detail pane scroll    transcript follow / call show polling",
-        "  Outbound M2 commands are also shared:",
+        "  Outbound and M3 conversation commands are also shared:",
         "    dial <+e164> [--from +e164]",
         "    speak [call-id] <text...>",
         "    speak cancel [call-id]",
+        "    conversation status [call-id]",
+        "    conversation attach|detach [call-id]",
         "    conversation smoke-test on|off",
         "    conversation approve [call-id]",
         "    conversation disapprove [call-id]",
@@ -2471,6 +2524,8 @@ fn socket_help() -> String {
         "Source-local state:",
         "  Each socket connection has its own selected call, next ASR backend, and next TTS backend.",
         "  A later socket starts from the code defaults, not another source's choices.",
+        "  The smoke-test handler mode is gateway-wide because media-triggered turns are",
+        "  not associated with one TUI/socket command source.",
     ]
     .join("\n")
 }
@@ -2599,6 +2654,8 @@ mod tests {
         assert!(rendered.contains("quit [dump_path]"));
         assert!(rendered.contains("tts list"));
         assert!(rendered.contains("tts use piper"));
+        assert!(rendered.contains("conversation status [call-id]"));
+        assert!(rendered.contains("test-only echo reply handler"));
         assert!(rendered.contains("help socket"));
     }
 
@@ -2612,6 +2669,10 @@ mod tests {
         let asr = engine.run_line("help asr").await.expect("asr help");
         let tts = engine.run_line("help tts").await.expect("tts help");
         let call = engine.run_line("help call").await.expect("call help");
+        let outbound = engine
+            .run_line("help outbound")
+            .await
+            .expect("outbound help");
         let socket = engine.run_line("help socket").await.expect("socket help");
         let conversation = engine
             .run_line("help conversation")
@@ -2622,12 +2683,18 @@ mod tests {
         assert!(tts.lines.join("\n").contains("tts list"));
         assert!(tts.lines.join("\n").contains("speak <text...>"));
         assert!(call.lines.join("\n").contains("call use <call-id>"));
-        assert!(socket.lines.join("\n").contains("Receive one JSON object"));
-        assert!(socket.lines.join("\n").contains("Operational parity"));
-        assert!(conversation
-            .lines
-            .join("\n")
-            .contains("conversation disapprove [call-id]"));
+        let outbound = outbound.lines.join("\n");
+        let socket = socket.lines.join("\n");
+        let conversation = conversation.lines.join("\n");
+        assert!(outbound.contains("auto-attaches conversation in auto mode"));
+        assert!(outbound.contains("conversation smoke-test on"));
+        assert!(socket.contains("Receive one JSON object"));
+        assert!(socket.contains("Agent workflows"));
+        assert!(socket.contains("smoke-test handler mode is gateway-wide"));
+        assert!(conversation.contains("Default live behavior"));
+        assert!(conversation.contains("Normal inbound TUI/socket flow"));
+        assert!(conversation.contains("Normal outbound TUI/socket flow"));
+        assert!(conversation.contains("conversation disapprove [call-id]"));
     }
 
     #[tokio::test]
