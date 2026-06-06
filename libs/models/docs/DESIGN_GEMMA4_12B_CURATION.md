@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 10:28 PDT | @gemma4-cdx | Recorded DGX GB10 validation from codex-398-dgx-rv: standard GGUF Q4_K_M and QAT Q4_0 pass live tool-use at ~24/22 gen-tps, while full safetensors on mistral.rs builds and loads but has a real generation/tool-use defect and is not M1 live-accepted yet. |
 | 2026-06-06 00:51 PDT | @gemma4-cdx | Addressed second-reviewer L1/M2: GGUF cache tests now use collision-resistant temp directories, local-only GGUF resolution validates exact variant filenames, and generic logical-model resolution documents that QAT requires an explicit selector/bundle id. |
 | 2026-06-05 22:29 PDT | @gemma4-cdx | Clarified David's curation direction: safetensors, standard GGUF, and QAT GGUF are all curated Gemma 4 12B variants selected by platform/performance fit, not a priority hierarchy. |
 | 2026-06-05 16:59 PDT | @gemma4-cdx | Fixed and validated Gemma 4 12B GGUF live tool-use: default tool demo now disables thinking for the 12B GGUF path, llama.cpp parser strips empty Gemma thought-channel markers, and default Q4 tool demo completed all tool calls plus final answer locally. |
@@ -562,6 +563,10 @@ by exact root GGUF filenames for the selected variant, so a QAT-only cache is no
 accepted for the standard GGUF variant and a standard-only cache is not accepted
 for the QAT variant.
 
+DGX validation update, 2026-06-06 10:28 PDT by @gemma4-cdx: codex-398-dgx-rv validated PR #398 head `b257d7bb` on DGX GB10 with CUDA/flash-attn. The two llama.cpp GGUF live paths passed the weather/math tool-use smoke: standard Unsloth Q4_K_M completed the exact five-step sequence at about 24 generated tokens/sec, and Google QAT Q4_0 completed the same sequence at about 22 generated tokens/sec; both returned the correct 68F final answer. The official full safetensors variant `google/gemma4_12b` is GPU-runnable but not live-accepted: it built and loaded, then `bench_chat` reported `mistralrs-gen-tps: 0`, about 6% GPU utilization, 81s startup, and 246s warmup. The live tool-use smoke failed in round 3 with no tool call and a garbled text answer (`.The average temperature for Seattle is 23.0.`), then failed the harness with `Error: model did not call evaluate_math_expression`. This is a real mistral.rs Gemma4 full-generation defect, not a hardware-capacity limit. Until fixed, GGUF Q4_K_M and QAT Q4_0 are the working M1 live chat/tool-use paths; the full safetensors variant remains build/load traceability plus future multimodal/ASR direction, blocked for live chat/tool-use acceptance.
+
+Initial investigation note, 2026-06-06 10:28 PDT by @gemma4-cdx: Motlie already sends tool-bearing mistral.rs chat requests through the shared template-compatible adapter, includes tools in `send_chat_request`, replays assistant tool calls and tool results, and defaults tool requests to `enable_thinking = Some(false)` unless the caller opts in. The observed failure occurs after successful model load and partial generation, so the next code investigation should focus on the mistral.rs `MultimodalModelBuilder`/Gemma4 loader and generation path pinned at revision `47ec459cbd6d5b0d6c9035bb79d8cf1e37ee14a0`, plus regression smoke for E2B/E4B under the same CUDA/flash-attn builder swap.
+
 ## Tracking Issues
 
 Parent issue: #388
@@ -689,6 +694,7 @@ ASR acceptance bar:
 - Should the first safetensors bundle default to full precision with no
   recommended quantization, as proposed, or should Motlie still recommend ISQ
   for operators who do not specify `StartOptions.quantization`?
+- Given the DGX GB10 result that full safetensors builds and loads but fails live generation/tool-use on the mistral.rs path, should `gemma4_12b` remain in #398 as a build/load-only full-model variant pending backend fix, or should it be held out of M1 until live chat/tool-use passes?
 - What platform/profile thresholds should drive selection between safetensors,
   standard GGUF, and QAT GGUF: startup time, generation latency, memory, quality,
   or host coverage?
