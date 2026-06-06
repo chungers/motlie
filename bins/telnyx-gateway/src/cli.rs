@@ -29,6 +29,10 @@ pub struct Cli {
     #[arg(long)]
     pub dry_run_telnyx: bool,
 
+    /// Enable the M3 smoke-test echo conversation handler.
+    #[arg(long)]
+    pub conversation_smoke_test: bool,
+
     #[arg(long)]
     pub asr_artifact_root: Option<PathBuf>,
 

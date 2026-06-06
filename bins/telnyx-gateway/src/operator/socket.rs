@@ -294,6 +294,10 @@ mod tests {
             .expect("listener should be structured");
         assert!(listener.starts_with("127.0.0.1:"));
         assert!(!listener.contains("Some("));
+        assert_eq!(
+            response["data"]["fields"]["conversation_handler"],
+            "disabled"
+        );
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);

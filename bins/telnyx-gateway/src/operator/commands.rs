@@ -4,6 +4,7 @@ use crate::adapter::LiveAsrBackend;
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
+use crate::conversation::{default_conversation_handler, ConversationRuntime};
 use crate::media::SharedMediaRegistry;
 #[cfg(test)]
 use crate::media::{OutboundMediaCommand, SpeechCancelToken};
@@ -25,16 +26,26 @@ pub struct GatewayContext {
     pub telnyx: TelnyxClient,
     pub media: SharedMediaRegistry,
     pub tts: SharedTtsRegistry,
+    pub conversation: ConversationRuntime,
     pub session: OperatorSession,
 }
 
 impl GatewayContext {
     pub fn new(state: SharedState, telnyx: TelnyxClient) -> Self {
+        let media = SharedMediaRegistry::default();
+        let tts = unavailable_registry();
+        let conversation = ConversationRuntime::new(
+            telnyx.clone(),
+            tts.clone(),
+            default_conversation_handler(),
+            false,
+        );
         Self::with_services(
             state,
             telnyx,
-            SharedMediaRegistry::default(),
-            unavailable_registry(),
+            media,
+            tts,
+            conversation,
             LiveAsrBackend::default(),
         )
     }
@@ -44,6 +55,7 @@ impl GatewayContext {
         telnyx: TelnyxClient,
         media: SharedMediaRegistry,
         tts: SharedTtsRegistry,
+        conversation: ConversationRuntime,
         next_asr_backend: LiveAsrBackend,
     ) -> Self {
         Self {
@@ -51,6 +63,7 @@ impl GatewayContext {
             telnyx,
             media,
             tts,
+            conversation,
             session: OperatorSession::new(next_asr_backend),
         }
     }
@@ -61,6 +74,7 @@ impl GatewayContext {
             self.telnyx.clone(),
             self.media.clone(),
             self.tts.clone(),
+            self.conversation.clone(),
             self.session.next_asr_backend,
         );
         context.session.next_tts_backend = self.session.next_tts_backend;
@@ -304,6 +318,18 @@ pub enum ConversationModeArg {
     Auto,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConversationSmokeTestArg {
+    On,
+    Off,
+}
+
+impl ConversationSmokeTestArg {
+    fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 impl From<ConversationModeArg> for ConversationMode {
     fn from(mode: ConversationModeArg) -> Self {
         match mode {
@@ -317,6 +343,10 @@ impl From<ConversationModeArg> for ConversationMode {
 pub enum ConversationCommand {
     Status {
         call: Option<String>,
+    },
+    SmokeTest {
+        #[arg(value_enum)]
+        state: ConversationSmokeTestArg,
     },
     Attach {
         call: Option<String>,
@@ -473,6 +503,10 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
             "asr-default: {} ({})",
             LiveAsrBackend::default().label(),
             LiveAsrBackend::default().model_label()
+        ),
+        format!(
+            "conversation-handler: {}",
+            context.conversation.handler_label()
         ),
         format!(
             "webhook-url: {}",
@@ -1090,8 +1124,9 @@ async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<Comm
         lines: vec![
             format!("dial requested for {gateway_call_id}"),
             format!("selected call: {gateway_call_id}"),
-            "wait for call state media/transcribing, then run:".to_string(),
-            format!("  speak {gateway_call_id} <text to say>"),
+            "conversation attached in auto mode; smoke-test echo replies require:".to_string(),
+            "  conversation smoke-test on".to_string(),
+            format!("manual TTS smoke test: speak {gateway_call_id} <text to say>"),
             "use `status` or `call show` to inspect TTS playback; use `speak cancel` to clear active speech".to_string(),
         ],
         effects: Vec::new(),
@@ -1243,6 +1278,7 @@ async fn register_outbound_dial(
         call.push_timeline(timeline);
         call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
     }
+    guard.attach_conversation(&gateway_call_id, ConversationMode::Auto);
     guard.log(
         LogLevel::Info,
         format!(
@@ -1463,9 +1499,22 @@ async fn conversation_command(
                 name: id.clone(),
             })?;
             Ok(CommandOutput {
-                lines: conversation_status_lines(call),
+                lines: conversation_status_lines(call, context.conversation.handler_label()),
                 effects: Vec::new(),
             })
+        }
+        ConversationCommand::SmokeTest { state } => {
+            let enabled = state.enabled();
+            context.conversation.set_smoke_test_enabled(enabled);
+            let label = if enabled { "on" } else { "off" };
+            context
+                .state
+                .write()
+                .await
+                .log(LogLevel::Info, format!("conversation smoke-test {label}"));
+            Ok(CommandOutput::line(format!(
+                "conversation smoke-test: {label}"
+            )))
         }
         ConversationCommand::Attach { call } => {
             let mut guard = context.state.write().await;
@@ -1653,13 +1702,17 @@ async fn approve_conversation_proposal(
     }
 }
 
-fn conversation_status_lines(call: &crate::operator::state::CallSession) -> Vec<String> {
+fn conversation_status_lines(
+    call: &crate::operator::state::CallSession,
+    handler_label: &str,
+) -> Vec<String> {
     let conversation = &call.conversation;
     let mut lines = vec![
         format!("call: {}", call.gateway_call_id),
         format!("conversation: {}", conversation.status_label()),
         format!("attached: {}", conversation.attached),
         format!("mode: {}", conversation.mode.label()),
+        format!("handler: {handler_label}"),
         format!("status: {}", conversation.status.label()),
         format!(
             "last_user: {}",
@@ -1975,6 +2028,7 @@ fn gateway_root_help() -> String {
         "  log clear",
         "",
         "Testing:",
+        "  conversation smoke-test on    Enable echo reply handler for M3 smoke tests",
         "  test dial-transcribe <+e164> [--from +e164]",
         "",
         "Helpful topics:",
@@ -2243,6 +2297,7 @@ fn conversation_help() -> String {
         "",
         "Usage:",
         "  conversation status [call-id]",
+        "  conversation smoke-test <on|off>",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
         "  conversation disapprove [call-id]",
@@ -2250,8 +2305,10 @@ fn conversation_help() -> String {
         "  conversation say [call-id]",
         "  conversation mode <manual|auto> [call-id]",
         "",
-        "`answer` and `conversation attach` attach in auto mode by default. Disapprove",
-        "cancels active conversation TTS and leaves the call in transcription-only mode.",
+        "`answer`, `dial`, and `conversation attach` attach in auto mode by default,",
+        "but echo replies are disabled unless `conversation smoke-test on` or startup",
+        "`--conversation-smoke-test` is used. Disapprove cancels active conversation",
+        "TTS and leaves the call in transcription-only mode.",
         "Manual mode records the assistant response for operator review; approve/say",
         "speaks the pending proposal using this source's selected TTS backend.",
     ]
@@ -2406,6 +2463,7 @@ fn socket_help() -> String {
         "    dial <+e164> [--from +e164]",
         "    speak [call-id] <text...>",
         "    speak cancel [call-id]",
+        "    conversation smoke-test on|off",
         "    conversation approve [call-id]",
         "    conversation disapprove [call-id]",
         "    hangup [call-id]",
@@ -2853,6 +2911,8 @@ mod tests {
         assert_eq!(call.to.as_deref(), Some("+15550000002"));
         assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
+        assert!(call.conversation.attached);
+        assert_eq!(call.conversation.mode, ConversationMode::Auto);
     }
 
     #[tokio::test]
@@ -2879,7 +2939,12 @@ mod tests {
         assert!(output
             .lines
             .iter()
-            .any(|line| line == "wait for call state media/transcribing, then run:"));
+            .any(|line| line
+                == "conversation attached in auto mode; smoke-test echo replies require:"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "  conversation smoke-test on"));
         assert!(output
             .lines
             .iter()
@@ -3086,6 +3151,34 @@ mod tests {
             socket_engine.context().session.selected_call,
             Some(call_two)
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_smoke_test_command_toggles_echo_handler() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let status = engine.run_line("status").await.expect("status");
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "conversation-handler: disabled"));
+
+        let enabled = engine
+            .run_line("conversation smoke-test on")
+            .await
+            .expect("enable smoke test");
+        assert_eq!(enabled.lines, vec!["conversation smoke-test: on"]);
+        assert!(engine.context().conversation.smoke_test_enabled());
+
+        let disabled = engine
+            .run_line("conversation smoke-test off")
+            .await
+            .expect("disable smoke test");
+        assert_eq!(disabled.lines, vec!["conversation smoke-test: off"]);
+        assert!(!engine.context().conversation.smoke_test_enabled());
     }
 
     #[tokio::test]
@@ -3394,7 +3487,20 @@ mod tests {
             1_000;
             2_205
         ]))));
-        GatewayContext::with_services(state, telnyx, media, tts, LiveAsrBackend::Kroko2025)
+        let conversation = ConversationRuntime::new(
+            telnyx.clone(),
+            tts.clone(),
+            default_conversation_handler(),
+            false,
+        );
+        GatewayContext::with_services(
+            state,
+            telnyx,
+            media,
+            tts,
+            conversation,
+            LiveAsrBackend::Kroko2025,
+        )
     }
 
     async fn receive_outbound(

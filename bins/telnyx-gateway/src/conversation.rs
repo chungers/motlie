@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
@@ -21,6 +22,7 @@ pub struct ConversationRuntime {
     telnyx: TelnyxClient,
     tts: SharedTtsRegistry,
     handler: SharedConversationHandler,
+    smoke_test_enabled: Arc<AtomicBool>,
 }
 
 impl ConversationRuntime {
@@ -28,24 +30,42 @@ impl ConversationRuntime {
         telnyx: TelnyxClient,
         tts: SharedTtsRegistry,
         handler: SharedConversationHandler,
+        smoke_test_enabled: bool,
     ) -> Self {
         Self {
             telnyx,
             tts,
             handler,
+            smoke_test_enabled: Arc::new(AtomicBool::new(smoke_test_enabled)),
+        }
+    }
+
+    pub fn smoke_test_enabled(&self) -> bool {
+        self.smoke_test_enabled.load(Ordering::SeqCst)
+    }
+
+    pub fn set_smoke_test_enabled(&self, enabled: bool) {
+        self.smoke_test_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn handler_label(&self) -> &'static str {
+        if self.smoke_test_enabled() {
+            "smoke-test"
+        } else {
+            "disabled"
         }
     }
 }
 
 pub fn default_conversation_handler() -> SharedConversationHandler {
-    Arc::new(FirstDuplexConversationHandler)
+    Arc::new(SmokeTestConversationHandler)
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct FirstDuplexConversationHandler;
+pub struct SmokeTestConversationHandler;
 
 #[async_trait]
-impl ConversationHandler for FirstDuplexConversationHandler {
+impl ConversationHandler for SmokeTestConversationHandler {
     async fn on_transcript(
         &self,
         event: TranscriptEvent,
@@ -90,6 +110,18 @@ pub async fn handle_final_transcript(
         .write()
         .await
         .record_conversation_user_turn(gateway_call_id, user_text);
+
+    if !runtime.smoke_test_enabled() {
+        state
+            .write()
+            .await
+            .record_conversation_idle(gateway_call_id);
+        tracing::debug!(
+            gateway_call_id,
+            "conversation.handler.disabled_for_final_transcript"
+        );
+        return Ok(());
+    }
 
     if let Some(playback_id) = media_registry
         .active_speech_playback_id(gateway_call_id)
@@ -286,6 +318,7 @@ mod tests {
             TelnyxClient::new("https://api.example.test", None, true),
             crate::tts::unavailable_registry(),
             default_conversation_handler(),
+            true,
         )
     }
 
@@ -294,6 +327,7 @@ mod tests {
             TelnyxClient::new("https://api.example.test", None, true),
             crate::tts::unavailable_registry(),
             Arc::new(FailingConversationHandler),
+            true,
         )
     }
 
@@ -329,8 +363,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_handler_turns_final_transcript_into_say() {
-        let handler = FirstDuplexConversationHandler;
+    async fn smoke_test_handler_turns_final_transcript_into_say() {
+        let handler = SmokeTestConversationHandler;
         let mut context = CallContext {
             ids: None,
             custom_state: BTreeMap::new(),
@@ -344,7 +378,7 @@ mod tests {
                 &mut context,
             )
             .await
-            .expect("default handler should accept final transcript");
+            .expect("smoke-test handler should accept final transcript");
 
         match command {
             ConversationCommand::Say { text } => assert_eq!(text, "I heard: hello"),
@@ -353,8 +387,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_handler_ignores_partial_transcript() {
-        let handler = FirstDuplexConversationHandler;
+    async fn smoke_test_handler_ignores_partial_transcript() {
+        let handler = SmokeTestConversationHandler;
         let mut context = CallContext {
             ids: None,
             custom_state: BTreeMap::new(),
@@ -368,12 +402,43 @@ mod tests {
                 &mut context,
             )
             .await
-            .expect("default handler should accept partial transcript");
+            .expect("smoke-test handler should accept partial transcript");
 
         match command {
             ConversationCommand::Noop => {}
             _ => panic!("expected noop command"),
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_runtime_records_user_turn_without_invoking_handler() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        let runtime = ConversationRuntime::new(
+            TelnyxClient::new("https://api.example.test", None, true),
+            crate::tts::unavailable_registry(),
+            Arc::new(FailingConversationHandler),
+            false,
+        );
+
+        handle_final_transcript(
+            &state,
+            &SharedMediaRegistry::default(),
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "hello".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+        )
+        .await
+        .expect("disabled handler should not fail media");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Idle);
+        assert_eq!(call.conversation.last_user_text.as_deref(), Some("hello"));
+        assert!(call.conversation.last_error.is_none());
     }
 
     #[tokio::test]

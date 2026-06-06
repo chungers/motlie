@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-06 13:40 PDT | @codex-366-impl: Made the M3 echo conversation handler explicitly test-only and wired outbound `dial` into the same auto-attach conversation path: default attached conversations are transcription-only, `--conversation-smoke-test` or `conversation smoke-test on` enables the echo reply loop, and status surfaces the active handler mode. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
 | 2026-06-06 13:12 PDT | @codex-366-impl: Updated M3 operator UX after manual acceptance feedback: inbound answer and plain conversation attach now default to auto/approved mode, `conversation disapprove` cancels active TTS and returns the call to transcription-only, and status prints listener addresses without `Option` debug formatting. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
 | 2026-06-06 08:48 PDT | @codex-366-impl: Addressed PR #400 review round 1 by documenting final-transcript-triggered barge-in latency, adding manual approval commands, and clarifying that auto conversation is Piper-locked for the first Sherpa+Piper pairing while manual approval uses source-selected TTS. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
 | 2026-06-05 23:34 PDT | @codex-366-impl: Implemented milestone 3 composition using gateway-local `ConversationRuntime`, final-transcript forwarding for attached calls, shared TUI/socket `conversation` commands, M2 speech queue reuse for `Say`, and drop-and-regenerate barge-in via the existing `speak cancel`/Telnyx `clear` path. | Milestone 3: Full-Duplex TUI Chat Conversation, Recommended Telnyx v1 Pipelines, Operator REPL and TUI Control Surface |
@@ -599,7 +600,7 @@ Recommended composition rule:
 - conversation handlers emit provider-neutral commands such as `Say { text }`, `Call(CallAction::Hangup)`, `Call(CallAction::Transfer { ... })`, or `Noop`
 - `bins/telnyx-gateway` maps those commands to Telnyx call-control and outbound media operations
 
-Implementation note (@codex-366-impl, 2026-06-06 13:12 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. `answer` for inbound calls and plain `conversation attach [call]` now attach in auto/approved mode by default. Operators can run `conversation disapprove [call]` mid-call to cancel active conversation TTS through the M2 clear/cancel path and leave the call in transcription-only mode. Manual mode remains available through `conversation mode manual [call]`; it records the assistant proposal in the selected-call chat state, and `conversation approve [call]` / `conversation say [call]` speaks the pending proposal through that command source's selected TTS backend. Auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with Piper for the first Sherpa+Piper pairing; it intentionally does not use `tts use` because media-triggered turns are not associated with a command source. Barge-in is drop-and-regenerate, but the initial implementation triggers it on final transcript events, so cut latency is bounded by ASR endpointing; VAD/partial-ASR-triggered barge-in remains deferred. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
+Implementation note (@codex-366-impl, 2026-06-06 13:40 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. `answer` for inbound calls, outbound `dial`, and plain `conversation attach [call]` attach in auto/approved mode by default, but the built-in echo reply handler is disabled by default so normal live sessions are transcription-only after attach. Operators must start with `--conversation-smoke-test` or run `conversation smoke-test on` from the TUI/socket to enable the `I heard: ...` smoke-test loop. Operators can run `conversation disapprove [call]` mid-call to cancel active conversation TTS through the M2 clear/cancel path and leave the call in transcription-only mode. Manual mode remains available through `conversation mode manual [call]`; it records the assistant proposal in the selected-call chat state, and `conversation approve [call]` / `conversation say [call]` speaks the pending proposal through that command source's selected TTS backend when a non-smoke handler proposes a response. Auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with Piper for the first Sherpa+Piper pairing; it intentionally does not use `tts use` because media-triggered turns are not associated with a command source. Barge-in is drop-and-regenerate when a conversation handler is enabled, but the initial implementation triggers it on final transcript events, so cut latency is bounded by ASR endpointing; VAD/partial-ASR-triggered barge-in remains deferred. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
 
 ### Milestone 4: External Integration Harness
 
@@ -965,6 +966,7 @@ Conversation bridge commands:
 
 ```text
 conversation status
+conversation smoke-test <on|off>
 conversation attach [call]
 conversation detach [call]
 conversation disapprove [call]
@@ -973,7 +975,7 @@ conversation say [call]
 conversation mode <manual|auto>
 ```
 
-These belong after milestone 1 and milestone 2 are independently useful. `conversation attach` wires selected media final transcript events to `ConversationHandler` in auto mode by default; it should not change the Telnyx media or model contracts. `conversation disapprove` cancels active conversation TTS and detaches the handler so the call remains transcription-only. Manual proposals are spoken only after `conversation approve` / `conversation say`.
+These belong after milestone 1 and milestone 2 are independently useful. `answer`, `dial`, and `conversation attach` wire selected media final transcript events to `ConversationHandler` in auto mode by default; they should not change the Telnyx media or model contracts. Built-in echo replies are test-only and require `--conversation-smoke-test` or `conversation smoke-test on`. `conversation disapprove` cancels active conversation TTS and detaches the handler so the call remains transcription-only. Manual proposals are spoken only after `conversation approve` / `conversation say`.
 
 ### Replayable State Dumps
 
