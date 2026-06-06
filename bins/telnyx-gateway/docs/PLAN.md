@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 15:00 PDT | @codex-366-impl | Added M3 partial-ASR-triggered barge-in: meaningful unsuppressed partials on attached calls cancel active playback through the existing M2 clear/cancel path; final transcripts still drive regeneration, and frame-level VAD barge-in is deferred to M5 #402. |
 | 2026-06-06 13:40 PDT | @codex-366-impl | Made M3 echo replies opt-in for testing via `--conversation-smoke-test` or `conversation smoke-test on`, and wired outbound `dial` to auto-attach conversation like inbound `answer`; default attached conversations now remain transcription-only unless a test handler is enabled. |
 | 2026-06-06 13:12 PDT | @codex-366-impl | Applied M3 manual acceptance feedback: default conversation attach/answer is auto-approved, `conversation disapprove` cancels active TTS and returns calls to transcription-only, and status listener formatting is operator-friendly. |
 | 2026-06-06 08:48 PDT | @codex-366-impl | Addressed PR #400 review round 1: removed dead sink wording, added manual proposal approval commands, clarified source/backend behavior, documented final-transcript-triggered barge-in latency, and expanded core coverage. |
@@ -529,7 +530,7 @@ Close the loop on independently useful product flows before combining them.
 
 ### 8.3 - Milestone 3 full-duplex TUI chat conversation flow (#366)
 
-- [x] Forward selected final transcript events from the media socket to `ConversationHandler`. (@codex-366-impl, 2026-06-06 08:48 PDT: corrected implementation note; forwarding is via `conversation::handle_final_transcript` on unsuppressed final transcript events for attached calls, not a separate sink adapter.)
+- [x] Forward selected transcript events from the media socket to `ConversationHandler`. (@codex-366-impl, 2026-06-06 15:00 PDT: forwarding is via `conversation::handle_transcript_event` on unsuppressed final and partial transcript events for attached calls; meaningful partials can interrupt active playback, while finals still drive handler/regenerate.)
   DESIGN reference: `Staged Build Strategy`, `Conversation Handler Contract`
 - [x] Add conversation bridge commands `conversation status`, `conversation smoke-test <on|off>`, `conversation attach [call]`, `conversation detach [call]`, `conversation disapprove [call]`, `conversation approve [call]`, `conversation say [call]`, and `conversation mode <manual|auto>`. (@codex-366-impl, 2026-06-06 13:40 PDT: default attach/answer/dial uses auto-approved mode for the M3 acceptance path, but the built-in echo reply handler is disabled unless `--conversation-smoke-test` or `conversation smoke-test on` explicitly marks the session as a test; `conversation disapprove` cancels active TTS and detaches the handler so the call remains transcription-only, while manual proposal approval remains available after `conversation mode manual`.)
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Conversation Handler Contract`
@@ -539,7 +540,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Staged Build Strategy`, `Returning TTS Audio`
 - [x] Route `ConversationCommand::Call(action)` through the Telnyx call-control mapping. (@codex-366-impl, 2026-06-05 23:34 PDT: mapped `CallAction::Hangup`; unsupported future call actions fail closed and record conversation failure state.)
   DESIGN reference: `motlie_voice::telephony Surface`, `v1.1: DTMF and Call Control`
-- [x] Add barge-in policy only after milestone 1 and milestone 2 are independently stable. (@codex-366-impl, 2026-06-06 08:48 PDT: implemented the #366 drop-and-regenerate policy by canceling active M2 speech with Telnyx `clear` before handling the new final transcript; VAD/partial-triggered low-latency barge-in remains deferred.)
+- [x] Add barge-in policy only after milestone 1 and milestone 2 are independently stable. (@codex-366-impl, 2026-06-06 15:00 PDT: implemented the #366 drop-and-regenerate policy by canceling active M2 speech with Telnyx `clear` on meaningful partial ASR before final endpointing; final transcripts still regenerate through the handler, and frame-level VAD-triggered barge-in is deferred to M5 #402.)
   DESIGN reference: `Returning TTS Audio`, `Real-Time Latency Requirements`
 
 Verification (@codex-366-impl, 2026-06-05 23:34 PDT): `cargo build -p motlie-telnyx-gateway --features "sherpa piper"`, `cargo test -p motlie-telnyx-gateway --features "sherpa piper"`, and `cargo clippy -p motlie-telnyx-gateway --features "sherpa piper" -- -D warnings` all pass. Workspace-wide `cargo fmt` is still blocked by unrelated missing `examples/vector2/app/benchmark.rs`; package-scoped `cargo fmt -p motlie-telnyx-gateway` passes.

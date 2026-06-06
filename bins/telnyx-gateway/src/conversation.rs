@@ -15,6 +15,8 @@ use crate::operator::state::{ConversationMode, LogLevel, SharedState};
 use crate::speech;
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
 
+const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
+
 pub type SharedConversationHandler = Arc<dyn ConversationHandler>;
 
 #[derive(Clone)]
@@ -84,18 +86,15 @@ impl ConversationHandler for SmokeTestConversationHandler {
     }
 }
 
-pub async fn handle_final_transcript(
+pub async fn handle_transcript_event(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
     event: TranscriptEvent,
 ) -> anyhow::Result<()> {
-    if !event.is_final() {
-        return Ok(());
-    }
-    let user_text = event.text().trim().to_string();
-    if user_text.is_empty() {
+    let transcript_text = event.text().trim().to_string();
+    if transcript_text.is_empty() {
         return Ok(());
     }
 
@@ -106,10 +105,31 @@ pub async fn handle_final_transcript(
         return Ok(());
     }
 
+    if !event.is_final() {
+        if is_meaningful_partial_barge_in(&transcript_text) {
+            cancel_active_speech_for_barge_in(
+                state,
+                media_registry,
+                gateway_call_id,
+                BargeInTrigger::Partial,
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
     state
         .write()
         .await
-        .record_conversation_user_turn(gateway_call_id, user_text);
+        .record_conversation_user_turn(gateway_call_id, transcript_text);
+
+    cancel_active_speech_for_barge_in(
+        state,
+        media_registry,
+        gateway_call_id,
+        BargeInTrigger::Final,
+    )
+    .await?;
 
     if !runtime.smoke_test_enabled() {
         state
@@ -121,28 +141,6 @@ pub async fn handle_final_transcript(
             "conversation.handler.disabled_for_final_transcript"
         );
         return Ok(());
-    }
-
-    if let Some(playback_id) = media_registry
-        .active_speech_playback_id(gateway_call_id)
-        .await
-    {
-        speech::cancel_speech(
-            state,
-            media_registry,
-            gateway_call_id,
-            "conversation barge-in",
-        )
-        .await?;
-        state
-            .write()
-            .await
-            .record_conversation_interrupted(gateway_call_id, &playback_id);
-        tracing::info!(
-            gateway_call_id,
-            playback_id,
-            "conversation.barge_in.cancel_requested"
-        );
     }
 
     let mut context = snapshot.context;
@@ -168,6 +166,77 @@ pub async fn handle_final_transcript(
         command,
     )
     .await
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BargeInTrigger {
+    Partial,
+    Final,
+}
+
+impl BargeInTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Partial => "partial",
+            Self::Final => "final",
+        }
+    }
+
+    fn source_label(self) -> &'static str {
+        match self {
+            Self::Partial => "conversation partial barge-in",
+            Self::Final => "conversation final barge-in",
+        }
+    }
+}
+
+fn is_meaningful_partial_barge_in(text: &str) -> bool {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .take(PARTIAL_BARGE_IN_MIN_CHARS)
+        .count()
+        >= PARTIAL_BARGE_IN_MIN_CHARS
+}
+
+async fn cancel_active_speech_for_barge_in(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    gateway_call_id: &str,
+    trigger: BargeInTrigger,
+) -> anyhow::Result<()> {
+    if media_registry
+        .active_speech_playback_id(gateway_call_id)
+        .await
+        .is_none()
+    {
+        return Ok(());
+    }
+
+    let playback_id = match speech::cancel_speech(
+        state,
+        media_registry,
+        gateway_call_id,
+        trigger.source_label(),
+    )
+    .await
+    {
+        Ok(playback_id) => playback_id,
+        Err(error) if format!("{error:#}").contains("no active speech job") => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    state
+        .write()
+        .await
+        .record_conversation_interrupted(gateway_call_id, &playback_id);
+    tracing::info!(
+        gateway_call_id,
+        playback_id,
+        trigger = trigger.as_str(),
+        partial_triggered = matches!(trigger, BargeInTrigger::Partial),
+        "conversation.barge_in.cancel_requested"
+    );
+    Ok(())
 }
 
 struct ConversationSnapshot {
@@ -311,7 +380,9 @@ async fn apply_conversation_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::SpeechCancelToken;
     use crate::operator::state::{shared_state, CallStatus, ConversationStatus, TelnyxIds};
+    use tokio::sync::mpsc;
 
     fn test_runtime() -> ConversationRuntime {
         ConversationRuntime::new(
@@ -421,7 +492,7 @@ mod tests {
             false,
         );
 
-        handle_final_transcript(
+        handle_transcript_event(
             &state,
             &SharedMediaRegistry::default(),
             &runtime,
@@ -473,12 +544,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meaningful_partial_interrupts_active_playback_without_regenerating() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        state.write().await.record_conversation_speaking(
+            &gateway_call_id,
+            "assistant is speaking".to_string(),
+            "tts_test".to_string(),
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(&gateway_call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        let runtime = test_runtime();
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Partial {
+                text: "hello".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+        )
+        .await
+        .expect("partial barge-in should cancel active speech");
+
+        assert!(cancel.is_canceled());
+        assert!(media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await
+            .is_none());
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Interrupted);
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("assistant is speaking")
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_or_tiny_partial_does_not_interrupt_active_playback() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        state.write().await.record_conversation_speaking(
+            &gateway_call_id,
+            "assistant is speaking".to_string(),
+            "tts_test".to_string(),
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(&gateway_call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        let runtime = test_runtime();
+
+        for text in ["   ", "uh"] {
+            handle_transcript_event(
+                &state,
+                &media_registry,
+                &runtime,
+                &gateway_call_id,
+                TranscriptEvent::Partial {
+                    text: text.to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                },
+            )
+            .await
+            .expect("non-meaningful partial should not cut speech");
+        }
+
+        assert!(!cancel.is_canceled());
+        assert_eq!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .as_deref(),
+            Some("tts_test")
+        );
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Speaking);
+    }
+
+    #[tokio::test]
+    async fn final_transcript_still_regenerates_after_partial_barge_in() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        state.write().await.record_conversation_speaking(
+            &gateway_call_id,
+            "assistant is speaking".to_string(),
+            "tts_test".to_string(),
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(&gateway_call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        let runtime = test_runtime();
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Partial {
+                text: "hello".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+        )
+        .await
+        .expect("partial should interrupt active speech");
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "hello there".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+        )
+        .await
+        .expect("final should still regenerate through handler");
+
+        assert!(cancel.is_canceled());
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Proposed);
+        assert_eq!(
+            call.conversation.last_user_text.as_deref(),
+            Some("hello there")
+        );
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("I heard: hello there")
+        );
+    }
+
+    #[tokio::test]
     async fn handler_error_marks_conversation_failed_without_failing_media() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
         let runtime = failing_runtime();
 
-        handle_final_transcript(
+        handle_transcript_event(
             &state,
             &SharedMediaRegistry::default(),
             &runtime,

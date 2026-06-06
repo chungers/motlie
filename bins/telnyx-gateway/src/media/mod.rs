@@ -1313,7 +1313,7 @@ async fn finish_asr_session(
 fn conversation_events_from_transcripts(events: &[AsrTranscriptEvent]) -> Vec<TranscriptEvent> {
     events
         .iter()
-        .filter(|event| !event.is_suppressed() && event.event.is_final())
+        .filter(|event| !event.is_suppressed())
         .map(|event| event.event.clone())
         .collect()
 }
@@ -1329,7 +1329,7 @@ async fn forward_conversation_events(
         return;
     };
     for event in events {
-        if let Err(error) = conversation::handle_final_transcript(
+        if let Err(error) = conversation::handle_transcript_event(
             state,
             media_registry,
             conversation,
@@ -2082,7 +2082,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_events_from_transcripts_filters_to_unsuppressed_finals() {
+    fn conversation_events_from_transcripts_forwards_unsuppressed_partials_and_finals() {
         let events = vec![
             AsrTranscriptEvent::emit(TranscriptEvent::Partial {
                 text: "partial".to_string(),
@@ -2104,9 +2104,11 @@ mod tests {
 
         let forwarded = conversation_events_from_transcripts(&events);
 
-        assert_eq!(forwarded.len(), 1);
-        assert!(forwarded[0].is_final());
-        assert_eq!(forwarded[0].text(), "forward final");
+        assert_eq!(forwarded.len(), 2);
+        assert!(!forwarded[0].is_final());
+        assert_eq!(forwarded[0].text(), "partial");
+        assert!(forwarded[1].is_final());
+        assert_eq!(forwarded[1].text(), "forward final");
     }
 
     #[tokio::test]
