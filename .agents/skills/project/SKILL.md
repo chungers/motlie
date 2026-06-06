@@ -565,15 +565,15 @@ When starting a new agent, include:
 - instruction to use `@{session_name}` in comments and submissions
 - working directory and branch naming expectations
 - exact repository URL and issue context. Do not make agents guess repository owner/name; include `https://github.com/chungers/motlie.git` for Motlie work unless the user gives a different URL.
-- permission-mode guidance when useful. Treat `mstream new --agent` as the executable name unless the current CLI supports arguments; otherwise start the executable, such as `claude` or `codex`, and use the initial task to request auto permission mode, for example Claude auto mode or Codex `/permission` auto mode.
+- permission-mode guidance when useful. Treat `mstream new --agent` as a bare executable path (`claude` or `codex`); do not pass CLI flags or wrappers. After launch, the orchestrator sets the permission mode by DRIVING THE TUI THROUGH MSTREAM — send `/permission` (Codex) or the equivalent Claude permission command via `mstream send ... --enter`, snapshot the selector, and send the choice keys — only with the user's approval for that host/workstream.
 
 Remote non-login shells may not have the same `PATH` as an interactive shell.
-Prefer user-provided absolute executable paths or workstream-local wrappers when
-creating sessions. If you need to discover executable paths and mstream lacks a
-safe host probe, ask the user or add the needed mstream capability instead of
-running direct SSH probes.
+Prefer user-provided absolute executable paths when creating sessions (do NOT
+create workstream-local wrapper scripts). If you need to discover executable
+paths and mstream lacks a safe host probe, ask the user or add the needed
+mstream capability instead of running direct SSH probes.
 
-If an agent needs CLI flags and `mstream new --agent` accepts only an executable path, create a small wrapper under the workstream root, for example `~/sessions/{workstream}/bin/codex-auto`, and pass the wrapper path as `--agent`. Use this only after the user has approved the permission mode for the target host and workstream.
+NEVER create launcher wrapper scripts (e.g. a `codex-auto` that bakes in `--ask-for-approval`/`--sandbox` flags), and NEVER create a wrapper that execs uncommitted code. Launch the bare executable (`codex` or `claude`) via `mstream new --agent <absolute-executable-path>`. The orchestrator MUST then DRIVE THE AGENT TUI THROUGH MSTREAM to set the permission/approval mode — e.g. `mstream send <ws> <target> --enter --text "/permission"`, `mstream snapshot` the selector, then send the digit/keys to choose the mode (a bare empty `--enter` submits stuck/queued input). Permission posture is set interactively via mstream, only with the user's approval for that host/workstream — never via on-disk wrapper flags.
 
 When a TUI is sensitive to startup timing, create the session first without a long `--task`, confirm the prompt is ready with `mstream snapshot`, then send the assignment with `mstream send --interrupt-first --enter`. Verify the timeline shows the agent started acting on the assignment.
 
