@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-05-30 | @codex-360-og | Added issue #360 live session rename/retag commands with id-stable tmux rename, role/workstream retagging, and mmux label refresh. |
+| 2026-06-06 | @codex-386-impl | Documented `mstream new` agent executable preflight on the remote non-login PATH and absolute-path guidance. |
 | 2026-05-30 | @codex-355-rv | Switched daemon session bookkeeping to stable `(host, session_id)` targets while keeping tmux session names as display metadata. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 mmux-visible workstream labels with `open --mmux-label`, `label --mmux-label`, status/show/list fields, and close/leave cleanup. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #347 closeout ergonomics: `timer --self`, workstream-scoped timers, readable events, and close-time timer/standby flags. |
@@ -124,8 +125,12 @@ mstream rename local::codex-worker codex-reviewer --role reviewer --workstream p
 mstream session retag local::$7 --role reviewer --workstream pr-324 --mmux-label "PR 324"
 ```
 
-`new` validates absolute `--cwd`, creates the directory on the target host, and
-starts the agent through a narrow shell bootstrap. Joined/new sessions receive
+`new` validates absolute `--cwd` and validates `--agent` before session
+creation with a non-login `command -v` on the target host. Remote agents must
+be visible on that non-login PATH; pass an absolute executable path when login
+shell setup is required. After validation, `new` creates the directory on the
+target host and starts the agent through a narrow shell bootstrap. Joined/new
+sessions receive
 `@mstream/*` tags and a managed-agent reporting prompt when a task is sent. If
 the workstream has an mmux label, assignment also writes:
 
