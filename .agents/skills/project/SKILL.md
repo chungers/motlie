@@ -566,7 +566,7 @@ When starting a new agent, include:
 - working directory and branch naming expectations
 - exact repository URL and issue context. Do not make agents guess repository owner/name; include `https://github.com/chungers/motlie.git` for Motlie work unless the user gives a different URL.
 - **Permission mode is MANDATORY INITIAL SETUP for every Codex agent — set it BEFORE assigning any work.** `mstream new --agent` takes a bare executable path (`claude` or `codex`); never pass CLI flags or wrappers. As soon as the Codex TUI is ready (confirm with `mstream snapshot`), the orchestrator sets the mode by driving the TUI through mstream, in this exact order:
-  1. `mstream send <ws> <target> --enter --text "/permission"` — opens the Codex permission selector.
+  1. `mstream send <ws> <target> --enter --text "/permissions"` — opens the Codex permission selector.
   2. `mstream snapshot <ws>` — read the selector (options: 1 Default, 2 Auto-review, 3 Full Access).
   3. `mstream send <ws> <target> --enter --text "2"` — pick **option 2, Auto-review** (workspace-write + on-request approvals routed through the auto-reviewer subagent).
   4. `mstream snapshot <ws>` — confirm the pane shows `Permissions updated to Auto-review`.
@@ -578,7 +578,7 @@ create workstream-local wrapper scripts). If you need to discover executable
 paths and mstream lacks a safe host probe, ask the user or add the needed
 mstream capability instead of running direct SSH probes.
 
-NEVER create launcher wrapper scripts (e.g. a `codex-auto` that bakes in `--ask-for-approval`/`--sandbox danger-full-access` flags), and NEVER create a wrapper that execs uncommitted code. Launch the bare executable (`codex` or `claude`) via `mstream new --agent <absolute-executable-path>`, then run the mandatory permission-mode setup as the FIRST step before the agent does any work — the `/permission` → pick **2 Auto-review** procedure above. Permission posture is set interactively via mstream — never via on-disk wrapper flags.
+NEVER create launcher wrapper scripts (e.g. a `codex-auto` that bakes in `--ask-for-approval`/`--sandbox danger-full-access` flags), and NEVER create a wrapper that execs uncommitted code. Launch the bare executable (`codex` or `claude`) via `mstream new --agent <absolute-executable-path>`, then run the mandatory permission-mode setup as the FIRST step before the agent does any work — the `/permissions` → pick **2 Auto-review** procedure above. Permission posture is set interactively via mstream — never via on-disk wrapper flags.
 
 When a TUI is sensitive to startup timing, create the session first without a long `--task`, confirm the prompt is ready with `mstream snapshot`, then send the assignment with `mstream send --interrupt-first --enter`. Verify the timeline shows the agent started acting on the assignment.
 
