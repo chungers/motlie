@@ -565,6 +565,10 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
                 .unwrap_or_else(|| "<unbound>".to_string())
         )),
         Line::from(format!("tts: {}", selected_call_tts_status(call))),
+        Line::from(format!(
+            "conversation: {}",
+            selected_call_conversation_status(call)
+        )),
     ];
     if let Some(reason) = &call.terminal_reason {
         lines.push(Line::from(format!("ended: {reason}")));
@@ -574,11 +578,39 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
         Line::from("assembled transcription:"),
         Line::from(call.assembled_transcript_text()),
     ]);
+    if !call.conversation.lines.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("conversation:"));
+        for entry in call.conversation.lines.iter().rev().take(10).rev() {
+            lines.push(Line::from(format!(
+                "{}: {}",
+                entry.role.label(),
+                entry.text
+            )));
+        }
+    }
     if let Some(error) = &call.last_error {
         lines.push(Line::from(""));
         lines.push(Line::from(format!("error: {error}")));
     }
     lines
+}
+
+fn selected_call_conversation_status(call: &crate::operator::state::CallSession) -> String {
+    let conversation = &call.conversation;
+    let mut status = format!(
+        "{} mode={} attached={}",
+        conversation.status_label(),
+        conversation.mode.label(),
+        conversation.attached
+    );
+    if let Some(playback) = &conversation.last_playback_id {
+        status.push_str(&format!(" playback={playback}"));
+    }
+    if let Some(error) = &conversation.last_error {
+        status.push_str(&format!(" error={error}"));
+    }
+    status
 }
 
 fn selected_call_tts_status(call: &crate::operator::state::CallSession) -> String {

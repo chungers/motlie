@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
+use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
 use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
@@ -22,6 +23,7 @@ use crate::adapter::{
     SharedAsrRegistry,
 };
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
+use crate::conversation::{self, ConversationRuntime};
 use crate::operator::state::{
     CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
 };
@@ -243,7 +245,7 @@ impl SharedMediaRegistry {
             .take()
     }
 
-    async fn active_speech_playback_id(&self, gateway_call_id: &str) -> Option<String> {
+    pub async fn active_speech_playback_id(&self, gateway_call_id: &str) -> Option<String> {
         self.inner
             .lock()
             .await
@@ -281,6 +283,7 @@ struct MediaSocketState {
     outbound_pending: VecDeque<OutboundMediaCommand>,
     canceled_playbacks: HashSet<String>,
     media_registry: SharedMediaRegistry,
+    conversation: Option<ConversationRuntime>,
     outbound_frame_count: usize,
     outbound_underrun_ticks: usize,
     last_outbound_frame_sent_at: Option<Instant>,
@@ -308,10 +311,20 @@ impl MediaSocketState {
             outbound_pending: VecDeque::new(),
             canceled_playbacks: HashSet::new(),
             media_registry,
+            conversation: None,
             outbound_frame_count: 0,
             outbound_underrun_ticks: 0,
             last_outbound_frame_sent_at: None,
         }
+    }
+
+    fn with_conversation(
+        media_registry: SharedMediaRegistry,
+        conversation: ConversationRuntime,
+    ) -> Self {
+        let mut state = Self::with_media_registry(media_registry);
+        state.conversation = Some(conversation);
+        state
     }
 }
 
@@ -320,8 +333,9 @@ pub async fn handle_socket(
     state: SharedState,
     asr: SharedAsrRegistry,
     media_registry: SharedMediaRegistry,
+    conversation: ConversationRuntime,
 ) {
-    let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
+    let mut media_state = MediaSocketState::with_conversation(media_registry.clone(), conversation);
     let mut silence_keepalive = time::interval(SILENCE_KEEPALIVE_INTERVAL);
     silence_keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -367,6 +381,7 @@ pub async fn handle_socket(
     ) {
         match asr_session.finish().await {
             Ok(events) => {
+                let conversation_events = conversation_events_from_transcripts(&events);
                 let _ = record_transcript_events(
                     &state,
                     call_id,
@@ -374,6 +389,14 @@ pub async fn handle_socket(
                     media_state.media_format.as_ref(),
                     media_state.capture.as_mut(),
                     events,
+                )
+                .await;
+                forward_conversation_events(
+                    &state,
+                    &media_state.media_registry,
+                    media_state.conversation.as_ref(),
+                    call_id,
+                    conversation_events,
                 )
                 .await;
             }
@@ -789,15 +812,7 @@ async fn handle_text(
             record_raw_capture(media_state.capture.as_mut(), text);
             let event: StopEvent = serde_json::from_str(text).context("parse stop event")?;
             media_state.silence_keepalive = false;
-            let result = finish_stream(
-                state,
-                &mut media_state.session,
-                media_state.gateway_call_id.as_deref(),
-                event.stream_id,
-                media_state.media_format.as_ref(),
-                media_state.capture.as_mut(),
-            )
-            .await;
+            let result = finish_stream(state, media_state, event.stream_id).await;
             finalize_capture(media_state).await;
             result
         }
@@ -976,7 +991,8 @@ async fn ingest_frame(
     let events = session
         .ingest(AudioBuf::<i16, 16_000, Mono>::new(samples))
         .await?;
-    if record_transcript_events(
+    let conversation_events = conversation_events_from_transcripts(&events);
+    let needs_reset = record_transcript_events(
         state,
         &gateway_call_id,
         Some(stream_id),
@@ -984,8 +1000,16 @@ async fn ingest_frame(
         media_state.capture.as_mut(),
         events,
     )
-    .await
-    {
+    .await;
+    forward_conversation_events(
+        state,
+        &media_state.media_registry,
+        media_state.conversation.as_ref(),
+        &gateway_call_id,
+        conversation_events,
+    )
+    .await;
+    if needs_reset {
         media_state.session = None;
         media_state.asr_gate.wait_for_next_speech();
         open_asr_session(
@@ -1241,24 +1265,14 @@ fn transcript_preview(text: &str) -> String {
 
 async fn finish_stream(
     state: &SharedState,
-    session: &mut Option<Box<dyn InboundAsrSession>>,
-    gateway_call_id: Option<&str>,
+    media_state: &mut MediaSocketState,
     stream_id: Option<String>,
-    media_format: Option<&MediaFormat>,
-    capture: Option<&mut MediaCapture>,
 ) -> anyhow::Result<()> {
-    finish_asr_session(
-        state,
-        session,
-        gateway_call_id,
-        stream_id,
-        media_format,
-        capture,
-    )
-    .await?;
+    let gateway_call_id = media_state.gateway_call_id.clone();
+    finish_asr_session(state, media_state, gateway_call_id.as_deref(), stream_id).await?;
     if let Some(call_id) = gateway_call_id {
         let mut guard = state.write().await;
-        if let Some(call) = guard.calls.get_mut(call_id) {
+        if let Some(call) = guard.calls.get_mut(&call_id) {
             call.status = CallStatus::Ended;
             call.push_timeline("media stream stopped");
         }
@@ -1268,25 +1282,65 @@ async fn finish_stream(
 
 async fn finish_asr_session(
     state: &SharedState,
-    session: &mut Option<Box<dyn InboundAsrSession>>,
+    media_state: &mut MediaSocketState,
     gateway_call_id: Option<&str>,
     stream_id: Option<String>,
-    media_format: Option<&MediaFormat>,
-    capture: Option<&mut MediaCapture>,
 ) -> anyhow::Result<()> {
-    if let (Some(call_id), Some(asr_session)) = (gateway_call_id, session.take()) {
+    if let (Some(call_id), Some(asr_session)) = (gateway_call_id, media_state.session.take()) {
         let events = asr_session.finish().await?;
+        let conversation_events = conversation_events_from_transcripts(&events);
         let _ = record_transcript_events(
             state,
             call_id,
             stream_id.as_deref(),
-            media_format,
-            capture,
+            media_state.media_format.as_ref(),
+            media_state.capture.as_mut(),
             events,
+        )
+        .await;
+        forward_conversation_events(
+            state,
+            &media_state.media_registry,
+            media_state.conversation.as_ref(),
+            call_id,
+            conversation_events,
         )
         .await;
     }
     Ok(())
+}
+
+fn conversation_events_from_transcripts(events: &[AsrTranscriptEvent]) -> Vec<TranscriptEvent> {
+    events
+        .iter()
+        .filter(|event| !event.is_suppressed())
+        .map(|event| event.event.clone())
+        .collect()
+}
+
+async fn forward_conversation_events(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    conversation: Option<&ConversationRuntime>,
+    gateway_call_id: &str,
+    events: Vec<TranscriptEvent>,
+) {
+    let Some(conversation) = conversation else {
+        return;
+    };
+    for event in events {
+        if let Err(error) = conversation::handle_transcript_event(
+            state,
+            media_registry,
+            conversation,
+            gateway_call_id,
+            event,
+        )
+        .await
+        {
+            log_media_error(state, Some(gateway_call_id), error).await;
+        }
+    }
 }
 
 async fn record_transcript_events(
@@ -2025,6 +2079,36 @@ mod tests {
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.transcripts.len(), 1);
         assert_eq!(call.transcripts[0].text, "hello there");
+    }
+
+    #[test]
+    fn conversation_events_from_transcripts_forwards_unsuppressed_partials_and_finals() {
+        let events = vec![
+            AsrTranscriptEvent::emit(TranscriptEvent::Partial {
+                text: "partial".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            }),
+            AsrTranscriptEvent::suppress(
+                TranscriptEvent::Final {
+                    text: "suppressed final".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                },
+                AsrTranscriptSuppressionReason::RepeatedTokenHallucination,
+                true,
+            ),
+            AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "forward final".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            }),
+        ];
+
+        let forwarded = conversation_events_from_transcripts(&events);
+
+        assert_eq!(forwarded.len(), 2);
+        assert!(!forwarded[0].is_final());
+        assert_eq!(forwarded[0].text(), "partial");
+        assert!(forwarded[1].is_final());
+        assert_eq!(forwarded[1].text(), "forward final");
     }
 
     #[tokio::test]

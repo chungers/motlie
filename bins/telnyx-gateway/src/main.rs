@@ -9,6 +9,7 @@ use motlie_telnyx_gateway::adapter::{
 };
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
+use motlie_telnyx_gateway::conversation::{default_conversation_handler, ConversationRuntime};
 use motlie_telnyx_gateway::media::SharedMediaRegistry;
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
 use motlie_telnyx_gateway::operator::script::run_repl_file;
@@ -97,11 +98,24 @@ async fn main() -> anyhow::Result<()> {
     let asr = build_live_asr_registry(&cli);
     let media = SharedMediaRegistry::default();
     let tts = build_tts_registry(&cli);
+    let conversation = ConversationRuntime::new(
+        telnyx.clone(),
+        tts.clone(),
+        default_conversation_handler(),
+        cli.conversation_smoke_test,
+    );
+    if cli.conversation_smoke_test {
+        state.write().await.log(
+            LogLevel::Info,
+            "conversation smoke-test enabled".to_string(),
+        );
+    }
     let services = AppServices {
         state: state.clone(),
         telnyx: telnyx.clone(),
         asr,
         media: media.clone(),
+        conversation: conversation.clone(),
     };
 
     let server = tokio::spawn(serve(cli.bind, services));
@@ -110,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
         telnyx,
         media,
         tts,
+        conversation,
         motlie_telnyx_gateway::adapter::LiveAsrBackend::default(),
     );
     let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
