@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
+    feature = "model-gemma4-12b",
+    feature = "model-gemma4-12b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
@@ -37,6 +39,7 @@ use thiserror::Error;
     feature = "model-qwen3-6-27b-gguf",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
+    feature = "model-gemma4-12b-gguf",
 ))]
 use motlie_model_llama_cpp::LlamaCppTextHandle;
 #[cfg(any(
@@ -44,7 +47,11 @@ use motlie_model_llama_cpp::LlamaCppTextHandle;
     feature = "model-qwen3-embedding-06b"
 ))]
 use motlie_model_mistral::MistralEmbeddingHandle;
-#[cfg(any(feature = "model-gemma4-e2b", feature = "model-gemma4-e4b"))]
+#[cfg(any(
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e4b",
+    feature = "model-gemma4-12b",
+))]
 use motlie_model_mistral::MistralMultimodalHandle;
 #[cfg(feature = "model-qwen3-4b")]
 use motlie_model_mistral::MistralTextHandle;
@@ -275,6 +282,8 @@ pub fn resolve_hf_gguf_snapshot(
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
+    feature = "model-gemma4-12b",
+    feature = "model-gemma4-12b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
@@ -322,6 +331,8 @@ pub enum CuratedBundle {
     Gemma4E2B,
     #[cfg(feature = "model-gemma4-e4b")]
     Gemma4E4B,
+    #[cfg(feature = "model-gemma4-12b")]
+    Gemma4_12B,
     #[cfg(feature = "model-qwen3-4b-gguf")]
     Qwen3_4B_Gguf,
     #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -330,6 +341,8 @@ pub enum CuratedBundle {
     Gemma4E2B_Gguf,
     #[cfg(feature = "model-gemma4-e4b-gguf")]
     Gemma4E4B_Gguf,
+    #[cfg(feature = "model-gemma4-12b-gguf")]
+    Gemma4_12B_Gguf,
     #[cfg(feature = "model-google-gemma-300m")]
     GoogleGemma300m,
     #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -360,6 +373,8 @@ impl CuratedBundle {
             Self::Gemma4E2B => chat::gemma4_e2b::descriptor(),
             #[cfg(feature = "model-gemma4-e4b")]
             Self::Gemma4E4B => chat::gemma4_e4b::descriptor(),
+            #[cfg(feature = "model-gemma4-12b")]
+            Self::Gemma4_12B => chat::gemma4_12b::descriptor(),
             #[cfg(feature = "model-qwen3-4b-gguf")]
             Self::Qwen3_4B_Gguf => chat::qwen3_4b_gguf::descriptor(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -368,6 +383,8 @@ impl CuratedBundle {
             Self::Gemma4E2B_Gguf => chat::gemma4_e2b_gguf::descriptor(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf => chat::gemma4_e4b_gguf::descriptor(),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf => chat::gemma4_12b_gguf::descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => embeddings::google_gemma_300m::descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -406,6 +423,10 @@ impl CuratedBundle {
             Self::Gemma4E4B => chat::gemma4_e4b::start(options)
                 .await
                 .map(CuratedHandle::Gemma4E4B),
+            #[cfg(feature = "model-gemma4-12b")]
+            Self::Gemma4_12B => chat::gemma4_12b::start(options)
+                .await
+                .map(CuratedHandle::Gemma4_12B),
             #[cfg(feature = "model-qwen3-4b-gguf")]
             Self::Qwen3_4B_Gguf => chat::qwen3_4b_gguf::start(options)
                 .await
@@ -422,6 +443,10 @@ impl CuratedBundle {
             Self::Gemma4E4B_Gguf => chat::gemma4_e4b_gguf::start(options)
                 .await
                 .map(CuratedHandle::Gemma4E4B_Gguf),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf => chat::gemma4_12b_gguf::start(options)
+                .await
+                .map(CuratedHandle::Gemma4_12B_Gguf),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => embeddings::google_gemma_300m::start(options)
                 .await
@@ -465,6 +490,8 @@ pub enum CuratedHandle {
     Gemma4E2B(MistralMultimodalHandle),
     #[cfg(feature = "model-gemma4-e4b")]
     Gemma4E4B(MistralMultimodalHandle),
+    #[cfg(feature = "model-gemma4-12b")]
+    Gemma4_12B(MistralMultimodalHandle),
     #[cfg(feature = "model-qwen3-4b-gguf")]
     Qwen3_4B_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -473,6 +500,8 @@ pub enum CuratedHandle {
     Gemma4E2B_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-gemma4-e4b-gguf")]
     Gemma4E4B_Gguf(LlamaCppTextHandle),
+    #[cfg(feature = "model-gemma4-12b-gguf")]
+    Gemma4_12B_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-google-gemma-300m")]
     GoogleGemma300m(MistralEmbeddingHandle),
     #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -504,6 +533,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B(handle) => handle.descriptor(),
             #[cfg(feature = "model-gemma4-e4b")]
             Self::Gemma4E4B(handle) => handle.descriptor(),
+            #[cfg(feature = "model-gemma4-12b")]
+            Self::Gemma4_12B(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-4b-gguf")]
             Self::Qwen3_4B_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -512,6 +543,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf(handle) => handle.descriptor(),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -539,6 +572,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B(handle) => handle.capabilities(),
             #[cfg(feature = "model-gemma4-e4b")]
             Self::Gemma4E4B(handle) => handle.capabilities(),
+            #[cfg(feature = "model-gemma4-12b")]
+            Self::Gemma4_12B(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-4b-gguf")]
             Self::Qwen3_4B_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -547,6 +582,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf(handle) => handle.capabilities(),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -574,6 +611,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-gemma4-e4b")]
             Self::Gemma4E4B(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-gemma4-12b")]
+            Self::Gemma4_12B(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-4b-gguf")]
             Self::Qwen3_4B_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -582,6 +621,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -609,6 +650,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B(_) => Ok(self),
             #[cfg(feature = "model-gemma4-e4b")]
             Self::Gemma4E4B(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-12b")]
+            Self::Gemma4_12B(_) => Ok(self),
             #[cfg(feature = "model-qwen3-4b-gguf")]
             Self::Qwen3_4B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -617,6 +660,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(_) => Ok(self),
             _ => Err(ModelError::UnsupportedCapability(CapabilityKind::Chat)),
         }
     }
@@ -634,6 +679,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(_) => Ok(self),
             _ => Err(ModelError::UnsupportedCapability(
                 CapabilityKind::Completion,
             )),
@@ -660,6 +707,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B(handle) => handle.shutdown().await,
             #[cfg(feature = "model-gemma4-e4b")]
             Self::Gemma4E4B(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-gemma4-12b")]
+            Self::Gemma4_12B(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-4b-gguf")]
             Self::Qwen3_4B_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -668,6 +717,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E2B_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -700,6 +751,8 @@ impl ChatModel for CuratedHandle {
             Self::Gemma4E2B(handle) => handle.generate(request).await,
             #[cfg(feature = "model-gemma4-e4b")]
             Self::Gemma4E4B(handle) => handle.generate(request).await,
+            #[cfg(feature = "model-gemma4-12b")]
+            Self::Gemma4_12B(handle) => handle.generate(request).await,
             #[cfg(feature = "model-qwen3-4b-gguf")]
             Self::Qwen3_4B_Gguf(handle) => handle.generate(request).await,
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -708,6 +761,8 @@ impl ChatModel for CuratedHandle {
             Self::Gemma4E2B_Gguf(handle) => handle.generate(request).await,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf(handle) => handle.generate(request).await,
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(handle) => handle.generate(request).await,
             _ => UnsupportedChat.generate(request).await,
         }
     }
@@ -731,6 +786,8 @@ impl CompletionModel for CuratedHandle {
             Self::Gemma4E2B_Gguf(handle) => handle.complete(request).await,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf(handle) => handle.complete(request).await,
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(handle) => handle.complete(request).await,
             _ => UnsupportedCompletion.complete(request).await,
         }
     }
@@ -976,6 +1033,8 @@ pub enum ModelSelector {
         feature = "model-gemma4-e2b",
         feature = "model-gemma4-e2b-gguf",
         feature = "model-gemma4-e4b",
+        feature = "model-gemma4-12b",
+        feature = "model-gemma4-12b-gguf",
         feature = "model-gemma4-e4b-gguf",
     ))]
     Chat(ChatModels),
@@ -995,6 +1054,8 @@ pub enum ModelSelector {
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
+    feature = "model-gemma4-12b",
+    feature = "model-gemma4-12b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
@@ -1023,6 +1084,8 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
+                feature = "model-gemma4-12b",
+                feature = "model-gemma4-12b-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => format!("chat:{}", model.as_str()),
@@ -1054,6 +1117,8 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
+                feature = "model-gemma4-12b",
+                feature = "model-gemma4-12b-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => model.bundle_id(),
@@ -1085,6 +1150,8 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
+                feature = "model-gemma4-12b",
+                feature = "model-gemma4-12b-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => model.descriptor(),
@@ -1116,6 +1183,8 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
+                feature = "model-gemma4-12b",
+                feature = "model-gemma4-12b-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => Ok(model.bundle()),
@@ -1137,6 +1206,8 @@ impl ModelSelector {
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
+    feature = "model-gemma4-12b",
+    feature = "model-gemma4-12b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
@@ -1206,6 +1277,18 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-gemma4-12b"))]
+            if raw == chat::GEMMA4_12B_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            #[cfg(not(feature = "model-gemma4-12b-gguf"))]
+            if raw == chat::GEMMA4_12B_GGUF_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-qwen3-4b"))]
             if raw == chat::QWEN3_4B_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
@@ -1231,6 +1314,8 @@ impl FromStr for ModelSelector {
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
+                feature = "model-gemma4-12b",
+                feature = "model-gemma4-12b-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             return Ok(Self::Chat(raw.parse()?));
@@ -1241,6 +1326,8 @@ impl FromStr for ModelSelector {
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
+                feature = "model-gemma4-12b",
+                feature = "model-gemma4-12b-gguf",
                 feature = "model-gemma4-e4b-gguf",
             )))]
             return Err(ModelsError::UnknownModelSelector {
@@ -1324,6 +1411,8 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "gemma4_e2b" => Some(CuratedBundle::Gemma4E2B),
         #[cfg(feature = "model-gemma4-e4b")]
         "gemma4_e4b" => Some(CuratedBundle::Gemma4E4B),
+        #[cfg(feature = "model-gemma4-12b")]
+        "gemma4_12b" => Some(CuratedBundle::Gemma4_12B),
         #[cfg(feature = "model-qwen3-4b-gguf")]
         "qwen3_4b_gguf" => Some(CuratedBundle::Qwen3_4B_Gguf),
         #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -1332,6 +1421,8 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "gemma4_e2b_gguf" => Some(CuratedBundle::Gemma4E2B_Gguf),
         #[cfg(feature = "model-gemma4-e4b-gguf")]
         "gemma4_e4b_gguf" => Some(CuratedBundle::Gemma4E4B_Gguf),
+        #[cfg(feature = "model-gemma4-12b-gguf")]
+        "gemma4_12b_gguf" => Some(CuratedBundle::Gemma4_12B_Gguf),
         #[cfg(feature = "model-google-gemma-300m")]
         "embeddinggemma_300m" => Some(CuratedBundle::GoogleGemma300m),
         #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -1368,6 +1459,10 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         ("gemma4_e4b", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
             Some(CuratedBundle::Gemma4E4B)
         }
+        #[cfg(feature = "model-gemma4-12b")]
+        ("gemma4_12b", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
+            Some(CuratedBundle::Gemma4_12B)
+        }
         #[cfg(feature = "model-qwen3-4b-gguf")]
         ("qwen3_4b", BackendKind::LlamaCpp, CheckpointFormat::Gguf) => {
             Some(CuratedBundle::Qwen3_4B_Gguf)
@@ -1383,6 +1478,10 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         #[cfg(feature = "model-gemma4-e4b-gguf")]
         ("gemma4_e4b", BackendKind::LlamaCpp, CheckpointFormat::Gguf) => {
             Some(CuratedBundle::Gemma4E4B_Gguf)
+        }
+        #[cfg(feature = "model-gemma4-12b-gguf")]
+        ("gemma4_12b", BackendKind::LlamaCpp, CheckpointFormat::Gguf) => {
+            Some(CuratedBundle::Gemma4_12B_Gguf)
         }
         #[cfg(feature = "model-google-gemma-300m")]
         ("embeddinggemma_300m", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
@@ -1446,6 +1545,8 @@ impl Catalog {
         chat::gemma4_e2b::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e4b")]
         chat::gemma4_e4b::register(&mut catalog);
+        #[cfg(feature = "model-gemma4-12b")]
+        chat::gemma4_12b::register(&mut catalog);
         #[cfg(feature = "model-qwen3-4b-gguf")]
         chat::qwen3_4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-qwen3-6-27b-gguf")]
@@ -1454,6 +1555,8 @@ impl Catalog {
         chat::gemma4_e2b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e4b-gguf")]
         chat::gemma4_e4b_gguf::register(&mut catalog);
+        #[cfg(feature = "model-gemma4-12b-gguf")]
+        chat::gemma4_12b_gguf::register(&mut catalog);
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-cpp")]
@@ -1789,9 +1892,11 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1810,9 +1915,11 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1831,9 +1938,11 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_6_27b_gguf");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Chat)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Chat)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -2150,9 +2259,11 @@ mod tests {
         #[cfg(feature = "model-whisper-base-en")]
         {
             let descriptor = crate::asr::whisper_base_en::descriptor();
-            assert!(descriptor
-                .capabilities
-                .supports(CapabilityKind::Transcription));
+            assert!(
+                descriptor
+                    .capabilities
+                    .supports(CapabilityKind::Transcription)
+            );
             assert!(!descriptor.capabilities.supports(CapabilityKind::VoiceClone));
             assert_eq!(
                 descriptor.capabilities.descriptors(),

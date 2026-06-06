@@ -7,8 +7,10 @@
 ///
 /// Options:
 ///   --iterations=N         Number of measured iterations (default: 5)
-///   --precision=q4|q8|f32  Quantization (default: q4)
-///   --model=qwen|gemma     Model selection (default: qwen)
+///   --precision=q4|q8|f32|f16
+///                          Quantization (default: q4; GGUF uses f16 for no quantization)
+///   --model=qwen|gemma|gemma4-12b|gemma4-12b-gguf
+///                          Model selection (default: qwen; `gemma` is Gemma 4 E2B)
 ///   --input=FILE           Read prompt from file instead of args
 ///
 /// Environment variables:
@@ -19,7 +21,9 @@ use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, QuantizationBits,
     StartOptions,
 };
-use motlie_models::{CuratedBundle, default_artifact_root, quantization_label_isq};
+use motlie_models::{
+    CuratedBundle, default_artifact_root, quantization_label_gguf, quantization_label_isq,
+};
 use std::time::Instant;
 
 #[tokio::main]
@@ -56,7 +60,7 @@ async fn main() -> Result<()> {
     let quantization = match precision.as_deref() {
         Some("q4") | None => Some(QuantizationBits::Four),
         Some("q8") => Some(QuantizationBits::Eight),
-        Some("f32") => None,
+        Some("f32") | Some("f16") => None,
         Some(other) => bail!("unknown precision `{other}`"),
     };
 
@@ -68,9 +72,16 @@ async fn main() -> Result<()> {
     let prompt_words = prompt.split_whitespace().count();
     let est_tokens = prompt_words * 13 / 10;
 
+    let quantization_label = if matches!(model_name.as_str(), "gemma4-12b-gguf" | "gemma4_12b_gguf")
+    {
+        quantization_label_gguf(quantization)
+    } else {
+        quantization_label_isq(quantization)
+    };
+
     println!("=== bench_chat ===");
     println!("model: {model_name}");
-    println!("quantization: {}", quantization_label_isq(quantization));
+    println!("quantization: {quantization_label}");
     println!("iterations: {iterations}");
     println!("force-cpu: {force_cpu}");
     let pa_context = std::env::var("MOTLIE_PAGED_ATTN_CONTEXT").ok();
@@ -98,7 +109,23 @@ async fn main() -> Result<()> {
             #[cfg(not(feature = "model-gemma4-e2b"))]
             bail!("model-gemma4-e2b feature not enabled")
         }
-        other => bail!("unknown model `{other}` — use qwen or gemma"),
+        "gemma4-12b" | "gemma4_12b" => {
+            #[cfg(feature = "model-gemma4-12b")]
+            {
+                motlie_models::chat::gemma4_12b::bundle()
+            }
+            #[cfg(not(feature = "model-gemma4-12b"))]
+            bail!("model-gemma4-12b feature not enabled")
+        }
+        "gemma4-12b-gguf" | "gemma4_12b_gguf" => {
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            {
+                motlie_models::chat::gemma4_12b_gguf::bundle()
+            }
+            #[cfg(not(feature = "model-gemma4-12b-gguf"))]
+            bail!("model-gemma4-12b-gguf feature not enabled")
+        }
+        other => bail!("unknown model `{other}` — use qwen, gemma, gemma4-12b, or gemma4-12b-gguf"),
     };
 
     // Startup

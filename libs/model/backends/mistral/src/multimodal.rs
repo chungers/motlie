@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use mistralrs::ModelBuilder;
+use mistralrs::{MultimodalLoaderType, MultimodalModelBuilder};
 use motlie_model::{
     BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, GenerationParams,
     ModelError, QuantizationBits, QuantizationSupport, StartOptions, UnsupportedCompletion,
@@ -8,8 +8,8 @@ use motlie_model::{
 };
 
 use crate::common::{
-    MistralMessageParts, configure_artifact_policy, map_quantization_bits,
-    multimodal_message_parts, paged_attn_context_size, should_force_cpu,
+    configure_artifact_policy, map_quantization_bits, multimodal_message_parts,
+    paged_attn_context_size, should_force_cpu, MistralMessageParts,
 };
 use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 
@@ -77,6 +77,29 @@ impl MistralMultimodalSpec {
                     QuantizationBits::Eight,
                 ])
             }),
+            recommended_generation_params: GenerationParams {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
+        }
+    }
+
+    pub fn gemma4_12b() -> Self {
+        Self {
+            id: BundleId::new("gemma4_12b"),
+            display_name: "Gemma 4 12B-it",
+            model_id: "google/gemma-4-12B-it",
+            arch: MistralMultimodalArch::Gemma4,
+            capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
+            // @gemma4-cdx 2026-06-04 16:08 PDT: keep the official 12B
+            // safetensors bundle full precision by default; ISQ Q4/Q8 remain
+            // explicit operator overrides through StartOptions.quantization.
+            quantization: QuantizationSupport::without_recommended([
+                QuantizationBits::Four,
+                QuantizationBits::Eight,
+            ]),
             recommended_generation_params: GenerationParams {
                 temperature: Some(1.0),
                 top_p: Some(0.95),
@@ -179,9 +202,15 @@ async fn build_multimodal_model(
         hf_cache_root = configured.hf_cache_root;
     }
 
-    // Use the auto-detecting builder here. Upstream's Gemma 4 multimodal examples use
-    // `ModelBuilder`, and that path preserves multimodal chat-template discovery.
-    let mut builder = ModelBuilder::new(model_target);
+    // @gemma4-cdx 2026-06-04 17:47 PDT: force the explicit Gemma4
+    // multimodal loader because Gemma 4 12B uses the newer HF architecture
+    // name `Gemma4UnifiedForConditionalGeneration`, which upstream auto-detect
+    // does not map yet in mistral.rs v0.8.3.
+    let mut builder = match _arch {
+        MistralMultimodalArch::Gemma4 => {
+            MultimodalModelBuilder::new(model_target).with_loader_type(MultimodalLoaderType::Gemma4)
+        }
+    };
     if let Some(bits) = resolved_quantization {
         builder = builder.with_auto_isq(map_quantization_bits(bits)?);
     }
@@ -262,6 +291,28 @@ mod tests {
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Vision));
         assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
+    }
+
+    #[test]
+    fn gemma4_12b_spec_defaults_to_full_precision() {
+        let spec = MistralMultimodalSpec::gemma4_12b();
+
+        assert_eq!(spec.id.as_str(), "gemma4_12b");
+        assert_eq!(spec.display_name, "Gemma 4 12B-it");
+        assert_eq!(spec.model_id, "google/gemma-4-12B-it");
+        assert_eq!(spec.quantization.recommended(), None);
+        assert!(spec.quantization.supports(QuantizationBits::Four));
+        assert!(spec.quantization.supports(QuantizationBits::Eight));
+        assert_eq!(spec.recommended_generation_params.temperature, Some(1.0));
+        assert_eq!(spec.recommended_generation_params.top_p, Some(0.95));
+        assert_eq!(
+            spec.recommended_system_prompt,
+            Some("You are Gemma, a helpful assistant.")
+        );
+        assert!(spec.capabilities.supports(CapabilityKind::Chat));
+        assert!(spec.capabilities.supports(CapabilityKind::Vision));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
+        assert!(!spec.capabilities.supports(CapabilityKind::Completion));
     }
 
     #[test]

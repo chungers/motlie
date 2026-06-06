@@ -1,16 +1,20 @@
 # `motlie-models` `chat_multimodal_gemma4` Example
 
-This example demonstrates the single Gemma 4 E2B-it multimodal chat flow for this bundle. It supports both:
+This example demonstrates the Gemma 4 multimodal chat flow for the compiled
+curated Gemma 4 variants: E2B, E4B, and 12B. It supports both:
 
 1. pure local-only startup using pre-downloaded curated artifacts
 2. an optional in-example download step via `--download-artifacts`
 
+> 2026-06-04 21:38 PDT @gemma4-cdx: added the `--model` selector so the same
+> live example can exercise `gemma4-e2b`, `gemma4-e4b`, or `gemma4-12b`.
+
 ## What It Demonstrates
 
-1. Direct curated enum selection through `ChatModels::Gemma4E2B`
-2. ISQ quantization control (Q4 default, Q8, or F32)
+1. Direct curated enum selection through the Gemma 4 `ChatModels` variants
+2. ISQ quantization control using each bundle's recommendation, with Q4, Q8, or F32 overrides
 3. Descriptor/capability introspection showing `Chat` + `Vision` + `ToolUse`
-4. Catalog self-check showing exactly one compiled curated bundle
+4. Catalog self-check for the selected compiled curated bundle
 5. Optional curated artifact download via `--download-artifacts`
 6. Local-only startup through `ArtifactPolicy::LocalOnly`
 7. Text-only chat through the multimodal runtime path
@@ -38,10 +42,17 @@ cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --e
 
 ## Step 2: Run the Example
 
-Default path (direct enum, text-only, ISQ Q4, using existing local artifacts only):
+Default path for E2B (direct enum, text-only, ISQ Q4, using existing local artifacts only):
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- "What is Rust's ownership model?"
+```
+
+Select a specific Gemma 4 variant with `--model`. When multiple Gemma 4
+features are compiled in, the default is E2B, then E4B, then 12B.
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b,model-gemma4-e4b,model-gemma4-12b --example chat_multimodal_gemma4 -- --model=gemma4-12b "What is Rust's ownership model?"
 ```
 
 Alternate curated artifact root:
@@ -62,6 +73,14 @@ Full precision (no quantization):
 cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- --precision=f32 "What is Rust's ownership model?"
 ```
 
+Gemma 4 12B defaults to full precision. Use a full-model host such as DGX Spark
+or another CUDA/unified-memory target for performance validation; local
+CPU-only startup is not representative.
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-12b --example chat_multimodal_gemma4 -- --model=gemma4-12b --tool-demo-only "What is Rust?"
+```
+
 Tool-calling smoke only:
 
 ```sh
@@ -75,11 +94,11 @@ combine a plain Rust explanation with a weather-derived average temperature.
 
 ## Preconditions
 
-- Either pre-downloaded Gemma 4 E2B-it artifacts in the curated artifact root, `--artifact-root /path/to/hf-cache`, or `--download-artifacts` plus the required Hugging Face access in the current environment
+- Either pre-downloaded Gemma 4 artifacts for the selected variant in the curated artifact root, `--artifact-root /path/to/hf-cache`, or `--download-artifacts` plus the required Hugging Face access in the current environment
 - Sufficient memory for the chosen precision
-- The example must be built with only the Gemma 4 bundle enabled, which is why the commands above use `--no-default-features --features model-gemma4-e2b`
+- The example must be built with at least one Gemma 4 feature enabled: `model-gemma4-e2b`, `model-gemma4-e4b`, or `model-gemma4-12b`
 
 ## Source
 
 - Example entrypoint: [main.rs](main.rs)
-- Bundle definition: `libs/models/src/chat/gemma4_e2b.rs`
+- Bundle definitions: `libs/models/src/chat/gemma4_e2b.rs`, `libs/models/src/chat/gemma4_e4b.rs`, `libs/models/src/chat/gemma4_12b.rs`

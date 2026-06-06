@@ -553,6 +553,7 @@ pub(crate) fn motlie_tool_spec_to_mistral(
             description: Some(spec.description.clone()),
             name: spec.name.as_str().to_string(),
             parameters: Some(parameters),
+            strict: None,
         },
     })
 }
@@ -832,7 +833,7 @@ fn aggregate_tokens_per_second(tokens: u64, total_time_msec: u128) -> Option<u64
 }
 
 fn current_resident_memory_bytes() -> Option<u64> {
-    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
 
     let pid = get_current_pid().ok()?;
     let mut system = System::new();

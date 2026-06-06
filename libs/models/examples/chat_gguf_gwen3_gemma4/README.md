@@ -6,13 +6,14 @@ GGUF-quantized weights. It supports switching between these models at runtime:
 - **Qwen3 4B** (default) — `qwen/qwen3_4b_gguf`
 - **Gemma 4 E2B-it** — `google/gemma4_e2b_gguf`
 - **Gemma 4 E4B-it** — `google/gemma4_e4b_gguf`
+- **Gemma 4 12B-it** — `google/gemma4_12b_gguf`
 
 ## Weight Format Compatibility
 
-| Backend | Weight format | Qwen3-4B repo | Gemma4 E2B repo | Gemma4 E4B repo |
-|---------|---------------|---------------|------------------|------------------|
-| **mistral.rs** (`chat_mistral_qwen3` / `chat_multimodal_gemma4`) | safetensors | `Qwen/Qwen3-4B` | `google/gemma-4-E2B-it` | `google/gemma-4-E4B-it` |
-| **llama.cpp** (`chat_gguf_gwen3_gemma4`) | GGUF | `Qwen/Qwen3-4B-GGUF` | `unsloth/gemma-4-E2B-it-GGUF` | `unsloth/gemma-4-E4B-it-GGUF` |
+| Backend | Weight format | Qwen3-4B repo | Gemma4 E2B repo | Gemma4 E4B repo | Gemma4 12B repo |
+|---------|---------------|---------------|------------------|------------------|------------------|
+| **mistral.rs** (`chat_mistral_qwen3` / `chat_multimodal_gemma4`) | safetensors | `Qwen/Qwen3-4B` | `google/gemma-4-E2B-it` | `google/gemma-4-E4B-it` | `google/gemma-4-12B-it` |
+| **llama.cpp** (`chat_gguf_gwen3_gemma4`) | GGUF | `Qwen/Qwen3-4B-GGUF` | `unsloth/gemma-4-E2B-it-GGUF` | `unsloth/gemma-4-E4B-it-GGUF` | `unsloth/gemma-4-12b-it-GGUF` |
 
 The two weight formats are **not interchangeable**. Each backend requires its
 own artifact set. However, both target the identical upstream model
@@ -29,13 +30,13 @@ quantization levels.
 | `f16` / `f32` | F32 | F16 |
 
 When `--precision` is omitted, the example uses each GGUF spec's recommended
-quantization. Qwen3 4B and Gemma 4 E2B default to Q4_K_M. Gemma 4 E4B defaults
-to Q8_0.
+quantization. Qwen3 4B, Gemma 4 E2B, and Gemma 4 12B default to Q4_K_M.
+Gemma 4 E4B defaults to Q8_0.
 
 ## What It Demonstrates
 
 1. Direct curated enum selection through `ChatModels::Qwen3_4B_Gguf`
-2. Runtime model switching through `--chat=google/gemma4_e2b_gguf` or `--chat=google/gemma4_e4b_gguf`
+2. Runtime model switching through `--chat=google/gemma4_e2b_gguf`, `--chat=google/gemma4_e4b_gguf`, or `--chat=google/gemma4_12b_gguf`
 3. GGUF quantization control from curated spec defaults, plus `--precision=q4|q5|q8|f16`
 4. Descriptor/capability introspection showing each selected bundle's advertised capabilities
 5. Optional curated artifact download via `--download-artifacts`
@@ -81,6 +82,15 @@ cargo run -p motlie-models --no-default-features --features model-gemma4-e4b-ggu
   --bin motlie-models-download -- gemma4_e4b_gguf
 ```
 
+For Gemma 4 12B, the curated GGUF download includes the exact root Q4_K_M and
+Q8_0 files from `unsloth/gemma-4-12b-it-GGUF`. It intentionally excludes MTP
+drafter files, BF16, and multimodal projector files:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-12b-gguf \
+  --bin motlie-models-download -- gemma4_12b_gguf
+```
+
 ## Step 2: Run the Example
 
 Default path (Qwen3 4B, GGUF Q4_K_M, using existing local artifacts):
@@ -109,6 +119,17 @@ cargo run -p motlie-models --no-default-features --features model-gemma4-e4b-ggu
   --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_e4b_gguf \
   --system="You are Gemma, a helpful assistant." \
   --assistant="I will keep the answer compact." \
+  --thinking=auto \
+  "Summarize ownership in one paragraph"
+```
+
+Switch to Gemma 4 12B GGUF. With no `--precision` flag this uses the 12B
+spec's recommended Q4_K_M artifact; pass `--precision=q8` to select Q8_0:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-12b-gguf \
+  --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_12b_gguf \
+  --system="You are Gemma, a helpful assistant." \
   --thinking=auto \
   "Summarize ownership in one paragraph"
 ```
@@ -183,6 +204,23 @@ cargo run -p motlie-models --no-default-features \
   "What is Rust? Then calculate the average temperature for Seattle, Portland, and San Francisco."
 ```
 
+Tool-calling loop (Gemma 4 12B GGUF):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-12b-gguf \
+  --bin motlie-models-download -- gemma4_12b_gguf
+
+cargo run -p motlie-models --no-default-features \
+  --features model-gemma4-12b-gguf \
+  --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_12b_gguf --tool-demo-only \
+  "What is Rust? Then calculate the average temperature for Seattle, Portland, and San Francisco."
+```
+
+For Gemma 4 12B GGUF, the example keeps normal chat on the model's recommended
+`ThinkingMode::Auto`, but defaults the tool demo to `ThinkingMode::Disabled`.
+@gemma4-cdx validated this on 2026-06-05 16:59 PDT after `Auto` consumed the
+short tool-demo budget with reasoning text and produced no tool call.
+
 The tool demo registers `get_weather` and `evaluate_math_expression`, sends
 their generated schemas through the llama.cpp OpenAI-compatible chat-template
 path, executes model-requested tool calls through static `ToolList` dispatch, appends each
@@ -193,7 +231,8 @@ weather-derived average temperature.
 
 - Pre-downloaded GGUF artifacts in the curated artifact root, or `--download-artifacts`
 - Sufficient memory for the chosen precision and model size
-- At least one GGUF chat feature: `model-qwen3-4b-gguf`, `model-gemma4-e2b-gguf`, `model-gemma4-e4b-gguf`, or `model-qwen3-6-27b-gguf`
+- At least one GGUF chat feature: `model-qwen3-4b-gguf`, `model-gemma4-e2b-gguf`, `model-gemma4-e4b-gguf`, `model-gemma4-12b-gguf`, or `model-qwen3-6-27b-gguf`
+- llama.cpp build prerequisites: CMake plus clang/libclang headers visible to bindgen
 
 Validated tool-use smoke:
 
@@ -217,10 +256,13 @@ tool-result: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted"
 tool-final-response: The average current temperature for Seattle, Portland, and San Francisco is 68.0 degrees Fahrenheit.
 ```
 
+- `gemma4_12b_gguf` Q4_K_M/Q8_0 wiring was added by @gemma4-cdx on 2026-06-04 22:58 PDT. @gemma4-cdx fixed GGUF-only compile wiring on 2026-06-05 16:11 PDT; `--lib`, this example, and `bench_chat` pass `cargo check` with local CMake plus bindgen include paths. @gemma4-cdx tightened artifact rules and completed the corrected Q4/Q8 download on 2026-06-05 16:36 PDT; Q4 startup and one-word warmup passed locally with startup 14.5s, warmup 15.4s, final RSS 11.3 GiB, peak RSS 22.1 GiB, and no swaps. @gemma4-cdx fixed the 12B GGUF tool-demo default on 2026-06-05 16:59 PDT and validated the default Q4 `--tool-demo-only` path: startup 7.0s, `tool-demo-thinking: Disabled`, four expected tool calls, clean final response, final RSS 12.5 GiB, and peak resident bytes 24.55 GB.
+
 ## Source
 
 - Example entrypoint: [main.rs](main.rs)
 - Qwen3 GGUF bundle: `libs/models/src/chat/qwen3_4b_gguf.rs`
 - Gemma4 GGUF bundle: `libs/models/src/chat/gemma4_e2b_gguf.rs`
 - Gemma4 E4B GGUF bundle: `libs/models/src/chat/gemma4_e4b_gguf.rs`
+- Gemma4 12B GGUF bundle: `libs/models/src/chat/gemma4_12b_gguf.rs`
 - llama.cpp backend: `libs/model/backends/llama_cpp/`

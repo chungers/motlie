@@ -1,10 +1,22 @@
-use anyhow::{Context, Result, bail, ensure};
+#[cfg(not(any(
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e4b",
+    feature = "model-gemma4-12b"
+)))]
+compile_error!(
+    "chat_multimodal_gemma4 requires at least one of model-gemma4-e2b, model-gemma4-e4b, or model-gemma4-12b"
+);
+
+use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart,
     QuantizationBits, StartOptions,
 };
 use motlie_model_mistral::MistralMultimodalSpec;
-use motlie_models::{chat::ChatModels, default_artifact_root, quantization_label_isq};
+use motlie_models::{
+    chat::ChatModels, default_artifact_root, quantization_label_isq, BundleDescriptor,
+    CuratedBundle,
+};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -16,6 +28,7 @@ mod tool_demo_support;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut precision = None;
+    let mut model_name = None;
     let mut image_path = None;
     let mut artifact_root = None;
     let mut download_artifacts = false;
@@ -39,6 +52,10 @@ async fn main() -> Result<()> {
             ));
         } else if let Some(path) = arg.strip_prefix("--artifact-root=") {
             artifact_root = Some(PathBuf::from(path));
+        } else if arg == "--model" {
+            model_name = Some(args.next().context("--model requires a model name")?);
+        } else if let Some(model) = arg.strip_prefix("--model=") {
+            model_name = Some(model.to_owned());
         } else if let Some(p) = arg.strip_prefix("--precision=") {
             precision = Some(p.to_owned());
         } else if let Some(path) = arg.strip_prefix("--image=") {
@@ -51,31 +68,29 @@ async fn main() -> Result<()> {
     let input = input_parts.join(" ");
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- \
-             [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
+            "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b[,model-gemma4-e4b,model-gemma4-12b] --example chat_multimodal_gemma4 -- \
+             [--model=gemma4-e2b|gemma4-e4b|gemma4-12b] [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
         );
     }
 
-    let quantization = match precision.as_deref() {
-        Some("q4") | None => Some(QuantizationBits::Four),
-        Some("q8") => Some(QuantizationBits::Eight),
-        Some("f32") => None,
-        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
-    };
-
-    let model = ChatModels::Gemma4E2B;
-    let selector_label = model.to_string();
-    let bundle_id = model.bundle_id();
-    let descriptor = model.descriptor();
-    let bundle = model.bundle();
+    let selected_model = select_model(model_name.as_deref())?;
+    let quantization = resolve_quantization(
+        precision.as_deref(),
+        selected_model.recommended_quantization,
+    )?;
+    let selector_label = selected_model.selector_label.clone();
+    let bundle_id = selected_model.bundle_id.clone();
+    let descriptor = selected_model.descriptor.clone();
+    let bundle = selected_model.bundle;
 
     let artifact_root = artifact_root.unwrap_or_else(default_artifact_root);
     let catalog = motlie_models::Catalog::with_defaults();
 
     println!("catalog-entry-count: {}", catalog.len());
     ensure!(
-        catalog.len() == 1,
-        "chat_multimodal_gemma4 must be built with exactly one curated bundle feature enabled"
+        catalog.bundle(&bundle_id).is_some(),
+        "selected model `{selector_label}` is not registered in the curated catalog; available model flags: {}",
+        available_model_names().join(", ")
     );
 
     println!("bundle-selector: {selector_label}");
@@ -135,7 +150,7 @@ async fn main() -> Result<()> {
     support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
     let chat = handle.chat().context("gemma4 bundle should expose chat")?;
-    let generation_defaults = MistralMultimodalSpec::gemma4_e2b().recommended_generation_params;
+    let generation_defaults = selected_model.generation_defaults.clone();
 
     if tool_demo_only {
         tool_demo_support::run_tool_demo_with_options(
@@ -257,6 +272,131 @@ async fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+struct SelectedGemmaModel {
+    selector_label: String,
+    bundle_id: motlie_model::BundleId,
+    descriptor: BundleDescriptor,
+    bundle: CuratedBundle,
+    generation_defaults: motlie_model::GenerationParams,
+    recommended_quantization: Option<QuantizationBits>,
+}
+
+fn select_model(model_name: Option<&str>) -> Result<SelectedGemmaModel> {
+    let default_name;
+    let requested = if let Some(model_name) = model_name {
+        model_name
+    } else {
+        default_name = default_model_name()
+            .context("no Gemma 4 model feature is enabled for chat_multimodal_gemma4")?;
+        default_name
+    };
+    let normalized = requested.to_ascii_lowercase().replace('_', "-");
+
+    match normalized.as_str() {
+        "e2b" | "gemma4-e2b" | "google/gemma4-e2b" => {
+            #[cfg(feature = "model-gemma4-e2b")]
+            {
+                return Ok(selected_from_chat_model(
+                    ChatModels::Gemma4E2B,
+                    MistralMultimodalSpec::gemma4_e2b(),
+                ));
+            }
+            #[cfg(not(feature = "model-gemma4-e2b"))]
+            bail_model_feature_disabled(requested, "model-gemma4-e2b")
+        }
+        "e4b" | "gemma4-e4b" | "google/gemma4-e4b" => {
+            #[cfg(feature = "model-gemma4-e4b")]
+            {
+                return Ok(selected_from_chat_model(
+                    ChatModels::Gemma4E4B,
+                    MistralMultimodalSpec::gemma4_e4b(),
+                ));
+            }
+            #[cfg(not(feature = "model-gemma4-e4b"))]
+            bail_model_feature_disabled(requested, "model-gemma4-e4b")
+        }
+        "12b" | "gemma4-12b" | "google/gemma4-12b" => {
+            #[cfg(feature = "model-gemma4-12b")]
+            {
+                return Ok(selected_from_chat_model(
+                    ChatModels::Gemma4_12B,
+                    MistralMultimodalSpec::gemma4_12b(),
+                ));
+            }
+            #[cfg(not(feature = "model-gemma4-12b"))]
+            bail_model_feature_disabled(requested, "model-gemma4-12b")
+        }
+        other => bail!(
+            "unknown Gemma 4 model `{other}`; use one of: {}",
+            available_model_names().join(", ")
+        ),
+    }
+}
+
+fn selected_from_chat_model(model: ChatModels, spec: MistralMultimodalSpec) -> SelectedGemmaModel {
+    SelectedGemmaModel {
+        selector_label: model.to_string(),
+        bundle_id: model.bundle_id(),
+        descriptor: model.descriptor(),
+        bundle: model.bundle(),
+        generation_defaults: spec.recommended_generation_params,
+        recommended_quantization: spec.quantization.recommended(),
+    }
+}
+
+fn resolve_quantization(
+    precision: Option<&str>,
+    recommended: Option<QuantizationBits>,
+) -> Result<Option<QuantizationBits>> {
+    match precision {
+        Some("q4") => Ok(Some(QuantizationBits::Four)),
+        Some("q8") => Ok(Some(QuantizationBits::Eight)),
+        Some("f32") | Some("full") | Some("none") => Ok(None),
+        None => Ok(recommended),
+        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
+    }
+}
+
+fn default_model_name() -> Option<&'static str> {
+    #[cfg(feature = "model-gemma4-e2b")]
+    {
+        return Some("gemma4-e2b");
+    }
+    #[cfg(all(not(feature = "model-gemma4-e2b"), feature = "model-gemma4-e4b"))]
+    {
+        return Some("gemma4-e4b");
+    }
+    #[cfg(all(
+        not(feature = "model-gemma4-e2b"),
+        not(feature = "model-gemma4-e4b"),
+        feature = "model-gemma4-12b"
+    ))]
+    {
+        return Some("gemma4-12b");
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+fn available_model_names() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    #[cfg(feature = "model-gemma4-e2b")]
+    names.push("gemma4-e2b");
+    #[cfg(feature = "model-gemma4-e4b")]
+    names.push("gemma4-e4b");
+    #[cfg(feature = "model-gemma4-12b")]
+    names.push("gemma4-12b");
+    names
+}
+
+#[allow(dead_code)]
+fn bail_model_feature_disabled(requested: &str, feature: &str) -> Result<SelectedGemmaModel> {
+    bail!(
+        "requested model `{requested}` requires `{feature}`; enabled model flags: {}",
+        available_model_names().join(", ")
+    )
 }
 
 fn infer_media_type(path: &str) -> Result<&'static str> {
