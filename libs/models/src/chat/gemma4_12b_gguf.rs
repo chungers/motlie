@@ -40,7 +40,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 ///
 /// ## Weight compatibility with mistral.rs
 ///
-/// The `gemma4_12b` bundle remains the primary official-weight path using
+/// The `gemma4_12b` bundle is the official full-model curated variant using
 /// safetensors from `google/gemma-4-12B-it` through `mistral.rs`. This bundle
 /// uses **GGUF** weights from `unsloth/gemma-4-12b-it-GGUF` through
 /// `llama.cpp`. The two artifact sets are **not interchangeable**; each
