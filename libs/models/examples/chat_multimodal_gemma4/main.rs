@@ -2,24 +2,16 @@ fn main() -> anyhow::Result<()> {
     gemma4_multimodal_example::run()
 }
 
-#[cfg(not(any(
-    feature = "model-gemma4-e2b",
-    feature = "model-gemma4-e4b",
-    feature = "model-gemma4-12b",
-)))]
+#[cfg(not(any(feature = "model-gemma4-e2b", feature = "model-gemma4-e4b",)))]
 mod gemma4_multimodal_example {
     pub fn run() -> anyhow::Result<()> {
         anyhow::bail!(
-            "enable at least one Gemma 4 multimodal feature: model-gemma4-e2b, model-gemma4-e4b, or model-gemma4-12b"
+            "enable at least one Gemma 4 multimodal feature: model-gemma4-e2b or model-gemma4-e4b"
         )
     }
 }
 
-#[cfg(any(
-    feature = "model-gemma4-e2b",
-    feature = "model-gemma4-e4b",
-    feature = "model-gemma4-12b",
-))]
+#[cfg(any(feature = "model-gemma4-e2b", feature = "model-gemma4-e4b",))]
 mod gemma4_multimodal_example {
 
     use anyhow::{Context, Result, bail, ensure};
@@ -85,8 +77,8 @@ mod gemma4_multimodal_example {
         let input = input_parts.join(" ");
         if input.trim().is_empty() {
             bail!(
-                "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b[,model-gemma4-e4b,model-gemma4-12b] --example chat_multimodal_gemma4 -- \
-             [--model=gemma4-e2b|gemma4-e4b|gemma4-12b] [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
+                "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b[,model-gemma4-e4b] --example chat_multimodal_gemma4 -- \
+             [--model=gemma4-e2b|gemma4-e4b] [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
             );
         }
 
@@ -343,17 +335,6 @@ mod gemma4_multimodal_example {
                 #[cfg(not(feature = "model-gemma4-e4b"))]
                 bail_model_feature_disabled(requested, "model-gemma4-e4b")
             }
-            "12b" | "gemma4-12b" | "google/gemma4-12b" => {
-                #[cfg(feature = "model-gemma4-12b")]
-                {
-                    Ok(selected_from_chat_model(
-                        ChatModels::Gemma4_12B,
-                        MistralMultimodalSpec::gemma4_12b(),
-                    ))
-                }
-                #[cfg(not(feature = "model-gemma4-12b"))]
-                bail_model_feature_disabled(requested, "model-gemma4-12b")
-            }
             other => bail!(
                 "unknown Gemma 4 model `{other}`; use one of: {}",
                 available_model_names().join(", ")
@@ -397,14 +378,6 @@ mod gemma4_multimodal_example {
         {
             return Some("gemma4-e4b");
         }
-        #[cfg(all(
-            not(feature = "model-gemma4-e2b"),
-            not(feature = "model-gemma4-e4b"),
-            feature = "model-gemma4-12b"
-        ))]
-        {
-            return Some("gemma4-12b");
-        }
         #[allow(unreachable_code)]
         None
     }
@@ -415,8 +388,6 @@ mod gemma4_multimodal_example {
             "gemma4-e2b",
             #[cfg(feature = "model-gemma4-e4b")]
             "gemma4-e4b",
-            #[cfg(feature = "model-gemma4-12b")]
-            "gemma4-12b",
         ]
     }
 

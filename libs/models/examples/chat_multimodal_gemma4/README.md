@@ -1,13 +1,13 @@
 # `motlie-models` `chat_multimodal_gemma4` Example
 
 This example demonstrates the Gemma 4 multimodal chat flow for the compiled
-curated Gemma 4 variants: E2B, E4B, and 12B. It supports both:
+curated Gemma 4 safetensors variants: E2B and E4B. It supports both:
 
 1. pure local-only startup using pre-downloaded curated artifacts
 2. an optional in-example download step via `--download-artifacts`
 
 > 2026-06-04 21:38 PDT @gemma4-cdx: added the `--model` selector so the same
-> live example can exercise `gemma4-e2b`, `gemma4-e4b`, or `gemma4-12b`.
+> live example can exercise `gemma4-e2b` or `gemma4-e4b`.
 
 ## What It Demonstrates
 
@@ -49,10 +49,10 @@ cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --e
 ```
 
 Select a specific Gemma 4 variant with `--model`. When multiple Gemma 4
-features are compiled in, the default is E2B, then E4B, then 12B.
+features are compiled in, the default is E2B, then E4B.
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b,model-gemma4-e4b,model-gemma4-12b --example chat_multimodal_gemma4 -- --model=gemma4-12b "What is Rust's ownership model?"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b,model-gemma4-e4b --example chat_multimodal_gemma4 -- --model=gemma4-e4b "What is Rust's ownership model?"
 ```
 
 Alternate curated artifact root:
@@ -73,14 +73,6 @@ Full precision (no quantization):
 cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- --precision=f32 "What is Rust's ownership model?"
 ```
 
-Gemma 4 12B defaults to full precision. Use a full-model host such as DGX Spark
-or another CUDA/unified-memory target for performance validation; local
-CPU-only startup is not representative.
-
-```sh
-cargo run -p motlie-models --no-default-features --features model-gemma4-12b --example chat_multimodal_gemma4 -- --model=gemma4-12b --tool-demo-only "What is Rust?"
-```
-
 Tool-calling smoke only:
 
 ```sh
@@ -96,9 +88,9 @@ combine a plain Rust explanation with a weather-derived average temperature.
 
 - Either pre-downloaded Gemma 4 artifacts for the selected variant in the curated artifact root, `--artifact-root /path/to/hf-cache`, or `--download-artifacts` plus the required Hugging Face access in the current environment
 - Sufficient memory for the chosen precision
-- The example must be built with at least one Gemma 4 feature enabled: `model-gemma4-e2b`, `model-gemma4-e4b`, or `model-gemma4-12b`
+- The example must be built with at least one Gemma 4 feature enabled: `model-gemma4-e2b` or `model-gemma4-e4b`
 
 ## Source
 
 - Example entrypoint: [main.rs](main.rs)
-- Bundle definitions: `libs/models/src/chat/gemma4_e2b.rs`, `libs/models/src/chat/gemma4_e4b.rs`, `libs/models/src/chat/gemma4_12b.rs`
+- Bundle definitions: `libs/models/src/chat/gemma4_e2b.rs`, `libs/models/src/chat/gemma4_e4b.rs`

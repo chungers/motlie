@@ -553,7 +553,6 @@ pub(crate) fn motlie_tool_spec_to_mistral(
             description: Some(spec.description.clone()),
             name: spec.name.as_str().to_string(),
             parameters: Some(parameters),
-            strict: None,
         },
     })
 }

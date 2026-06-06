@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 11:01 PDT | @gemma4-cdx | Applied David decision B: removed the known-broken full-safetensors/mistral.rs Gemma 4 12B variant from PR #398, restored the mistral.rs dependency path to main, and narrowed M1 to the validated GGUF Q4_K_M and QAT Q4_0 production paths. |
 | 2026-06-06 10:28 PDT | @gemma4-cdx | Recorded DGX GB10 validation from codex-398-dgx-rv: standard GGUF Q4_K_M and QAT Q4_0 pass live tool-use at ~24/22 gen-tps, while full safetensors on mistral.rs builds and loads but has a real generation/tool-use defect and is not M1 live-accepted yet. |
 | 2026-06-06 00:51 PDT | @gemma4-cdx | Addressed second-reviewer L1/M2: GGUF cache tests now use collision-resistant temp directories, local-only GGUF resolution validates exact variant filenames, and generic logical-model resolution documents that QAT requires an explicit selector/bundle id. |
 | 2026-06-05 22:29 PDT | @gemma4-cdx | Clarified David's curation direction: safetensors, standard GGUF, and QAT GGUF are all curated Gemma 4 12B variants selected by platform/performance fit, not a priority hierarchy. |
@@ -282,7 +283,8 @@ PATH=/tmp/motlie-cmake/usr/bin:$PATH LD_LIBRARY_PATH=/tmp/motlie-cmake/usr/lib/x
   the no-quantization GGUF spelling.
 - Superseded remaining validation note: the 2026-06-05 16:59 PDT follow-up ran
   the live GGUF tool example and fixed the tool-demo thinking/parser issues. Broad
-  performance evals and DGX/full-safetensors validation still remain.
+  performance evals remained at that point; later DGX validation moved #398 to
+  GGUF-only after the full-safetensors path failed generation.
 
 M1 GGUF live tool-use update, 2026-06-05 16:59 PDT by @gemma4-cdx:
 
@@ -324,8 +326,8 @@ PATH=/tmp/motlie-cmake/usr/bin:$PATH LD_LIBRARY_PATH=/tmp/motlie-cmake/usr/lib/x
   `cargo check -p motlie-models --no-default-features --features
   model-gemma4-12b-gguf --example chat_gguf_gwen3_gemma4`, and the live Q4
   `--tool-demo-only` command above.
-- Remaining M1 work is now performance/eval reporting plus DGX/full-safetensors
-  validation, not basic GGUF viability.
+- Remaining M1 work after this point was performance/eval reporting; later DGX
+  validation confirmed GGUF viability and moved full safetensors out of #398.
 
 References:
 
@@ -452,13 +454,13 @@ Cons:
 - GGUF source choice needs review: `ggml-org` is simpler; Unsloth matches
   current Motlie Gemma pattern and has richer quant/audio instructions.
 
-### Option B: Official Safetensors Full-Model Variant
+### Option B: Deferred Official Safetensors Full-Model Variant
 
-Add `google/gemma4_12b` using `google/gemma-4-12B-it` and the existing
-`mistral.rs` multimodal backend. This should be selected when the target
-deployment hosts can run the full model, such as DGX Spark or David's larger
-local hosts, and when the workload benefits from the official safetensors
-artifact and future multimodal expansion.
+Revisit `google/gemma4_12b` using `google/gemma-4-12B-it` only after Motlie has
+a working full-safetensors generation backend for Gemma 4 12B. The attempted
+`mistral.rs` path builds and loads on DGX GB10, but it did not produce valid
+generation or pass the tool-use acceptance sequence, so it is intentionally out
+of PR #398.
 
 Proposed descriptor:
 
@@ -472,7 +474,7 @@ Proposed descriptor:
 | Feature | `model-gemma4-12b` |
 | Source | `google/gemma-4-12B-it` |
 | Default quant | Full precision (`None`); ISQ Q4/Q8 explicit overrides only |
-| Capabilities | `Chat` + `Vision`; add `ToolUse` after smoke |
+| Capabilities | Deferred; do not advertise until chat/tool-use pass |
 
 Pros:
 
@@ -494,9 +496,9 @@ Cons:
 - Motlie currently supports only text/image content on this path.
 - Audio/video would still require `ContentPart::Audio` / `ContentPart::Video`
   design and backend mapping.
-- Requires upgrading or pinning the locked `mistralrs 0.8.1` dependency to a
-  compatible upstream revision. Current M1 work pins revision `47ec459c` until
-  a tagged release includes the same Gemma 4 unified support.
+- The attempted `mistral.rs` upgrade/pin was enough to build and load the model,
+  but not enough to generate correctly. PR #398 restores the main-line
+  `mistralrs = "0.8.1"` dependency and leaves this variant out.
 
 ### Option C: True Multimodal GGUF Path
 
@@ -522,35 +524,35 @@ Cons:
 
 ## Recommendation
 
-Use a variant-based M1 plan:
+Use a narrowed GGUF-only M1 plan for PR #398:
 
-1. Curate official safetensors on `mistral.rs` as the full-model variant for
-   DGX Spark or another full-model CUDA/unified-memory host. This is the path
-   that can eventually exercise Gemma 4 12B's broader multimodal surface. It
-   defaults to full precision; ISQ Q4/Q8 remain explicit operator overrides.
-2. Curate the `google/gemma4_12b_gguf` llama.cpp/GGUF variant now. Local testing
-   showed the 28 GiB CPU-only host could not reach safetensors startup or Q8 ISQ
-   warmup completion in a practical window. The GGUF variant should use Q4_K_M
-   by default and support Q8_0.
-3. Keep capability claims artifact-specific. Safetensors can represent the
-   full-model direction but still needs DGX chat, image, tool-loop, and
-   performance validation. GGUF can cover text chat, completion, and tool-use
-   examples through Motlie's current text-only llama.cpp wrapper, but it cannot
-   answer ASR feasibility.
-4. Treat ASR as a later required milestone gated on PR #387 merge, not as a
+1. Ship the `google/gemma4_12b_gguf` llama.cpp/GGUF variant. It uses Unsloth
+   Q4_K_M by default, supports Q8_0, and passed the DGX live chat/tool-use
+   sequence.
+2. Ship the `google/gemma4_12b_qat_q4_0_gguf` llama.cpp/GGUF variant. It uses
+   Google's QAT Q4_0 GGUF artifact and passed the same DGX live chat/tool-use
+   sequence.
+3. Do not ship the full-safetensors `google/gemma4_12b` / `gemma4_12b`
+   mistral.rs variant in #398. It builds and loads on DGX GB10 but generation is
+   defective (`mistralrs-gen-tps: 0`, garbled output, failed tool-use), so it is
+   deferred until a working generation path exists.
+4. Keep capability claims artifact-specific. The current GGUF variants cover
+   text chat, completion, and tool-use examples through Motlie's text-only
+   llama.cpp wrapper; they do not cover image/audio/video or ASR.
+5. Treat ASR as a later required milestone gated on PR #387 merge, not as a
    stretch goal. The likely first shape is buffered/final-only audio-chat over
    bounded clips, but it must not advertise `CapabilityKind::Transcription`
    until the wrapper satisfies Motlie's typed ASR contract honestly.
-5. Keep dedicated ASR models as the production recommendation for transcription
+6. Keep dedicated ASR models as the production recommendation for transcription
    unless Gemma 4 12B beats them on a Motlie validation set for David's target
    workflow.
 
-This means M1 should land the selected 12B variants with explicit host/profile
-selection guidance: safetensors for full-model hosts, standard GGUF for local or
-resource-sensitive chat/tool profiles, and QAT Q4_0 GGUF where that profile wins
-on measured startup, latency, memory, or quality. M2 owns the ASR
-research and Telnyx audio mapping. M3 owns the final advertised-capability
-acceptance gate with examples and eval results.
+This means M1 should land the validated 12B GGUF variants with explicit
+host/profile selection guidance: standard GGUF for local or resource-sensitive
+chat/tool profiles, and QAT Q4_0 GGUF where that profile wins on measured
+startup, latency, memory, or quality. M2 owns the ASR research and Telnyx audio
+mapping. M3 owns the final advertised-capability acceptance gate with examples
+and eval results.
 
 Variant selection note, 2026-06-06 00:51 PDT by @gemma4-cdx: the generic
 `Catalog::resolve_model(gemma4_12b, LlamaCpp, Gguf)` path has only logical model,
@@ -563,15 +565,17 @@ by exact root GGUF filenames for the selected variant, so a QAT-only cache is no
 accepted for the standard GGUF variant and a standard-only cache is not accepted
 for the QAT variant.
 
-DGX validation update, 2026-06-06 10:28 PDT by @gemma4-cdx: codex-398-dgx-rv validated PR #398 head `b257d7bb` on DGX GB10 with CUDA/flash-attn. The two llama.cpp GGUF live paths passed the weather/math tool-use smoke: standard Unsloth Q4_K_M completed the exact five-step sequence at about 24 generated tokens/sec, and Google QAT Q4_0 completed the same sequence at about 22 generated tokens/sec; both returned the correct 68F final answer. The official full safetensors variant `google/gemma4_12b` is GPU-runnable but not live-accepted: it built and loaded, then `bench_chat` reported `mistralrs-gen-tps: 0`, about 6% GPU utilization, 81s startup, and 246s warmup. The live tool-use smoke failed in round 3 with no tool call and a garbled text answer (`.The average temperature for Seattle is 23.0.`), then failed the harness with `Error: model did not call evaluate_math_expression`. This is a real mistral.rs Gemma4 full-generation defect, not a hardware-capacity limit. Until fixed, GGUF Q4_K_M and QAT Q4_0 are the working M1 live chat/tool-use paths; the full safetensors variant remains build/load traceability plus future multimodal/ASR direction, blocked for live chat/tool-use acceptance.
+DGX validation update, 2026-06-06 10:28 PDT by @gemma4-cdx: codex-398-dgx-rv validated PR #398 head `b257d7bb` on DGX GB10 with CUDA/flash-attn. The two llama.cpp GGUF live paths passed the weather/math tool-use smoke: standard Unsloth Q4_K_M completed the exact five-step sequence at about 24 generated tokens/sec, and Google QAT Q4_0 completed the same sequence at about 22 generated tokens/sec; both returned the correct 68F final answer. The official full safetensors variant `google/gemma4_12b` is GPU-runnable but not live-accepted: it built and loaded, then `bench_chat` reported `mistralrs-gen-tps: 0`, about 6% GPU utilization, 81s startup, and 246s warmup. The live tool-use smoke failed in round 3 with no tool call and a garbled text answer (`.The average temperature for Seattle is 23.0.`), then failed the harness with `Error: model did not call evaluate_math_expression`. This is a real mistral.rs Gemma4 full-generation defect, not a hardware-capacity limit. David decision B on 2026-06-06: do not ship a known-broken full-safetensors deliverable in #398. GGUF Q4_K_M and QAT Q4_0 are the working M1 live chat/tool-use paths; full safetensors is deferred until Motlie has a working generation path.
 
-Initial investigation note, 2026-06-06 10:28 PDT by @gemma4-cdx: Motlie already sends tool-bearing mistral.rs chat requests through the shared template-compatible adapter, includes tools in `send_chat_request`, replays assistant tool calls and tool results, and defaults tool requests to `enable_thinking = Some(false)` unless the caller opts in. The observed failure occurs after successful model load and partial generation, so the next code investigation should focus on the mistral.rs `MultimodalModelBuilder`/Gemma4 loader and generation path pinned at revision `47ec459cbd6d5b0d6c9035bb79d8cf1e37ee14a0`, plus regression smoke for E2B/E4B under the same CUDA/flash-attn builder swap.
+Initial investigation note, 2026-06-06 10:28 PDT by @gemma4-cdx: Motlie already sent tool-bearing mistral.rs chat requests through the shared template-compatible adapter, included tools in `send_chat_request`, replayed assistant tool calls and tool results, and defaulted tool requests to `enable_thinking = Some(false)` unless the caller opted in. The observed failure occurred after successful model load and partial generation, so future full-safetensors work should start with a working mistral.rs Gemma4 generation path and DGX regression smoke for E2B/E4B. That investigation is outside #398 after David decision B.
+
+David decision B implementation update, 2026-06-06 11:01 PDT by @gemma4-cdx: PR #398 no longer includes the full-safetensors `google/gemma4_12b` / `gemma4_12b` bundle, feature, examples, benchmark selector, or downloader artifact entry. The `mistral.rs` git pin and explicit Gemma4 builder swap were only needed for that failed 12B safetensors attempt, so they were restored to the main-line `mistralrs = "0.8.1"` dependency path. The full-safetensors path is deferred pending a backend/runtime that can pass the same DGX chat and tool-use acceptance sequence as the GGUF variants.
 
 ## Tracking Issues
 
 Parent issue: #388
 
-- M1: #389 - Full-precision safetensors chat/tool curation and performance evaluation.
+- M1: #389 - 12B chat/tool curation and performance evaluation; #398 now ships only the validated GGUF variants after full safetensors failed DGX generation.
 - M2: #390 - ASR audio slicing research and Telnyx audio mapping, gated on PR #387.
 - M3: #391 - Full acceptance gate for all advertised capabilities and examples.
 
@@ -579,35 +583,26 @@ Parent issue: #388
 
 ### Phase 0: Review This Design
 
-- Confirm the host profile where Option B should be selected, starting with DGX Spark / full-model hosts.
-- Upgrade `mistralrs` before the 12B safetensors implementation and resolve any
-  adapter/API fallout.
-- Review the GGUF variant profile after the safetensors startup diagnostics.
+- Confirm the host/profile guidance for standard GGUF versus QAT Q4_0 GGUF.
+- Keep the full-safetensors path out of #398 until a working generation backend
+  passes DGX chat/tool validation.
 - Confirm the standard GGUF source choice of `unsloth/gemma-4-12b-it-GGUF`, which
   matches the existing Gemma GGUF bundles.
-- Confirm target validation host and minimum acceptable latency for full
-  precision safetensors.
 - Track ASR as a later milestone gated on PR #387 merge; decide whether the
   milestone target is batch/final-only transcription first or full
   `StreamingTranscriber` support.
 
 ### Phase 1: Descriptor And Spec Design
 
-Safetensors full-model variant:
+Deferred full-safetensors variant:
 
-- Upgrade `mistralrs` from the locked `0.8.1` version to the compatible current
-  line needed for Gemma 4 12B, then rerun existing Gemma 4 E2B/E4B chat/tool
-  tests to catch regressions.
-- Add `model-gemma4-12b` feature.
-- Add `ChatModels::Gemma4_12B`.
-- Add `MistralMultimodalSpec::gemma4_12b`.
-- Add `libs/models/src/chat/gemma4_12b.rs`.
-- Include official sidecars: chat template, tokenizer, processor or
-  preprocessor config, safetensors shards and index.
-- Use full precision as the default by declaring supported ISQ Q4/Q8 without a
-  recommended quantization. Operators can still request Q4/Q8 through
-  `StartOptions`.
-- Keep capabilities at `Chat` + `Vision` until tool smoke passes.
+- Do not include `model-gemma4-12b`, `ChatModels::Gemma4_12B`,
+  `MistralMultimodalSpec::gemma4_12b`, or `libs/models/src/chat/gemma4_12b.rs`
+  in #398.
+- Restore the `mistral.rs` dependency to the main-line path because the 12B
+  safetensors-only pin did not produce valid generation.
+- Revisit official safetensors only after a backend/runtime can pass DGX text
+  chat and the same weather/math tool-use sequence as the GGUF variants.
 
 GGUF variant path, active for M1 local validation:
 
@@ -689,14 +684,8 @@ ASR acceptance bar:
 
 ## Open Questions For David
 
-- Which exact full-model host should be the validation target: DGX Spark GB10
-  or another CUDA/unified-memory host?
-- Should the first safetensors bundle default to full precision with no
-  recommended quantization, as proposed, or should Motlie still recommend ISQ
-  for operators who do not specify `StartOptions.quantization`?
-- Given the DGX GB10 result that full safetensors builds and loads but fails live generation/tool-use on the mistral.rs path, should `gemma4_12b` remain in #398 as a build/load-only full-model variant pending backend fix, or should it be held out of M1 until live chat/tool-use passes?
 - What platform/profile thresholds should drive selection between safetensors,
-  standard GGUF, and QAT GGUF: startup time, generation latency, memory, quality,
+  standard GGUF and QAT GGUF: startup time, generation latency, memory, quality,
   or host coverage?
 - Please review the M1 standard GGUF source choice of `unsloth/gemma-4-12b-it-GGUF`
   over `ggml-org/gemma-4-12B-it-GGUF` for consistency with the existing Gemma

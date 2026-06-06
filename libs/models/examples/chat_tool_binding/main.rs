@@ -123,11 +123,11 @@ fn parse_model_arg() -> Result<Option<String>> {
             model_name = Some(model.to_owned());
         } else if arg == "--help" || arg == "-h" {
             println!(
-                "usage: cargo run -p motlie-models --example chat_tool_binding -- [--model=gemma4-e4b|gemma4-12b]"
+                "usage: cargo run -p motlie-models --example chat_tool_binding -- [--model=gemma4-e4b]"
             );
             std::process::exit(0);
         } else {
-            bail!("unknown argument `{arg}`; use --model=gemma4-e4b or --model=gemma4-12b");
+            bail!("unknown argument `{arg}`; use --model=gemma4-e4b");
         }
     }
     Ok(model_name)
@@ -145,8 +145,7 @@ impl DemoRecommendedChatSpec {
         let normalized = requested.to_ascii_lowercase().replace('_', "-");
         match normalized.as_str() {
             "e4b" | "gemma4-e4b" | "google/gemma4-e4b" => Ok(Self::gemma4_e4b()),
-            "12b" | "gemma4-12b" | "google/gemma4-12b" => Self::gemma4_12b(),
-            other => bail!("unknown spec model `{other}`; use gemma4-e4b or gemma4-12b"),
+            other => bail!("unknown spec model `{other}`; use gemma4-e4b"),
         }
     }
 
@@ -184,21 +183,6 @@ impl DemoRecommendedChatSpec {
             },
             recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
         }
-    }
-
-    #[cfg(feature = "model-gemma4-12b")]
-    fn gemma4_12b() -> Result<Self> {
-        let spec = motlie_model_mistral::MistralMultimodalSpec::gemma4_12b();
-        Ok(Self {
-            source: "motlie_model_mistral::MistralMultimodalSpec::gemma4_12b",
-            recommended_generation_params: spec.recommended_generation_params,
-            recommended_system_prompt: spec.recommended_system_prompt,
-        })
-    }
-
-    #[cfg(not(feature = "model-gemma4-12b"))]
-    fn gemma4_12b() -> Result<Self> {
-        bail!("--model=gemma4-12b requires the `model-gemma4-12b` feature")
     }
 }
 

@@ -24,7 +24,7 @@ either = "1.15.0"
 image = "0.25.8"
 indexmap = "2.14.0"
 motlie-model = { path = "../.." }
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", rev = "47ec459cbd6d5b0d6c9035bb79d8cf1e37ee14a0" }
+mistralrs = "0.8.1"
 serde_json = "1.0.149"
 sysinfo = "0.36.1"
 tracing = "0.1"

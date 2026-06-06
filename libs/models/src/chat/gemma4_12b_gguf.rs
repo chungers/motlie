@@ -42,11 +42,11 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 ///
 /// ## Weight compatibility with mistral.rs
 ///
-/// The `gemma4_12b` bundle is the official full-model curated variant using
-/// safetensors from `google/gemma-4-12B-it` through `mistral.rs`. This bundle
-/// uses **GGUF** weights from `unsloth/gemma-4-12b-it-GGUF` through
-/// `llama.cpp`. The two artifact sets are **not interchangeable**; each
-/// backend requires its own format.
+/// The official full-safetensors `google/gemma-4-12B-it` path is deferred
+/// because the current `mistral.rs` Gemma4 generation path failed DGX live
+/// validation. This bundle uses **GGUF** weights from
+/// `unsloth/gemma-4-12b-it-GGUF` through `llama.cpp`. The artifact sets are
+/// **not interchangeable**; each backend requires its own format.
 ///
 /// ## Capability boundary
 ///
@@ -132,12 +132,6 @@ mod tests {
         assert!(!artifacts.includes("MTP/gemma-4-12B-it-MTP-Q8_0.gguf"));
         assert!(!artifacts.includes("mmproj-F16.gguf"));
         assert!(!artifacts.includes("README.md"));
-    }
-
-    #[cfg(feature = "model-gemma4-12b")]
-    #[test]
-    fn identity_matches_logical_gemma4_model() {
-        assert_eq!(identity(), crate::chat::gemma4_12b::identity());
     }
 
     #[test]

@@ -9,9 +9,6 @@ model backend. It covers the static caller-owned shape:
 - the E4B recommended generation params and system prompt are merged into an
   effective request shape without starting an LLM
 
-> 2026-06-04 21:38 PDT @gemma4-cdx: added `--model=gemma4-12b` as a
-> no-load recommendation witness for the full Gemma 4 12B curated bundle.
-
 Run it with:
 
 ```bash
@@ -30,14 +27,6 @@ LLM, enable the GGUF feature:
 ```bash
 cargo run -p motlie-models --no-default-features --features model-gemma4-e4b-gguf \
   --example chat_tool_binding
-```
-
-To exercise the Gemma 4 12B Mistral multimodal recommendation witness without
-loading an LLM, enable the 12B feature:
-
-```bash
-cargo run -p motlie-models --no-default-features --features model-gemma4-12b \
-  --example chat_tool_binding -- --model=gemma4-12b
 ```
 
 The example builds a `ChatRequest` from `tools.specs()`, simulates assistant

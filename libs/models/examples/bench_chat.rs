@@ -9,7 +9,7 @@
 ///   --iterations=N         Number of measured iterations (default: 5)
 ///   --precision=q4|q8|f32|f16
 ///                          Quantization (default: q4; GGUF uses f16 for no quantization)
-///   --model=qwen|gemma|gemma4-12b|gemma4-12b-gguf|gemma4-12b-qat-q4-0-gguf
+///   --model=qwen|gemma|gemma4-12b-gguf|gemma4-12b-qat-q4-0-gguf
 ///                          Model selection (default: qwen; `gemma` is Gemma 4 E2B)
 ///   --input=FILE           Read prompt from file instead of args
 ///
@@ -23,14 +23,13 @@ fn main() -> anyhow::Result<()> {
 #[cfg(not(any(
     feature = "model-qwen3-4b",
     feature = "model-gemma4-e2b",
-    feature = "model-gemma4-12b",
     feature = "model-gemma4-12b-gguf",
     feature = "model-gemma4-12b-qat-q4-0-gguf",
 )))]
 mod bench_chat_example {
     pub fn run() -> anyhow::Result<()> {
         anyhow::bail!(
-            "enable at least one bench_chat feature: model-qwen3-4b, model-gemma4-e2b, model-gemma4-12b, model-gemma4-12b-gguf, or model-gemma4-12b-qat-q4-0-gguf"
+            "enable at least one bench_chat feature: model-qwen3-4b, model-gemma4-e2b, model-gemma4-12b-gguf, or model-gemma4-12b-qat-q4-0-gguf"
         )
     }
 }
@@ -38,7 +37,6 @@ mod bench_chat_example {
 #[cfg(any(
     feature = "model-qwen3-4b",
     feature = "model-gemma4-e2b",
-    feature = "model-gemma4-12b",
     feature = "model-gemma4-12b-gguf",
     feature = "model-gemma4-12b-qat-q4-0-gguf",
 ))]
@@ -138,14 +136,6 @@ mod bench_chat_example {
                 #[cfg(not(feature = "model-gemma4-e2b"))]
                 bail!("model-gemma4-e2b feature not enabled")
             }
-            "gemma4-12b" | "gemma4_12b" => {
-                #[cfg(feature = "model-gemma4-12b")]
-                {
-                    motlie_models::chat::gemma4_12b::bundle()
-                }
-                #[cfg(not(feature = "model-gemma4-12b"))]
-                bail!("model-gemma4-12b feature not enabled")
-            }
             "gemma4-12b-gguf" | "gemma4_12b_gguf" => {
                 #[cfg(feature = "model-gemma4-12b-gguf")]
                 {
@@ -163,7 +153,7 @@ mod bench_chat_example {
                 bail!("model-gemma4-12b-qat-q4-0-gguf feature not enabled")
             }
             other => bail!(
-                "unknown model `{other}` — use qwen, gemma, gemma4-12b, gemma4-12b-gguf, or gemma4-12b-qat-q4-0-gguf"
+                "unknown model `{other}` — use qwen, gemma, gemma4-12b-gguf, or gemma4-12b-qat-q4-0-gguf"
             ),
         };
 
