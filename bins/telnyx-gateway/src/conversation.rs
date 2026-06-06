@@ -114,11 +114,18 @@ pub async fn handle_final_transcript(
     }
 
     let mut context = snapshot.context;
-    let command = runtime
-        .handler
-        .on_transcript(event, &mut context)
-        .await
-        .map_err(|error| anyhow::anyhow!(error))?;
+    let command = match runtime.handler.on_transcript(event, &mut context).await {
+        Ok(command) => command,
+        Err(error) => {
+            let error = format!("{error:#}");
+            state
+                .write()
+                .await
+                .record_conversation_failed(gateway_call_id, error.clone());
+            tracing::warn!(gateway_call_id, error, "conversation.handler.failed");
+            return Ok(());
+        }
+    };
     apply_conversation_command(
         state,
         media_registry,
@@ -282,6 +289,28 @@ mod tests {
         )
     }
 
+    fn failing_runtime() -> ConversationRuntime {
+        ConversationRuntime::new(
+            TelnyxClient::new("https://api.example.test", None, true),
+            crate::tts::unavailable_registry(),
+            Arc::new(FailingConversationHandler),
+        )
+    }
+
+    #[derive(Clone, Debug)]
+    struct FailingConversationHandler;
+
+    #[async_trait]
+    impl ConversationHandler for FailingConversationHandler {
+        async fn on_transcript(
+            &self,
+            _event: TranscriptEvent,
+            _context: &mut CallContext,
+        ) -> Result<ConversationCommand, VoiceAppError> {
+            Err(VoiceAppError::new("model unavailable"))
+        }
+    }
+
     async fn seed_conversation_call(state: &SharedState, mode: ConversationMode) -> String {
         let mut guard = state.write().await;
         let call_id = guard.add_or_update_outbound_call(
@@ -376,6 +405,36 @@ mod tests {
         );
         assert!(call.conversation.last_playback_id.is_none());
         assert!(call.tts.is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_error_marks_conversation_failed_without_failing_media() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        let runtime = failing_runtime();
+
+        handle_final_transcript(
+            &state,
+            &SharedMediaRegistry::default(),
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "hello".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+        )
+        .await
+        .expect("handler error should remain conversation-scoped");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.status, CallStatus::MediaStarted);
+        assert!(call.last_error.is_none());
+        assert_eq!(call.conversation.status, ConversationStatus::Failed);
+        assert_eq!(
+            call.conversation.last_error.as_deref(),
+            Some("model unavailable")
+        );
     }
 
     #[tokio::test]
