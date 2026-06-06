@@ -6,16 +6,17 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-05 22:29 PDT | @gemma4-cdx | Clarified David's curation direction: safetensors, standard GGUF, and QAT GGUF are all curated Gemma 4 12B variants selected by platform/performance fit, not a priority hierarchy. |
 | 2026-06-05 16:59 PDT | @gemma4-cdx | Fixed and validated Gemma 4 12B GGUF live tool-use: default tool demo now disables thinking for the 12B GGUF path, llama.cpp parser strips empty Gemma thought-channel markers, and default Q4 tool demo completed all tool calls plus final answer locally. |
 | 2026-06-05 16:36 PDT | @gemma4-cdx | Completed corrected GGUF artifact download, tightened artifact rules to exact Q4/Q8 root files after an MTP suffix-match bug, and ran Q4 startup/warmup successfully on the local CPU host. |
 | 2026-06-05 16:11 PDT | @gemma4-cdx | Investigated and fixed GGUF build status: local host needed CMake plus bindgen include paths; corrected GGUF-only cfg wiring, and GGUF lib/example/bench checks now pass with the local toolchain workaround. |
 | 2026-06-04 23:08 PDT | @gemma4-cdx | Added verification trace: safetensors library, multimodal example, and benchmark compile; GGUF library and example checks were blocked locally by `llama-cpp-sys-2` missing `stdbool.h` before the 2026-06-05 host/toolchain investigation. |
-| 2026-06-04 22:58 PDT | @gemma4-cdx | Killed the no-timeout local Q8 ISQ warmup after about 26 minutes without startup completion; documented memory/timeout findings and switched M1 to include a llama.cpp/GGUF fallback while retaining safetensors/Mistral for DGX/full-model hosts. |
+| 2026-06-04 22:58 PDT | @gemma4-cdx | Killed the no-timeout local Q8 ISQ warmup after about 26 minutes without startup completion; documented memory/timeout findings and expanded M1 to include a llama.cpp/GGUF curated variant alongside safetensors/Mistral for platform/performance selection. |
 | 2026-06-04 20:25 PDT | @gemma4-cdx | Added M1 full-artifact validation: official safetensors downloaded, `mistral.rs` pinned to upstream revision `47ec459c`, and CPU-only startup was stopped after heavy swap pressure. |
 | 2026-06-04 16:08 PDT | @gemma4-cdx | Opened and linked milestone issues M1 #389, M2 #390, and M3 #391 under parent issue #388. |
 | 2026-06-04 16:02 PDT | @gemma4-cdx | Applied David's ASR direction: ASR is a later required milestone, not a stretch goal, and may be gated on PR #387 merge. |
-| 2026-06-04 15:57 PDT | @gemma4-cdx | Applied David's direction: full-precision safetensors first, GGUF only as fallback if full precision is too slow or operationally heavy, and `mistralrs` upgrade is required. |
-| 2026-06-04 15:55 PDT | @gemma4-cdx | Updated recommendation after David feedback: make official safetensors on `mistral.rs` the primary path for DGX/full-model hosts, with full precision as the default and ISQ as explicit override. |
+| 2026-06-04 15:57 PDT | @gemma4-cdx | Applied David's direction: full-precision safetensors support is required, GGUF is also needed for platform/performance coverage when full precision is too slow or operationally heavy, and `mistralrs` upgrade is required. |
+| 2026-06-04 15:55 PDT | @gemma4-cdx | Updated recommendation after David feedback: make official safetensors on `mistral.rs` the full-model variant for DGX/full-model hosts, with full precision as the default and ISQ as explicit override. |
 | 2026-06-04 15:36 PDT | @gemma4-cdx | Initial greenfield design proposal for curating Gemma 4 12B into Motlie for chat, tool use, and ASR feasibility review. |
 
 ## Scope
@@ -74,9 +75,9 @@ Quantization and footprint:
 | `ggml-org/gemma-4-12B-it-GGUF` | Q4_K_M | 7.38 GB | Simple, official ggml-org distribution. |
 | `ggml-org/gemma-4-12B-it-GGUF` | Q8_0 | 12.7 GB | Likely higher quality, tighter on 16 GB hosts once KV cache and multimodal projector are included. |
 | `ggml-org/gemma-4-12B-it-GGUF` | BF16 | 23.8 GB | Not a 16 GB target. |
-| `unsloth/gemma-4-12b-it-GGUF` | Q4_K_M | 7.26 GB | Matches existing Motlie Gemma GGUF source style and is the proposed fallback default. |
+| `unsloth/gemma-4-12b-it-GGUF` | Q4_K_M | 7.26 GB | Matches existing Motlie Gemma GGUF source style and is the selected standard GGUF default for local/CPU-constrained profiles. |
 | `unsloth/gemma-4-12b-it-GGUF` | Q8_0 | 12.5 GB | Optional quality tier. |
-| `unsloth/gemma-4-12b-it-GGUF` | BF16 | 23.4 GB | Available, but not included in the Motlie text GGUF fallback artifact rules. |
+| `unsloth/gemma-4-12b-it-GGUF` | BF16 | 23.4 GB | Available, but not included in the Motlie text-only GGUF artifact rules. |
 | `unsloth/gemma-4-12b-it-GGUF` | UD-Q4_K_XL | 7.37 GB | Attractive, but Motlie's `QuantizationBits` mapper currently targets standard GGUF suffixes. |
 
 Runtime status:
@@ -105,7 +106,7 @@ M1 validation update, 2026-06-04 20:25 PDT by @gemma4-cdx:
 - `mistral.rs` tag `v0.8.3` was insufficient for the official 12B config: it failed auto-detection on `Gemma4UnifiedForConditionalGeneration`, then failed the older `vision_tower` tensor layout when forced to Gemma4.
 - Upstream `mistral.rs` master revision `47ec459cbd6d5b0d6c9035bb79d8cf1e37ee14a0` contains the required Gemma4-unified architecture mapping and `vision_embedder.patch_dense` support. M1 therefore pins that exact revision until an upstream tag includes the same support.
 - Local CPU-only host was not a valid full-precision performance target: AMD Ryzen 7 7730U, 28 GiB RAM, no `nvidia-smi`. Full-precision startup was stopped after 17m35s before generation, with peak RSS about 18.6 GiB and heavy swap pressure.
-- Required next validation target remains DGX Spark or another full-model CUDA/unified-memory host. Later local diagnostics promoted GGUF to an active local fallback, but it does not replace full-model DGX validation.
+- Required next validation target remains DGX Spark or another full-model CUDA/unified-memory host. Later local diagnostics validated GGUF as a local/CPU-friendly curated variant; it complements, but does not replace, full-model DGX validation.
 
 
 M1 local runtime update, 2026-06-04 22:58 PDT by @gemma4-cdx:
@@ -140,14 +141,15 @@ M1 local runtime update, 2026-06-04 22:58 PDT by @gemma4-cdx:
   read, materialize, and traverse the 22.28 GiB BF16 artifact before or while
   quantizing. Q8 lowers the final resident shape but does not avoid the local
   CPU-side load/conversion cost.
-- Decision: keep `google/gemma4_12b` safetensors/Mistral as the primary
-  full-model path for DGX Spark or another full-model CUDA/unified-memory host,
-  and add `google/gemma4_12b_gguf` llama.cpp/GGUF now as the local fallback.
-- The GGUF fallback follows the existing Gemma GGUF pattern: source
+- Decision: keep `google/gemma4_12b` safetensors/Mistral as the full-model
+  curated variant for DGX Spark or another full-model CUDA/unified-memory host,
+  and add `google/gemma4_12b_gguf` llama.cpp/GGUF as a separate curated variant
+  for hosts where GGUF gives the best startup, memory, or latency fit.
+- The GGUF variant follows the existing Gemma GGUF pattern: source
   `unsloth/gemma-4-12b-it-GGUF`, bundle id `gemma4_12b_gguf`, Q4_K_M default,
   Q8_0 supported, and no BF16 or `mmproj-F16.gguf` in the initial artifact rules.
 - Current capability boundary: Motlie's `llama.cpp` wrapper is text-only, so the
-  GGUF fallback can cover chat, completion, and tool-use smoke, but it cannot
+  GGUF variants can cover chat, completion, and tool-use smoke, but they cannot
   validate image/audio/video or the later ASR milestone.
 - Initial local GGUF verification blocker: `llama-cpp-sys-2 v0.1.146`
   bindgen failed before Rust type-checking because clang could not find the C
@@ -157,11 +159,11 @@ M1 local runtime update, 2026-06-04 22:58 PDT by @gemma4-cdx:
 
 M1 implementation snapshot, 2026-06-04 22:58 PDT by @gemma4-cdx:
 
-- Safetensors path retained: feature `model-gemma4-12b`, selector
+- Safetensors full-model variant retained: feature `model-gemma4-12b`, selector
   `google/gemma4_12b`, bundle id `gemma4_12b`, backend `BackendKind::MistralRs`,
   source `google/gemma-4-12B-it`, full precision by default with explicit ISQ
   Q4/Q8 overrides.
-- GGUF fallback added in parallel: feature `model-gemma4-12b-gguf`, selector
+- GGUF variant added in parallel: feature `model-gemma4-12b-gguf`, selector
   `google/gemma4_12b_gguf`, bundle id `gemma4_12b_gguf`, backend
   `BackendKind::LlamaCpp`, source `unsloth/gemma-4-12b-it-GGUF`, Q4_K_M default
   and Q8_0 supported.
@@ -225,7 +227,7 @@ PATH=/tmp/motlie-cmake/usr/bin:$PATH LD_LIBRARY_PATH=/tmp/motlie-cmake/usr/lib/x
   `MistralMultimodalHandle` import cfg, causing a GGUF-only build to require the
   Mistral backend dependency. The GGUF feature now pulls only `LlamaCppTextHandle`.
 - Motlie bug 2 fixed: `chat_gguf_gwen3_gemma4` included
-  `model-gemma4-12b-gguf` in the no-feature fallback cfg but omitted it from the
+  `model-gemma4-12b-gguf` in the no-feature stub cfg but omitted it from the
   real `gguf_example` module cfg. A 12B-only example build therefore compiled
   neither module. The real module cfg now includes the 12B GGUF feature.
 - `cargo check -p motlie-models --no-default-features --features
@@ -250,7 +252,7 @@ M1 GGUF artifact and startup update, 2026-06-05 16:36 PDT by @gemma4-cdx:
 - During the first real GGUF download attempt, the suffix artifact rule
   `ArtifactRule::Suffix("-Q8_0.gguf")` matched Unsloth's new
   `MTP/gemma-4-12B-it-MTP-Q8_0.gguf` drafter file. That is not part of the
-  Motlie text fallback bundle.
+  Motlie text-only GGUF bundle.
 - The active downloader was stopped, and `gemma4_12b_gguf` artifact rules were
   changed from broad suffixes to exact root filenames:
   `gemma-4-12b-it-Q4_K_M.gguf` and `gemma-4-12b-it-Q8_0.gguf`.
@@ -351,7 +353,7 @@ Motlie does not yet model audio/video chat content.
 
 GGUF can reuse the `LlamaCppTextSpec` and `LlamaCppTextHandle` pattern from
 `gemma4_e2b_gguf.rs` and `gemma4_e4b_gguf.rs`. The current wrapper is
-text-only even if the GGUF artifact itself is multimodal, so the fallback can
+text-only even if the GGUF artifact itself is multimodal, so the GGUF variants can
 cover text chat, completion, and tool-use examples but cannot validate image,
 audio, video, or ASR.
 
@@ -406,13 +408,15 @@ Motlie ASR contract honestly.
 
 ## Approach Options
 
-### Option A: GGUF Fallback Chat And Tool Path
+### Option A: GGUF Curated Chat And Tool Variant
 
-M1 now includes `google/gemma4_12b_gguf` as an active fallback because the
-local CPU-only host could not finish official-safetensors startup or Q8 ISQ
-warmup in a useful time window. This does not replace the full-model path; it
-keeps local chat/tool validation moving while safetensors/Mistral remains the
-DGX-class host target. The fallback uses standard GGUF quantization from
+M1 now includes `google/gemma4_12b_gguf` as a curated GGUF variant for
+platform/performance profiles where GGUF startup, memory footprint, or latency
+is the better fit. The local CPU-only host could not finish official-safetensors
+startup or Q8 ISQ warmup in a useful time window, while GGUF later passed local
+chat/tool smoke. This does not replace full-model DGX validation; it gives
+Motlie another curated 12B variant to select when the host profile calls for it.
+The variant uses standard GGUF quantization from
 `unsloth/gemma-4-12b-it-GGUF` to match existing Gemma GGUF curation.
 
 Proposed descriptor:
@@ -433,9 +437,9 @@ Pros:
 
 - Smallest implementation surface.
 - Reuses existing `LlamaCppTextSpec` and artifact resolver patterns.
-- Best fit if full precision is too slow or too heavy on a target host.
+- Best fit on hosts where full precision is too slow or too heavy for the target latency/resource budget.
 - Fast startup compared with safetensors plus runtime ISQ.
-- Preserves an escape hatch for smaller or latency-sensitive deployments.
+- Adds a deployable profile for smaller or latency-sensitive deployments.
 
 Cons:
 
@@ -446,12 +450,13 @@ Cons:
 - GGUF source choice needs review: `ggml-org` is simpler; Unsloth matches
   current Motlie Gemma pattern and has richer quant/audio instructions.
 
-### Option B: Official Safetensors Multimodal First
+### Option B: Official Safetensors Full-Model Variant
 
 Add `google/gemma4_12b` using `google/gemma-4-12B-it` and the existing
-`mistral.rs` multimodal backend. This should be the primary path when the target
+`mistral.rs` multimodal backend. This should be selected when the target
 deployment hosts can run the full model, such as DGX Spark or David's larger
-local hosts.
+local hosts, and when the workload benefits from the official safetensors
+artifact and future multimodal expansion.
 
 Proposed descriptor:
 
@@ -515,15 +520,15 @@ Cons:
 
 ## Recommendation
 
-Use a two-path M1 plan:
+Use a variant-based M1 plan:
 
-1. Keep official safetensors on `mistral.rs` as the primary full-model path for
+1. Curate official safetensors on `mistral.rs` as the full-model variant for
    DGX Spark or another full-model CUDA/unified-memory host. This is the path
    that can eventually exercise Gemma 4 12B's broader multimodal surface. It
    defaults to full precision; ISQ Q4/Q8 remain explicit operator overrides.
-2. Add the `google/gemma4_12b_gguf` llama.cpp/GGUF fallback now. Local testing
+2. Curate the `google/gemma4_12b_gguf` llama.cpp/GGUF variant now. Local testing
    showed the 28 GiB CPU-only host could not reach safetensors startup or Q8 ISQ
-   warmup completion in a practical window. The GGUF fallback should use Q4_K_M
+   warmup completion in a practical window. The GGUF variant should use Q4_K_M
    by default and support Q8_0.
 3. Keep capability claims artifact-specific. Safetensors can represent the
    full-model direction but still needs DGX chat, image, tool-loop, and
@@ -538,8 +543,10 @@ Use a two-path M1 plan:
    unless Gemma 4 12B beats them on a Motlie validation set for David's target
    workflow.
 
-This means M1 should land both the full-model safetensors path for DGX-class
-validation and the GGUF fallback for local chat/tool iteration. M2 owns the ASR
+This means M1 should land the selected 12B variants with explicit host/profile
+selection guidance: safetensors for full-model hosts, standard GGUF for local or
+resource-sensitive chat/tool profiles, and QAT Q4_0 GGUF where that profile wins
+on measured startup, latency, memory, or quality. M2 owns the ASR
 research and Telnyx audio mapping. M3 owns the final advertised-capability
 acceptance gate with examples and eval results.
 
@@ -555,12 +562,11 @@ Parent issue: #388
 
 ### Phase 0: Review This Design
 
-- Confirm Option B as the primary path for DGX Spark / full-model hosts.
+- Confirm the host profile where Option B should be selected, starting with DGX Spark / full-model hosts.
 - Upgrade `mistralrs` before the 12B safetensors implementation and resolve any
   adapter/API fallout.
-- Review the decision to add GGUF now as a local fallback after the safetensors
-  startup diagnostics.
-- Confirm the fallback source choice of `unsloth/gemma-4-12b-it-GGUF`, which
+- Review the GGUF variant profile after the safetensors startup diagnostics.
+- Confirm the standard GGUF source choice of `unsloth/gemma-4-12b-it-GGUF`, which
   matches the existing Gemma GGUF bundles.
 - Confirm target validation host and minimum acceptable latency for full
   precision safetensors.
@@ -570,7 +576,7 @@ Parent issue: #388
 
 ### Phase 1: Descriptor And Spec Design
 
-Primary safetensors path:
+Safetensors full-model variant:
 
 - Upgrade `mistralrs` from the locked `0.8.1` version to the compatible current
   line needed for Gemma 4 12B, then rerun existing Gemma 4 E2B/E4B chat/tool
@@ -586,7 +592,7 @@ Primary safetensors path:
   `StartOptions`.
 - Keep capabilities at `Chat` + `Vision` until tool smoke passes.
 
-Fallback GGUF path, active for M1 local validation:
+GGUF variant path, active for M1 local validation:
 
 - Add `model-gemma4-12b-gguf` feature.
 - Add `ChatModels::Gemma4_12B_Gguf`.
@@ -600,9 +606,9 @@ Fallback GGUF path, active for M1 local validation:
 ### Phase 2: Tool Use Validation
 
 - Reuse `libs/models/examples/chat_tool_binding`.
-- Extend `chat_multimodal_gemma4` for the safetensors primary path, or add a
+- Extend `chat_multimodal_gemma4` for the safetensors full-model variant, or add a
   12B-specific example if the current E2B example remains intentionally narrow.
-- Extend `chat_gguf_gwen3_gemma4` for the active GGUF fallback selector.
+- Extend `chat_gguf_gwen3_gemma4` for the active GGUF variant selectors.
 - Run the existing weather/math multi-round tool loop.
 - Verify:
   - tool definitions reach the template
@@ -633,7 +639,7 @@ Target host baseline:
 
 ### Phase 4: ASR Later Milestone
 
-Start after PR #387 merges and the primary chat/tool curation path has a stable backend baseline.
+Start after PR #387 merges and the chat/tool curation variants have a stable backend baseline.
 
 Possible evaluation paths:
 
@@ -671,10 +677,10 @@ ASR acceptance bar:
 - Should the first safetensors bundle default to full precision with no
   recommended quantization, as proposed, or should Motlie still recommend ISQ
   for operators who do not specify `StartOptions.quantization`?
-- What threshold should determine deployment preference between full
-  safetensors and the GGUF fallback: startup time, generation latency, memory, or
-  host coverage?
-- Please review the M1 fallback source choice of `unsloth/gemma-4-12b-it-GGUF`
+- What platform/profile thresholds should drive selection between safetensors,
+  standard GGUF, and QAT GGUF: startup time, generation latency, memory, quality,
+  or host coverage?
+- Please review the M1 standard GGUF source choice of `unsloth/gemma-4-12b-it-GGUF`
   over `ggml-org/gemma-4-12B-it-GGUF` for consistency with the existing Gemma
   GGUF bundles.
 - For the ASR milestone, should the first accepted shape be final-only 30
