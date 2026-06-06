@@ -889,13 +889,28 @@ stand by, and active workstream timers are stopped. At closeout, tell the user
 what merged, what remains open, which agents were freed, which timers were
 stopped, and whether any local uncommitted changes remain.
 
-Keep mstream boundaries clean during closeout. `mstream` is responsible for
-workstream/session/timer/timeline primitives; it should not decide which GitHub
-issue or PR to comment on and should not post closeout logs itself. When a
-closeout log is useful, build it as the orchestrator from neutral primitives:
+**MANDATORY — capture the full mstream timeline as the final audit trail.**
+Before (or at) every closeout you MUST save the complete human-readable timeline
+to a transcript artifact. This timeline IS the authoritative audit trail of the
+workstream — it is not optional and not a convenience:
 
 ```sh
-mstream events <workstream> --limit 100 --readable
+mstream events <workstream> --readable --limit 5000 \
+  > ~/sessions/<session>/closeouts/transcript-<workstream>.txt
+```
+
+Use a `--limit` high enough to cover the whole workstream (do not truncate the
+audit trail). The daemon retains the timeline even AFTER `mstream close`, so it
+stays recoverable if missed — but capture it as part of the close so the audit
+trail is never lost.
+
+Keep mstream boundaries clean during closeout. `mstream` is responsible for
+workstream/session/timer/timeline primitives; it should not decide which GitHub
+issue or PR to comment on and should not post closeout logs itself. Build the
+closeout log as the orchestrator from neutral primitives:
+
+```sh
+mstream events <workstream> --readable --limit 5000   # full timeline = the audit trail
 mstream summary-input <workstream> --max-chars 12000
 mstream snapshot <workstream> --max-chars 12000
 ```
