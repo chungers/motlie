@@ -20,6 +20,8 @@ model-qwen3-embedding-06b = ["dep:motlie-model-mistral"]
 model-qwen3-4b = ["dep:motlie-model-mistral"]
 model-gemma4-e2b = ["dep:motlie-model-mistral"]
 model-gemma4-e4b = ["dep:motlie-model-mistral"]
+model-gemma4-12b-gguf = ["dep:motlie-model-llama-cpp"]
+model-gemma4-12b-qat-q4-0-gguf = ["dep:motlie-model-llama-cpp"]
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e4b-gguf = ["dep:motlie-model-llama-cpp"]
@@ -86,7 +88,6 @@ path = "examples/chat_tool_binding/main.rs"
 [[example]]
 name = "chat_multimodal_gemma4"
 path = "examples/chat_multimodal_gemma4/main.rs"
-required-features = ["model-gemma4-e2b"]
 
 [[example]]
 name = "chat_gguf_gwen3_gemma4"
@@ -125,4 +126,3 @@ required-features = ["model-piper-en-us-ljspeech-medium"]
 [[example]]
 name = "bench_chat"
 path = "examples/bench_chat.rs"
-required-features = ["model-qwen3-4b"]

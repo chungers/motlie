@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use motlie_model::{
     ChatMessage, ChatRequest, ChatRole, ContentPart, GenerationParams, ToolCall, ToolChoice,
 };
-use motlie_models::{tool_list, ToolDispatch, ToolList};
+use motlie_models::{ToolDispatch, ToolList, tool_list};
 
 #[allow(dead_code)]
 #[path = "../tool_demo_support.rs"]
@@ -10,11 +10,12 @@ mod tool_demo_support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let model_name = parse_model_arg()?;
     let tools = tool_list!(
         tool_demo_support::WeatherTool,
         tool_demo_support::EvaluateMathExpressionTool,
     );
-    let recommended_params = exercise_spec_recommendations();
+    let recommended_params = exercise_spec_recommendations(model_name.as_deref())?;
 
     let request = ChatRequest {
         messages: vec![ChatMessage::text(
@@ -90,8 +91,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn exercise_spec_recommendations() -> GenerationParams {
-    let spec = DemoRecommendedChatSpec::gemma4_e4b();
+fn exercise_spec_recommendations(model_name: Option<&str>) -> Result<GenerationParams> {
+    let spec = DemoRecommendedChatSpec::for_model(model_name)?;
     let effective = GenerationParams::default().with_defaults(&spec.recommended_generation_params);
 
     assert_eq!(effective.temperature, Some(1.0));
@@ -109,7 +110,27 @@ fn exercise_spec_recommendations() -> GenerationParams {
         spec.recommended_system_prompt
     );
 
-    effective
+    Ok(effective)
+}
+
+fn parse_model_arg() -> Result<Option<String>> {
+    let mut model_name = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--model" {
+            model_name = Some(args.next().context("--model requires a model name")?);
+        } else if let Some(model) = arg.strip_prefix("--model=") {
+            model_name = Some(model.to_owned());
+        } else if arg == "--help" || arg == "-h" {
+            println!(
+                "usage: cargo run -p motlie-models --example chat_tool_binding -- [--model=gemma4-e4b]"
+            );
+            std::process::exit(0);
+        } else {
+            bail!("unknown argument `{arg}`; use --model=gemma4-e4b");
+        }
+    }
+    Ok(model_name)
 }
 
 struct DemoRecommendedChatSpec {
@@ -119,6 +140,15 @@ struct DemoRecommendedChatSpec {
 }
 
 impl DemoRecommendedChatSpec {
+    fn for_model(model_name: Option<&str>) -> Result<Self> {
+        let requested = model_name.unwrap_or("gemma4-e4b");
+        let normalized = requested.to_ascii_lowercase().replace('_', "-");
+        match normalized.as_str() {
+            "e4b" | "gemma4-e4b" | "google/gemma4-e4b" => Ok(Self::gemma4_e4b()),
+            other => bail!("unknown spec model `{other}`; use gemma4-e4b"),
+        }
+    }
+
     #[cfg(feature = "model-gemma4-e4b-gguf")]
     fn gemma4_e4b() -> Self {
         let spec = motlie_model_llama_cpp::LlamaCppTextSpec::gemma4_e4b();

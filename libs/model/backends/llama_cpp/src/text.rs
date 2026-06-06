@@ -19,12 +19,11 @@ use motlie_model::{
     ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
     ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
-    TextMetricState,
+    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
+    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -38,15 +37,30 @@ pub enum LlamaCppTextArch {
     Gemma4,
 }
 
+/// @gemma4-cdx 2026-06-05 17:45 PDT: GGUF artifact naming layout for
+/// curated llama.cpp bundles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GgufFileLayout {
+    QuantizedSuffix,
+    ExactQ4_0(&'static str),
+}
+
 /// Maps `QuantizationBits` to the curated GGUF filename for a given model.
 ///
 /// llama.cpp uses pre-quantized GGUF files (unlike mistral.rs which applies
 /// ISQ at load time from safetensors). Each precision level maps to a specific
 /// GGUF file that must be downloaded separately.
-fn gguf_filename(model_prefix: &str, bits: Option<QuantizationBits>) -> String {
+fn gguf_filename(
+    model_prefix: &str,
+    layout: GgufFileLayout,
+    bits: Option<QuantizationBits>,
+) -> String {
     // INVARIANT: `bits` must already be resolved through the spec's
     // `QuantizationSupport`; this mapper only names the curated GGUF artifact.
-    format!("{model_prefix}{}", gguf_quant_suffix(bits))
+    match layout {
+        GgufFileLayout::QuantizedSuffix => format!("{model_prefix}{}", gguf_quant_suffix(bits)),
+        GgufFileLayout::ExactQ4_0(filename) => filename.to_owned(),
+    }
 }
 
 fn gguf_quant_suffix(bits: Option<QuantizationBits>) -> &'static str {
@@ -65,6 +79,7 @@ pub struct LlamaCppTextSpec {
     pub id: BundleId,
     pub display_name: &'static str,
     pub model_prefix: &'static str,
+    pub file_layout: GgufFileLayout,
     pub arch: LlamaCppTextArch,
     pub thinking: ThinkingMode,
     pub capabilities: Capabilities,
@@ -80,6 +95,7 @@ impl LlamaCppTextSpec {
             id: BundleId::new("qwen3_4b_gguf"),
             display_name: "Qwen3 4B (GGUF)",
             model_prefix: "Qwen3-4B",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Qwen3,
             thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
@@ -95,6 +111,7 @@ impl LlamaCppTextSpec {
             id: BundleId::new("gemma4_e2b_gguf"),
             display_name: "Gemma 4 E2B-it (GGUF)",
             model_prefix: "gemma-4-E2B-it",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
             thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
@@ -110,10 +127,57 @@ impl LlamaCppTextSpec {
             id: BundleId::new("gemma4_e4b_gguf"),
             display_name: "Gemma 4 E4B-it (GGUF)",
             model_prefix: "gemma-4-E4B-it",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
             thinking: ThinkingMode::Auto,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support_with_recommended(QuantizationBits::Eight),
+            default_context_length: 32768,
+            recommended_generation_params: GenerationParams {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
+        }
+    }
+
+    pub fn gemma4_12b() -> Self {
+        Self {
+            id: BundleId::new("gemma4_12b_gguf"),
+            display_name: "Gemma 4 12B-it (GGUF)",
+            model_prefix: "gemma-4-12b-it",
+            file_layout: GgufFileLayout::QuantizedSuffix,
+            arch: LlamaCppTextArch::Gemma4,
+            thinking: ThinkingMode::Auto,
+            capabilities: Capabilities::chat_completion_and_tool_use(),
+            // @gemma4-cdx 2026-06-04 22:49 PDT: GGUF is the
+            // local fallback for the official 12B safetensors path; prefer
+            // Q4_K_M for startup/memory, keep Q8_0 as an explicit override.
+            quantization: curated_q4_q8_support(),
+            default_context_length: 32768,
+            recommended_generation_params: GenerationParams {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
+        }
+    }
+
+    pub fn gemma4_12b_qat_q4_0() -> Self {
+        Self {
+            id: BundleId::new("gemma4_12b_qat_q4_0_gguf"),
+            display_name: "Gemma 4 12B-it QAT Q4_0 (GGUF)",
+            model_prefix: "gemma-4-12b-it-qat-q4_0",
+            file_layout: GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
+            arch: LlamaCppTextArch::Gemma4,
+            thinking: ThinkingMode::Auto,
+            capabilities: Capabilities::chat_completion_and_tool_use(),
+            // @gemma4-cdx 2026-06-05 17:45 PDT: Google publishes the QAT
+            // checkpoint as a single GGUF Q4_0 artifact, so expose only Q4
+            // here rather than falling back to the standard Q4_K_M/Q8 suffixes.
+            quantization: curated_q4_only_support(),
             default_context_length: 32768,
             recommended_generation_params: GenerationParams {
                 temperature: Some(1.0),
@@ -129,6 +193,7 @@ impl LlamaCppTextSpec {
             id: BundleId::new("qwen3_6_27b_gguf"),
             display_name: "Qwen3.6 27B (GGUF)",
             model_prefix: "Qwen3.6-27B",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Qwen3,
             thinking: ThinkingMode::Auto,
             capabilities: Capabilities::chat_and_completion(),
@@ -249,6 +314,16 @@ fn curated_q4_q8_support_with_recommended(recommended: QuantizationBits) -> Quan
 /// Q4 recommended, Q8 supported.
 fn curated_q4_q8_support() -> QuantizationSupport {
     curated_q4_q8_support_with_recommended(QuantizationBits::Four)
+}
+
+/// @gemma4-cdx 2026-06-05 17:45 PDT: Q4-only support for single-file QAT
+/// GGUF checkpoints.
+fn curated_q4_only_support() -> QuantizationSupport {
+    QuantizationSupport::with_recommended([QuantizationBits::Four], QuantizationBits::Four)
+        .unwrap_or_else(|e| {
+            tracing::error!("curated quantization construction failed (this is a bug): {e}");
+            QuantizationSupport::without_recommended([QuantizationBits::Four])
+        })
 }
 
 /// Qwen3.6 currently has validated GGUF Q4/Q5/Q8 artifacts in the curated repo.
@@ -546,7 +621,7 @@ impl LlamaCppRuntime {
 
             let mut generated_token_count: u32 = 0;
             let mut generated_text = String::new();
-            let mut n_cur =
+            let prompt_position_start =
                 i32::try_from(tokens.len()).map_err(|_| ModelError::BackendExecution {
                     backend: "llama-cpp",
                     operation: "tokenize",
@@ -554,7 +629,7 @@ impl LlamaCppRuntime {
                 })?;
             let mut decoder = encoding_rs::UTF_8.new_decoder();
 
-            for _ in 0..max_tokens {
+            for generation_index in 0..max_tokens {
                 let token = sampler.sample(&ctx, batch.n_tokens() - 1);
                 sampler.accept(token);
 
@@ -577,15 +652,28 @@ impl LlamaCppRuntime {
                     break;
                 }
 
+                let generation_offset =
+                    i32::try_from(generation_index).map_err(|_| ModelError::BackendExecution {
+                        backend: "llama-cpp",
+                        operation: "decode_token",
+                        message: "generated token index exceeds llama.cpp position range".into(),
+                    })?;
+                let token_position = prompt_position_start
+                    .checked_add(generation_offset)
+                    .ok_or_else(|| ModelError::BackendExecution {
+                        backend: "llama-cpp",
+                        operation: "decode_token",
+                        message: "generated token position exceeds llama.cpp position range".into(),
+                    })?;
+
                 batch.clear();
-                batch
-                    .add(token, n_cur, &[0], true)
-                    .map_err(|e| ModelError::BackendExecution {
+                batch.add(token, token_position, &[0], true).map_err(|e| {
+                    ModelError::BackendExecution {
                         backend: "llama-cpp",
                         operation: "batch_add_token",
                         message: e.to_string(),
-                    })?;
-                n_cur += 1;
+                    }
+                })?;
 
                 ctx.decode(&mut batch)
                     .map_err(|e| ModelError::BackendExecution {
@@ -865,6 +953,7 @@ fn openai_response_json_to_chat_response(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let content = strip_empty_gemma4_channel_prefix(&content).to_string();
     let reasoning = value
         .get("reasoning_content")
         .or_else(|| value.get("reasoning"))
@@ -895,6 +984,19 @@ fn openai_response_json_to_chat_response(
         reasoning,
         usage: Some(usage),
     })
+}
+
+fn strip_empty_gemma4_channel_prefix(content: &str) -> &str {
+    for marker in [
+        "<|channel>thought\n<channel|>",
+        "<|channel>thought\r\n<channel|>",
+    ] {
+        if let Some(rest) = content.strip_prefix(marker) {
+            return rest.trim_start_matches(['\n', '\r']);
+        }
+    }
+
+    content
 }
 
 fn openai_response_tool_call(
@@ -1193,7 +1295,7 @@ fn build_llama_model(
         )));
     }
 
-    let filename = gguf_filename(spec.model_prefix, resolved_quantization);
+    let filename = gguf_filename(spec.model_prefix, spec.file_layout, resolved_quantization);
     let model_path = if let Some(artifact_policy) = artifact_policy {
         configure_artifact_policy(&filename, artifact_policy)?.model_path
     } else {
@@ -1390,22 +1492,49 @@ mod tests {
     #[test]
     fn gguf_filename_maps_quantization_to_curated_filenames() {
         assert_eq!(
-            gguf_filename("qwen3-4b", Some(QuantizationBits::Four)),
+            gguf_filename(
+                "qwen3-4b",
+                GgufFileLayout::QuantizedSuffix,
+                Some(QuantizationBits::Four)
+            ),
             "qwen3-4b-Q4_K_M.gguf"
         );
         assert_eq!(
-            gguf_filename("qwen3-4b", Some(QuantizationBits::Eight)),
+            gguf_filename(
+                "qwen3-4b",
+                GgufFileLayout::QuantizedSuffix,
+                Some(QuantizationBits::Eight)
+            ),
             "qwen3-4b-Q8_0.gguf"
         );
         assert_eq!(
-            gguf_filename("qwen3-4b", Some(QuantizationBits::Five)),
+            gguf_filename(
+                "qwen3-4b",
+                GgufFileLayout::QuantizedSuffix,
+                Some(QuantizationBits::Five)
+            ),
             "qwen3-4b-Q5_K_M.gguf"
         );
         assert_eq!(
-            gguf_filename("qwen3-4b", Some(QuantizationBits::FloatEight)),
+            gguf_filename(
+                "qwen3-4b",
+                GgufFileLayout::QuantizedSuffix,
+                Some(QuantizationBits::FloatEight)
+            ),
             "qwen3-4b-FP8.gguf"
         );
-        assert_eq!(gguf_filename("qwen3-4b", None), "qwen3-4b-f16.gguf");
+        assert_eq!(
+            gguf_filename("qwen3-4b", GgufFileLayout::QuantizedSuffix, None),
+            "qwen3-4b-f16.gguf"
+        );
+        assert_eq!(
+            gguf_filename(
+                "gemma-4-12b-it-qat-q4_0",
+                GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
+                Some(QuantizationBits::Four)
+            ),
+            "gemma-4-12b-it-qat-q4_0.gguf"
+        );
     }
 
     #[test]
@@ -1541,6 +1670,46 @@ mod tests {
             response.usage.as_ref().and_then(|usage| usage.total_tokens),
             Some(7)
         );
+    }
+
+    #[test]
+    fn openai_response_json_strips_empty_gemma4_thought_channel_from_content() {
+        let raw = json!({
+            "role": "assistant",
+            "content": "<|channel>thought\n<channel|>The answer is 68.0 degrees Fahrenheit."
+        })
+        .to_string();
+
+        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default())
+            .expect("response should map");
+
+        assert_eq!(response.content, "The answer is 68.0 degrees Fahrenheit.");
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.finish_reason, Some(ChatFinishReason::Stop));
+    }
+
+    #[test]
+    fn openai_response_json_strips_bare_gemma4_thought_channel_from_tool_content() {
+        let raw = json!({
+            "role": "assistant",
+            "content": "<|channel>thought\n<channel|>",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": {"city": "Seattle"}
+                }
+            }]
+        })
+        .to_string();
+
+        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default())
+            .expect("response should map");
+
+        assert_eq!(response.content, "");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.finish_reason, Some(ChatFinishReason::ToolCalls));
     }
 
     #[tokio::test]
