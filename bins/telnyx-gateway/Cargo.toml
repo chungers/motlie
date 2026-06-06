@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-golden-ab = ["sherpa", "moonshine", "whisper", "qwen3-tts-cpp"]
+golden-ab = ["sherpa", "moonshine", "whisper", "piper", "qwen3-tts-cpp"]
 sherpa = [
     "dep:motlie-model-sherpa-onnx",
     "motlie-models/model-sherpa-onnx-streaming",

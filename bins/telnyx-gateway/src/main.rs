@@ -80,6 +80,21 @@ async fn main() -> anyhow::Result<()> {
             print_golden_ab_report(&report);
             return Ok(());
         }
+        Some(CliCommand::TtsGoldenAb(args)) => {
+            let asr_backend = args.asr_backend;
+            let fixed_asr =
+                ReplayBackend::new(asr_backend.label(), build_asr_factory(&cli, asr_backend));
+            let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+            let report = motlie_telnyx_gateway::golden_ab::run_tts_golden_ab(
+                args,
+                fixed_asr,
+                artifact_root,
+                !cli.no_asr_download,
+            )
+            .await?;
+            print_tts_golden_ab_report(&report);
+            return Ok(());
+        }
         None => {}
     }
 
@@ -331,6 +346,46 @@ fn print_golden_ab_report(report: &motlie_telnyx_gateway::golden_ab::GoldenAbRep
             summary.ingest_avg_ms,
             summary.finish_avg_ms,
             summary.wall_avg_ms
+        );
+    }
+}
+
+fn print_tts_golden_ab_report(report: &motlie_telnyx_gateway::golden_ab::TtsGoldenAbReport) {
+    println!("manifest: {}", report.manifest_path);
+    println!("output_dir: {}", report.output_dir);
+    println!("asr_backend: {}", report.asr_backend);
+    println!("chunk_ms: {}", report.chunk_ms);
+    println!(
+        "trailing_silence_pad_ms: {}",
+        report.trailing_silence_pad_ms
+    );
+    println!("entries: {}", report.entries.len());
+    println!("failures: {}", report.failures.len());
+    for summary in &report.summaries {
+        println!(
+            "summary: engine={} codec={} category={} samples={} wer={:.1}% errors={}/{} tts_avg_ms={:.1} rtf_avg={:.2} wpm_avg={:.1} clipping_avg={:.3}% asr_wall_avg_ms={:.1}",
+            summary.engine,
+            summary.codec,
+            summary.category,
+            summary.sample_count,
+            summary.wer_percent,
+            summary.errors,
+            summary.reference_words,
+            summary.tts_elapsed_avg_ms,
+            summary.tts_realtime_factor_avg,
+            summary.speaking_rate_wpm_avg,
+            summary.clipping_percent_avg,
+            summary.asr_wall_avg_ms
+        );
+    }
+    for failure in &report.failures {
+        println!(
+            "failure: engine={} codec={} id={} status={} error={}",
+            failure.engine,
+            failure.codec.as_deref().unwrap_or("n/a"),
+            failure.id,
+            failure.status,
+            failure.error
         );
     }
 }

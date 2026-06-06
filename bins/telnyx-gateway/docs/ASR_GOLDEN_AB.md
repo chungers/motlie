@@ -11,6 +11,10 @@ This harness produces reproducible offline ASR selection data without a live Tel
 
 Ground truth is the corpus `text` field in `bins/telnyx-gateway/corpus/qwen3-call-center-golden.json`. Digit strings are written as spoken words to make WER compare the intended speech instead of punctuation or numeric formatting.
 
+## Related Harnesses
+
+- [TTS_GOLDEN_AB.md](./TTS_GOLDEN_AB.md) documents the issue #381 reversed harness: fixed golden text -> per-engine TTS -> Telnyx codec round-trip -> fixed sherpa-2023 ASR -> WER/objective TTS quality signals.
+
 ## Commands
 
 Generate the 16 kHz mono source WAVs:
