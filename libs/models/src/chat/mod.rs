@@ -4,6 +4,7 @@
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b",
     feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
@@ -18,6 +19,7 @@ use std::str::FromStr;
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b",
     feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
@@ -30,6 +32,7 @@ use crate::{BundleFamily, BundleRequirements, PlatformConstraint};
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b",
     feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
@@ -42,6 +45,7 @@ use motlie_model::BundleId;
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b",
     feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
@@ -54,6 +58,7 @@ pub const GEMMA4_E2B_SELECTOR: &str = "google/gemma4_e2b";
 pub const GEMMA4_E4B_SELECTOR: &str = "google/gemma4_e4b";
 pub const GEMMA4_12B_SELECTOR: &str = "google/gemma4_12b";
 pub const GEMMA4_12B_GGUF_SELECTOR: &str = "google/gemma4_12b_gguf";
+pub const GEMMA4_12B_QAT_Q4_0_GGUF_SELECTOR: &str = "google/gemma4_12b_qat_q4_0_gguf";
 pub const QWEN3_4B_GGUF_SELECTOR: &str = "qwen/qwen3_4b_gguf";
 pub const GEMMA4_E2B_GGUF_SELECTOR: &str = "google/gemma4_e2b_gguf";
 pub const GEMMA4_E4B_GGUF_SELECTOR: &str = "google/gemma4_e4b_gguf";
@@ -139,7 +144,11 @@ pub(crate) fn gemma4_e4b_identity() -> motlie_model::ModelIdentity {
     }
 }
 
-#[cfg(any(feature = "model-gemma4-12b", feature = "model-gemma4-12b-gguf"))]
+#[cfg(any(
+    feature = "model-gemma4-12b",
+    feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
+))]
 pub(crate) fn gemma4_12b_identity() -> motlie_model::ModelIdentity {
     motlie_model::ModelIdentity {
         id: BundleId::new("gemma4_12b"),
@@ -163,6 +172,8 @@ pub(crate) fn gemma4_12b_identity() -> motlie_model::ModelIdentity {
 pub mod gemma4_12b;
 #[cfg(feature = "model-gemma4-12b-gguf")]
 pub mod gemma4_12b_gguf;
+#[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+pub mod gemma4_12b_qat_q4_0_gguf;
 #[cfg(feature = "model-gemma4-e2b")]
 pub mod gemma4_e2b;
 #[cfg(feature = "model-gemma4-e2b-gguf")]
@@ -192,6 +203,8 @@ pub enum ChatModels {
     Gemma4_12B,
     #[cfg(feature = "model-gemma4-12b-gguf")]
     Gemma4_12B_Gguf,
+    #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+    Gemma4_12B_QatQ4_0_Gguf,
     #[cfg(feature = "model-gemma4-e4b-gguf")]
     Gemma4E4B_Gguf,
     #[cfg(feature = "model-qwen3-4b")]
@@ -208,6 +221,7 @@ pub enum ChatModels {
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b",
     feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
@@ -226,6 +240,8 @@ impl ChatModels {
             Self::Gemma4_12B => gemma4_12b::SELECTOR,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf => gemma4_12b_gguf::SELECTOR,
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            Self::Gemma4_12B_QatQ4_0_Gguf => gemma4_12b_qat_q4_0_gguf::SELECTOR,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf => gemma4_e4b_gguf::SELECTOR,
             #[cfg(feature = "model-qwen3-4b")]
@@ -249,6 +265,8 @@ impl ChatModels {
             Self::Gemma4_12B => gemma4_12b::descriptor().id,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf => gemma4_12b_gguf::descriptor().id,
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            Self::Gemma4_12B_QatQ4_0_Gguf => gemma4_12b_qat_q4_0_gguf::descriptor().id,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf => gemma4_e4b_gguf::descriptor().id,
             #[cfg(feature = "model-qwen3-4b")]
@@ -272,6 +290,8 @@ impl ChatModels {
             Self::Gemma4_12B => gemma4_12b::descriptor(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf => gemma4_12b_gguf::descriptor(),
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            Self::Gemma4_12B_QatQ4_0_Gguf => gemma4_12b_qat_q4_0_gguf::descriptor(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf => gemma4_e4b_gguf::descriptor(),
             #[cfg(feature = "model-qwen3-4b")]
@@ -295,6 +315,8 @@ impl ChatModels {
             Self::Gemma4_12B => gemma4_12b::bundle(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf => gemma4_12b_gguf::bundle(),
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            Self::Gemma4_12B_QatQ4_0_Gguf => gemma4_12b_qat_q4_0_gguf::bundle(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             Self::Gemma4E4B_Gguf => gemma4_e4b_gguf::bundle(),
             #[cfg(feature = "model-qwen3-4b")]
@@ -313,6 +335,7 @@ impl ChatModels {
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b",
     feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
@@ -357,6 +380,12 @@ impl FromStr for ChatModels {
             gemma4_12b_gguf::SELECTOR => Ok(Self::Gemma4_12B_Gguf),
             #[cfg(not(feature = "model-gemma4-12b-gguf"))]
             GEMMA4_12B_GGUF_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
+                selector: value.to_owned(),
+            }),
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            gemma4_12b_qat_q4_0_gguf::SELECTOR => Ok(Self::Gemma4_12B_QatQ4_0_Gguf),
+            #[cfg(not(feature = "model-gemma4-12b-qat-q4-0-gguf"))]
+            GEMMA4_12B_QAT_Q4_0_GGUF_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
                 selector: value.to_owned(),
             }),
             #[cfg(feature = "model-gemma4-e4b-gguf")]

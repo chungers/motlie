@@ -37,15 +37,30 @@ pub enum LlamaCppTextArch {
     Gemma4,
 }
 
+/// @gemma4-cdx 2026-06-05 17:45 PDT: GGUF artifact naming layout for
+/// curated llama.cpp bundles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GgufFileLayout {
+    QuantizedSuffix,
+    ExactQ4_0(&'static str),
+}
+
 /// Maps `QuantizationBits` to the curated GGUF filename for a given model.
 ///
 /// llama.cpp uses pre-quantized GGUF files (unlike mistral.rs which applies
 /// ISQ at load time from safetensors). Each precision level maps to a specific
 /// GGUF file that must be downloaded separately.
-fn gguf_filename(model_prefix: &str, bits: Option<QuantizationBits>) -> String {
+fn gguf_filename(
+    model_prefix: &str,
+    layout: GgufFileLayout,
+    bits: Option<QuantizationBits>,
+) -> String {
     // INVARIANT: `bits` must already be resolved through the spec's
     // `QuantizationSupport`; this mapper only names the curated GGUF artifact.
-    format!("{model_prefix}{}", gguf_quant_suffix(bits))
+    match layout {
+        GgufFileLayout::QuantizedSuffix => format!("{model_prefix}{}", gguf_quant_suffix(bits)),
+        GgufFileLayout::ExactQ4_0(filename) => filename.to_owned(),
+    }
 }
 
 fn gguf_quant_suffix(bits: Option<QuantizationBits>) -> &'static str {
@@ -64,6 +79,7 @@ pub struct LlamaCppTextSpec {
     pub id: BundleId,
     pub display_name: &'static str,
     pub model_prefix: &'static str,
+    pub file_layout: GgufFileLayout,
     pub arch: LlamaCppTextArch,
     pub thinking: ThinkingMode,
     pub capabilities: Capabilities,
@@ -79,6 +95,7 @@ impl LlamaCppTextSpec {
             id: BundleId::new("qwen3_4b_gguf"),
             display_name: "Qwen3 4B (GGUF)",
             model_prefix: "Qwen3-4B",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Qwen3,
             thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
@@ -94,6 +111,7 @@ impl LlamaCppTextSpec {
             id: BundleId::new("gemma4_e2b_gguf"),
             display_name: "Gemma 4 E2B-it (GGUF)",
             model_prefix: "gemma-4-E2B-it",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
             thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
@@ -109,6 +127,7 @@ impl LlamaCppTextSpec {
             id: BundleId::new("gemma4_e4b_gguf"),
             display_name: "Gemma 4 E4B-it (GGUF)",
             model_prefix: "gemma-4-E4B-it",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
             thinking: ThinkingMode::Auto,
             capabilities: Capabilities::chat_completion_and_tool_use(),
@@ -128,6 +147,7 @@ impl LlamaCppTextSpec {
             id: BundleId::new("gemma4_12b_gguf"),
             display_name: "Gemma 4 12B-it (GGUF)",
             model_prefix: "gemma-4-12b-it",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
             thinking: ThinkingMode::Auto,
             capabilities: Capabilities::chat_completion_and_tool_use(),
@@ -145,11 +165,35 @@ impl LlamaCppTextSpec {
         }
     }
 
+    pub fn gemma4_12b_qat_q4_0() -> Self {
+        Self {
+            id: BundleId::new("gemma4_12b_qat_q4_0_gguf"),
+            display_name: "Gemma 4 12B-it QAT Q4_0 (GGUF)",
+            model_prefix: "gemma-4-12b-it-qat-q4_0",
+            file_layout: GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
+            arch: LlamaCppTextArch::Gemma4,
+            thinking: ThinkingMode::Auto,
+            capabilities: Capabilities::chat_completion_and_tool_use(),
+            // @gemma4-cdx 2026-06-05 17:45 PDT: Google publishes the QAT
+            // checkpoint as a single GGUF Q4_0 artifact, so expose only Q4
+            // here rather than falling back to the standard Q4_K_M/Q8 suffixes.
+            quantization: curated_q4_only_support(),
+            default_context_length: 32768,
+            recommended_generation_params: GenerationParams {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
+        }
+    }
+
     pub fn qwen3_6_27b() -> Self {
         Self {
             id: BundleId::new("qwen3_6_27b_gguf"),
             display_name: "Qwen3.6 27B (GGUF)",
             model_prefix: "Qwen3.6-27B",
+            file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Qwen3,
             thinking: ThinkingMode::Auto,
             capabilities: Capabilities::chat_and_completion(),
@@ -270,6 +314,16 @@ fn curated_q4_q8_support_with_recommended(recommended: QuantizationBits) -> Quan
 /// Q4 recommended, Q8 supported.
 fn curated_q4_q8_support() -> QuantizationSupport {
     curated_q4_q8_support_with_recommended(QuantizationBits::Four)
+}
+
+/// @gemma4-cdx 2026-06-05 17:45 PDT: Q4-only support for single-file QAT
+/// GGUF checkpoints.
+fn curated_q4_only_support() -> QuantizationSupport {
+    QuantizationSupport::with_recommended([QuantizationBits::Four], QuantizationBits::Four)
+        .unwrap_or_else(|e| {
+            tracing::error!("curated quantization construction failed (this is a bug): {e}");
+            QuantizationSupport::without_recommended([QuantizationBits::Four])
+        })
 }
 
 /// Qwen3.6 currently has validated GGUF Q4/Q5/Q8 artifacts in the curated repo.
@@ -1228,7 +1282,11 @@ fn build_llama_model(
         )));
     }
 
-    let filename = gguf_filename(spec.model_prefix, resolved_quantization);
+    let filename = gguf_filename(
+        spec.model_prefix,
+        spec.file_layout,
+        resolved_quantization,
+    );
     let model_path = if let Some(artifact_policy) = artifact_policy {
         configure_artifact_policy(&filename, artifact_policy)?.model_path
     } else {
@@ -1425,22 +1483,49 @@ mod tests {
     #[test]
     fn gguf_filename_maps_quantization_to_curated_filenames() {
         assert_eq!(
-            gguf_filename("qwen3-4b", Some(QuantizationBits::Four)),
+            gguf_filename(
+                "qwen3-4b",
+                GgufFileLayout::QuantizedSuffix,
+                Some(QuantizationBits::Four)
+            ),
             "qwen3-4b-Q4_K_M.gguf"
         );
         assert_eq!(
-            gguf_filename("qwen3-4b", Some(QuantizationBits::Eight)),
+            gguf_filename(
+                "qwen3-4b",
+                GgufFileLayout::QuantizedSuffix,
+                Some(QuantizationBits::Eight)
+            ),
             "qwen3-4b-Q8_0.gguf"
         );
         assert_eq!(
-            gguf_filename("qwen3-4b", Some(QuantizationBits::Five)),
+            gguf_filename(
+                "qwen3-4b",
+                GgufFileLayout::QuantizedSuffix,
+                Some(QuantizationBits::Five)
+            ),
             "qwen3-4b-Q5_K_M.gguf"
         );
         assert_eq!(
-            gguf_filename("qwen3-4b", Some(QuantizationBits::FloatEight)),
+            gguf_filename(
+                "qwen3-4b",
+                GgufFileLayout::QuantizedSuffix,
+                Some(QuantizationBits::FloatEight)
+            ),
             "qwen3-4b-FP8.gguf"
         );
-        assert_eq!(gguf_filename("qwen3-4b", None), "qwen3-4b-f16.gguf");
+        assert_eq!(
+            gguf_filename("qwen3-4b", GgufFileLayout::QuantizedSuffix, None),
+            "qwen3-4b-f16.gguf"
+        );
+        assert_eq!(
+            gguf_filename(
+                "gemma-4-12b-it-qat-q4_0",
+                GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
+                Some(QuantizationBits::Four)
+            ),
+            "gemma-4-12b-it-qat-q4_0.gguf"
+        );
     }
 
     #[test]

@@ -679,3 +679,48 @@ ASR acceptance bar:
   GGUF bundles.
 - For the ASR milestone, should the first accepted shape be final-only 30
   second batch transcription, or should it require real streaming transcription?
+
+## QAT Q4_0 GGUF Variant Update
+
+@gemma4-cdx 2026-06-05 17:45 PDT: issue #397 adds a Google-published QAT
+Q4_0 GGUF variant in parallel with the existing M1 variants. Bundle id
+`gemma4_12b_qat_q4_0_gguf`, selector
+`google/gemma4_12b_qat_q4_0_gguf`, feature
+`model-gemma4-12b-qat-q4-0-gguf`, backend `llama.cpp`, source repo
+`google/gemma-4-12B-it-qat-q4_0-gguf`, curated file
+`gemma-4-12b-it-qat-q4_0.gguf`. The repo also publishes
+`mmproj-gemma-4-12b-it-qat-q4_0.gguf`; Motlie does not include it yet because
+the current `llama.cpp` wrapper is text-only, so this variant advertises chat,
+completion, and tool use only.
+
+Recommendation after review: try `llama.cpp` first for this Q4_0 artifact. The
+published Q4_0 checkpoint is already GGUF and loads directly through the
+existing GGUF artifact/cache path. The Mistral backend remains the right path for
+full safetensors and future QAT-unquantized experiments, but not for consuming
+this GGUF file directly.
+
+Validation on the local CPU host:
+
+- `cargo check -p motlie-models --no-default-features --features
+  model-gemma4-12b-qat-q4-0-gguf --lib` passed.
+- `cargo check -p motlie-models --no-default-features --features
+  model-gemma4-12b-qat-q4-0-gguf --example chat_gguf_gwen3_gemma4` passed.
+- `cargo check -p motlie-models --no-default-features --features
+  model-gemma4-12b-qat-q4-0-gguf --example bench_chat` passed.
+- `motlie-models-download gemma4_12b_qat_q4_0_gguf` downloaded one file from
+  snapshot `f6e7774e6148da3b7f201e42ba37cf084c1db35f`.
+- `bench_chat --model=gemma4-12b-qat-q4-0-gguf --precision=q4 --iterations=1`
+  loaded file type `Q4_0`, file size 6.48 GiB, startup 4.946s, RSS after
+  startup 12.6 GiB, one-word warmup 38.8s, measured one-word request 43.6s,
+  final RSS 12.5 GiB, peak RSS 18.7 GiB.
+- `chat_gguf_gwen3_gemma4 --chat=google/gemma4_12b_qat_q4_0_gguf
+  --tool-demo-only` passed with `tool-demo-thinking: Disabled`: Seattle,
+  Portland, San Francisco weather calls plus math average call, final response
+  "The average current temperature for Seattle, Portland, and San Francisco is
+  68.0 degrees Fahrenheit.", startup 5.2s, final RSS 12.4 GiB, peak resident
+  bytes 24.45 GB.
+
+Workspace note: `cargo fmt --check` remains blocked by unrelated workspace
+state (`examples/vector2/app/benchmark.rs` missing) and reports formatting drift
+in unrelated files, so formatting validation was scoped to compile checks for
+the touched targets.

@@ -9,7 +9,7 @@
 ///   --iterations=N         Number of measured iterations (default: 5)
 ///   --precision=q4|q8|f32|f16
 ///                          Quantization (default: q4; GGUF uses f16 for no quantization)
-///   --model=qwen|gemma|gemma4-12b|gemma4-12b-gguf
+///   --model=qwen|gemma|gemma4-12b|gemma4-12b-gguf|gemma4-12b-qat-q4-0-gguf
 ///                          Model selection (default: qwen; `gemma` is Gemma 4 E2B)
 ///   --input=FILE           Read prompt from file instead of args
 ///
@@ -72,11 +72,13 @@ async fn main() -> Result<()> {
     let prompt_words = prompt.split_whitespace().count();
     let est_tokens = prompt_words * 13 / 10;
 
-    let quantization_label = if matches!(model_name.as_str(), "gemma4-12b-gguf" | "gemma4_12b_gguf")
-    {
-        quantization_label_gguf(quantization)
-    } else {
-        quantization_label_isq(quantization)
+    let quantization_label = match model_name.as_str() {
+        "gemma4-12b-qat-q4-0-gguf" | "gemma4_12b_qat_q4_0_gguf" => match quantization {
+            Some(QuantizationBits::Four) => "GGUF Q4_0",
+            _ => "unsupported QAT GGUF precision",
+        },
+        "gemma4-12b-gguf" | "gemma4_12b_gguf" => quantization_label_gguf(quantization),
+        _ => quantization_label_isq(quantization),
     };
 
     println!("=== bench_chat ===");
@@ -125,7 +127,15 @@ async fn main() -> Result<()> {
             #[cfg(not(feature = "model-gemma4-12b-gguf"))]
             bail!("model-gemma4-12b-gguf feature not enabled")
         }
-        other => bail!("unknown model `{other}` — use qwen, gemma, gemma4-12b, or gemma4-12b-gguf"),
+        "gemma4-12b-qat-q4-0-gguf" | "gemma4_12b_qat_q4_0_gguf" => {
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            {
+                motlie_models::chat::gemma4_12b_qat_q4_0_gguf::bundle()
+            }
+            #[cfg(not(feature = "model-gemma4-12b-qat-q4-0-gguf"))]
+            bail!("model-gemma4-12b-qat-q4-0-gguf feature not enabled")
+        }
+        other => bail!("unknown model `{other}` — use qwen, gemma, gemma4-12b, gemma4-12b-gguf, or gemma4-12b-qat-q4-0-gguf"),
     };
 
     // Startup
