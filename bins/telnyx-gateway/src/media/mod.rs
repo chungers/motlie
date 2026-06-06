@@ -2081,6 +2081,34 @@ mod tests {
         assert_eq!(call.transcripts[0].text, "hello there");
     }
 
+    #[test]
+    fn conversation_events_from_transcripts_filters_to_unsuppressed_finals() {
+        let events = vec![
+            AsrTranscriptEvent::emit(TranscriptEvent::Partial {
+                text: "partial".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            }),
+            AsrTranscriptEvent::suppress(
+                TranscriptEvent::Final {
+                    text: "suppressed final".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                },
+                AsrTranscriptSuppressionReason::RepeatedTokenHallucination,
+                true,
+            ),
+            AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "forward final".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            }),
+        ];
+
+        let forwarded = conversation_events_from_transcripts(&events);
+
+        assert_eq!(forwarded.len(), 1);
+        assert!(forwarded[0].is_final());
+        assert_eq!(forwarded[0].text(), "forward final");
+    }
+
     #[tokio::test]
     async fn non_sherpa_pass_through_transcripts_are_not_suppressed_by_media_loop() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));

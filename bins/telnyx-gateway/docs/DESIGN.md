@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-06 08:48 PDT | @codex-366-impl: Addressed PR #400 review round 1 by documenting final-transcript-triggered barge-in latency, adding manual approval commands, and clarifying that auto conversation is Piper-locked for the first Sherpa+Piper pairing while manual approval uses source-selected TTS. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
 | 2026-06-05 23:34 PDT | @codex-366-impl: Implemented milestone 3 composition using gateway-local `ConversationRuntime`, final-transcript forwarding for attached calls, shared TUI/socket `conversation` commands, M2 speech queue reuse for `Say`, and drop-and-regenerate barge-in via the existing `speak cancel`/Telnyx `clear` path. | Milestone 3: Full-Duplex TUI Chat Conversation, Recommended Telnyx v1 Pipelines, Operator REPL and TUI Control Surface |
 | 2026-06-04 | @codex-369-rv: Removed ASR startup-default configuration in favor of code defaults plus source-local `asr use`, and normalized gateway TTS output to backend-neutral signed 16-bit PCM plus sample-rate metadata before Telnyx packetization so Piper and future Qwen3-TTS.cpp share one media path. | Operator REPL and TUI Control Surface, Returning TTS Audio, Recommended TTS: Piper |
 | 2026-06-04 | @codex-369-rv: Aligned TTS operator commands with the ASR command pattern: `tts list`, `tts status`, and `tts use piper` are available through the shared TUI/socket command engine, and `dial` output now tells operators to wait for media before running `speak`. | Operator REPL and TUI Control Surface, Driver REPL Dialer Surface, Recommended TTS: Piper |
@@ -581,7 +582,7 @@ The third milestone composes milestone 1 and milestone 2 into a TUI-driven conve
 
 ```text
 selected-call chat interface
--> TranscriptSink
+-> media final-transcript forwarding
 -> ConversationHandler
 -> ConversationCommand::Say { text }
 -> OutboundSpeechController::speak(...)
@@ -597,7 +598,7 @@ Recommended composition rule:
 - conversation handlers emit provider-neutral commands such as `Say { text }`, `Call(CallAction::Hangup)`, `Call(CallAction::Transfer { ... })`, or `Noop`
 - `bins/telnyx-gateway` maps those commands to Telnyx call-control and outbound media operations
 
-Implementation note (@codex-366-impl, 2026-06-05 23:34 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. Manual mode records the assistant proposal in the selected-call chat state; auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with Piper. Barge-in is drop-and-regenerate: an active playback is canceled through the existing speech cancel/Telnyx `clear` mechanism before the new response is generated. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
+Implementation note (@codex-366-impl, 2026-06-06 08:48 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. Manual mode records the assistant proposal in the selected-call chat state, and `conversation approve [call]` / `conversation say [call]` speaks the pending proposal through that command source's selected TTS backend. Auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with Piper for the first Sherpa+Piper pairing; it intentionally does not use `tts use` because media-triggered turns are not associated with a command source. Barge-in is drop-and-regenerate, but the initial implementation triggers it on final transcript events, so cut latency is bounded by ASR endpointing; VAD/partial-ASR-triggered barge-in remains deferred. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
 
 ### Milestone 4: External Integration Harness
 
@@ -658,7 +659,7 @@ Milestone 3 full-duplex TUI chat conversation (#366):
 
 ```text
 selected-call chat interface
--> TranscriptSink
+-> media final-transcript forwarding
 -> ConversationHandler
 -> ConversationCommand::Say { text }
 -> OutboundSpeechController
@@ -965,10 +966,12 @@ Conversation bridge commands:
 conversation status
 conversation attach [call]
 conversation detach [call]
+conversation approve [call]
+conversation say [call]
 conversation mode <manual|auto>
 ```
 
-These belong after milestone 1 and milestone 2 are independently useful. `conversation attach` should wire selected transcript events to `ConversationHandler`; it should not change the Telnyx media or model contracts.
+These belong after milestone 1 and milestone 2 are independently useful. `conversation attach` should wire selected media final transcript events to `ConversationHandler`; it should not change the Telnyx media or model contracts. Manual proposals are spoken only after `conversation approve` / `conversation say`.
 
 ### Replayable State Dumps
 

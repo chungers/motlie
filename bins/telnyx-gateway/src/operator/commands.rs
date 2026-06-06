@@ -10,7 +10,8 @@ use crate::media::{OutboundMediaCommand, SpeechCancelToken};
 use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{
-    CallStatus, ConversationMode, GatewayState, InboundMode, LogLevel, SharedState,
+    CallStatus, ConversationMode, ConversationStatus, GatewayState, InboundMode, LogLevel,
+    SharedState,
 };
 use crate::speech;
 use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
@@ -320,6 +321,12 @@ pub enum ConversationCommand {
         call: Option<String>,
     },
     Detach {
+        call: Option<String>,
+    },
+    Approve {
+        call: Option<String>,
+    },
+    Say {
         call: Option<String>,
     },
     Mode {
@@ -1486,6 +1493,9 @@ async fn conversation_command(
                 "conversation detached for {id}"
             )))
         }
+        ConversationCommand::Approve { call } | ConversationCommand::Say { call } => {
+            approve_conversation_proposal(context, call).await
+        }
         ConversationCommand::Mode { mode, call } => {
             let mode = ConversationMode::from(mode);
             let mut guard = context.state.write().await;
@@ -1494,18 +1504,89 @@ async fn conversation_command(
                 call.as_deref(),
                 context.session.selected_call.as_deref(),
             )?;
-            if !guard.calls.contains_key(&id) {
+            let Some(call) = guard.calls.get(&id) else {
                 return Err(DriverError::NotFound {
                     kind: "call",
                     name: id,
                 });
-            }
+            };
+            let attached_before = call.conversation.attached;
             guard.set_conversation_mode(&id, mode);
             context.session.selected_call = Some(id.clone());
+            let attached_note = if attached_before { "" } else { " (attached)" };
             Ok(CommandOutput::line(format!(
-                "conversation mode for {id}: {}",
+                "conversation mode for {id}: {}{attached_note}",
                 mode.label()
             )))
+        }
+    }
+}
+
+async fn approve_conversation_proposal(
+    context: &mut GatewayContext,
+    call: Option<String>,
+) -> DriverResult<CommandOutput> {
+    let (id, text) = {
+        let guard = context.state.read().await;
+        let id = resolve_call_id(
+            &guard,
+            call.as_deref(),
+            context.session.selected_call.as_deref(),
+        )?;
+        let call = guard.calls.get(&id).ok_or_else(|| DriverError::NotFound {
+            kind: "call",
+            name: id.clone(),
+        })?;
+        if !call.conversation.attached {
+            return Err(DriverError::message(format!(
+                "conversation is detached for {id}; run conversation attach {id} first"
+            )));
+        }
+        if call.conversation.status != ConversationStatus::Proposed {
+            return Err(DriverError::message(format!(
+                "no pending conversation proposal for {id}"
+            )));
+        }
+        let text = call
+            .conversation
+            .last_assistant_text
+            .clone()
+            .ok_or_else(|| {
+                DriverError::message(format!("no pending conversation proposal for {id}"))
+            })?;
+        (id, text)
+    };
+
+    let queued = speech::queue_speech(
+        &context.state,
+        &context.media,
+        &context.tts,
+        context.session.next_tts_backend,
+        id.clone(),
+        text,
+        "conversation approve",
+    )
+    .await;
+    match queued {
+        Ok(queued) => {
+            context
+                .state
+                .write()
+                .await
+                .record_conversation_approved_speaking(&id, queued.playback_id.clone());
+            Ok(CommandOutput::line(format!(
+                "conversation approved for {id} playback={}",
+                queued.playback_id
+            )))
+        }
+        Err(error) => {
+            let error = format!("{error:#}");
+            context
+                .state
+                .write()
+                .await
+                .record_conversation_failed(&id, error.clone());
+            Err(DriverError::message(error))
         }
     }
 }
@@ -2102,10 +2183,13 @@ fn conversation_help() -> String {
         "  conversation status [call-id]",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
+        "  conversation approve [call-id]",
+        "  conversation say [call-id]",
         "  conversation mode <manual|auto> [call-id]",
         "",
-        "Manual mode records the assistant response for operator review. Auto mode routes",
-        "the generated response through the same Piper `speak` media path used by M2.",
+        "Manual mode records the assistant response for operator review; approve/say",
+        "speaks the pending proposal using this source's selected TTS backend. Auto mode",
+        "routes generated responses through Piper for the M3 Sherpa+Piper pairing.",
     ]
     .join("\n")
 }
@@ -2258,6 +2342,7 @@ fn socket_help() -> String {
         "    dial <+e164> [--from +e164]",
         "    speak [call-id] <text...>",
         "    speak cancel [call-id]",
+        "    conversation approve [call-id]",
         "    hangup [call-id]",
         "",
         "Source-local state:",
@@ -2962,7 +3047,7 @@ mod tests {
         );
         assert_eq!(
             mode.lines,
-            vec![format!("conversation mode for {call_two}: auto")]
+            vec![format!("conversation mode for {call_two}: auto (attached)")]
         );
         let socket_status = socket_engine
             .run_line("conversation status")
@@ -2981,6 +3066,47 @@ mod tests {
         assert_eq!(tui_call.conversation.mode, ConversationMode::Manual);
         assert!(socket_call.conversation.attached);
         assert_eq!(socket_call.conversation.mode, ConversationMode::Auto);
+    }
+
+    #[tokio::test]
+    async fn conversation_approve_speaks_pending_manual_proposal() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            let call_id = add_streaming_call(&mut guard, "call-1", "stream-1");
+            guard.attach_conversation(&call_id, ConversationMode::Manual);
+            guard.record_conversation_proposal(&call_id, "Approved response".to_string());
+            call_id
+        };
+        let media = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        media.register_call(call_id.clone(), tx).await;
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = context_with_static_tts(state.clone(), telnyx, media);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let output = engine
+            .run_line("conversation approve")
+            .await
+            .expect("approve should queue proposed response");
+
+        assert!(
+            output.lines[0].starts_with(&format!("conversation approved for {call_id} playback="))
+        );
+        let playback_id = receive_frame_playback(&mut rx).await;
+        let guard = state.read().await;
+        let call = guard.calls.get(&call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Speaking);
+        assert_eq!(
+            call.conversation.last_playback_id.as_deref(),
+            Some(playback_id.as_str())
+        );
+        assert_eq!(call.conversation.lines.len(), 1);
+        assert_eq!(call.conversation.lines[0].text, "Approved response");
     }
 
     #[tokio::test]

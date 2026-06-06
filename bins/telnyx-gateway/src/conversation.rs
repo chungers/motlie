@@ -4,8 +4,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use motlie_voice::app::{
-    CallContext, CallIds, ConversationCommand, ConversationHandler, TranscriptEvent,
-    TranscriptSink, VoiceAppError,
+    CallContext, CallIds, ConversationCommand, ConversationHandler, TranscriptEvent, VoiceAppError,
 };
 use motlie_voice::telephony::CallAction;
 
@@ -62,33 +61,6 @@ impl ConversationHandler for FirstDuplexConversationHandler {
         Ok(ConversationCommand::Say {
             text: format!("I heard: {text}"),
         })
-    }
-}
-
-pub struct ConversationTranscriptSink {
-    handler: SharedConversationHandler,
-}
-
-impl ConversationTranscriptSink {
-    pub fn new(handler: SharedConversationHandler) -> Self {
-        Self { handler }
-    }
-}
-
-#[async_trait]
-impl TranscriptSink for ConversationTranscriptSink {
-    async fn on_transcript(
-        &self,
-        event: TranscriptEvent,
-        context: &mut CallContext,
-    ) -> Result<Vec<CallAction>, VoiceAppError> {
-        if !event.is_final() {
-            return Ok(Vec::new());
-        }
-        match self.handler.on_transcript(event, context).await? {
-            ConversationCommand::Call(action) => Ok(vec![action]),
-            ConversationCommand::Say { .. } | ConversationCommand::Noop => Ok(Vec::new()),
-        }
     }
 }
 
@@ -231,6 +203,8 @@ async fn apply_conversation_command(
                     Ok(())
                 }
                 ConversationMode::Auto => {
+                    // M3's media-triggered conversation path is intentionally
+                    // Piper-locked for the first Sherpa+Piper full-duplex pairing.
                     let queued = speech::queue_speech(
                         state,
                         media_registry,
@@ -298,6 +272,32 @@ async fn apply_conversation_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operator::state::{shared_state, CallStatus, ConversationStatus, TelnyxIds};
+
+    fn test_runtime() -> ConversationRuntime {
+        ConversationRuntime::new(
+            TelnyxClient::new("https://api.example.test", None, true),
+            crate::tts::unavailable_registry(),
+            default_conversation_handler(),
+        )
+    }
+
+    async fn seed_conversation_call(state: &SharedState, mode: ConversationMode) -> String {
+        let mut guard = state.write().await;
+        let call_id = guard.add_or_update_outbound_call(
+            TelnyxIds {
+                call_control_id: "call-control-1".to_string(),
+                call_session_id: Some("session-1".to_string()),
+                call_leg_id: Some("leg-1".to_string()),
+                stream_id: Some("stream-1".to_string()),
+            },
+            None,
+            None,
+            CallStatus::MediaStarted,
+        );
+        guard.attach_conversation(&call_id, mode);
+        call_id
+    }
 
     #[tokio::test]
     async fn default_handler_turns_final_transcript_into_say() {
@@ -345,5 +345,93 @@ mod tests {
             ConversationCommand::Noop => {}
             _ => panic!("expected noop command"),
         }
+    }
+
+    #[tokio::test]
+    async fn apply_manual_say_records_proposal_without_speaking() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        let runtime = test_runtime();
+
+        apply_conversation_command(
+            &state,
+            &SharedMediaRegistry::default(),
+            &runtime,
+            &gateway_call_id,
+            ConversationMode::Manual,
+            "call-control-1".to_string(),
+            ConversationCommand::Say {
+                text: "  assistant response  ".to_string(),
+            },
+        )
+        .await
+        .expect("manual say should record a proposal");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Proposed);
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("assistant response")
+        );
+        assert!(call.conversation.last_playback_id.is_none());
+        assert!(call.tts.is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_noop_marks_conversation_idle() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        state
+            .write()
+            .await
+            .record_conversation_user_turn(&gateway_call_id, "user turn".to_string());
+        let runtime = test_runtime();
+
+        apply_conversation_command(
+            &state,
+            &SharedMediaRegistry::default(),
+            &runtime,
+            &gateway_call_id,
+            ConversationMode::Manual,
+            "call-control-1".to_string(),
+            ConversationCommand::Noop,
+        )
+        .await
+        .expect("noop should mark idle");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn apply_unsupported_call_action_fails_closed() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        let runtime = test_runtime();
+
+        let error = apply_conversation_command(
+            &state,
+            &SharedMediaRegistry::default(),
+            &runtime,
+            &gateway_call_id,
+            ConversationMode::Auto,
+            "call-control-1".to_string(),
+            ConversationCommand::Call(CallAction::Transfer {
+                destination: "sip:agent@example.test".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unsupported action should fail");
+
+        assert!(format!("{error:#}").contains("unsupported conversation call action"));
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Failed);
+        assert_eq!(
+            call.conversation.last_error.as_deref(),
+            Some("unsupported conversation call action")
+        );
     }
 }

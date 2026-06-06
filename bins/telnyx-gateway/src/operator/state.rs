@@ -645,6 +645,20 @@ impl GatewayState {
         }
     }
 
+    pub fn record_conversation_approved_speaking(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: String,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.last_playback_id = Some(playback_id.clone());
+            call.conversation.status = ConversationStatus::Speaking;
+            call.conversation.last_error = None;
+            call.conversation.updated_at = Utc::now();
+            call.push_timeline(format!("conversation assistant approved {playback_id}"));
+        }
+    }
+
     pub fn record_conversation_interrupted(&mut self, gateway_call_id: &str, playback_id: &str) {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.conversation.status = ConversationStatus::Interrupted;
