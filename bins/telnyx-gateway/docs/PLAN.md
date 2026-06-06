@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 13:12 PDT | @codex-366-impl | Applied M3 manual acceptance feedback: default conversation attach/answer is auto-approved, `conversation disapprove` cancels active TTS and returns calls to transcription-only, and status listener formatting is operator-friendly. |
 | 2026-06-06 08:48 PDT | @codex-366-impl | Addressed PR #400 review round 1: removed dead sink wording, added manual proposal approval commands, clarified source/backend behavior, documented final-transcript-triggered barge-in latency, and expanded core coverage. |
 | 2026-06-05 23:34 PDT | @codex-366-impl | Implemented M3 full-duplex composition: conversation attach/detach/status/mode commands, final transcript forwarding, provider-neutral conversation command routing, Piper auto-say via the M2 speech queue, barge-in cancellation, selected-call chat state, and build/test/clippy verification with `sherpa piper`. |
 | 2026-06-04 | @codex-369-rv | Removed the ASR startup-default flag/config path while keeping `kroko-2025` as the code default, and made the TTS factory boundary backend-neutral by normalizing synthesized output to signed 16-bit PCM plus source sample-rate metadata before packetization. |
@@ -529,7 +530,7 @@ Close the loop on independently useful product flows before combining them.
 
 - [x] Forward selected final transcript events from the media socket to `ConversationHandler`. (@codex-366-impl, 2026-06-06 08:48 PDT: corrected implementation note; forwarding is via `conversation::handle_final_transcript` on unsuppressed final transcript events for attached calls, not a separate sink adapter.)
   DESIGN reference: `Staged Build Strategy`, `Conversation Handler Contract`
-- [x] Add conversation bridge commands `conversation status`, `conversation attach [call]`, `conversation detach [call]`, `conversation approve [call]`, `conversation say [call]`, and `conversation mode <manual|auto>`. (@codex-366-impl, 2026-06-06 08:48 PDT: added shared command-engine commands, so TUI and socket sources have parity, source-local call selection, and manual proposal approval.)
+- [x] Add conversation bridge commands `conversation status`, `conversation attach [call]`, `conversation detach [call]`, `conversation disapprove [call]`, `conversation approve [call]`, `conversation say [call]`, and `conversation mode <manual|auto>`. (@codex-366-impl, 2026-06-06 13:12 PDT: default attach/answer uses auto-approved mode for the M3 acceptance path; `conversation disapprove` cancels active TTS and detaches the handler so the call remains transcription-only, while manual proposal approval remains available after `conversation mode manual`.)
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Conversation Handler Contract`
 - [x] Add selected-call chat interface state showing inbound transcript, assistant response lifecycle, outbound `speak` activity, playback status, and call lifecycle. (@codex-366-impl, 2026-06-05 23:34 PDT: added bounded conversation lines/status to call state, call list/show status, and selected-call TUI chat rendering.)
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Conversation Handler Contract`

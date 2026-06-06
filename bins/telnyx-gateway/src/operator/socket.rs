@@ -289,10 +289,11 @@ mod tests {
             .expect("line should be a string")
             .starts_with("listener:"));
         assert_eq!(response["data"]["kind"], "status");
-        assert!(response["data"]["fields"]["listener"]
+        let listener = response["data"]["fields"]["listener"]
             .as_str()
-            .expect("listener should be structured")
-            .starts_with("Some("));
+            .expect("listener should be structured");
+        assert!(listener.starts_with("127.0.0.1:"));
+        assert!(!listener.contains("Some("));
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);

@@ -106,6 +106,7 @@ impl GatewayContext {
                     call.ids.call_control_id.clone(),
                 )
             };
+            guard.attach_conversation(&gateway_call_id, ConversationMode::Auto);
             (gateway_call_id, call_control_id, media_url, media)
         };
         self.session.selected_call = Some(gateway_call_id.clone());
@@ -323,6 +324,9 @@ pub enum ConversationCommand {
     Detach {
         call: Option<String>,
     },
+    Disapprove {
+        call: Option<String>,
+    },
     Approve {
         call: Option<String>,
     },
@@ -451,7 +455,14 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
     }
     let guard = context.state.read().await;
     let mut lines = vec![
-        format!("listener: {:?}", guard.config.bind),
+        format!(
+            "listener: {}",
+            guard
+                .config
+                .bind
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "<disabled>".to_string())
+        ),
         format!("inbound: {}", guard.inbound_mode.label()),
         format!(
             "asr-next: {} ({})",
@@ -1469,10 +1480,10 @@ async fn conversation_command(
                     name: id,
                 });
             }
-            guard.attach_conversation(&id, ConversationMode::Manual);
+            guard.attach_conversation(&id, ConversationMode::Auto);
             context.session.selected_call = Some(id.clone());
             Ok(CommandOutput::line(format!(
-                "conversation attached for {id} mode=manual"
+                "conversation attached for {id} mode=auto"
             )))
         }
         ConversationCommand::Detach { call } => {
@@ -1493,6 +1504,7 @@ async fn conversation_command(
                 "conversation detached for {id}"
             )))
         }
+        ConversationCommand::Disapprove { call } => disapprove_conversation(context, call).await,
         ConversationCommand::Approve { call } | ConversationCommand::Say { call } => {
             approve_conversation_proposal(context, call).await
         }
@@ -1520,6 +1532,56 @@ async fn conversation_command(
             )))
         }
     }
+}
+
+async fn disapprove_conversation(
+    context: &mut GatewayContext,
+    call: Option<String>,
+) -> DriverResult<CommandOutput> {
+    let id = {
+        let guard = context.state.read().await;
+        let id = resolve_call_id(
+            &guard,
+            call.as_deref(),
+            context.session.selected_call.as_deref(),
+        )?;
+        if !guard.calls.contains_key(&id) {
+            return Err(DriverError::NotFound {
+                kind: "call",
+                name: id,
+            });
+        }
+        id
+    };
+
+    let canceled_playback_id = if context.media.active_speech_playback_id(&id).await.is_some() {
+        Some(
+            speech::cancel_speech(
+                &context.state,
+                &context.media,
+                &id,
+                "conversation disapprove",
+            )
+            .await
+            .map_err(driver_anyhow)?,
+        )
+    } else {
+        None
+    };
+
+    {
+        let mut guard = context.state.write().await;
+        guard.detach_conversation(&id);
+    }
+    context.session.selected_call = Some(id.clone());
+
+    let line = match canceled_playback_id {
+        Some(playback_id) => {
+            format!("conversation disapproved for {id}; canceled playback={playback_id}; transcription-only")
+        }
+        None => format!("conversation disapproved for {id}; transcription-only"),
+    };
+    Ok(CommandOutput::line(line))
 }
 
 async fn approve_conversation_proposal(
@@ -2183,13 +2245,15 @@ fn conversation_help() -> String {
         "  conversation status [call-id]",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
+        "  conversation disapprove [call-id]",
         "  conversation approve [call-id]",
         "  conversation say [call-id]",
         "  conversation mode <manual|auto> [call-id]",
         "",
+        "`answer` and `conversation attach` attach in auto mode by default. Disapprove",
+        "cancels active conversation TTS and leaves the call in transcription-only mode.",
         "Manual mode records the assistant response for operator review; approve/say",
-        "speaks the pending proposal using this source's selected TTS backend. Auto mode",
-        "routes generated responses through Piper for the M3 Sherpa+Piper pairing.",
+        "speaks the pending proposal using this source's selected TTS backend.",
     ]
     .join("\n")
 }
@@ -2343,6 +2407,7 @@ fn socket_help() -> String {
         "    speak [call-id] <text...>",
         "    speak cancel [call-id]",
         "    conversation approve [call-id]",
+        "    conversation disapprove [call-id]",
         "    hangup [call-id]",
         "",
         "Source-local state:",
@@ -2387,6 +2452,22 @@ mod tests {
         let output = engine.run_line("inbound status").await.expect("status");
 
         assert_eq!(output.lines, vec!["inbound disabled"]);
+    }
+
+    #[tokio::test]
+    async fn status_formats_listener_without_option_debug() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("status").await.expect("status");
+
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line.starts_with("listener: 127.0.0.1:")));
+        assert!(!output.lines.iter().any(|line| line.contains("Some(")));
     }
 
     #[tokio::test]
@@ -2474,6 +2555,10 @@ mod tests {
         let tts = engine.run_line("help tts").await.expect("tts help");
         let call = engine.run_line("help call").await.expect("call help");
         let socket = engine.run_line("help socket").await.expect("socket help");
+        let conversation = engine
+            .run_line("help conversation")
+            .await
+            .expect("conversation help");
 
         assert!(asr.lines.join("\n").contains("source-local"));
         assert!(tts.lines.join("\n").contains("tts list"));
@@ -2481,6 +2566,10 @@ mod tests {
         assert!(call.lines.join("\n").contains("call use <call-id>"));
         assert!(socket.lines.join("\n").contains("Receive one JSON object"));
         assert!(socket.lines.join("\n").contains("Operational parity"));
+        assert!(conversation
+            .lines
+            .join("\n")
+            .contains("conversation disapprove [call-id]"));
     }
 
     #[tokio::test]
@@ -2589,22 +2678,14 @@ mod tests {
             .expect("socket answer");
 
         let guard = state.read().await;
-        assert_eq!(
-            guard
-                .calls
-                .get(&call_one)
-                .expect("call one should exist")
-                .asr_backend,
-            Some(LiveAsrBackend::Sherpa2023)
-        );
-        assert_eq!(
-            guard
-                .calls
-                .get(&call_two)
-                .expect("call two should exist")
-                .asr_backend,
-            Some(LiveAsrBackend::Kroko2025)
-        );
+        let call_one_state = guard.calls.get(&call_one).expect("call one should exist");
+        let call_two_state = guard.calls.get(&call_two).expect("call two should exist");
+        assert_eq!(call_one_state.asr_backend, Some(LiveAsrBackend::Sherpa2023));
+        assert!(call_one_state.conversation.attached);
+        assert_eq!(call_one_state.conversation.mode, ConversationMode::Auto);
+        assert_eq!(call_two_state.asr_backend, Some(LiveAsrBackend::Kroko2025));
+        assert!(call_two_state.conversation.attached);
+        assert_eq!(call_two_state.conversation.mode, ConversationMode::Auto);
     }
 
     #[tokio::test]
@@ -2636,6 +2717,8 @@ mod tests {
         let call = guard.calls.values().next().expect("call exists");
         assert_eq!(call.status, CallStatus::Answering);
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
+        assert!(call.conversation.attached);
+        assert_eq!(call.conversation.mode, ConversationMode::Auto);
     }
 
     #[tokio::test]
@@ -2717,14 +2800,13 @@ mod tests {
             engine.context().session.selected_call.as_deref(),
             Some(waiting_call_id.as_str())
         );
-        assert_eq!(
-            guard
-                .calls
-                .get(&waiting_call_id)
-                .expect("waiting call exists")
-                .status,
-            CallStatus::Answering
-        );
+        let waiting_call = guard
+            .calls
+            .get(&waiting_call_id)
+            .expect("waiting call exists");
+        assert_eq!(waiting_call.status, CallStatus::Answering);
+        assert!(waiting_call.conversation.attached);
+        assert_eq!(waiting_call.conversation.mode, ConversationMode::Auto);
     }
 
     #[tokio::test]
@@ -3043,7 +3125,7 @@ mod tests {
 
         assert_eq!(
             attach.lines,
-            vec![format!("conversation attached for {call_one} mode=manual")]
+            vec![format!("conversation attached for {call_one} mode=auto")]
         );
         assert_eq!(
             mode.lines,
@@ -3063,7 +3145,7 @@ mod tests {
         let tui_call = guard.calls.get(&call_one).expect("TUI call exists");
         let socket_call = guard.calls.get(&call_two).expect("socket call exists");
         assert!(!tui_call.conversation.attached);
-        assert_eq!(tui_call.conversation.mode, ConversationMode::Manual);
+        assert_eq!(tui_call.conversation.mode, ConversationMode::Auto);
         assert!(socket_call.conversation.attached);
         assert_eq!(socket_call.conversation.mode, ConversationMode::Auto);
     }
@@ -3107,6 +3189,59 @@ mod tests {
         );
         assert_eq!(call.conversation.lines.len(), 1);
         assert_eq!(call.conversation.lines[0].text, "Approved response");
+    }
+
+    #[tokio::test]
+    async fn conversation_disapprove_detaches_and_cancels_active_tts() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            let call_id = add_streaming_call(&mut guard, "call-1", "stream-1");
+            guard.attach_conversation(&call_id, ConversationMode::Auto);
+            call_id
+        };
+        let media = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media.register_call(call_id.clone(), tx).await;
+        let cancel = SpeechCancelToken::default();
+        media
+            .start_speech(&call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        state
+            .write()
+            .await
+            .start_tts_job(&call_id, "tts_test".to_string(), "hello");
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = context_with_static_tts(state.clone(), telnyx, media);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let output = engine
+            .run_line("conversation disapprove")
+            .await
+            .expect("disapprove should cancel active speech");
+
+        assert_eq!(
+            output.lines,
+            vec![format!(
+                "conversation disapproved for {call_id}; canceled playback=tts_test; transcription-only"
+            )]
+        );
+        assert!(cancel.is_canceled());
+        let guard = state.read().await;
+        let call = guard.calls.get(&call_id).expect("call should exist");
+        assert!(!call.conversation.attached);
+        assert_eq!(call.conversation.status, ConversationStatus::Idle);
+        let status = call
+            .tts
+            .as_ref()
+            .map(|tts| tts.status)
+            .expect("tts status should exist");
+        assert_eq!(status, TtsPlaybackStatus::Canceling);
     }
 
     #[tokio::test]
