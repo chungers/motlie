@@ -112,7 +112,10 @@ mod tests {
         let descriptor = descriptor();
 
         assert_eq!(descriptor.id.as_str(), "gemma4_12b_qat_q4_0_gguf");
-        assert_eq!(descriptor.display_name, "Gemma 4 12B-it QAT Q4_0 (GGUF/llama.cpp)");
+        assert_eq!(
+            descriptor.display_name,
+            "Gemma 4 12B-it QAT Q4_0 (GGUF/llama.cpp)"
+        );
         assert_eq!(descriptor.family, BundleFamily::Gemma);
         assert_eq!(descriptor.backend, BackendKind::LlamaCpp);
         assert!(descriptor.capabilities.supports(CapabilityKind::Chat));
@@ -180,7 +183,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be monotonic enough")
             .as_nanos();
-        std::env::temp_dir().join(format!("motlie-models-gemma4-12b-qat-q4-0-gguf-test-{unique}"))
+        std::env::temp_dir().join(format!(
+            "motlie-models-gemma4-12b-qat-q4-0-gguf-test-{unique}"
+        ))
     }
 
     fn create_fake_hf_gguf_cache(root: &Path, model_id: &str) -> PathBuf {

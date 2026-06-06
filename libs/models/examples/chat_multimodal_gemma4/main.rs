@@ -324,10 +324,10 @@ mod gemma4_multimodal_example {
             "e2b" | "gemma4-e2b" | "google/gemma4-e2b" => {
                 #[cfg(feature = "model-gemma4-e2b")]
                 {
-                    return Ok(selected_from_chat_model(
+                    Ok(selected_from_chat_model(
                         ChatModels::Gemma4E2B,
                         MistralMultimodalSpec::gemma4_e2b(),
-                    ));
+                    ))
                 }
                 #[cfg(not(feature = "model-gemma4-e2b"))]
                 bail_model_feature_disabled(requested, "model-gemma4-e2b")
@@ -335,10 +335,10 @@ mod gemma4_multimodal_example {
             "e4b" | "gemma4-e4b" | "google/gemma4-e4b" => {
                 #[cfg(feature = "model-gemma4-e4b")]
                 {
-                    return Ok(selected_from_chat_model(
+                    Ok(selected_from_chat_model(
                         ChatModels::Gemma4E4B,
                         MistralMultimodalSpec::gemma4_e4b(),
-                    ));
+                    ))
                 }
                 #[cfg(not(feature = "model-gemma4-e4b"))]
                 bail_model_feature_disabled(requested, "model-gemma4-e4b")
@@ -346,10 +346,10 @@ mod gemma4_multimodal_example {
             "12b" | "gemma4-12b" | "google/gemma4-12b" => {
                 #[cfg(feature = "model-gemma4-12b")]
                 {
-                    return Ok(selected_from_chat_model(
+                    Ok(selected_from_chat_model(
                         ChatModels::Gemma4_12B,
                         MistralMultimodalSpec::gemma4_12b(),
-                    ));
+                    ))
                 }
                 #[cfg(not(feature = "model-gemma4-12b"))]
                 bail_model_feature_disabled(requested, "model-gemma4-12b")
@@ -410,14 +410,14 @@ mod gemma4_multimodal_example {
     }
 
     fn available_model_names() -> Vec<&'static str> {
-        let mut names = Vec::new();
-        #[cfg(feature = "model-gemma4-e2b")]
-        names.push("gemma4-e2b");
-        #[cfg(feature = "model-gemma4-e4b")]
-        names.push("gemma4-e4b");
-        #[cfg(feature = "model-gemma4-12b")]
-        names.push("gemma4-12b");
-        names
+        vec![
+            #[cfg(feature = "model-gemma4-e2b")]
+            "gemma4-e2b",
+            #[cfg(feature = "model-gemma4-e4b")]
+            "gemma4-e4b",
+            #[cfg(feature = "model-gemma4-12b")]
+            "gemma4-12b",
+        ]
     }
 
     #[allow(dead_code)]

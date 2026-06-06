@@ -8,8 +8,8 @@ use motlie_model::{
 };
 
 use crate::common::{
-    configure_artifact_policy, map_quantization_bits, multimodal_message_parts,
-    paged_attn_context_size, should_force_cpu, MistralMessageParts,
+    MistralMessageParts, configure_artifact_policy, map_quantization_bits,
+    multimodal_message_parts, paged_attn_context_size, should_force_cpu,
 };
 use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 

@@ -1,8 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use motlie_model::{
     ChatMessage, ChatRequest, ChatRole, ContentPart, GenerationParams, ToolCall, ToolChoice,
 };
-use motlie_models::{tool_list, ToolDispatch, ToolList};
+use motlie_models::{ToolDispatch, ToolList, tool_list};
 
 #[allow(dead_code)]
 #[path = "../tool_demo_support.rs"]

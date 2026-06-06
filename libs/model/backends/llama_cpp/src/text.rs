@@ -621,7 +621,7 @@ impl LlamaCppRuntime {
 
             let mut generated_token_count: u32 = 0;
             let mut generated_text = String::new();
-            let mut n_cur =
+            let prompt_position_start =
                 i32::try_from(tokens.len()).map_err(|_| ModelError::BackendExecution {
                     backend: "llama-cpp",
                     operation: "tokenize",
@@ -629,7 +629,7 @@ impl LlamaCppRuntime {
                 })?;
             let mut decoder = encoding_rs::UTF_8.new_decoder();
 
-            for _ in 0..max_tokens {
+            for generation_index in 0..max_tokens {
                 let token = sampler.sample(&ctx, batch.n_tokens() - 1);
                 sampler.accept(token);
 
@@ -652,15 +652,28 @@ impl LlamaCppRuntime {
                     break;
                 }
 
+                let generation_offset =
+                    i32::try_from(generation_index).map_err(|_| ModelError::BackendExecution {
+                        backend: "llama-cpp",
+                        operation: "decode_token",
+                        message: "generated token index exceeds llama.cpp position range".into(),
+                    })?;
+                let token_position = prompt_position_start
+                    .checked_add(generation_offset)
+                    .ok_or_else(|| ModelError::BackendExecution {
+                        backend: "llama-cpp",
+                        operation: "decode_token",
+                        message: "generated token position exceeds llama.cpp position range".into(),
+                    })?;
+
                 batch.clear();
-                batch
-                    .add(token, n_cur, &[0], true)
-                    .map_err(|e| ModelError::BackendExecution {
+                batch.add(token, token_position, &[0], true).map_err(|e| {
+                    ModelError::BackendExecution {
                         backend: "llama-cpp",
                         operation: "batch_add_token",
                         message: e.to_string(),
-                    })?;
-                n_cur += 1;
+                    }
+                })?;
 
                 ctx.decode(&mut batch)
                     .map_err(|e| ModelError::BackendExecution {
@@ -1282,11 +1295,7 @@ fn build_llama_model(
         )));
     }
 
-    let filename = gguf_filename(
-        spec.model_prefix,
-        spec.file_layout,
-        resolved_quantization,
-    );
+    let filename = gguf_filename(spec.model_prefix, spec.file_layout, resolved_quantization);
     let model_path = if let Some(artifact_policy) = artifact_policy {
         configure_artifact_policy(&filename, artifact_policy)?.model_path
     } else {

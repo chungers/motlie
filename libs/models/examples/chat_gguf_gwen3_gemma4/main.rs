@@ -130,7 +130,10 @@ mod gguf_example {
             "process-before-start",
             &support::current_process_snapshot(),
         );
-        println!("quantization: {}", quantization_label_for_model(selected.model, quantization));
+        println!(
+            "quantization: {}",
+            quantization_label_for_model(selected.model, quantization)
+        );
         println!(
             "recommended-generation-params: {:?}",
             selected.spec.recommended_generation_params

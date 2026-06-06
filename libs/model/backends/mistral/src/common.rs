@@ -833,7 +833,7 @@ fn aggregate_tokens_per_second(tokens: u64, total_time_msec: u128) -> Option<u64
 }
 
 fn current_resident_memory_bytes() -> Option<u64> {
-    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
+    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
 
     let pid = get_current_pid().ok()?;
     let mut system = System::new();
