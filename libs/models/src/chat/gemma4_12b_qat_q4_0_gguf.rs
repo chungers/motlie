@@ -13,6 +13,7 @@ use crate::{
 
 pub const SELECTOR: &str = "google/gemma4_12b_qat_q4_0_gguf";
 const REPO: &str = "google/gemma-4-12B-it-qat-q4_0-gguf";
+const QAT_Q4_0_GGUF_FILE: &str = "gemma-4-12b-it-qat-q4_0.gguf";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register_descriptor(descriptor());
@@ -27,7 +28,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
     ModelCheckpoint {
         format: CheckpointFormat::Gguf,
         source: ArtifactSource::HuggingFace { repo: REPO },
-        include: vec![ArtifactRule::Exact("gemma-4-12b-it-qat-q4_0.gguf")],
+        include: vec![ArtifactRule::Exact(QAT_Q4_0_GGUF_FILE)],
         quantization: None,
     }
 }
@@ -97,7 +98,7 @@ pub async fn start(options: StartOptions) -> Result<LlamaCppTextHandle, ModelErr
 }
 
 fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
-    crate::resolve_hf_gguf_snapshot(REPO, root)
+    crate::resolve_hf_gguf_snapshot_with_any_file(REPO, root, &[QAT_Q4_0_GGUF_FILE])
 }
 
 #[cfg(test)]
@@ -105,7 +106,7 @@ mod tests {
     use super::*;
     use crate::BundleFamily;
     use motlie_model::CapabilityKind;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -140,9 +141,10 @@ mod tests {
 
     #[test]
     fn local_gguf_resolution_rejects_missing_cache() {
-        let root = unique_temp_dir();
+        let temp = TestCacheDir::new("missing-cache");
 
-        let error = resolve_local_gguf_root(&root).expect_err("missing cache should fail closed");
+        let error =
+            resolve_local_gguf_root(temp.path()).expect_err("missing cache should fail closed");
 
         assert!(matches!(
             error,
@@ -152,40 +154,72 @@ mod tests {
 
     #[test]
     fn local_gguf_resolution_rejects_cache_without_gguf_files() {
-        let root = unique_temp_dir();
-        let _snapshot = create_fake_hf_gguf_cache(&root, REPO);
+        let temp = TestCacheDir::new("cache-without-gguf");
+        let _snapshot = create_fake_hf_gguf_cache(temp.path(), REPO);
 
-        let error = resolve_local_gguf_root(&root).expect_err("cache without .gguf should fail");
+        let error =
+            resolve_local_gguf_root(temp.path()).expect_err("cache without .gguf should fail");
 
         assert!(matches!(
             error,
             ModelError::InvalidConfiguration(message) if message.contains(".gguf")
         ));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn local_gguf_resolution_accepts_cache_with_gguf_file() {
-        let root = unique_temp_dir();
-        let snapshot = create_fake_hf_gguf_cache(&root, REPO);
-        std::fs::write(snapshot.join("gemma-4-12b-it-qat-q4_0.gguf"), "stub")
+        let temp = TestCacheDir::new("qat-accepts-cache-with-gguf");
+        let snapshot = create_fake_hf_gguf_cache(temp.path(), REPO);
+        std::fs::write(snapshot.join(QAT_Q4_0_GGUF_FILE), "stub")
             .expect("gguf stub should be writable");
 
-        let resolved = resolve_local_gguf_root(&root).expect("cache with .gguf should resolve");
+        let resolved =
+            resolve_local_gguf_root(temp.path()).expect("cache with .gguf should resolve");
 
         assert_eq!(resolved, snapshot);
-        std::fs::remove_dir_all(&root).ok();
     }
 
-    fn unique_temp_dir() -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic enough")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "motlie-models-gemma4-12b-qat-q4-0-gguf-test-{unique}"
-        ))
+    #[test]
+    fn local_gguf_resolution_rejects_standard_only_cache_for_qat_variant() {
+        let temp = TestCacheDir::new("qat-rejects-standard-cache");
+        let snapshot = create_fake_hf_gguf_cache(temp.path(), REPO);
+        std::fs::write(snapshot.join("gemma-4-12b-it-Q4_K_M.gguf"), "stub")
+            .expect("wrong gguf stub should be writable");
+
+        let error = resolve_local_gguf_root(temp.path())
+            .expect_err("QAT GGUF resolver should reject standard-only cache");
+
+        assert!(matches!(
+            error,
+            ModelError::InvalidConfiguration(message) if message.contains(QAT_Q4_0_GGUF_FILE)
+        ));
+    }
+
+    struct TestCacheDir {
+        path: PathBuf,
+    }
+
+    impl TestCacheDir {
+        fn new(label: &str) -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "motlie-models-gemma4-12b-qat-q4-0-gguf-test-{}-{unique}-{label}",
+                std::process::id()
+            ));
+            std::fs::remove_dir_all(&path).ok();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestCacheDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.path).ok();
+        }
     }
 
     fn create_fake_hf_gguf_cache(root: &Path, model_id: &str) -> PathBuf {

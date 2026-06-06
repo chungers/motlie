@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 00:51 PDT | @gemma4-cdx | Addressed second-reviewer L1/M2: GGUF cache tests now use collision-resistant temp directories, local-only GGUF resolution validates exact variant filenames, and generic logical-model resolution documents that QAT requires an explicit selector/bundle id. |
 | 2026-06-05 22:29 PDT | @gemma4-cdx | Clarified David's curation direction: safetensors, standard GGUF, and QAT GGUF are all curated Gemma 4 12B variants selected by platform/performance fit, not a priority hierarchy. |
 | 2026-06-05 16:59 PDT | @gemma4-cdx | Fixed and validated Gemma 4 12B GGUF live tool-use: default tool demo now disables thinking for the 12B GGUF path, llama.cpp parser strips empty Gemma thought-channel markers, and default Q4 tool demo completed all tool calls plus final answer locally. |
 | 2026-06-05 16:36 PDT | @gemma4-cdx | Completed corrected GGUF artifact download, tightened artifact rules to exact Q4/Q8 root files after an MTP suffix-match bug, and ran Q4 startup/warmup successfully on the local CPU host. |
@@ -549,6 +550,17 @@ resource-sensitive chat/tool profiles, and QAT Q4_0 GGUF where that profile wins
 on measured startup, latency, memory, or quality. M2 owns the ASR
 research and Telnyx audio mapping. M3 owns the final advertised-capability
 acceptance gate with examples and eval results.
+
+Variant selection note, 2026-06-06 00:51 PDT by @gemma4-cdx: the generic
+`Catalog::resolve_model(gemma4_12b, LlamaCpp, Gguf)` path has only logical model,
+backend, and checkpoint-format dimensions, so it cannot distinguish standard
+Unsloth GGUF from Google QAT Q4_0 GGUF. It resolves to the standard GGUF variant
+by registration order. Callers that need QAT must use the exact selector or
+bundle id: `google/gemma4_12b_qat_q4_0_gguf` /
+`gemma4_12b_qat_q4_0_gguf`. Runtime local-only cache resolution is now guarded
+by exact root GGUF filenames for the selected variant, so a QAT-only cache is not
+accepted for the standard GGUF variant and a standard-only cache is not accepted
+for the QAT variant.
 
 ## Tracking Issues
 

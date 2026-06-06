@@ -277,6 +277,30 @@ pub fn resolve_hf_gguf_snapshot(
     Ok(snapshot_dir)
 }
 
+/// Resolve a Hugging Face GGUF cache snapshot and require at least one exact
+/// root-level GGUF filename for the selected curated variant.
+pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
+    model_id: &str,
+    cache_root: &Path,
+    accepted_filenames: &[&str],
+) -> std::result::Result<PathBuf, motlie_model::ModelError> {
+    let snapshot_dir = resolve_hf_gguf_snapshot(model_id, cache_root)?;
+
+    if accepted_filenames.is_empty()
+        || accepted_filenames
+            .iter()
+            .any(|filename| snapshot_dir.join(filename).is_file())
+    {
+        return Ok(snapshot_dir);
+    }
+
+    Err(motlie_model::ModelError::InvalidConfiguration(format!(
+        "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires one of [{}] for `{model_id}` under `{}`",
+        accepted_filenames.join(", "),
+        snapshot_dir.display()
+    )))
+}
+
 #[cfg(any(
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
