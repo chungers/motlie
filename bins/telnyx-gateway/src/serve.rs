@@ -9,6 +9,7 @@ use axum::{Json, Router};
 
 use crate::adapter::SharedAsrRegistry;
 use crate::call_control::TelnyxClient;
+use crate::conversation::ConversationRuntime;
 use crate::media::{self, SharedMediaRegistry};
 use crate::operator::state::{LogLevel, SharedState};
 use crate::webhook;
@@ -19,6 +20,7 @@ pub struct AppServices {
     pub telnyx: TelnyxClient,
     pub asr: SharedAsrRegistry,
     pub media: SharedMediaRegistry,
+    pub conversation: ConversationRuntime,
 }
 
 pub fn router(services: AppServices) -> Router {
@@ -65,6 +67,7 @@ async fn telnyx_media(
             services.state.clone(),
             services.asr.clone(),
             services.media.clone(),
+            services.conversation.clone(),
         )
     })
 }

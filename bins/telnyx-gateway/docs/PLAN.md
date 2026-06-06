@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-05 23:34 PDT | @codex-366-impl | Implemented M3 full-duplex composition: conversation attach/detach/status/mode commands, final transcript forwarding, provider-neutral conversation command routing, Piper auto-say via the M2 speech queue, barge-in cancellation, selected-call chat state, and build/test/clippy verification with `sherpa piper`. |
 | 2026-06-04 | @codex-369-rv | Removed the ASR startup-default flag/config path while keeping `kroko-2025` as the code default, and made the TTS factory boundary backend-neutral by normalizing synthesized output to signed 16-bit PCM plus source sample-rate metadata before packetization. |
 | 2026-06-04 | @codex-369-rv | Aligned milestone 2 TTS operator UX with ASR: `tts list`, `tts status`, and `tts use piper` are shared TUI/socket commands, `tts status` reports clear availability, and `dial` tells operators to wait for media before running `speak`. |
 | 2026-06-03 23:30 PDT | @codex-369-rv | Captured M2 live-test hardening: Piper eSpeak-ng data must be auto-detected or fail loudly, outbound speech is prebuffered as continuous utterance audio before resample/packetize, the media task owns 20 ms pacing, silence keepalive is withheld during active speech, and frame interval/underrun logs diagnose choppy playback. |
@@ -525,18 +526,20 @@ Close the loop on independently useful product flows before combining them.
 
 ### 8.3 - Milestone 3 full-duplex TUI chat conversation flow (#366)
 
-- [ ] Implement `TranscriptSink` adapter that forwards selected final transcript events to `ConversationHandler`.
+- [x] Implement `TranscriptSink` adapter that forwards selected final transcript events to `ConversationHandler`. (@codex-366-impl, 2026-06-05 23:34 PDT: added `ConversationTranscriptSink` plus media-socket forwarding for unsuppressed final transcript events on attached calls.)
   DESIGN reference: `Staged Build Strategy`, `Conversation Handler Contract`
-- [ ] Add conversation bridge commands `conversation status`, `conversation attach [call]`, `conversation detach [call]`, and `conversation mode <manual|auto>`.
+- [x] Add conversation bridge commands `conversation status`, `conversation attach [call]`, `conversation detach [call]`, and `conversation mode <manual|auto>`. (@codex-366-impl, 2026-06-05 23:34 PDT: added shared command-engine commands, so TUI and socket sources have parity and source-local call selection.)
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Conversation Handler Contract`
-- [ ] Add selected-call chat interface state showing inbound transcript, assistant response lifecycle, outbound `speak` activity, playback status, and call lifecycle.
+- [x] Add selected-call chat interface state showing inbound transcript, assistant response lifecycle, outbound `speak` activity, playback status, and call lifecycle. (@codex-366-impl, 2026-06-05 23:34 PDT: added bounded conversation lines/status to call state, call list/show status, and selected-call TUI chat rendering.)
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Conversation Handler Contract`
-- [ ] Route `ConversationCommand::Say { text }` to `OutboundSpeechController::speak()`.
+- [x] Route `ConversationCommand::Say { text }` to `OutboundSpeechController::speak()`. (@codex-366-impl, 2026-06-05 23:34 PDT: extracted M2 speech queue/cancel into `speech.rs`; auto mode queues Piper speech through the same media registry and single bidirectional WebSocket.)
   DESIGN reference: `Staged Build Strategy`, `Returning TTS Audio`
-- [ ] Route `ConversationCommand::Call(action)` through the Telnyx call-control mapping.
+- [x] Route `ConversationCommand::Call(action)` through the Telnyx call-control mapping. (@codex-366-impl, 2026-06-05 23:34 PDT: mapped `CallAction::Hangup`; unsupported future call actions fail closed and record conversation failure state.)
   DESIGN reference: `motlie_voice::telephony Surface`, `v1.1: DTMF and Call Control`
-- [ ] Add barge-in policy only after milestone 1 and milestone 2 are independently stable.
+- [x] Add barge-in policy only after milestone 1 and milestone 2 are independently stable. (@codex-366-impl, 2026-06-05 23:34 PDT: implemented the #366 drop-and-regenerate policy by canceling active M2 speech with Telnyx `clear` before handling the new final transcript.)
   DESIGN reference: `Returning TTS Audio`, `Real-Time Latency Requirements`
+
+Verification (@codex-366-impl, 2026-06-05 23:34 PDT): `cargo build -p motlie-telnyx-gateway --features "sherpa piper"`, `cargo test -p motlie-telnyx-gateway --features "sherpa piper"`, and `cargo clippy -p motlie-telnyx-gateway --features "sherpa piper" -- -D warnings` all pass. Workspace-wide `cargo fmt` is still blocked by unrelated missing `examples/vector2/app/benchmark.rs`; package-scoped `cargo fmt -p motlie-telnyx-gateway` passes.
 
 ### 8.4 - Milestone 4 external integration harness (#367)
 

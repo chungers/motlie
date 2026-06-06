@@ -9,6 +9,7 @@ use motlie_telnyx_gateway::adapter::{
 };
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
+use motlie_telnyx_gateway::conversation::{default_conversation_handler, ConversationRuntime};
 use motlie_telnyx_gateway::media::SharedMediaRegistry;
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
 use motlie_telnyx_gateway::operator::script::run_repl_file;
@@ -102,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
         telnyx: telnyx.clone(),
         asr,
         media: media.clone(),
+        conversation: ConversationRuntime::new(
+            telnyx.clone(),
+            tts.clone(),
+            default_conversation_handler(),
+        ),
     };
 
     let server = tokio::spawn(serve(cli.bind, services));

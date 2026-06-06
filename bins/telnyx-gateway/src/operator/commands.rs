@@ -1,22 +1,22 @@
 use std::path::PathBuf;
 
-use async_trait::async_trait;
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
-use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
-use uuid::Uuid;
-
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
-use crate::media::{
-    packetize_tts_samples, OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry,
-    SpeechCancelToken,
-};
+use crate::media::SharedMediaRegistry;
+#[cfg(test)]
+use crate::media::{OutboundMediaCommand, SpeechCancelToken};
 use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
-use crate::operator::state::{CallStatus, GatewayState, InboundMode, LogLevel, SharedState};
-use crate::tts::{split_speech_text, unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
+use crate::operator::state::{
+    CallStatus, ConversationMode, GatewayState, InboundMode, LogLevel, SharedState,
+};
+use crate::speech;
+use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
+use async_trait::async_trait;
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 
 #[derive(Clone)]
 pub struct GatewayContext {
@@ -180,6 +180,10 @@ pub enum GatewayCommand {
         #[command(subcommand)]
         command: TtsCommand,
     },
+    Conversation {
+        #[command(subcommand)]
+        command: ConversationCommand,
+    },
     Calls,
     Call {
         #[command(subcommand)]
@@ -292,6 +296,39 @@ pub enum TtsCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConversationModeArg {
+    Manual,
+    Auto,
+}
+
+impl From<ConversationModeArg> for ConversationMode {
+    fn from(mode: ConversationModeArg) -> Self {
+        match mode {
+            ConversationModeArg::Manual => Self::Manual,
+            ConversationModeArg::Auto => Self::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConversationCommand {
+    Status {
+        call: Option<String>,
+    },
+    Attach {
+        call: Option<String>,
+    },
+    Detach {
+        call: Option<String>,
+    },
+    Mode {
+        #[arg(value_enum)]
+        mode: ConversationModeArg,
+        call: Option<String>,
+    },
+}
+
 #[derive(Debug, Args)]
 pub struct InboundEnableArgs {
     #[arg(long)]
@@ -386,6 +423,7 @@ impl CommandSet<GatewayContext> for GatewayCommand {
             Self::Inbound { command } => inbound_command(context, command).await,
             Self::Asr { command } => asr_command(context, command).await,
             Self::Tts { command } => tts_command(context, command).await,
+            Self::Conversation { command } => conversation_command(context, command).await,
             Self::Calls => calls(&context.state).await,
             Self::Call { command } => call_command(context, command).await,
             Self::Dial(args) => dial(context, args).await,
@@ -1061,61 +1099,20 @@ async fn start_speech(
     gateway_call_id: String,
     text: String,
 ) -> DriverResult<CommandOutput> {
-    let playback_id = format!("tts_{}", Uuid::new_v4().simple());
-    let cancel = SpeechCancelToken::default();
-    let media = {
-        let guard = context.state.read().await;
-        let media = guard.config.telnyx_media;
-        let call = guard
-            .calls
-            .get(&gateway_call_id)
-            .ok_or_else(|| DriverError::NotFound {
-                kind: "call",
-                name: gateway_call_id.clone(),
-            })?;
-        if call.ids.stream_id.is_none() {
-            return Err(DriverError::message(format!(
-                "media stream is not ready for call {gateway_call_id}"
-            )));
-        }
-        media
-    };
-    let media_handle = context
-        .media
-        .start_speech(&gateway_call_id, playback_id.clone(), cancel.clone())
-        .await
-        .map_err(driver_anyhow)?;
-    {
-        let mut guard = context.state.write().await;
-        guard.start_tts_job(&gateway_call_id, playback_id.clone(), &text);
-        guard.log(
-            LogLevel::Info,
-            format!("speak requested for {gateway_call_id}: {playback_id}"),
-        );
-    }
-    let state = context.state.clone();
-    let tts = context.tts.clone();
-    let tts_backend = context.session.next_tts_backend;
-    let media_registry = context.media.clone();
-    let call_id = gateway_call_id.clone();
-    let playback_for_task = playback_id.clone();
-    tokio::spawn(async move {
-        run_speech_job(SpeechJob {
-            state,
-            tts,
-            media_registry,
-            media_handle,
-            gateway_call_id: call_id,
-            playback_id: playback_for_task,
-            tts_backend,
-            text,
-            media,
-            cancel,
-        })
-        .await;
-    });
+    let queued = speech::queue_speech(
+        &context.state,
+        &context.media,
+        &context.tts,
+        context.session.next_tts_backend,
+        gateway_call_id.clone(),
+        text,
+        "speak",
+    )
+    .await
+    .map_err(driver_anyhow)?;
     Ok(CommandOutput::line(format!(
-        "speak queued for {gateway_call_id} playback={playback_id}"
+        "speak queued for {gateway_call_id} playback={}",
+        queued.playback_id
     )))
 }
 
@@ -1123,152 +1120,13 @@ async fn cancel_speech(
     context: &mut GatewayContext,
     gateway_call_id: String,
 ) -> DriverResult<CommandOutput> {
-    let playback_id = context
-        .media
-        .cancel_speech(&gateway_call_id)
-        .await
-        .map_err(driver_anyhow)?;
-    {
-        let mut guard = context.state.write().await;
-        guard.mark_tts_canceling(&gateway_call_id, &playback_id);
-        guard.log(
-            LogLevel::Info,
-            format!("speak cancel requested for {gateway_call_id}: {playback_id}"),
-        );
-    }
+    let playback_id =
+        speech::cancel_speech(&context.state, &context.media, &gateway_call_id, "speak")
+            .await
+            .map_err(driver_anyhow)?;
     Ok(CommandOutput::line(format!(
         "speak cancel requested for {gateway_call_id} playback={playback_id}"
     )))
-}
-
-struct SpeechJob {
-    state: SharedState,
-    tts: SharedTtsRegistry,
-    media_registry: SharedMediaRegistry,
-    media_handle: crate::media::CallMediaHandle,
-    gateway_call_id: String,
-    playback_id: String,
-    tts_backend: LiveTtsBackend,
-    text: String,
-    media: TelnyxMediaConfig,
-    cancel: SpeechCancelToken,
-}
-
-async fn run_speech_job(job: SpeechJob) {
-    let result = run_speech_job_inner(&job).await;
-    match result {
-        Ok(SpeechJobOutcome::MarkQueued) => {}
-        Ok(SpeechJobOutcome::NoAudioOrCanceled) => {
-            job.media_registry
-                .finish_speech(&job.gateway_call_id, &job.playback_id)
-                .await;
-        }
-        Err(error) => {
-            job.media_registry
-                .finish_speech(&job.gateway_call_id, &job.playback_id)
-                .await;
-            let mut guard = job.state.write().await;
-            guard.mark_tts_failed(&job.gateway_call_id, &job.playback_id, format!("{error:#}"));
-            guard.log(
-                LogLevel::Error,
-                format!("speak failed for {}: {error:#}", job.gateway_call_id),
-            );
-            tracing::error!(
-                gateway_call_id = job.gateway_call_id.as_str(),
-                playback_id = job.playback_id.as_str(),
-                error = %error,
-                "tts.speak.failed"
-            );
-        }
-    }
-}
-
-enum SpeechJobOutcome {
-    MarkQueued,
-    NoAudioOrCanceled,
-}
-
-async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcome> {
-    let text_chunks = split_speech_text(&job.text);
-    let mut model_samples = Vec::new();
-    let mut model_sample_rate_hz = None;
-    let mut model_chunks = 0usize;
-    for text_chunk in text_chunks {
-        if job.cancel.is_canceled() {
-            return Ok(SpeechJobOutcome::NoAudioOrCanceled);
-        }
-        let audio_chunks = job
-            .tts
-            .factory(job.tts_backend)
-            .synthesize_chunks(text_chunk)
-            .await?;
-        for audio_chunk in audio_chunks {
-            if job.cancel.is_canceled() {
-                return Ok(SpeechJobOutcome::NoAudioOrCanceled);
-            }
-            let sample_rate_hz = audio_chunk.sample_rate_hz();
-            match model_sample_rate_hz {
-                Some(existing) if existing != sample_rate_hz => {
-                    anyhow::bail!(
-                        "TTS backend emitted mixed sample rates: {existing}Hz and {sample_rate_hz}Hz"
-                    );
-                }
-                Some(_) => {}
-                None => model_sample_rate_hz = Some(sample_rate_hz),
-            }
-            model_samples.extend(audio_chunk.into_samples_i16());
-            model_chunks = model_chunks.saturating_add(1);
-        }
-    }
-    if model_samples.is_empty() || job.cancel.is_canceled() {
-        return Ok(SpeechJobOutcome::NoAudioOrCanceled);
-    }
-
-    let model_sample_rate_hz = model_sample_rate_hz.unwrap_or(crate::tts::PIPER_SAMPLE_RATE_HZ);
-    let packets = packetize_tts_samples(model_samples, model_sample_rate_hz, job.media)?;
-    let queued_frames = packets.len();
-    if queued_frames == 0 || job.cancel.is_canceled() {
-        return Ok(SpeechJobOutcome::NoAudioOrCanceled);
-    }
-    job.state.write().await.mark_tts_frames_queued(
-        &job.gateway_call_id,
-        &job.playback_id,
-        queued_frames,
-    );
-    tracing::info!(
-        gateway_call_id = job.gateway_call_id.as_str(),
-        playback_id = job.playback_id.as_str(),
-        model_chunks,
-        model_sample_rate_hz,
-        frames = queued_frames,
-        "tts.speak.prebuffered"
-    );
-    for payload in packets {
-        if job.cancel.is_canceled() {
-            return Ok(SpeechJobOutcome::NoAudioOrCanceled);
-        }
-        job.media_handle
-            .send(OutboundMediaCommand::Frame(OutboundMediaFrame {
-                playback_id: job.playback_id.clone(),
-                payload,
-            }))
-            .await?;
-    }
-    if queued_frames > 0 && !job.cancel.is_canceled() {
-        job.media_handle
-            .send(OutboundMediaCommand::Mark {
-                playback_id: job.playback_id.clone(),
-            })
-            .await?;
-        tracing::info!(
-            gateway_call_id = job.gateway_call_id.as_str(),
-            playback_id = job.playback_id.as_str(),
-            frames = queued_frames,
-            "tts.speak.queued"
-        );
-        return Ok(SpeechJobOutcome::MarkQueued);
-    }
-    Ok(SpeechJobOutcome::NoAudioOrCanceled)
 }
 
 enum SpeakRequest {
@@ -1458,7 +1316,7 @@ async fn calls(state: &SharedState) -> DriverResult<CommandOutput> {
             .values()
             .map(|call| {
                 format!(
-                    "{} {} from={} to={} stream={} asr={} tts={}",
+                    "{} {} from={} to={} stream={} asr={} tts={} conversation={}",
                     call.gateway_call_id,
                     call.status.label(),
                     call.from.as_deref().unwrap_or("<unknown>"),
@@ -1467,7 +1325,8 @@ async fn calls(state: &SharedState) -> DriverResult<CommandOutput> {
                     call.asr_backend
                         .map(|backend| backend.label())
                         .unwrap_or("<unbound>"),
-                    call.tts_status_label()
+                    call.tts_status_label(),
+                    call.conversation_status_label()
                 )
             })
             .collect()
@@ -1548,6 +1407,7 @@ async fn call_show(
                 .unwrap_or_else(|| "<unbound>".to_string())
         ),
         format!("tts: {}", call_tts_status(call)),
+        format!("conversation: {}", call_conversation_status(call)),
     ];
     if let Some(reason) = &call.terminal_reason {
         lines.push(format!("ended: {reason}"));
@@ -1566,6 +1426,135 @@ async fn call_show(
         lines,
         effects: Vec::new(),
     })
+}
+
+async fn conversation_command(
+    context: &mut GatewayContext,
+    command: ConversationCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        ConversationCommand::Status { call } => {
+            let guard = context.state.read().await;
+            let id = resolve_call_id(
+                &guard,
+                call.as_deref(),
+                context.session.selected_call.as_deref(),
+            )?;
+            let call = guard.calls.get(&id).ok_or_else(|| DriverError::NotFound {
+                kind: "call",
+                name: id.clone(),
+            })?;
+            Ok(CommandOutput {
+                lines: conversation_status_lines(call),
+                effects: Vec::new(),
+            })
+        }
+        ConversationCommand::Attach { call } => {
+            let mut guard = context.state.write().await;
+            let id = resolve_call_id(
+                &guard,
+                call.as_deref(),
+                context.session.selected_call.as_deref(),
+            )?;
+            if !guard.calls.contains_key(&id) {
+                return Err(DriverError::NotFound {
+                    kind: "call",
+                    name: id,
+                });
+            }
+            guard.attach_conversation(&id, ConversationMode::Manual);
+            context.session.selected_call = Some(id.clone());
+            Ok(CommandOutput::line(format!(
+                "conversation attached for {id} mode=manual"
+            )))
+        }
+        ConversationCommand::Detach { call } => {
+            let mut guard = context.state.write().await;
+            let id = resolve_call_id(
+                &guard,
+                call.as_deref(),
+                context.session.selected_call.as_deref(),
+            )?;
+            if !guard.calls.contains_key(&id) {
+                return Err(DriverError::NotFound {
+                    kind: "call",
+                    name: id,
+                });
+            }
+            guard.detach_conversation(&id);
+            Ok(CommandOutput::line(format!(
+                "conversation detached for {id}"
+            )))
+        }
+        ConversationCommand::Mode { mode, call } => {
+            let mode = ConversationMode::from(mode);
+            let mut guard = context.state.write().await;
+            let id = resolve_call_id(
+                &guard,
+                call.as_deref(),
+                context.session.selected_call.as_deref(),
+            )?;
+            if !guard.calls.contains_key(&id) {
+                return Err(DriverError::NotFound {
+                    kind: "call",
+                    name: id,
+                });
+            }
+            guard.set_conversation_mode(&id, mode);
+            context.session.selected_call = Some(id.clone());
+            Ok(CommandOutput::line(format!(
+                "conversation mode for {id}: {}",
+                mode.label()
+            )))
+        }
+    }
+}
+
+fn conversation_status_lines(call: &crate::operator::state::CallSession) -> Vec<String> {
+    let conversation = &call.conversation;
+    let mut lines = vec![
+        format!("call: {}", call.gateway_call_id),
+        format!("conversation: {}", conversation.status_label()),
+        format!("attached: {}", conversation.attached),
+        format!("mode: {}", conversation.mode.label()),
+        format!("status: {}", conversation.status.label()),
+        format!(
+            "last_user: {}",
+            conversation.last_user_text.as_deref().unwrap_or("<none>")
+        ),
+        format!(
+            "last_assistant: {}",
+            conversation
+                .last_assistant_text
+                .as_deref()
+                .unwrap_or("<none>")
+        ),
+        format!(
+            "last_playback: {}",
+            conversation.last_playback_id.as_deref().unwrap_or("<none>")
+        ),
+    ];
+    if let Some(error) = &conversation.last_error {
+        lines.push(format!("error: {error}"));
+    }
+    lines
+}
+
+fn call_conversation_status(call: &crate::operator::state::CallSession) -> String {
+    let conversation = &call.conversation;
+    let mut status = format!(
+        "{} mode={} attached={}",
+        conversation.status_label(),
+        conversation.mode.label(),
+        conversation.attached
+    );
+    if let Some(playback) = &conversation.last_playback_id {
+        status.push_str(&format!(" playback={playback}"));
+    }
+    if let Some(error) = &conversation.last_error {
+        status.push_str(&format!(" error={error}"));
+    }
+    status
 }
 
 fn call_tts_status(call: &crate::operator::state::CallSession) -> String {
@@ -1770,6 +1759,7 @@ fn gateway_help(topic: &[String]) -> Option<String> {
         [topic] if topic == "inbound" => Some(inbound_help()),
         [topic] if topic == "asr" => Some(asr_help()),
         [topic] if topic == "tts" => Some(tts_help()),
+        [topic] if topic == "conversation" || topic == "chat" => Some(conversation_help()),
         [topic] if topic == "calls" || topic == "call" => Some(call_help()),
         [topic] if topic == "dial" || topic == "speak" || topic == "outbound" => {
             Some(outbound_help())
@@ -2097,6 +2087,25 @@ fn asr_help() -> String {
         "  asr list",
         "  asr status",
         "  asr use kroko-2025",
+    ]
+    .join("\n")
+}
+
+fn conversation_help() -> String {
+    [
+        "conversation commands",
+        "",
+        "Attach or detach the selected call from the gateway-local conversation handler.",
+        "The TUI and command socket share this command path.",
+        "",
+        "Usage:",
+        "  conversation status [call-id]",
+        "  conversation attach [call-id]",
+        "  conversation detach [call-id]",
+        "  conversation mode <manual|auto> [call-id]",
+        "",
+        "Manual mode records the assistant response for operator review. Auto mode routes",
+        "the generated response through the same Piper `speak` media path used by M2.",
     ]
     .join("\n")
 }
@@ -2910,6 +2919,68 @@ mod tests {
             socket_engine.context().session.selected_call,
             Some(call_two)
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_commands_attach_mode_detach_and_keep_source_selection_isolated() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let (call_one, call_two) = {
+            let mut guard = state.write().await;
+            (
+                add_streaming_call(&mut guard, "call-1", "stream-1"),
+                add_streaming_call(&mut guard, "call-2", "stream-2"),
+            )
+        };
+        let media = SharedMediaRegistry::default();
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let base = context_with_static_tts(state.clone(), telnyx, media);
+        let mut tui_engine =
+            CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
+        let mut socket_engine =
+            CommandEngine::<GatewayContext, GatewayCommand>::new(base.for_new_source());
+
+        tui_engine
+            .run_line(&format!("call use {call_one}"))
+            .await
+            .expect("TUI call use");
+        socket_engine
+            .run_line(&format!("call use {call_two}"))
+            .await
+            .expect("socket call use");
+        let attach = tui_engine
+            .run_line("conversation attach")
+            .await
+            .expect("TUI conversation attach");
+        let mode = socket_engine
+            .run_line("conversation mode auto")
+            .await
+            .expect("socket conversation mode");
+
+        assert_eq!(
+            attach.lines,
+            vec![format!("conversation attached for {call_one} mode=manual")]
+        );
+        assert_eq!(
+            mode.lines,
+            vec![format!("conversation mode for {call_two}: auto")]
+        );
+        let socket_status = socket_engine
+            .run_line("conversation status")
+            .await
+            .expect("socket conversation status");
+        assert!(socket_status.lines.iter().any(|line| line == "mode: auto"));
+
+        tui_engine
+            .run_line("conversation detach")
+            .await
+            .expect("TUI conversation detach");
+        let guard = state.read().await;
+        let tui_call = guard.calls.get(&call_one).expect("TUI call exists");
+        let socket_call = guard.calls.get(&call_two).expect("socket call exists");
+        assert!(!tui_call.conversation.attached);
+        assert_eq!(tui_call.conversation.mode, ConversationMode::Manual);
+        assert!(socket_call.conversation.attached);
+        assert_eq!(socket_call.conversation.mode, ConversationMode::Auto);
     }
 
     #[tokio::test]

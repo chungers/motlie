@@ -130,6 +130,122 @@ pub struct TtsPlaybackState {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConversationMode {
+    #[default]
+    Manual,
+    Auto,
+}
+
+impl ConversationMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConversationStatus {
+    #[default]
+    Idle,
+    Thinking,
+    Proposed,
+    Speaking,
+    Interrupted,
+    Failed,
+}
+
+impl ConversationStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Thinking => "thinking",
+            Self::Proposed => "proposed",
+            Self::Speaking => "speaking",
+            Self::Interrupted => "interrupted",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConversationRole {
+    User,
+    Assistant,
+    System,
+}
+
+impl ConversationRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationLine {
+    pub at: DateTime<Utc>,
+    pub role: ConversationRole,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationState {
+    pub attached: bool,
+    pub mode: ConversationMode,
+    pub status: ConversationStatus,
+    pub lines: Vec<ConversationLine>,
+    pub last_user_text: Option<String>,
+    pub last_assistant_text: Option<String>,
+    pub last_playback_id: Option<String>,
+    pub last_error: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Default for ConversationState {
+    fn default() -> Self {
+        Self {
+            attached: false,
+            mode: ConversationMode::Manual,
+            status: ConversationStatus::Idle,
+            lines: Vec::new(),
+            last_user_text: None,
+            last_assistant_text: None,
+            last_playback_id: None,
+            last_error: None,
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+impl ConversationState {
+    pub fn status_label(&self) -> &'static str {
+        if self.attached {
+            self.status.label()
+        } else {
+            "detached"
+        }
+    }
+
+    fn push_line(&mut self, role: ConversationRole, text: String) {
+        self.lines.push(ConversationLine {
+            at: Utc::now(),
+            role,
+            text,
+        });
+        if self.lines.len() > 40 {
+            let remove_count = self.lines.len().saturating_sub(40);
+            self.lines.drain(0..remove_count);
+        }
+        self.updated_at = Utc::now();
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MediaMetadata {
     pub stream_id: Option<String>,
@@ -176,6 +292,7 @@ pub struct CallSession {
     pub terminal_reason: Option<String>,
     pub asr_backend: Option<LiveAsrBackend>,
     pub tts: Option<TtsPlaybackState>,
+    pub conversation: ConversationState,
 }
 
 impl CallSession {
@@ -203,6 +320,7 @@ impl CallSession {
             terminal_reason: None,
             asr_backend: None,
             tts: None,
+            conversation: ConversationState::default(),
         };
         call.push_timeline("call created");
         call
@@ -257,6 +375,10 @@ impl CallSession {
             .as_ref()
             .map(|tts| tts.status.label())
             .unwrap_or("idle")
+    }
+
+    pub fn conversation_status_label(&self) -> &'static str {
+        self.conversation.status_label()
     }
 }
 
@@ -455,6 +577,98 @@ impl GatewayState {
         }
     }
 
+    pub fn attach_conversation(&mut self, gateway_call_id: &str, mode: ConversationMode) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.attached = true;
+            call.conversation.mode = mode;
+            call.conversation.status = ConversationStatus::Idle;
+            call.conversation.last_error = None;
+            call.conversation.updated_at = Utc::now();
+            call.push_timeline(format!("conversation attached ({})", mode.label()));
+        }
+    }
+
+    pub fn detach_conversation(&mut self, gateway_call_id: &str) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.attached = false;
+            call.conversation.status = ConversationStatus::Idle;
+            call.conversation.updated_at = Utc::now();
+            call.push_timeline("conversation detached");
+        }
+    }
+
+    pub fn set_conversation_mode(&mut self, gateway_call_id: &str, mode: ConversationMode) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.mode = mode;
+            call.conversation.attached = true;
+            call.conversation.updated_at = Utc::now();
+            call.push_timeline(format!("conversation mode -> {}", mode.label()));
+        }
+    }
+
+    pub fn record_conversation_user_turn(&mut self, gateway_call_id: &str, text: String) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.last_user_text = Some(text.clone());
+            call.conversation.status = ConversationStatus::Thinking;
+            call.conversation.last_error = None;
+            call.conversation.push_line(ConversationRole::User, text);
+            call.push_timeline("conversation user turn");
+        }
+    }
+
+    pub fn record_conversation_proposal(&mut self, gateway_call_id: &str, text: String) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.last_assistant_text = Some(text.clone());
+            call.conversation.last_playback_id = None;
+            call.conversation.status = ConversationStatus::Proposed;
+            call.conversation.last_error = None;
+            call.conversation
+                .push_line(ConversationRole::Assistant, text);
+            call.push_timeline("conversation assistant proposed");
+        }
+    }
+
+    pub fn record_conversation_speaking(
+        &mut self,
+        gateway_call_id: &str,
+        text: String,
+        playback_id: String,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.last_assistant_text = Some(text.clone());
+            call.conversation.last_playback_id = Some(playback_id.clone());
+            call.conversation.status = ConversationStatus::Speaking;
+            call.conversation.last_error = None;
+            call.conversation
+                .push_line(ConversationRole::Assistant, text);
+            call.push_timeline(format!("conversation assistant speaking {playback_id}"));
+        }
+    }
+
+    pub fn record_conversation_interrupted(&mut self, gateway_call_id: &str, playback_id: &str) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.status = ConversationStatus::Interrupted;
+            call.conversation.updated_at = Utc::now();
+            call.push_timeline(format!("conversation interrupted {playback_id}"));
+        }
+    }
+
+    pub fn record_conversation_idle(&mut self, gateway_call_id: &str) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.status = ConversationStatus::Idle;
+            call.conversation.updated_at = Utc::now();
+        }
+    }
+
+    pub fn record_conversation_failed(&mut self, gateway_call_id: &str, error: String) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.status = ConversationStatus::Failed;
+            call.conversation.last_error = Some(error.clone());
+            call.conversation.updated_at = Utc::now();
+            call.push_timeline(format!("conversation failed: {error}"));
+        }
+    }
+
     pub fn start_tts_job(&mut self, gateway_call_id: &str, playback_id: String, text: &str) {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.status = CallStatus::Speaking;
@@ -530,6 +744,10 @@ impl GatewayState {
                 if call.status == CallStatus::Speaking {
                     call.status = status_after_tts(call);
                 }
+                if call.conversation.last_playback_id.as_deref() == Some(playback_id.as_str()) {
+                    call.conversation.status = ConversationStatus::Idle;
+                    call.conversation.updated_at = Utc::now();
+                }
                 call.push_timeline(format!("tts {playback_id} completed"));
             }
         }
@@ -552,6 +770,10 @@ impl GatewayState {
             if call.status == CallStatus::Speaking {
                 call.status = status_after_tts(call);
             }
+            if call.conversation.last_playback_id.as_deref() == Some(playback_id) {
+                call.conversation.status = ConversationStatus::Idle;
+                call.conversation.updated_at = Utc::now();
+            }
             call.push_timeline(format!("tts {playback_id} canceled"));
         }
     }
@@ -563,6 +785,11 @@ impl GatewayState {
         });
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.last_error = Some(error.clone());
+            if call.conversation.last_playback_id.as_deref() == Some(playback_id) {
+                call.conversation.status = ConversationStatus::Failed;
+                call.conversation.last_error = Some(error.clone());
+                call.conversation.updated_at = Utc::now();
+            }
             call.push_timeline(format!("tts {playback_id} failed: {error}"));
         }
     }

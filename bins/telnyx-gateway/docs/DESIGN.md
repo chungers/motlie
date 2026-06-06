@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-05 23:34 PDT | @codex-366-impl: Implemented milestone 3 composition using gateway-local `ConversationRuntime`, final-transcript forwarding for attached calls, shared TUI/socket `conversation` commands, M2 speech queue reuse for `Say`, and drop-and-regenerate barge-in via the existing `speak cancel`/Telnyx `clear` path. | Milestone 3: Full-Duplex TUI Chat Conversation, Recommended Telnyx v1 Pipelines, Operator REPL and TUI Control Surface |
 | 2026-06-04 | @codex-369-rv: Removed ASR startup-default configuration in favor of code defaults plus source-local `asr use`, and normalized gateway TTS output to backend-neutral signed 16-bit PCM plus sample-rate metadata before Telnyx packetization so Piper and future Qwen3-TTS.cpp share one media path. | Operator REPL and TUI Control Surface, Returning TTS Audio, Recommended TTS: Piper |
 | 2026-06-04 | @codex-369-rv: Aligned TTS operator commands with the ASR command pattern: `tts list`, `tts status`, and `tts use piper` are available through the shared TUI/socket command engine, and `dial` output now tells operators to wait for media before running `speak`. | Operator REPL and TUI Control Surface, Driver REPL Dialer Surface, Recommended TTS: Piper |
 | 2026-06-03 | @codex-369-rv: Recorded M2 live-test findings for Piper: eSpeak-ng phonemization data must be present or auto-discovered, outbound TTS is packetized from continuous utterance audio, frames are paced by the media task, silence keepalive is not injected during active speech, and frame interval/underrun telemetry is required for live diagnosis. | Milestone 2: Outbound Dialer and TTS, Returning TTS Audio, M2-Safe Bidirectional Media Contract, Recommended TTS: Piper, Testing Scope |
@@ -595,6 +596,8 @@ Recommended composition rule:
 - transcript consumers decide whether to log, send to tmux, or call a conversation handler
 - conversation handlers emit provider-neutral commands such as `Say { text }`, `Call(CallAction::Hangup)`, `Call(CallAction::Transfer { ... })`, or `Noop`
 - `bins/telnyx-gateway` maps those commands to Telnyx call-control and outbound media operations
+
+Implementation note (@codex-366-impl, 2026-06-05 23:34 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. Manual mode records the assistant proposal in the selected-call chat state; auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with Piper. Barge-in is drop-and-regenerate: an active playback is canceled through the existing speech cancel/Telnyx `clear` mechanism before the new response is generated. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
 
 ### Milestone 4: External Integration Harness
 
