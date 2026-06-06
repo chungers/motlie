@@ -279,6 +279,10 @@ pub fn resolve_hf_gguf_snapshot(
 
 /// Resolve a Hugging Face GGUF cache snapshot and require at least one exact
 /// root-level GGUF filename for the selected curated variant.
+#[cfg(any(
+    feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
+))]
 pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
     model_id: &str,
     cache_root: &Path,
