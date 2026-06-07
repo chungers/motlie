@@ -2,7 +2,8 @@
 
 ## Changelog
 
-- 2026-06-06 16:19 PDT, @codex-381-impl -- Added the reversed TTS quality A/B harness runbook for issue #381, covering Piper baseline, Kokoro-82M external command execution, Qwen3-TTS, codec round-trip scoring, objective audio signals, and M3.5 live-path interpretation.
+- 2026-06-06 16:19 PDT, @codex-381-impl -- Added the reversed TTS quality A/B harness runbook for issue #381, covering Piper baseline, Kokoro-82M, Qwen3-TTS, codec round-trip scoring, objective audio signals, and M3.5 live-path interpretation.
+- 2026-06-06 22:11 PDT, @codex-381-impl -- Updated Kokoro-82M from an external-command experiment to a curated in-repo ONNX backend that shares the workspace static ONNX Runtime link path.
 
 ## Purpose
 
@@ -26,7 +27,7 @@ Default engine order is:
 2. `kokoro-82m` as the first candidate to beat Piper for M3.5 live full-duplex suitability
 3. `qwen3-tts-cpp` as the second candidate, using the existing Motlie Qwen3-TTS C++ backend path
 
-Kokoro is intentionally configured as an external command. There is no curated in-repo Kokoro backend on this branch, and this benchmark should not vendor Kokoro weights or add a production runtime before the measurements justify that dependency.
+Kokoro-82M is a curated in-repo ONNX backend. It uses the workspace `ort`/`ort-sys` link path, so the full golden A/B binary must still link exactly one static ONNX Runtime and no dynamic `libonnxruntime`.
 
 ## Commands
 
@@ -49,7 +50,6 @@ Run the full default matrix when Piper, Qwen3-TTS, Sherpa, and Kokoro artifacts 
 ```bash
 cargo run -p motlie-telnyx-gateway --features golden-ab -- \
   tts-golden-ab bins/telnyx-gateway/corpus/qwen3-call-center-golden.json \
-  --kokoro-command 'kokoro-cli --text {text} --output {output} --sample-rate {sample_rate}' \
   --output-dir /tmp/motlie-tts-golden-ab-call-center \
   --output-json /tmp/motlie-tts-golden-ab-call-center.json
 ```
@@ -59,7 +59,6 @@ Run the PM/orchestration corpus with the same engines and codecs:
 ```bash
 cargo run -p motlie-telnyx-gateway --features golden-ab -- \
   tts-golden-ab bins/telnyx-gateway/corpus/qwen3-pm-orchestration-golden.json \
-  --kokoro-command 'kokoro-cli --text {text} --output {output} --sample-rate {sample_rate}' \
   --output-dir /tmp/motlie-tts-golden-ab-pm \
   --output-json /tmp/motlie-tts-golden-ab-pm.json
 ```
@@ -70,12 +69,11 @@ Run only Kokoro first, which is the #381 priority candidate:
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
   tts-golden-ab bins/telnyx-gateway/corpus/qwen3-call-center-golden.json \
   --engine kokoro-82m \
-  --kokoro-command 'kokoro-cli --text {text} --output {output} --sample-rate {sample_rate}' \
   --output-dir /tmp/motlie-tts-golden-ab-kokoro \
   --output-json /tmp/motlie-tts-golden-ab-kokoro.json
 ```
 
-The Kokoro command template is split with shell-like quoting but executed directly, not through a shell. It must include `{text}` and `{output}` placeholders. `{sample_rate}` is optional and expands to `16000`.
+Kokoro artifacts resolve through the normal model artifact policy. The curated bundle expects `onnx/model_quantized.onnx`, `tokenizer.json`, and `voices/af_bella.bin` from `onnx-community/Kokoro-82M-v1.0-ONNX`.
 
 ## Output Layout
 
@@ -94,7 +92,7 @@ Codec round-trip ASR input WAVs are written under:
 The JSON report contains:
 
 - `entries`: successful engine x codec x sample measurements
-- `failures`: synthesis or ASR replay blockers, including missing external Kokoro command or missing model artifacts
+- `failures`: synthesis or ASR replay blockers, including missing model artifacts
 - `summaries`: aggregate engine x codec x category rows plus an `ALL` category
 
 ## Recommendation Criteria

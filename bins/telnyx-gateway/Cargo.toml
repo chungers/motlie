@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-golden-ab = ["sherpa", "moonshine", "whisper", "piper", "qwen3-tts-cpp"]
+golden-ab = ["sherpa", "moonshine", "whisper", "piper", "kokoro", "qwen3-tts-cpp"]
 sherpa = [
     "dep:motlie-model-sherpa-onnx",
     "motlie-models/model-sherpa-onnx-streaming",
@@ -37,6 +37,10 @@ piper = [
     "dep:motlie-model-piper",
     "motlie-models/model-piper-en-us-ljspeech-medium",
 ]
+kokoro = [
+    "dep:motlie-model-kokoro",
+    "motlie-models/model-kokoro-82m",
+]
 
 [dependencies]
 anyhow.workspace = true
@@ -51,6 +55,7 @@ hound = "3.5"
 motlie-driver = { path = "../../libs/driver" }
 motlie-model = { path = "../../libs/model" }
 motlie-model-moonshine = { path = "../../libs/model/backends/moonshine", optional = true }
+motlie-model-kokoro = { path = "../../libs/model/backends/kokoro", optional = true }
 motlie-model-piper = { path = "../../libs/model/backends/piper", optional = true }
 motlie-model-qwen3-tts-cpp = { path = "../../libs/model/backends/qwen3_tts_cpp", optional = true }
 motlie-model-sherpa-onnx = { path = "../../libs/model/backends/sherpa_onnx", optional = true }

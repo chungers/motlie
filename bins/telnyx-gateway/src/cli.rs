@@ -215,10 +215,6 @@ pub struct TtsGoldenAbArgs {
     /// Optional JSON report path for the full matrix.
     #[arg(long)]
     pub output_json: Option<PathBuf>,
-
-    /// External Kokoro command template. Use {text}, {output}, and optionally {sample_rate}.
-    #[arg(long)]
-    pub kokoro_command: Option<String>,
 }
 
 impl TtsGoldenAbArgs {
@@ -288,7 +284,7 @@ impl TtsGoldenEngineArg {
     pub fn label(self) -> &'static str {
         match self {
             Self::Piper => "piper/en_us_ljspeech_medium",
-            Self::Kokoro82m => "kokoro-82m",
+            Self::Kokoro82m => "kokoro/kokoro_82m",
             Self::Qwen3TtsCpp => "qwen3-tts-cpp-0.6b",
         }
     }

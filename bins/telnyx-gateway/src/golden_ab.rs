@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{bail, Context};
@@ -18,9 +17,9 @@ use crate::replay::{compute_wer, replay_samples, ReplayBackend, ReplayLatencyRep
 #[cfg(feature = "piper")]
 use crate::tts::OutboundTtsFactory;
 
-#[cfg(feature = "qwen3-tts-cpp")]
+#[cfg(any(feature = "kokoro", feature = "qwen3-tts-cpp"))]
 use motlie_model::typed::{BufferedSpeechSynthesizer, SynthesisRequest};
-#[cfg(feature = "qwen3-tts-cpp")]
+#[cfg(any(feature = "kokoro", feature = "qwen3-tts-cpp"))]
 use motlie_model::{ArtifactPolicy, ModelError, SpeechParams, StartOptions};
 
 const SOURCE_SAMPLE_RATE_HZ: u32 = 16_000;
@@ -521,27 +520,31 @@ struct TtsGoldenSynthesis {
 }
 
 struct TtsGoldenRunner {
-    #[cfg(any(feature = "piper", feature = "qwen3-tts-cpp"))]
+    #[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
     artifact_root: PathBuf,
-    #[cfg(any(feature = "piper", feature = "qwen3-tts-cpp"))]
+    #[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
     allow_download: bool,
     #[cfg(feature = "piper")]
     piper: Option<std::sync::Arc<crate::tts::PiperTtsFactory>>,
+    #[cfg(feature = "kokoro")]
+    kokoro: Option<motlie_model_kokoro::KokoroHandle>,
     #[cfg(feature = "qwen3-tts-cpp")]
     qwen3: Option<motlie_model_qwen3_tts_cpp::Qwen3TtsCppHandle>,
 }
 
 impl TtsGoldenRunner {
     fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
-        #[cfg(not(any(feature = "piper", feature = "qwen3-tts-cpp")))]
+        #[cfg(not(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp")))]
         let _ = (artifact_root, allow_download);
         Self {
-            #[cfg(any(feature = "piper", feature = "qwen3-tts-cpp"))]
+            #[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
             artifact_root,
-            #[cfg(any(feature = "piper", feature = "qwen3-tts-cpp"))]
+            #[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
             allow_download,
             #[cfg(feature = "piper")]
             piper: None,
+            #[cfg(feature = "kokoro")]
+            kokoro: None,
             #[cfg(feature = "qwen3-tts-cpp")]
             qwen3: None,
         }
@@ -556,7 +559,7 @@ impl TtsGoldenRunner {
         let source_wav = tts_source_wav_path(&args.output_dir, engine, &sample.id);
         match engine {
             TtsGoldenEngineArg::Piper => self.synthesize_piper(sample, source_wav).await,
-            TtsGoldenEngineArg::Kokoro82m => synthesize_kokoro(args, sample, source_wav).await,
+            TtsGoldenEngineArg::Kokoro82m => self.synthesize_kokoro(sample, source_wav).await,
             TtsGoldenEngineArg::Qwen3TtsCpp => self.synthesize_qwen3(sample, source_wav).await,
         }
     }
@@ -604,6 +607,47 @@ impl TtsGoldenRunner {
         _source_wav: PathBuf,
     ) -> anyhow::Result<TtsGoldenSynthesis> {
         bail!("Piper TTS is unavailable; rebuild with --features piper or --features golden-ab")
+    }
+
+    #[cfg(feature = "kokoro")]
+    async fn synthesize_kokoro(
+        &mut self,
+        sample: &GoldenAbSample,
+        source_wav: PathBuf,
+    ) -> anyhow::Result<TtsGoldenSynthesis> {
+        if self.kokoro.is_none() {
+            self.kokoro = Some(start_kokoro_tts(&self.artifact_root, self.allow_download).await?);
+        }
+        let handle = self
+            .kokoro
+            .as_ref()
+            .context("Kokoro-82M handle was not initialized")?;
+        let started_at = Instant::now();
+        let request = SynthesisRequest {
+            text: sample.text.clone(),
+            params: SpeechParams::default(),
+        };
+        let audio = handle
+            .synthesize_buffered(request)
+            .await
+            .with_context(|| format!("synthesize Kokoro-82M sample {}", sample.id))?;
+        let samples_16k = normalize_to_source_rate(audio.sample_rate_hz(), audio.into_samples())?;
+        write_i16_wav(&source_wav, SOURCE_SAMPLE_RATE_HZ, &samples_16k)
+            .with_context(|| format!("write Kokoro-82M source WAV {}", source_wav.display()))?;
+        Ok(TtsGoldenSynthesis {
+            source_wav,
+            samples_16k,
+            elapsed_ms: started_at.elapsed().as_millis(),
+        })
+    }
+
+    #[cfg(not(feature = "kokoro"))]
+    async fn synthesize_kokoro(
+        &mut self,
+        _sample: &GoldenAbSample,
+        _source_wav: PathBuf,
+    ) -> anyhow::Result<TtsGoldenSynthesis> {
+        bail!("Kokoro-82M is unavailable; rebuild with --features kokoro or --features golden-ab")
     }
 
     #[cfg(feature = "qwen3-tts-cpp")]
@@ -668,81 +712,6 @@ fn concatenate_tts_chunks(chunks: Vec<crate::tts::TtsAudio>) -> anyhow::Result<(
         samples.extend_from_slice(chunk.samples_i16());
     }
     Ok((sample_rate_hz, samples))
-}
-
-async fn synthesize_kokoro(
-    args: &TtsGoldenAbArgs,
-    sample: &GoldenAbSample,
-    source_wav: PathBuf,
-) -> anyhow::Result<TtsGoldenSynthesis> {
-    let template = args.kokoro_command.as_deref().context(
-        "Kokoro-82M command not configured; pass --kokoro-command with {text} and {output} placeholders",
-    )?;
-    if let Some(parent) = source_wav.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create Kokoro output dir {}", parent.display()))?;
-    }
-    let command = render_kokoro_command(template, &sample.text, &source_wav)?;
-    let program = command
-        .first()
-        .context("Kokoro command template produced no program")?;
-    let started_at = Instant::now();
-    let status = tokio::process::Command::new(program)
-        .args(&command[1..])
-        .stdin(Stdio::null())
-        .status()
-        .await
-        .with_context(|| format!("run Kokoro command for sample {}", sample.id))?;
-    if !status.success() {
-        bail!(
-            "Kokoro command failed for sample {} with status {}",
-            sample.id,
-            status
-        );
-    }
-    let (sample_rate_hz, samples) = read_mono_i16_wav(&source_wav)
-        .with_context(|| format!("read Kokoro output WAV {}", source_wav.display()))?;
-    let samples_16k = normalize_to_source_rate(sample_rate_hz, samples)?;
-    write_i16_wav(&source_wav, SOURCE_SAMPLE_RATE_HZ, &samples_16k).with_context(|| {
-        format!(
-            "write normalized Kokoro source WAV {}",
-            source_wav.display()
-        )
-    })?;
-    Ok(TtsGoldenSynthesis {
-        source_wav,
-        samples_16k,
-        elapsed_ms: started_at.elapsed().as_millis(),
-    })
-}
-
-fn render_kokoro_command(template: &str, text: &str, output: &Path) -> anyhow::Result<Vec<String>> {
-    let parts = shlex::split(template).context("parse --kokoro-command template")?;
-    if parts.is_empty() {
-        bail!("--kokoro-command must include a program");
-    }
-    let output = output.display().to_string();
-    let sample_rate = SOURCE_SAMPLE_RATE_HZ.to_string();
-    let mut saw_text = false;
-    let mut saw_output = false;
-    let rendered = parts
-        .into_iter()
-        .map(|part| {
-            if part.contains("{text}") {
-                saw_text = true;
-            }
-            if part.contains("{output}") {
-                saw_output = true;
-            }
-            part.replace("{text}", text)
-                .replace("{output}", &output)
-                .replace("{sample_rate}", &sample_rate)
-        })
-        .collect::<Vec<_>>();
-    if !saw_text || !saw_output {
-        bail!("--kokoro-command must include both {text} and {output} placeholders");
-    }
-    Ok(rendered)
 }
 
 fn normalize_to_source_rate(sample_rate_hz: u32, samples: Vec<i16>) -> anyhow::Result<Vec<i16>> {
@@ -1127,6 +1096,36 @@ fn average_u64(total: u64, count: usize) -> f64 {
     }
 }
 
+#[cfg(feature = "kokoro")]
+async fn start_kokoro_tts(
+    artifact_root: &Path,
+    allow_download: bool,
+) -> anyhow::Result<motlie_model_kokoro::KokoroHandle> {
+    match motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root)).await {
+        Ok(handle) => Ok(handle),
+        Err(err) if allow_download && missing_local_artifacts(&err) => {
+            tracing::info!(
+                artifact_root = %artifact_root.display(),
+                artifact = "kokoro-82m",
+                "downloading Kokoro-82M artifacts"
+            );
+            download_kokoro_artifacts(artifact_root)?;
+            motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root))
+                .await
+                .map_err(anyhow::Error::from)
+                .context("start Kokoro-82M after downloading artifacts")
+        }
+        Err(err) if !allow_download && missing_local_artifacts(&err) => {
+            bail!(
+                "{} missing for kokoro-82m under '{}'; rerun without --no-asr-download or preinstall artifacts",
+                motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX,
+                artifact_root.display()
+            )
+        }
+        Err(err) => Err(anyhow::Error::from(err)).context("start Kokoro-82M"),
+    }
+}
+
 #[cfg(feature = "qwen3-tts-cpp")]
 async fn start_qwen3_tts(
     artifact_root: &Path,
@@ -1157,7 +1156,7 @@ async fn start_qwen3_tts(
     }
 }
 
-#[cfg(feature = "qwen3-tts-cpp")]
+#[cfg(any(feature = "kokoro", feature = "qwen3-tts-cpp"))]
 fn local_only_options(artifact_root: &Path) -> StartOptions {
     StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -1167,7 +1166,7 @@ fn local_only_options(artifact_root: &Path) -> StartOptions {
     }
 }
 
-#[cfg(feature = "qwen3-tts-cpp")]
+#[cfg(any(feature = "kokoro", feature = "qwen3-tts-cpp"))]
 fn missing_local_artifacts(error: &ModelError) -> bool {
     match error {
         ModelError::InvalidConfiguration(message) => {
@@ -1175,6 +1174,16 @@ fn missing_local_artifacts(error: &ModelError) -> bool {
         }
         _ => false,
     }
+}
+
+#[cfg(feature = "kokoro")]
+fn download_kokoro_artifacts(artifact_root: &Path) -> anyhow::Result<()> {
+    let catalog = motlie_models::Catalog::with_defaults();
+    let bundle_id = motlie_models::tts::kokoro_82m::descriptor().id;
+    motlie_models::download_bundle_artifacts(&catalog, &bundle_id, artifact_root)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
+        .context("download Kokoro-82M artifacts")
 }
 
 #[cfg(feature = "qwen3-tts-cpp")]
@@ -1221,7 +1230,6 @@ mod tests {
             trailing_silence_pad_ms: crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS,
             limit: None,
             output_json: None,
-            kokoro_command: None,
         };
 
         assert_eq!(
@@ -1235,29 +1243,6 @@ mod tests {
         assert_eq!(
             args.selected_codecs(),
             vec![GoldenCodecArg::L16_16k, GoldenCodecArg::Pcmu8k]
-        );
-    }
-
-    #[test]
-    fn kokoro_command_template_replaces_placeholders_without_shell() {
-        let command = render_kokoro_command(
-            "kokoro-cli --text {text} --output {output} --sample-rate {sample_rate}",
-            "Hello from Motlie",
-            Path::new("/tmp/out.wav"),
-        )
-        .expect("template should render");
-
-        assert_eq!(
-            command,
-            vec![
-                "kokoro-cli",
-                "--text",
-                "Hello from Motlie",
-                "--output",
-                "/tmp/out.wav",
-                "--sample-rate",
-                "16000",
-            ]
         );
     }
 

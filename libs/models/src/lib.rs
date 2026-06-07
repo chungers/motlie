@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-kokoro-82m",
     feature = "model-qwen3-tts-cpp",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
@@ -32,6 +33,8 @@ pub mod tts;
 use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
 
+#[cfg(feature = "model-kokoro-82m")]
+use motlie_model_kokoro::KokoroHandle;
 #[cfg(any(
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
@@ -282,6 +285,7 @@ pub fn resolve_hf_gguf_snapshot(
     feature = "model-sherpa-onnx-streaming",
     feature = "model-moonshine-streaming",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-kokoro-82m",
     feature = "model-qwen3-tts-cpp",
 ))]
 pub(crate) fn resolve_typed_artifact_policy(
@@ -344,6 +348,8 @@ pub enum CuratedBundle {
     MoonshineStreamingEn,
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
     PiperEnUsLjspeechMedium,
+    #[cfg(feature = "model-kokoro-82m")]
+    Kokoro82m,
     #[cfg(feature = "model-qwen3-tts-cpp")]
     Qwen3TtsCpp0_6B,
 }
@@ -386,6 +392,8 @@ impl CuratedBundle {
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::descriptor(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m => tts::kokoro_82m::descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::descriptor(),
             _ => unreachable!("no curated bundle variants are enabled"),
@@ -458,6 +466,10 @@ impl CuratedBundle {
             Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::start_typed(options)
                 .await
                 .map(CuratedHandle::PiperEnUsLjspeechMedium),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m => tts::kokoro_82m::start_typed(options)
+                .await
+                .map(CuratedHandle::Kokoro82m),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::start_typed(options)
                 .await
@@ -499,6 +511,8 @@ pub enum CuratedHandle {
     MoonshineStreamingEn(MoonshineHandle),
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
     PiperEnUsLjspeechMedium(PiperHandle),
+    #[cfg(feature = "model-kokoro-82m")]
+    Kokoro82m(KokoroHandle),
     #[cfg(feature = "model-qwen3-tts-cpp")]
     Qwen3TtsCpp0_6B(Qwen3TtsCppHandle),
 }
@@ -540,6 +554,8 @@ impl BundleHandle for CuratedHandle {
             Self::MoonshineStreamingEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.descriptor(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.descriptor(),
             _ => unreachable!("no curated handle variants are enabled"),
@@ -577,6 +593,8 @@ impl BundleHandle for CuratedHandle {
             Self::MoonshineStreamingEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.capabilities(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.capabilities(),
             _ => unreachable!("no curated handle variants are enabled"),
@@ -614,6 +632,8 @@ impl BundleHandle for CuratedHandle {
             Self::MoonshineStreamingEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.metric_snapshot(),
             _ => unreachable!("no curated handle variants are enabled"),
@@ -702,6 +722,8 @@ impl BundleHandle for CuratedHandle {
             Self::MoonshineStreamingEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.shutdown().await,
         }
@@ -983,6 +1005,7 @@ pub struct ResolvedModelDescriptor {
 pub enum ModelSelector {
     #[cfg(any(
         feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-kokoro-82m",
         feature = "model-qwen3-tts-cpp",
     ))]
     Tts(TtsModels),
@@ -1020,6 +1043,7 @@ pub enum ModelSelector {
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-kokoro-82m",
     feature = "model-qwen3-tts-cpp",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
@@ -1030,6 +1054,7 @@ impl ModelSelector {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             Self::Tts(model) => format!("tts:{}", model.as_str()),
@@ -1061,6 +1086,7 @@ impl ModelSelector {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             Self::Tts(model) => model.bundle_id(),
@@ -1092,6 +1118,7 @@ impl ModelSelector {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             Self::Tts(model) => model.descriptor(),
@@ -1123,6 +1150,7 @@ impl ModelSelector {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             Self::Tts(model) => Ok(model.bundle()),
@@ -1162,6 +1190,7 @@ impl ModelSelector {
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-kokoro-82m",
     feature = "model-qwen3-tts-cpp",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
@@ -1184,6 +1213,12 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-kokoro-82m"))]
+            if raw == tts::KOKORO_82M_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-qwen3-tts-cpp"))]
             if raw == tts::QWEN3_TTS_CPP_0_6B_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
@@ -1192,11 +1227,13 @@ impl FromStr for ModelSelector {
             }
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             return Ok(Self::Tts(raw.parse()?));
             #[cfg(not(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             )))]
             return Err(ModelsError::UnknownModelSelector {
@@ -1371,6 +1408,8 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "moonshine_streaming_en" => Some(CuratedBundle::MoonshineStreamingEn),
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         "piper_en_us_ljspeech_medium" => Some(CuratedBundle::PiperEnUsLjspeechMedium),
+        #[cfg(feature = "model-kokoro-82m")]
+        "kokoro_82m" => Some(CuratedBundle::Kokoro82m),
         #[cfg(feature = "model-qwen3-tts-cpp")]
         "qwen3_tts_cpp_0_6b" => Some(CuratedBundle::Qwen3TtsCpp0_6B),
         _ => None,
@@ -1441,6 +1480,8 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         ("piper_en_us_ljspeech_medium", BackendKind::Ort, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::PiperEnUsLjspeechMedium)
         }
+        #[cfg(feature = "model-kokoro-82m")]
+        ("kokoro_82m", BackendKind::Ort, CheckpointFormat::Onnx) => Some(CuratedBundle::Kokoro82m),
         #[cfg(feature = "model-qwen3-tts-cpp")]
         ("qwen3_tts_cpp_0_6b", BackendKind::Qwen3TtsCpp, CheckpointFormat::Gguf) => {
             Some(CuratedBundle::Qwen3TtsCpp0_6B)
@@ -1489,6 +1530,8 @@ impl Catalog {
         chat::gemma4_e4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
+        #[cfg(feature = "model-kokoro-82m")]
+        tts::kokoro_82m::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-cpp")]
         tts::qwen3_tts_cpp::register(&mut catalog);
         #[cfg(feature = "model-moonshine-streaming")]
@@ -1824,11 +1867,9 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1847,11 +1888,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1870,11 +1909,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_6_27b_gguf");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Chat)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -2191,11 +2228,9 @@ mod tests {
         #[cfg(feature = "model-whisper-base-en")]
         {
             let descriptor = crate::asr::whisper_base_en::descriptor();
-            assert!(
-                descriptor
-                    .capabilities
-                    .supports(CapabilityKind::Transcription)
-            );
+            assert!(descriptor
+                .capabilities
+                .supports(CapabilityKind::Transcription));
             assert!(!descriptor.capabilities.supports(CapabilityKind::VoiceClone));
             assert_eq!(
                 descriptor.capabilities.descriptors(),
