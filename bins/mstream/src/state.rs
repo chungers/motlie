@@ -1,15 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{
+    sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
+};
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread::{self, JoinHandle as ThreadJoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
 use motlie_tmux::{
     CreateSessionOptions, Error as TmuxError, Fleet, FleetTargetSpec, HostHandle, KeySequence,
-    ResolvedFleetTarget, SessionEnvVar, SessionInfo, SessionTag, SshConfig, Target,
+    ResolvedFleetTarget, SessionEnvVar, SessionInfo, SessionTag, SinkEvent, SshConfig, Target,
+    TargetOutput,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -37,6 +45,15 @@ const MSTREAM_MMUX_LABEL_KEY: &str = "mmux-label";
 const MSTREAM_MMUX_SELECTED_KEY: &str = "mmux-selected-key";
 const MSTREAM_MMUX_PREVIOUS_SELECTED_KEY: &str = "mmux-previous-selected-key";
 const MMUX_LABEL_MAX_CHARS: usize = 24;
+const EVENT_TEXT_MAX_CHARS: usize = 16 * 1024;
+const EVENT_STORE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const EVENT_STORE_MAX_RECORDS: usize = 10_000;
+const EVENT_STORE_COMPACT_INTERVAL: u64 = 256;
+const EVENT_STORE_LOSSLESS_QUEUE_CAPACITY: usize = 4_096;
+const EVENT_STORE_BEST_EFFORT_QUEUE_CAPACITY: usize = 4_096;
+const EVENT_STORE_WARNING_WINDOW_SECS: u64 = 60;
+const EVENT_STORE_BEST_EFFORT_POLL_MS: u64 = 20;
+const OUTPUT_AUDIT_CHANNEL_CAPACITY: usize = 4_096;
 
 pub struct DaemonState {
     fleet: Fleet,
@@ -44,6 +61,7 @@ pub struct DaemonState {
     sessions: BTreeMap<SessionTarget, SessionRecord>,
     workstreams: BTreeMap<String, WorkstreamRecord>,
     timers: BTreeMap<String, TimerRecord>,
+    event_store: Option<EventStore>,
     next_generation: u64,
     next_handoff_id: u64,
     next_timer_generation: u64,
@@ -57,9 +75,310 @@ impl Default for DaemonState {
             sessions: BTreeMap::new(),
             workstreams: BTreeMap::new(),
             timers: BTreeMap::new(),
+            event_store: None,
             next_generation: 1,
             next_handoff_id: 1,
             next_timer_generation: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventPersistenceMode {
+    Lossless,
+    BestEffort,
+}
+
+#[derive(Default)]
+struct EventStoreObservability {
+    agent_output_dropped: AtomicU64,
+    lossless_enqueue_failures: AtomicU64,
+    persist_failures: AtomicU64,
+    last_warning_window: AtomicU64,
+}
+
+impl EventStoreObservability {
+    fn record_agent_output_drop(&self, message: &str) {
+        self.agent_output_dropped.fetch_add(1, Ordering::Relaxed);
+        self.warn_once_per_window(message);
+    }
+
+    fn record_lossless_enqueue_failure(&self, message: &str) {
+        self.lossless_enqueue_failures
+            .fetch_add(1, Ordering::Relaxed);
+        self.warn_once_per_window(message);
+    }
+
+    fn record_persist_failure(&self, message: String) {
+        self.persist_failures.fetch_add(1, Ordering::Relaxed);
+        self.warn_once_per_window(&message);
+    }
+
+    fn warn_once_per_window(&self, message: &str) {
+        let window = current_event_store_warning_window();
+        if self.last_warning_window.swap(window, Ordering::Relaxed) != window {
+            eprintln!("{message}");
+        }
+    }
+
+    fn snapshot(&self) -> EventStoreMetricsSnapshot {
+        EventStoreMetricsSnapshot {
+            agent_output_dropped: self.agent_output_dropped.load(Ordering::Relaxed),
+            lossless_enqueue_failures: self.lossless_enqueue_failures.load(Ordering::Relaxed),
+            persist_failures: self.persist_failures.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Default)]
+struct EventStoreMetricsSnapshot {
+    agent_output_dropped: u64,
+    lossless_enqueue_failures: u64,
+    persist_failures: u64,
+}
+
+impl EventStoreMetricsSnapshot {
+    fn degraded(&self) -> bool {
+        self.agent_output_dropped > 0
+            || self.lossless_enqueue_failures > 0
+            || self.persist_failures > 0
+    }
+}
+
+struct EventStore {
+    lossless_sender: Option<SyncSender<EventRecord>>,
+    best_effort_sender: Option<SyncSender<EventRecord>>,
+    thread: Option<ThreadJoinHandle<()>>,
+    observability: Arc<EventStoreObservability>,
+}
+
+impl EventStore {
+    fn start(path: PathBuf, retained_events: Vec<EventRecord>) -> anyhow::Result<Self> {
+        let (lossless_sender, lossless_receiver) =
+            sync_channel(EVENT_STORE_LOSSLESS_QUEUE_CAPACITY);
+        let (best_effort_sender, best_effort_receiver) =
+            sync_channel(EVENT_STORE_BEST_EFFORT_QUEUE_CAPACITY);
+        let observability = Arc::new(EventStoreObservability::default());
+        let writer_observability = Arc::clone(&observability);
+        let thread = thread::Builder::new()
+            .name("mstream-event-store".to_string())
+            .spawn(move || {
+                let mut writer = EventStoreWriter::new(path, retained_events, writer_observability);
+                writer.run(lossless_receiver, best_effort_receiver);
+            })
+            .context("failed to start event audit writer")?;
+        Ok(Self {
+            lossless_sender: Some(lossless_sender),
+            best_effort_sender: Some(best_effort_sender),
+            thread: Some(thread),
+            observability,
+        })
+    }
+
+    fn enqueue(&self, event: EventRecord, mode: EventPersistenceMode) -> anyhow::Result<()> {
+        match mode {
+            EventPersistenceMode::Lossless => self.enqueue_lossless(event),
+            EventPersistenceMode::BestEffort => {
+                self.enqueue_best_effort(event);
+                Ok(())
+            }
+        }
+    }
+
+    fn enqueue_lossless(&self, event: EventRecord) -> anyhow::Result<()> {
+        let Some(sender) = &self.lossless_sender else {
+            self.observability.record_lossless_enqueue_failure(
+                "mstream event audit degraded: lossless audit writer is unavailable",
+            );
+            bail!("lossless event audit writer is unavailable");
+        };
+        match sender.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(event)) => {
+                self.observability.warn_once_per_window(
+                    "mstream event audit backpressure: waiting to preserve lossless audit event",
+                );
+                sender.send(event).map_err(|_| {
+                    self.observability.record_lossless_enqueue_failure(
+                        "mstream event audit degraded: lossless audit writer stopped while backpressured",
+                    );
+                    anyhow!("lossless event audit writer stopped")
+                })
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.observability.record_lossless_enqueue_failure(
+                    "mstream event audit degraded: lossless audit writer stopped",
+                );
+                bail!("lossless event audit writer stopped")
+            }
+        }
+    }
+
+    fn enqueue_best_effort(&self, event: EventRecord) {
+        let Some(sender) = &self.best_effort_sender else {
+            self.observability.record_agent_output_drop(
+                "mstream event audit degraded: best-effort agent_output writer is unavailable",
+            );
+            return;
+        };
+        match sender.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => self.observability.record_agent_output_drop(
+                "mstream event audit degraded: dropped best-effort agent_output event because audit queue is full",
+            ),
+            Err(TrySendError::Disconnected(_)) => self.observability.record_agent_output_drop(
+                "mstream event audit degraded: dropped best-effort agent_output event because audit writer stopped",
+            ),
+        }
+    }
+
+    fn status_json(&self) -> Value {
+        event_store_status_json(true, self.observability.snapshot())
+    }
+
+    #[cfg(test)]
+    fn disconnected_for_test() -> Self {
+        let (lossless_sender, lossless_receiver) = sync_channel(1);
+        let (best_effort_sender, best_effort_receiver) = sync_channel(1);
+        drop(lossless_receiver);
+        drop(best_effort_receiver);
+        Self {
+            lossless_sender: Some(lossless_sender),
+            best_effort_sender: Some(best_effort_sender),
+            thread: None,
+            observability: Arc::new(EventStoreObservability::default()),
+        }
+    }
+}
+
+impl Drop for EventStore {
+    fn drop(&mut self) {
+        self.lossless_sender.take();
+        self.best_effort_sender.take();
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                eprintln!("mstream event audit writer panicked");
+            }
+        }
+    }
+}
+
+struct EventStoreWriter {
+    path: PathBuf,
+    retained_events: VecDeque<EventRecord>,
+    writes_since_compact: u64,
+    dirty: bool,
+    observability: Arc<EventStoreObservability>,
+}
+
+impl EventStoreWriter {
+    fn new(
+        path: PathBuf,
+        retained_events: Vec<EventRecord>,
+        observability: Arc<EventStoreObservability>,
+    ) -> Self {
+        let mut writer = Self {
+            path,
+            retained_events: retained_events.into(),
+            writes_since_compact: 0,
+            dirty: false,
+            observability,
+        };
+        writer.trim_retained_events();
+        writer
+    }
+
+    fn run(
+        &mut self,
+        lossless_receiver: Receiver<EventRecord>,
+        best_effort_receiver: Receiver<EventRecord>,
+    ) {
+        let mut lossless_closed = false;
+        let mut best_effort_closed = false;
+        while !(lossless_closed && best_effort_closed) {
+            match lossless_receiver.try_recv() {
+                Ok(event) => {
+                    self.persist_event(event);
+                    continue;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => lossless_closed = true,
+            }
+
+            if best_effort_closed {
+                match lossless_receiver.recv() {
+                    Ok(event) => self.persist_event(event),
+                    Err(_) => lossless_closed = true,
+                }
+                continue;
+            }
+
+            if lossless_closed {
+                match best_effort_receiver.recv() {
+                    Ok(event) => self.persist_event(event),
+                    Err(_) => best_effort_closed = true,
+                }
+                continue;
+            }
+
+            match best_effort_receiver
+                .recv_timeout(Duration::from_millis(EVENT_STORE_BEST_EFFORT_POLL_MS))
+            {
+                Ok(event) => self.persist_event(event),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => best_effort_closed = true,
+            }
+        }
+
+        if let Err(err) = self.compact_on_shutdown() {
+            self.observability.record_persist_failure(format!(
+                "mstream event audit degraded: final compaction failed: {err}"
+            ));
+        }
+    }
+
+    fn persist_event(&mut self, event: EventRecord) {
+        if let Err(err) = self.append_event(event) {
+            self.observability.record_persist_failure(format!(
+                "mstream event audit degraded: failed to persist event: {err}"
+            ));
+        }
+    }
+
+    fn append_event(&mut self, event: EventRecord) -> anyhow::Result<()> {
+        self.retained_events.push_back(event.clone());
+        self.trim_retained_events();
+        self.dirty = true;
+        append_event_to_store_path(&self.path, &event)?;
+        self.writes_since_compact += 1;
+        let size = fs::metadata(&self.path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        if self.writes_since_compact >= EVENT_STORE_COMPACT_INTERVAL || size > EVENT_STORE_MAX_BYTES
+        {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    fn compact_on_shutdown(&mut self) -> anyhow::Result<()> {
+        if self.dirty {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    fn compact(&mut self) -> anyhow::Result<()> {
+        let events = self.retained_events.iter().cloned().collect::<Vec<_>>();
+        write_event_store_snapshot(&self.path, &events)?;
+        self.writes_since_compact = 0;
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn trim_retained_events(&mut self) {
+        while self.retained_events.len() > EVENT_STORE_MAX_RECORDS {
+            self.retained_events.pop_front();
         }
     }
 }
@@ -141,30 +460,69 @@ enum WorkstreamState {
     Closed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EventDirection {
+    ToAgent,
+    FromAgent,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EventActor {
+    Orchestrator,
+    Agent,
+    Mstream,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct EventRecord {
     cursor: String,
     sequence: u64,
     generation: u64,
     workstream: String,
     kind: String,
+    #[serde(default = "default_event_direction")]
+    direction: EventDirection,
+    #[serde(default = "default_event_actor")]
+    actor: EventActor,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    source_pane: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<&'static str>,
+    state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     handoff_id: Option<String>,
+    #[serde(default)]
+    redacted: bool,
+    #[serde(default)]
+    truncated: bool,
     timestamp: String,
+}
+
+impl EventRecord {
+    fn persistence_mode(&self) -> EventPersistenceMode {
+        if self.kind == "agent_output" {
+            EventPersistenceMode::BestEffort
+        } else {
+            EventPersistenceMode::Lossless
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct EventDraft {
     kind: String,
+    direction: EventDirection,
+    actor: EventActor,
     target: Option<String>,
+    source_pane: Option<String>,
     text: Option<String>,
     state: Option<AgentState>,
     summary: Option<String>,
@@ -175,7 +533,10 @@ impl EventDraft {
     fn new(kind: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
+            direction: EventDirection::System,
+            actor: EventActor::Mstream,
             target: None,
+            source_pane: None,
             text: None,
             state: None,
             summary: None,
@@ -185,6 +546,23 @@ impl EventDraft {
 
     fn target(mut self, target: impl ToString) -> Self {
         self.target = Some(target.to_string());
+        self
+    }
+
+    fn source_pane(mut self, pane: impl Into<String>) -> Self {
+        self.source_pane = Some(pane.into());
+        self
+    }
+
+    fn direction_to_agent(mut self) -> Self {
+        self.direction = EventDirection::ToAgent;
+        self.actor = EventActor::Orchestrator;
+        self
+    }
+
+    fn direction_from_agent(mut self) -> Self {
+        self.direction = EventDirection::FromAgent;
+        self.actor = EventActor::Agent;
         self
     }
 
@@ -313,6 +691,7 @@ struct RecruitPlanSnapshot {
 
 struct TimerFireSnapshot {
     name: String,
+    workstream: Option<String>,
     target: SessionTarget,
     tmux_session_created: Option<u64>,
     handle: HostHandle,
@@ -401,6 +780,7 @@ impl DaemonState {
                     "hosts": state.hosts.len(),
                     "workstreams": state.workstreams.len(),
                     "sessions": state.sessions.len(),
+                    "audit": state.audit_status_json(),
                 })])
             }
             ClientRequest::DaemonStop => Ok(vec![jsonl::ok("daemon_stop")]),
@@ -436,6 +816,126 @@ impl DaemonState {
 
     pub fn should_stop(request: &ClientRequest) -> bool {
         matches!(request, ClientRequest::DaemonStop)
+    }
+
+    pub fn event_store_path_for_socket(socket: &Path) -> PathBuf {
+        let mut path = socket.as_os_str().to_owned();
+        path.push(".events.jsonl");
+        PathBuf::from(path)
+    }
+
+    pub fn with_event_store(path: PathBuf) -> anyhow::Result<Self> {
+        let mut state = Self::default();
+        state.load_event_store(path)?;
+        Ok(state)
+    }
+
+    pub(crate) fn abort_timer_tasks(&mut self) -> Vec<JoinHandle<()>> {
+        let tasks = self
+            .timers
+            .values_mut()
+            .filter_map(|timer| timer.task.take())
+            .collect::<Vec<_>>();
+        for task in &tasks {
+            task.abort();
+        }
+        tasks
+    }
+
+    pub(crate) fn shutdown_event_store(&mut self) {
+        self.event_store.take();
+    }
+
+    pub async fn spawn_output_audit_task(
+        shared: Arc<Mutex<Self>>,
+    ) -> anyhow::Result<JoinHandle<()>> {
+        let subscription = {
+            let state = shared.lock().await;
+            state
+                .fleet
+                .output_bus()
+                .subscribe(Vec::new(), OUTPUT_AUDIT_CHANNEL_CAPACITY)?
+        };
+        let mut receiver = subscription.into_receiver();
+        Ok(tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                Self::record_output_audit_event_shared(Arc::clone(&shared), event).await;
+            }
+        }))
+    }
+
+    fn load_event_store(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        self.replay_event_store(&path)?;
+        let retained_events = self.retained_events_for_store();
+        self.event_store = Some(EventStore::start(path, retained_events)?);
+        Ok(())
+    }
+
+    async fn record_output_audit_event_shared(shared: Arc<Mutex<Self>>, event: SinkEvent) {
+        match event {
+            SinkEvent::Data(output) => {
+                if let Err(err) = Self::record_agent_output_shared(shared, output).await {
+                    eprintln!("mstream output audit failed: {err}");
+                }
+            }
+            SinkEvent::Gap { dropped, .. } => {
+                Self::record_output_marker_shared(
+                    shared,
+                    "agent_output_gap",
+                    format!("output audit missed {dropped} event(s)"),
+                )
+                .await;
+            }
+            SinkEvent::Discontinuity { reason } => {
+                Self::record_output_marker_shared(
+                    shared,
+                    "agent_output_discontinuity",
+                    format!("output monitor discontinuity: {reason}"),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn record_agent_output_shared(
+        shared: Arc<Mutex<Self>>,
+        output: TargetOutput,
+    ) -> anyhow::Result<()> {
+        let mut state = shared.lock().await;
+        let Some((target, workstream)) = state.target_for_output(&output) else {
+            return Ok(());
+        };
+        let source_pane = output.pane_id().map(ToString::to_string);
+        let mut event = EventDraft::new("agent_output")
+            .direction_from_agent()
+            .target(&target)
+            .text(output.content);
+        if let Some(source_pane) = source_pane {
+            event = event.source_pane(source_pane);
+        }
+        state.record_event(&workstream, event)?;
+        Ok(())
+    }
+
+    async fn record_output_marker_shared(
+        shared: Arc<Mutex<Self>>,
+        kind: &'static str,
+        summary: String,
+    ) {
+        let mut state = shared.lock().await;
+        let workstreams = state
+            .workstreams
+            .iter()
+            .filter(|(_, workstream)| !workstream.sessions.is_empty())
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        for workstream in workstreams {
+            if let Err(err) =
+                state.record_event(&workstream, EventDraft::new(kind).summary(summary.clone()))
+            {
+                eprintln!("mstream output audit marker failed for {workstream}: {err}");
+            }
+        }
     }
 
     async fn connect_shared(
@@ -622,20 +1122,17 @@ impl DaemonState {
             Self::apply_mmux_workstream_label(&resolved.target, label).await?;
         }
         Self::ensure_monitoring_target_shared(Arc::clone(&shared), &resolved.spec).await?;
-        if let Some(task) = &request.task {
-            Self::send_text_to_resolved(
-                &resolved,
-                &managed_prompt(
-                    &request.workstream,
-                    &resolved.spec,
-                    Some(&request.role),
-                    None,
-                    Some(task),
-                ),
-                PasteMode::Bracketed,
-                true,
+        let initial_prompt = request.task.as_ref().map(|task| {
+            managed_prompt(
+                &request.workstream,
+                &resolved.spec,
+                Some(&request.role),
+                None,
+                Some(task),
             )
-            .await?;
+        });
+        if let Some(prompt) = &initial_prompt {
+            Self::send_text_to_resolved(&resolved, prompt, PasteMode::Bracketed, true).await?;
         }
         let cursor = {
             let stable_target = resolved.spec.clone();
@@ -666,6 +1163,15 @@ impl DaemonState {
                     EventDraft::new("mmux_label_applied")
                         .target(&stable_target)
                         .summary(format!("mmux label applied: {label}")),
+                )?;
+            }
+            if let Some(prompt) = initial_prompt {
+                cursor = state.record_event(
+                    &request.workstream,
+                    EventDraft::new("initial_prompt_sent")
+                        .direction_to_agent()
+                        .target(&stable_target)
+                        .text(prompt),
                 )?;
             }
             cursor
@@ -745,20 +1251,17 @@ impl DaemonState {
             Self::apply_mmux_workstream_label(&resolved.target, label).await?;
         }
         Self::ensure_monitoring_target_shared(Arc::clone(&shared), &resolved.spec).await?;
-        if let Some(task) = &request.task {
-            Self::send_text_to_resolved(
-                &resolved,
-                &managed_prompt(
-                    &request.workstream,
-                    &stable_target,
-                    Some(&request.role),
-                    Some(&request.cwd),
-                    Some(task),
-                ),
-                PasteMode::Bracketed,
-                true,
+        let initial_prompt = request.task.as_ref().map(|task| {
+            managed_prompt(
+                &request.workstream,
+                &stable_target,
+                Some(&request.role),
+                Some(&request.cwd),
+                Some(task),
             )
-            .await?;
+        });
+        if let Some(prompt) = &initial_prompt {
+            Self::send_text_to_resolved(&resolved, prompt, PasteMode::Bracketed, true).await?;
         }
         let cursor = {
             let mut state = shared.lock().await;
@@ -788,6 +1291,15 @@ impl DaemonState {
                     EventDraft::new("mmux_label_applied")
                         .target(&stable_target)
                         .summary(format!("mmux label applied: {label}")),
+                )?;
+            }
+            if let Some(prompt) = initial_prompt {
+                cursor = state.record_event(
+                    &request.workstream,
+                    EventDraft::new("initial_prompt_sent")
+                        .direction_to_agent()
+                        .target(&stable_target)
+                        .text(prompt),
                 )?;
             }
             cursor
@@ -861,6 +1373,7 @@ impl DaemonState {
                                 shared.lock().await.record_event(
                                     &request.workstream,
                                     EventDraft::new("standby_sent")
+                                        .direction_to_agent()
                                         .target(target)
                                         .text(message.clone())
                                         .summary("standby instruction sent"),
@@ -1291,6 +1804,7 @@ impl DaemonState {
             let cursor = state.record_event(
                 &request.workstream,
                 EventDraft::new("message_sent")
+                    .direction_to_agent()
                     .target(&stable_target)
                     .text(request.text)
                     .state(state_after),
@@ -1347,6 +1861,7 @@ impl DaemonState {
             let cursor = shared.lock().await.record_event(
                 &workstream,
                 EventDraft::new("interrupted")
+                    .direction_to_agent()
                     .target(&stable_target)
                     .text(request.key.as_str())
                     .state(state_value),
@@ -1379,6 +1894,7 @@ impl DaemonState {
             let cursor = shared.lock().await.record_event(
                 &request.workstream,
                 EventDraft::new("broadcast_sent")
+                    .direction_to_agent()
                     .target(&target.target.spec)
                     .text(request.text.clone())
                     .state(target.state),
@@ -1653,6 +2169,7 @@ impl DaemonState {
             let cursor = shared.lock().await.record_event(
                 &workstream,
                 EventDraft::new(kind)
+                    .direction_from_agent()
                     .target(&change.target)
                     .state(request.state)
                     .summary(request.summary.clone()),
@@ -1949,6 +2466,7 @@ impl DaemonState {
             }
             TimerFireSnapshot {
                 name: timer.name.clone(),
+                workstream: timer.workstream.clone(),
                 target: timer.target.clone(),
                 tmux_session_created: timer.tmux_session_created,
                 handle: state.host_handle(timer.target.host_alias())?,
@@ -2074,6 +2592,16 @@ impl DaemonState {
             }
         }
         result?;
+        if let Some(workstream) = &snapshot.workstream {
+            state.record_event(
+                workstream,
+                EventDraft::new("timer_fired")
+                    .direction_to_agent()
+                    .target(&snapshot.target)
+                    .text(snapshot.prompt.clone())
+                    .summary(format!("timer fired: {}", snapshot.name)),
+            )?;
+        }
         Ok(TimerFireOutcome::Sent(snapshot))
     }
 
@@ -2257,20 +2785,18 @@ impl DaemonState {
                 Self::apply_mmux_workstream_label(&plan.target.target, label).await?;
             }
             Self::ensure_monitoring_target_shared(Arc::clone(&shared), &plan.target.spec).await?;
-            if let Some(task) = &request.task {
-                Self::send_text_to_resolved(
-                    &plan.target,
-                    &managed_prompt(
-                        &request.workstream,
-                        &plan.target.spec,
-                        Some(&request.role),
-                        plan.cwd.as_deref(),
-                        Some(task),
-                    ),
-                    PasteMode::Bracketed,
-                    true,
+            let initial_prompt = request.task.as_ref().map(|task| {
+                managed_prompt(
+                    &request.workstream,
+                    &plan.target.spec,
+                    Some(&request.role),
+                    plan.cwd.as_deref(),
+                    Some(task),
                 )
-                .await?;
+            });
+            if let Some(prompt) = &initial_prompt {
+                Self::send_text_to_resolved(&plan.target, prompt, PasteMode::Bracketed, true)
+                    .await?;
             }
             {
                 let mut state = shared.lock().await;
@@ -2310,6 +2836,15 @@ impl DaemonState {
                         EventDraft::new("mmux_label_applied")
                             .target(&plan.target.spec)
                             .summary(format!("mmux label applied: {label}")),
+                    )?;
+                }
+                if let Some(prompt) = initial_prompt {
+                    cursor = state.record_event(
+                        &request.workstream,
+                        EventDraft::new("initial_prompt_sent")
+                            .direction_to_agent()
+                            .target(&plan.target.spec)
+                            .text(prompt),
                     )?;
                 }
                 cursor
@@ -2624,6 +3159,7 @@ impl DaemonState {
                 "idle_after_secs": activity_options.idle_after_secs,
             },
             "agents": agents,
+            "audit": self.audit_status_json(),
         }))
     }
 
@@ -2678,6 +3214,7 @@ impl DaemonState {
                 "text": text,
                 "cursor": cursor,
                 "ordering": "arrival",
+                "audit": self.audit_status_json(),
             }));
         }
         Ok(json!({
@@ -2686,6 +3223,7 @@ impl DaemonState {
             "events": events,
             "cursor": cursor,
             "ordering": "arrival",
+            "audit": self.audit_status_json(),
         }))
     }
 
@@ -2786,6 +3324,7 @@ impl DaemonState {
         let cursor = shared.lock().await.record_event(
             workstream,
             EventDraft::new("handoff_fired")
+                .direction_to_agent()
                 .target(&handoff.to)
                 .text(handoff.task)
                 .state(AgentState::Busy)
@@ -3577,31 +4116,174 @@ impl DaemonState {
         canceled
     }
 
-    fn record_event(&mut self, workstream: &str, draft: EventDraft) -> anyhow::Result<String> {
-        let workstream_record = self.workstream_mut(workstream)?;
-        let sequence = workstream_record.next_sequence;
-        workstream_record.next_sequence += 1;
-        let cursor = PublicCursor::new(
-            workstream,
-            workstream_record.generation,
-            workstream_record.next_sequence,
-        )
-        .encode()?;
-        let event = EventRecord {
-            cursor: cursor.clone(),
-            sequence,
-            generation: workstream_record.generation,
-            workstream: workstream.to_string(),
-            kind: draft.kind,
-            target: draft.target,
-            text: draft.text,
-            state: draft.state.map(AgentState::as_str),
-            summary: draft.summary,
-            handoff_id: draft.handoff_id,
-            timestamp: tags::now_tag(),
+    fn target_for_output(&self, output: &TargetOutput) -> Option<(SessionTarget, String)> {
+        if let Some(session_id) = output.session_id() {
+            if let Ok(target) = SessionTarget::session_id(&output.host, session_id) {
+                if let Some(record) = self.sessions.get(&target) {
+                    if let Some(workstream) = &record.workstream {
+                        return Some((target, workstream.clone()));
+                    }
+                }
+            }
+        }
+
+        if let Ok(target) = SessionTarget::session(&output.host, output.session_name()) {
+            if let Some(record) = self.sessions.get(&target) {
+                if let Some(workstream) = &record.workstream {
+                    return Some((target, workstream.clone()));
+                }
+            }
+        }
+
+        self.sessions.iter().find_map(|(target, record)| {
+            if target.host_alias() == output.host.as_str()
+                && record.identity == output.session_name()
+            {
+                record
+                    .workstream
+                    .as_ref()
+                    .map(|workstream| (target.clone(), workstream.clone()))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn replay_event_store(&mut self, path: &Path) -> anyhow::Result<()> {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to open event audit log {}", path.display()))
+            }
         };
-        workstream_record.events.push_back(event);
-        workstream_record.prune_events();
+
+        for (line_number, line) in BufReader::new(file).lines().enumerate() {
+            let line_number = line_number + 1;
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => {
+                    eprintln!(
+                        "mstream event audit replay skipped unreadable line {line_number} in {}: {err}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<EventRecord>(&line) {
+                Ok(event) => self.ingest_replayed_event(sanitize_event_record(event)),
+                Err(err) => eprintln!(
+                    "mstream event audit replay skipped malformed line {line_number} in {}: {err}",
+                    path.display()
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    fn ingest_replayed_event(&mut self, event: EventRecord) {
+        let workstream_name = event.workstream.clone();
+        let generation = event.generation;
+        let sequence = event.sequence;
+        if !self.workstreams.contains_key(&workstream_name) {
+            self.workstreams.insert(
+                workstream_name.clone(),
+                WorkstreamRecord::new(
+                    workstream_name.clone(),
+                    None,
+                    None,
+                    None,
+                    WorkstreamSettings::default(),
+                    generation,
+                ),
+            );
+        }
+        let Some(workstream) = self.workstreams.get_mut(&workstream_name) else {
+            return;
+        };
+        if generation < workstream.generation {
+            return;
+        }
+        if generation > workstream.generation {
+            workstream.reopen(generation);
+        }
+        if event.kind == "closed" {
+            workstream.state = WorkstreamState::Closed;
+        }
+        workstream.next_sequence = workstream.next_sequence.max(sequence.saturating_add(1));
+        workstream.events.push_back(event);
+        workstream.prune_events();
+        self.next_generation = self.next_generation.max(generation.saturating_add(1));
+    }
+
+    fn enqueue_event_for_store(&self, event: &EventRecord) -> anyhow::Result<()> {
+        if let Some(store) = &self.event_store {
+            store.enqueue(event.clone(), event.persistence_mode())?;
+        }
+        Ok(())
+    }
+
+    fn audit_status_json(&self) -> Value {
+        self.event_store.as_ref().map_or_else(
+            || event_store_status_json(false, EventStoreMetricsSnapshot::default()),
+            EventStore::status_json,
+        )
+    }
+
+    fn retained_events_for_store(&self) -> Vec<EventRecord> {
+        let mut events = self
+            .workstreams
+            .values()
+            .flat_map(|workstream| workstream.events.iter().cloned())
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then_with(|| left.workstream.cmp(&right.workstream))
+                .then_with(|| left.generation.cmp(&right.generation))
+                .then_with(|| left.sequence.cmp(&right.sequence))
+        });
+        events
+    }
+
+    fn record_event(&mut self, workstream: &str, draft: EventDraft) -> anyhow::Result<String> {
+        let (cursor, event) = {
+            let workstream_record = self.workstream_mut(workstream)?;
+            let sequence = workstream_record.next_sequence;
+            workstream_record.next_sequence += 1;
+            let cursor = PublicCursor::new(
+                workstream,
+                workstream_record.generation,
+                workstream_record.next_sequence,
+            )
+            .encode()?;
+            let event = sanitize_event_record(EventRecord {
+                cursor: cursor.clone(),
+                sequence,
+                generation: workstream_record.generation,
+                workstream: workstream.to_string(),
+                kind: draft.kind,
+                direction: draft.direction,
+                actor: draft.actor,
+                target: draft.target,
+                source_pane: draft.source_pane,
+                text: draft.text,
+                state: draft.state.map(|state| state.as_str().to_string()),
+                summary: draft.summary,
+                handoff_id: draft.handoff_id,
+                redacted: false,
+                truncated: false,
+                timestamp: tags::now_tag(),
+            });
+            workstream_record.events.push_back(event.clone());
+            workstream_record.prune_events();
+            (cursor, event)
+        };
+        self.enqueue_event_for_store(&event)?;
         Ok(cursor)
     }
 
@@ -4191,6 +4873,30 @@ impl WorkstreamState {
     }
 }
 
+impl EventDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            EventDirection::ToAgent => "to_agent",
+            EventDirection::FromAgent => "from_agent",
+            EventDirection::System => "system",
+        }
+    }
+
+    fn is_call_log(self) -> bool {
+        matches!(self, EventDirection::ToAgent | EventDirection::FromAgent)
+    }
+}
+
+impl EventActor {
+    fn as_str(self) -> &'static str {
+        match self {
+            EventActor::Orchestrator => "orchestrator",
+            EventActor::Agent => "agent",
+            EventActor::Mstream => "mstream",
+        }
+    }
+}
+
 #[derive(Default)]
 struct ParsedTags {
     managed: bool,
@@ -4465,13 +5171,207 @@ fn timer_fire_outcome_json(outcome: TimerFireOutcome) -> Value {
     }
 }
 
+fn default_event_direction() -> EventDirection {
+    EventDirection::System
+}
+
+fn default_event_actor() -> EventActor {
+    EventActor::Mstream
+}
+
+fn current_event_store_warning_window() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() / EVENT_STORE_WARNING_WINDOW_SECS)
+        .unwrap_or_default()
+}
+
+fn event_store_status_json(enabled: bool, metrics: EventStoreMetricsSnapshot) -> Value {
+    json!({
+        "enabled": enabled,
+        "degraded": metrics.degraded(),
+        "control_durability": "lossless",
+        "agent_output_durability": "best_effort",
+        "agent_output_dropped": metrics.agent_output_dropped,
+        "lossless_enqueue_failures": metrics.lossless_enqueue_failures,
+        "persist_failures": metrics.persist_failures,
+    })
+}
+
+fn create_event_store_parent(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create event audit log directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn append_event_to_store_path(path: &Path, event: &EventRecord) -> anyhow::Result<()> {
+    create_event_store_parent(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open event audit log {}", path.display()))?;
+    serde_json::to_writer(&mut file, event)
+        .with_context(|| format!("failed to encode event audit log {}", path.display()))?;
+    file.write_all(b"\n")
+        .with_context(|| format!("failed to write event audit log {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed to flush event audit log {}", path.display()))?;
+    Ok(())
+}
+
+fn write_event_store_snapshot(path: &Path, events: &[EventRecord]) -> anyhow::Result<()> {
+    create_event_store_parent(path)?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp_path = PathBuf::from(tmp);
+    {
+        let mut file = File::create(&tmp_path).with_context(|| {
+            format!(
+                "failed to create temporary event audit log {}",
+                tmp_path.display()
+            )
+        })?;
+        for event in events {
+            serde_json::to_writer(&mut file, event).with_context(|| {
+                format!("failed to encode event audit log {}", tmp_path.display())
+            })?;
+            file.write_all(b"\n").with_context(|| {
+                format!("failed to write event audit log {}", tmp_path.display())
+            })?;
+        }
+        file.flush()
+            .with_context(|| format!("failed to flush event audit log {}", tmp_path.display()))?;
+    }
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to replace event audit log {} with {}",
+            path.display(),
+            tmp_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sanitize_event_record(mut event: EventRecord) -> EventRecord {
+    let (target, target_redacted, target_truncated) = sanitize_event_option(event.target.take());
+    let (source_pane, pane_redacted, pane_truncated) =
+        sanitize_event_option(event.source_pane.take());
+    let (text, text_redacted, text_truncated) = sanitize_event_option(event.text.take());
+    let (summary, summary_redacted, summary_truncated) =
+        sanitize_event_option(event.summary.take());
+    let (handoff_id, handoff_redacted, handoff_truncated) =
+        sanitize_event_option(event.handoff_id.take());
+    event.target = target;
+    event.source_pane = source_pane;
+    event.text = text;
+    event.summary = summary;
+    event.handoff_id = handoff_id;
+    event.redacted |=
+        target_redacted || pane_redacted || text_redacted || summary_redacted || handoff_redacted;
+    event.truncated |= target_truncated
+        || pane_truncated
+        || text_truncated
+        || summary_truncated
+        || handoff_truncated;
+    event
+}
+
+fn sanitize_event_option(value: Option<String>) -> (Option<String>, bool, bool) {
+    match value {
+        Some(value) => {
+            let (value, redacted) = scrub_phone_numbers(&value);
+            let truncated = char_count(&value) > EVENT_TEXT_MAX_CHARS;
+            let value = if truncated {
+                truncate_chars(&value, EVENT_TEXT_MAX_CHARS)
+            } else {
+                value
+            };
+            (Some(value), redacted, truncated)
+        }
+        None => (None, false, false),
+    }
+}
+
+fn scrub_phone_numbers(text: &str) -> (String, bool) {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut rendered = String::with_capacity(text.len());
+    let mut index = 0usize;
+    let mut redacted = false;
+    while index < chars.len() {
+        if is_phone_candidate_start(chars[index]) {
+            let start = index;
+            let mut end = index;
+            let mut digits = 0usize;
+            let mut last_digit = None;
+            while end < chars.len() && is_phone_candidate_char(chars[end]) {
+                if is_phone_digit(chars[end]) {
+                    digits += 1;
+                    last_digit = Some(end);
+                }
+                end += 1;
+            }
+            if digits >= 10 {
+                rendered.push_str("[REDACTED_PHONE]");
+                redacted = true;
+                index = last_digit.map(|last_digit| last_digit + 1).unwrap_or(end);
+                continue;
+            }
+            for ch in &chars[start..end] {
+                rendered.push(*ch);
+            }
+            index = end;
+            continue;
+        }
+        rendered.push(chars[index]);
+        index += 1;
+    }
+    (rendered, redacted)
+}
+
+fn is_phone_candidate_start(ch: char) -> bool {
+    is_phone_digit(ch) || ch == '+' || ch == '('
+}
+
+fn is_phone_candidate_char(ch: char) -> bool {
+    is_phone_digit(ch) || ch.is_whitespace() || matches!(ch, '+' | '-' | '.' | '(' | ')')
+}
+
+fn is_phone_digit(ch: char) -> bool {
+    ch.is_ascii_digit() || (ch.is_numeric() && !ch.is_ascii_alphabetic())
+}
+
 fn render_readable_event(event: &EventRecord) -> String {
-    let mut first_line = format!("{}  {}", event.timestamp, event.kind);
+    let mut first_line = format!(
+        "{}  {}/{}  {}",
+        event.timestamp,
+        event.direction.as_str(),
+        event.actor.as_str(),
+        event.kind
+    );
     if let Some(target) = &event.target {
         first_line.push_str(&format!("  {target}"));
     }
-    if let Some(state) = event.state {
+    if let Some(source_pane) = &event.source_pane {
+        first_line.push_str(&format!("  pane={source_pane}"));
+    }
+    if let Some(state) = &event.state {
         first_line.push_str(&format!("  state={state}"));
+    }
+    if event.redacted {
+        first_line.push_str("  redacted=true");
+    }
+    if event.truncated {
+        first_line.push_str("  truncated=true");
     }
     let mut rendered = first_line;
     if let Some(summary) = &event.summary {
@@ -4479,10 +5379,28 @@ fn render_readable_event(event: &EventRecord) -> String {
     }
     if let Some(text) = &event.text {
         if event.summary.as_deref() != Some(text.as_str()) {
-            rendered.push_str(&format!("\n  {}", compact_inline(text, 320)));
+            if event.direction.is_call_log() || text.contains('\n') {
+                render_readable_block(&mut rendered, "text", text);
+            } else {
+                rendered.push_str(&format!("\n  {}", compact_inline(text, 320)));
+            }
         }
     }
     rendered
+}
+
+fn render_readable_block(rendered: &mut String, label: &str, text: &str) {
+    rendered.push_str(&format!("\n  {label}:"));
+    if text.is_empty() {
+        return;
+    }
+    for line in text.lines() {
+        rendered.push_str("\n    ");
+        rendered.push_str(line);
+    }
+    if text.ends_with('\n') {
+        rendered.push_str("\n    ");
+    }
 }
 
 fn compact_inline(text: &str, max_chars: usize) -> String {
@@ -5476,7 +6394,7 @@ mod tests {
             .iter()
             .any(|event| event.kind == "retired"
                 && event.target.as_deref() == Some("local::$1")
-                && event.state == Some("quarantined")));
+                && event.state.as_deref() == Some("quarantined")));
         drop(state);
         let commands = command_log.lock().expect("command log").clone();
         assert!(
@@ -6334,6 +7252,343 @@ mod tests {
         assert_eq!(events["events"].as_array().expect("events").len(), 2);
         assert_eq!(events["events"][0]["kind"], "second");
         assert_eq!(events["events"][1]["kind"], "third");
+    }
+
+    #[test]
+    fn event_store_replays_events_and_skips_malformed_lines() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        {
+            let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+            open_test_workstream(&mut state, "issue-409");
+            state
+                .record_event(
+                    "issue-409",
+                    EventDraft::new("message_sent")
+                        .direction_to_agent()
+                        .target("local::worker")
+                        .text("first durable message"),
+                )
+                .expect("record event");
+        }
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&store_path)
+                .expect("open audit log");
+            writeln!(file, "{{partial-json").expect("write malformed line");
+        }
+
+        let state = DaemonState::with_event_store(store_path).expect("replay skips malformed line");
+        let events = state
+            .events(EventsRequest {
+                workstream: "issue-409".to_string(),
+                after: None,
+                limit: 10,
+                readable: false,
+            })
+            .expect("events after replay");
+
+        assert_eq!(events["events"].as_array().expect("events").len(), 1);
+        assert_eq!(events["events"][0]["kind"], "message_sent");
+        assert_eq!(events["events"][0]["direction"], "to_agent");
+        assert_eq!(events["events"][0]["actor"], "orchestrator");
+    }
+
+    #[test]
+    fn event_store_redacts_before_memory_and_disk() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+        open_test_workstream(&mut state, "issue-409");
+        let sensitive = generated_phone_like_text();
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("message_sent")
+                    .direction_to_agent()
+                    .target("local::worker")
+                    .text(format!("call {sensitive} now")),
+            )
+            .expect("record event");
+
+        let (redacted, text) = {
+            let event = state
+                .workstream("issue-409")
+                .expect("workstream")
+                .events
+                .back()
+                .expect("event");
+            (event.redacted, event.text.clone())
+        };
+        assert!(redacted);
+        assert_eq!(text.as_deref(), Some("call [REDACTED_PHONE] now"));
+        drop(state);
+        let persisted = fs::read_to_string(store_path).expect("audit log");
+        assert!(persisted.contains("[REDACTED_PHONE]"));
+        assert!(!persisted.contains(&sensitive));
+    }
+
+    #[test]
+    fn event_store_redacts_multiline_tab_and_unicode_digits() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+        open_test_workstream(&mut state, "issue-409");
+        let multiline_sensitive =
+            interleave_phone_like_text(&generated_phone_like_text(), &["\n", "\t"]);
+        let unicode_sensitive =
+            interleave_phone_like_text(&generated_unicode_digit_text(), &["\t"]);
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("agent_output")
+                    .direction_from_agent()
+                    .target("local::worker")
+                    .text(format!(
+                        "agent printed {multiline_sensitive} and {unicode_sensitive}"
+                    )),
+            )
+            .expect("record event");
+
+        let text = state
+            .workstream("issue-409")
+            .expect("workstream")
+            .events
+            .back()
+            .expect("event")
+            .text
+            .clone()
+            .expect("text");
+        assert!(text.contains("[REDACTED_PHONE]"));
+        assert!(!text.contains(&multiline_sensitive));
+        assert!(!text.contains(&unicode_sensitive));
+        drop(state);
+        let persisted = fs::read_to_string(store_path).expect("audit log");
+        assert!(persisted.contains("[REDACTED_PHONE]"));
+        assert!(!persisted.contains(&multiline_sensitive));
+        assert!(!persisted.contains(&unicode_sensitive));
+    }
+
+    #[test]
+    fn event_store_shutdown_drains_queued_events() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+        open_test_workstream(&mut state, "issue-409");
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("message_sent")
+                    .direction_to_agent()
+                    .target("local::worker")
+                    .text("durable control message"),
+            )
+            .expect("record event");
+
+        state.shutdown_event_store();
+        let persisted = fs::read_to_string(store_path).expect("audit log");
+        assert!(persisted.contains("durable control message"));
+    }
+
+    #[tokio::test]
+    async fn abort_timer_tasks_cancels_tasks_before_event_store_drain() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+        open_test_workstream(&mut state, "issue-409");
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("message_sent")
+                    .direction_to_agent()
+                    .target("local::worker")
+                    .text("durable control message"),
+            )
+            .expect("record event");
+        let mut timer = timer_record(
+            "never-ending",
+            "local::worker".parse().expect("target"),
+            None,
+        );
+        timer.task = Some(tokio::spawn(async {
+            loop {
+                sleep(Duration::from_secs(60)).await;
+            }
+        }));
+        state.timers.insert(timer.name.clone(), timer);
+
+        let tasks = state.abort_timer_tasks();
+        for task in tasks {
+            let result = tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("aborted timer task should finish promptly");
+            assert!(result
+                .expect_err("timer task should be cancelled")
+                .is_cancelled());
+        }
+        state.shutdown_event_store();
+
+        let persisted = fs::read_to_string(store_path).expect("audit log");
+        assert!(persisted.contains("durable control message"));
+    }
+
+    #[test]
+    fn agent_output_drop_is_best_effort_and_observable() {
+        let mut state = DaemonState::default();
+        open_test_workstream(&mut state, "issue-409");
+        state.event_store = Some(EventStore::disconnected_for_test());
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("agent_output")
+                    .direction_from_agent()
+                    .target("local::worker")
+                    .text("chatty output"),
+            )
+            .expect("best-effort agent output does not fail command");
+
+        let events = state
+            .events(EventsRequest {
+                workstream: "issue-409".to_string(),
+                after: None,
+                limit: 10,
+                readable: false,
+            })
+            .expect("events");
+        assert_eq!(events["audit"]["degraded"], true);
+        assert_eq!(events["audit"]["agent_output_dropped"], 1);
+    }
+
+    #[test]
+    fn lossless_audit_enqueue_failure_is_error_and_observable() {
+        let mut state = DaemonState::default();
+        open_test_workstream(&mut state, "issue-409");
+        state.event_store = Some(EventStore::disconnected_for_test());
+        let error = state
+            .record_event(
+                "issue-409",
+                EventDraft::new("message_sent")
+                    .direction_to_agent()
+                    .target("local::worker")
+                    .text("control message"),
+            )
+            .expect_err("lossless control event must fail when writer is unavailable");
+        assert!(error.to_string().contains("lossless event audit writer"));
+
+        let events = state
+            .events(EventsRequest {
+                workstream: "issue-409".to_string(),
+                after: None,
+                limit: 10,
+                readable: false,
+            })
+            .expect("events");
+        assert_eq!(events["audit"]["degraded"], true);
+        assert_eq!(events["audit"]["lossless_enqueue_failures"], 1);
+    }
+
+    #[test]
+    fn event_text_is_capped_and_marked_truncated() {
+        let mut state = DaemonState::default();
+        open_test_workstream(&mut state, "issue-409");
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("agent_output")
+                    .direction_from_agent()
+                    .target("local::worker")
+                    .text("x".repeat(EVENT_TEXT_MAX_CHARS + 8)),
+            )
+            .expect("record event");
+
+        let event = state
+            .workstream("issue-409")
+            .expect("workstream")
+            .events
+            .back()
+            .expect("event");
+        assert!(event.truncated);
+        assert_eq!(
+            char_count(event.text.as_deref().expect("text")),
+            EVENT_TEXT_MAX_CHARS
+        );
+    }
+
+    #[tokio::test]
+    async fn output_audit_records_agent_output_for_registered_session() {
+        let shared = Arc::new(Mutex::new(DaemonState::default()));
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        {
+            let mut state = shared.lock().await;
+            open_test_workstream(&mut state, "issue-409");
+            let mut record = SessionRecord::from_target(&target, AgentState::Busy, None);
+            record.workstream = Some("issue-409".to_string());
+            record.identity = "worker".to_string();
+            state.sessions.insert(target.clone(), record);
+            state
+                .workstream_mut("issue-409")
+                .expect("workstream")
+                .sessions
+                .insert(target.clone());
+        }
+
+        let output = TargetOutput {
+            source: motlie_tmux::TargetAddress::Pane(motlie_tmux::PaneAddress {
+                pane_id: "%1".to_string(),
+                session_id: Some("$1".try_into().expect("session id")),
+                session: "worker".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+            host: "local".to_string(),
+            content: "agent says done".to_string(),
+            raw_content: None,
+            sequence: 1,
+            fidelity: motlie_tmux::OutputFidelity::default(),
+            timestamp: std::time::Instant::now(),
+        };
+        DaemonState::record_agent_output_shared(Arc::clone(&shared), output)
+            .await
+            .expect("record output");
+
+        let state = shared.lock().await;
+        let event = state
+            .workstream("issue-409")
+            .expect("workstream")
+            .events
+            .back()
+            .expect("event");
+        let target_string = target.to_string();
+        assert_eq!(event.kind, "agent_output");
+        assert_eq!(event.direction, EventDirection::FromAgent);
+        assert_eq!(event.actor, EventActor::Agent);
+        assert_eq!(event.target.as_deref(), Some(target_string.as_str()));
+        assert_eq!(event.source_pane.as_deref(), Some("%1"));
+        assert_eq!(event.text.as_deref(), Some("agent says done"));
+    }
+
+    fn generated_phone_like_text() -> String {
+        (0..10)
+            .map(|index| char::from(b'0' + (index % 10) as u8))
+            .collect()
+    }
+
+    fn generated_unicode_digit_text() -> String {
+        (0..10)
+            .map(|index| char::from_u32(0x0660 + (index % 10) as u32).expect("unicode digit"))
+            .collect()
+    }
+
+    fn interleave_phone_like_text(value: &str, separators: &[&str]) -> String {
+        let mut rendered = String::new();
+        for (index, ch) in value.chars().enumerate() {
+            if index > 0 {
+                rendered.push_str(separators[(index - 1) % separators.len()]);
+            }
+            rendered.push(ch);
+        }
+        rendered
     }
 
     #[test]
