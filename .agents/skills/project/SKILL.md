@@ -30,7 +30,7 @@ These rules hold across every section below. They are stated once here; later se
 2. **mstream is the coordination boundary.** Do not bypass it with direct `ssh`/`tmux` for liveness, listing, snapshots, monitoring, or messaging. If mstream lacks a needed signal, extend it in the active PR or ask the user before any temporary manual path.
 3. **Keep the daemon alive.** Once assigned, keep one daemon on one stable socket across turns. Do not stop or restart it after routine commands or transient SSH errors. Never stop it unless the user explicitly asks. If it seems unreachable, report and ask before replacing it.
 4. **Durable context outranks runtime state.** tmux and daemon memory are recoverable runtime, not the source of truth. Persist issue/PR/branch/commit/host/session/role facts to durable places (GitHub, worktrees, notes) so resets are survivable.
-5. **Side effects need approval.** Treat `connect`, `open`, `join`/`new`/`recruit`, `send`, `interrupt`, `handoff`, `label`, `leave`, `kill`, `close`, and `daemon start` as side-effecting. If the latest request asks for an outline, staffing, or risk plan, deliver that and wait. Otherwise summarize intended side effects before running them. On failure, stop the sequence, report the exact failure and implication, then decide the next step with the user unless the fix is local and obvious.
+5. **Side effects need approval.** Treat `connect`, `open`, `join`/`new`/`recruit`, `send`, `interrupt`, `handoff`, `label`, `leave`, `retire`, `reclaim`, `close`, and `daemon start` as side-effecting. If the latest request asks for an outline, staffing, or risk plan, deliver that and wait. Otherwise summarize intended side effects before running them. On failure, stop the sequence, report the exact failure and implication, then decide the next step with the user unless the fix is local and obvious.
 6. **Never invent state.** Do not fabricate credentials, host aliases, SSH URIs, issue numbers, or product direction. Ask the user (see Prerequisites To Collect).
 7. **Report quietly, by outcome.** Surface material state changes, blockers, risks, and decisions needing a human. Do not narrate routine tool calls or paste raw logs; summarize the relevant result.
 8. **TUI submit retry.** Agent TUIs sometimes miss the submit newline. If the timeline shows typed-but-unsubmitted text after a send, wait briefly and send one extra empty `--enter`. This is a targeted retry, not a default double-send.
@@ -75,7 +75,8 @@ Shared enums:
 | | `join <ws> <target> --role` | Join existing session | `--task` |
 | | `recruit <ws> --role` | Recruit tagged agents | `--agent`, `--count` (1), `--goal`, `--selector k=v` (repeatable), `--task` |
 | | `leave <ws> <target>` | Remove from workstream, keep tmux | `--available` |
-| | `kill <target>` | Destroy tmux session (terminal) | |
+| | `retire <ws> <target>` | Move agent to `quarantined` (no further assignment; stays alive + taskable) | |
+| | `reclaim <target>` | Terminal teardown: kill tmux + deregister. **GATED**: requires `managed` + `quarantined` | |
 | | `session list` | List sessions | |
 | | `session mark <target> --state --summary` | Annotate session state | |
 | Messaging | `send <ws> <target> --text` | Send to one session | `--enter`/`--no-enter`, `--interrupt-first`, `--settle-ms` (500), `--paste-mode bracketed\|literal`, `--require-state`, `--set-state` |
@@ -323,7 +324,7 @@ As project manager, keep enough durable context to survive these resets. When a 
 
 Use when an agent must be replaced, a host/session is going away, or the user
 asks to move ownership of in-flight work. Build transfer from existing mstream
-primitives (`send`, `new`/`join`/`recruit`, `session mark`, `leave`, `kill`); do
+primitives (`send`, `new`/`join`/`recruit`, `session mark`, `leave`, `retire`/`reclaim`); do
 not request a new `mstream transfer` command — if a primitive gap blocks you,
 stop and report it.
 
@@ -392,11 +393,11 @@ mstream send <workstream> <successor-target> --set-state busy --enter \
 
 5. **Quarantine, then retire the predecessor** once the successor is ready: mark
    it `reserved` to keep it out of recruitment, then prefer `leave` (keeps the
-   tmux session for later inspection) over `kill` (terminal).
+   tmux session for later inspection) over `reclaim` (terminal, gated on `quarantined`).
 
 ```sh
 mstream session mark <source-target> --state reserved --summary "succeeded by <successor-target>; retiring"
-mstream leave <workstream> <source-target>   # or: mstream kill <source-target>
+mstream leave <workstream> <source-target>   # or terminal: mstream retire <workstream> <source-target> && mstream reclaim <source-target>
 ```
 
 Record the outcome in the closeout log: source, successor, durable checkpoint,
@@ -570,7 +571,7 @@ When starting a new agent, include:
   2. `mstream snapshot <ws>` — read the selector (options: 1 Default, 2 Auto-review, 3 Full Access).
   3. `mstream send <ws> <target> --enter --text "2"` — pick **option 2, Auto-review** (workspace-write + on-request approvals routed through the auto-reviewer subagent).
   4. `mstream snapshot <ws>` — confirm the pane shows `Permissions updated to Auto-review`.
-  NEVER pick option 3 (Full Access / `danger-full-access` = yolo). Do this only with the user's approval for the host/workstream. (For Claude agents, set the equivalent auto permission mode.) A bare empty `--enter` submits stuck/queued input.
+  NEVER pick option 3 (Full Access / `danger-full-access` = yolo). Do this only with the user's approval for the host/workstream. (For Claude agents, launch in auto permission mode via `mstream new --agent <claude-path> --agent-arg --permission-mode --agent-arg auto` — #410 added `--agent-arg` passthrough, so Claude no longer needs per-command hand-approval.) A bare empty `--enter` submits stuck/queued input.
 
 Remote non-login shells may not have the same `PATH` as an interactive shell.
 Prefer user-provided absolute executable paths when creating sessions (do NOT
@@ -578,7 +579,7 @@ create workstream-local wrapper scripts). If you need to discover executable
 paths and mstream lacks a safe host probe, ask the user or add the needed
 mstream capability instead of running direct SSH probes.
 
-NEVER create launcher wrapper scripts (e.g. a `codex-auto` that bakes in `--ask-for-approval`/`--sandbox danger-full-access` flags), and NEVER create a wrapper that execs uncommitted code. Launch the bare executable (`codex` or `claude`) via `mstream new --agent <absolute-executable-path>`, then run the mandatory permission-mode setup as the FIRST step before the agent does any work — the `/permissions` → pick **2 Auto-review** procedure above. Permission posture is set interactively via mstream — never via on-disk wrapper flags.
+NEVER create launcher wrapper scripts (e.g. a `codex-auto` that bakes in `--ask-for-approval`/`--sandbox danger-full-access` flags), and NEVER create a wrapper that execs uncommitted code. Launch via `mstream new --agent <absolute-executable-path>` (Codex bare, then `/permissions` Auto-review; Claude with `--agent-arg --permission-mode --agent-arg auto` per #410), then run the mandatory permission-mode setup as the FIRST step before the agent does any work — the `/permissions` → pick **2 Auto-review** procedure above. Permission posture is set interactively via mstream — never via on-disk wrapper flags.
 
 When a TUI is sensitive to startup timing, create the session first without a long `--task`, confirm the prompt is ready with `mstream snapshot`, then send the assignment with `mstream send --interrupt-first --enter`. Verify the timeline shows the agent started acting on the assignment.
 
@@ -877,10 +878,10 @@ Use `leave --available` to free individual agents without killing sessions:
 mstream leave issue-337-tmux-fleet-api amd1::opus47-337-rv --available
 ```
 
-Use `kill` only when explicitly destructive session cleanup is intended:
+Use `reclaim` for terminal teardown (gated: agent must be `quarantined` via `retire` first; refuses non-managed/non-quarantined targets):
 
 ```sh
-mstream kill amd1::gpt55-337-og
+mstream retire <ws> amd1::gpt55-337-og && mstream reclaim amd1::gpt55-337-og
 ```
 
 Before closeout, verify the complete chain: PR merged, original issue closed
