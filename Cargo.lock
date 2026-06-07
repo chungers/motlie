@@ -2626,8 +2626,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "hound",
  "motlie-model",
  "motlie-models",
+ "motlie-voice",
  "serde",
  "serde_json",
  "sysinfo",
@@ -5411,14 +5413,6 @@ name = "motlie-model-espeak-ng"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "motlie-model-eval"
-version = "0.1.0"
-dependencies = [
- "motlie-model",
- "motlie-models",
 ]
 
 [[package]]

@@ -41,6 +41,10 @@ pub struct ChatPerformanceMetrics {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub tokens_per_second: Option<f64>,
+    pub response_chars: Option<u64>,
+    pub followup_response_chars: Option<u64>,
+    pub completion_chars: Option<u64>,
+    pub tool_call_count: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -48,6 +52,9 @@ pub struct AsrPerformanceMetrics {
     pub audio_duration_ms: Option<u64>,
     pub transcription_latency_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
+    pub transcript_chars: Option<u64>,
+    pub segment_count: Option<u64>,
+    pub word_error_rate: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -56,13 +63,19 @@ pub struct TtsPerformanceMetrics {
     pub synthesis_latency_ms: Option<u64>,
     pub audio_duration_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
+    pub sample_count: Option<u64>,
+    pub sample_rate_hz: Option<u64>,
+    pub chunk_count: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PerfPerformanceMetrics {
     pub iterations: Option<u64>,
+    pub successful_iterations: Option<u64>,
+    pub failed_iterations: Option<u64>,
     pub mean_latency_ms: Option<f64>,
     pub p95_latency_ms: Option<f64>,
+    pub total_output_words: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

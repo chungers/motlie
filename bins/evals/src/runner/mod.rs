@@ -1,4 +1,7 @@
+pub mod chat;
 pub mod embeddings;
+pub mod perf;
+pub mod support;
 
 use std::path::PathBuf;
 

@@ -36,6 +36,34 @@ impl Scenario {
         }
     }
 
+    pub fn chat(&self) -> Option<&ChatScenario> {
+        match &self.kind {
+            ScenarioKind::Chat(scenario) => Some(scenario),
+            _ => None,
+        }
+    }
+
+    pub fn asr(&self) -> Option<&AsrScenario> {
+        match &self.kind {
+            ScenarioKind::Asr(scenario) => Some(scenario),
+            _ => None,
+        }
+    }
+
+    pub fn tts(&self) -> Option<&TtsScenario> {
+        match &self.kind {
+            ScenarioKind::Tts(scenario) => Some(scenario),
+            _ => None,
+        }
+    }
+
+    pub fn perf(&self) -> Option<&PerfScenario> {
+        match &self.kind {
+            ScenarioKind::Perf(scenario) => Some(scenario),
+            _ => None,
+        }
+    }
+
     pub fn gates_for_profile(&self, profile_name: &str) -> Option<&ProfileGates> {
         self.profiles
             .get(profile_name)
@@ -87,9 +115,24 @@ impl CapabilityName {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapabilityName {
+    Chat,
+    Completion,
+    Embeddings,
+    Speech,
+    ToolUse,
+    Transcription,
+    Vision,
+    VoiceClone,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BundleFilter {
     pub capability: CapabilityName,
+    #[serde(default)]
+    pub required_capabilities: Vec<ModelCapabilityName>,
     #[serde(default)]
     pub backend: Vec<String>,
 }
@@ -122,20 +165,30 @@ pub enum SimilarityOrder {
     SimilarGtDissimilar,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatScenario {
     pub input: ChatInput,
     pub assertions: ChatAssertions,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatInput {
     pub prompt: String,
+    pub system_prompt: Option<String>,
+    pub followup_prompt: Option<String>,
+    pub completion_prompt: Option<String>,
+    pub tool_prompt: Option<String>,
+    pub tool_name: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChatAssertions {
     pub min_response_chars: Option<usize>,
+    pub min_followup_response_chars: Option<usize>,
+    pub min_completion_chars: Option<usize>,
+    pub min_tool_calls: Option<usize>,
     #[serde(default)]
     pub required_substrings: Vec<String>,
 }
@@ -149,29 +202,35 @@ pub struct AsrScenario {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AsrInput {
     pub audio: String,
+    pub reference_transcript: Option<String>,
+    pub language: Option<String>,
+    pub streaming_chunk_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AsrAssertions {
+    pub min_transcript_chars: Option<usize>,
     pub max_word_error_rate: Option<f64>,
     #[serde(default)]
     pub required_substrings: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TtsScenario {
     pub input: TtsInput,
     pub assertions: TtsAssertions,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TtsInput {
     pub text: String,
+    pub speaking_rate: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TtsAssertions {
     pub min_audio_duration_ms: Option<u64>,
+    pub min_sample_count: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -180,13 +239,24 @@ pub struct PerfScenario {
     pub assertions: PerfAssertions,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PerfInput {
     pub workload: String,
+    pub prompt: Option<String>,
+    pub dataset: Option<String>,
+    #[serde(default = "default_perf_iterations")]
+    pub iterations: u64,
+    #[serde(default)]
+    pub warmup_iterations: u64,
+}
+
+fn default_perf_iterations() -> u64 {
+    5
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PerfAssertions {
+    pub min_successful_iterations: Option<u64>,
     pub max_mean_latency_ms: Option<f64>,
     pub max_p95_latency_ms: Option<f64>,
 }
@@ -308,12 +378,17 @@ summary = "Minimal chat smoke scenario."
 [bundle_filter]
 capability = "chat"
 backend = ["MistralRs"]
+required_capabilities = ["completion", "tool_use"]
 
 [input]
 prompt = "Say hello."
+completion_prompt = "Complete this sentence."
+tool_prompt = "Call get_weather."
 
 [assertions]
 min_response_chars = 1
+min_completion_chars = 1
+min_tool_calls = 1
 
 [metrics]
 capture_startup_ms = true
@@ -323,12 +398,56 @@ capture_request_latency = true
         let scenario = toml::from_str::<Scenario>(raw).unwrap();
 
         assert_eq!(scenario.capability(), CapabilityName::Chat);
+        assert_eq!(
+            scenario.bundle_filter.required_capabilities,
+            [
+                ModelCapabilityName::Completion,
+                ModelCapabilityName::ToolUse
+            ]
+        );
         match scenario.kind {
             ScenarioKind::Chat(chat) => {
                 assert_eq!(chat.input.prompt, "Say hello.");
                 assert_eq!(chat.assertions.min_response_chars, Some(1));
+                assert_eq!(chat.assertions.min_completion_chars, Some(1));
             }
             other => panic!("expected chat scenario, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_perf_scenario_shape() {
+        let raw = r#"
+schema_version = 1
+id = "bench_chat_startup"
+capability = "perf"
+summary = "Chat startup and steady-state latency benchmark."
+
+[bundle_filter]
+capability = "chat"
+
+[input]
+workload = "chat_generation"
+prompt = "Say hello."
+iterations = 2
+
+[assertions]
+min_successful_iterations = 2
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+"#;
+
+        let scenario = toml::from_str::<Scenario>(raw).unwrap();
+
+        assert_eq!(scenario.capability(), CapabilityName::Perf);
+        match scenario.kind {
+            ScenarioKind::Perf(perf) => {
+                assert_eq!(perf.input.iterations, 2);
+                assert_eq!(perf.assertions.min_successful_iterations, Some(2));
+            }
+            other => panic!("expected perf scenario, got {other:?}"),
         }
     }
 

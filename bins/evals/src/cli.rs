@@ -5,9 +5,11 @@ use anyhow::{bail, Context, Result};
 use crate::metrics::MetricsSampler;
 use crate::platform::PlatformCollector;
 use crate::report::OutputSink;
+use crate::runner::chat::ChatRunner;
 use crate::runner::embeddings::EmbeddingSimilarityRunner;
+use crate::runner::perf::PerfRunner;
 use crate::runner::{BundleSelection, ProfileSelection, RunContext, RuntimeFlags, ScenarioRunner};
-use crate::scenario;
+use crate::scenario::{self, CapabilityName};
 
 pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     let command_line = args.into_iter().collect::<Vec<_>>();
@@ -30,9 +32,7 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         {
             list_scenarios(PathBuf::from(root))
         }
-        [command, subject] if command == "list" && subject == "bundles" => {
-            bail!("bundle listing is planned for the next evals CLI slice")
-        }
+        [command, subject] if command == "list" && subject == "bundles" => list_bundles(),
         [command, rest @ ..] if command == "run" => run_scenario(command_line, rest).await,
         [command, ..] if command == "matrix" || command == "report" => {
             bail!("`evals {command}` is planned after the embeddings runner pattern is reviewed")
@@ -73,8 +73,38 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
         output_sink,
     };
 
-    let runner = EmbeddingSimilarityRunner;
-    runner.run(context).await?;
+    match context.scenario.capability() {
+        CapabilityName::Embeddings => {
+            EmbeddingSimilarityRunner.run(context).await?;
+        }
+        CapabilityName::Chat => {
+            ChatRunner.run(context).await?;
+        }
+        CapabilityName::Perf => {
+            PerfRunner.run(context).await?;
+        }
+        CapabilityName::Asr | CapabilityName::Tts => {
+            bail!("`evals run` support for asr and tts is added in the next batch slice")
+        }
+    }
+    Ok(())
+}
+
+fn list_bundles() -> Result<()> {
+    let catalog = motlie_models::Catalog::with_defaults();
+    for descriptor in catalog.bundles() {
+        println!(
+            "{}\t{:?}\t{:?}",
+            descriptor.id.as_str(),
+            descriptor.backend,
+            descriptor
+                .capabilities
+                .descriptors()
+                .iter()
+                .map(|capability| format!("{:?}", capability.kind))
+                .collect::<Vec<_>>()
+        );
+    }
     Ok(())
 }
 
