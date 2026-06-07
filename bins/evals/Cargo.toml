@@ -7,7 +7,18 @@ license.workspace = true
 repository.workspace = true
 description = "Curated model eval runner and report CLI"
 
+[features]
+default = []
+model-google-gemma-300m = ["motlie-models/model-google-gemma-300m"]
+model-qwen3-embedding-06b = ["motlie-models/model-qwen3-embedding-06b"]
+
 [dependencies]
+async-trait = "0.1"
 anyhow.workspace = true
 serde.workspace = true
 serde_json = "1.0.149"
+motlie-model = { path = "../../libs/model" }
+motlie-models = { path = "../../libs/models", default-features = false }
+sysinfo = "0.36.1"
+tokio.workspace = true
+toml = "0.9.12"

@@ -2625,8 +2625,14 @@ name = "evals"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "motlie-model",
+ "motlie-models",
  "serde",
  "serde_json",
+ "sysinfo",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

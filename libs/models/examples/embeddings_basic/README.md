@@ -29,4 +29,8 @@ cargo run -p motlie-models --no-default-features --features "model-google-gemma-
 
 Repeatable acceptance evidence belongs in
 [`../../../../evals/scenarios/embeddings_similarity.toml`](../../../../evals/scenarios/embeddings_similarity.toml)
-and, once the runner exists, in `evals run --scenario embeddings_similarity`.
+and the runnable counterpart is:
+
+```sh
+cargo run -p evals --features "model-google-gemma-300m model-qwen3-embedding-06b" -- run --bundle embeddinggemma_300m --scenario embeddings_similarity
+```

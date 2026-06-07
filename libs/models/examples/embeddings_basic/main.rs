@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-#[path = "../embedding_example_support.rs"]
+#[path = "../support/embeddings.rs"]
 mod embedding_example_support;
 #[path = "../support.rs"]
 mod support;

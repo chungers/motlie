@@ -4,7 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-06 | -399-impl | Updated scope to keep eval engine modules in the single `bins/evals` binary crate; no separate eval library expansion. |
+| 2026-06-06 | @codex-399-impl | Applied early pattern review changes: sectioned result record, explicit `RunContext`, runnable embeddings eval path, support namespace, snake_case capability TOML, and GB10/AArch64 build blocker note. |
+| 2026-06-06 | @codex-399-impl | Updated scope to keep eval engine modules in the single `bins/evals` binary crate; no separate eval library expansion. |
 | 2026-06-06 | @codex-399-impl | Initial brownfield design for separating human examples, curation evals, performance/resource evidence, and generated reports for issue #399. |
 
 ## Problem
@@ -45,6 +46,7 @@ status?
 libs/models/examples/
   README.md
   support/
+    embeddings.rs
   chat_basic/main.rs
   tool_use_basic/main.rs
   multimodal_basic/main.rs
@@ -87,6 +89,8 @@ Evals are scenario-first:
 - one declared `capability`
 - explicit bundle filters, inputs, assertions, metrics, and optional profile
   gates
+- capability values serialize as snake_case in TOML, for example `embeddings`,
+  and serde maps them to Rust enums
 
 Performance is not a human example. It is captured by perf scenarios and the
 standard JSONL result schema. `bench_chat` should become a compatibility wrapper
@@ -99,7 +103,8 @@ a curated release intentionally checks in a snapshot.
 
 Every eval result should include these sections:
 
-- `identity`: schema version, run id, git SHA, branch, command line
+- top-level `schema_version`: result contract version
+- `identity`: run id, git SHA, branch, command line
 - `selection`: bundle id, selector, backend, checkpoint, artifact snapshot
 - `profile`: explicit profile such as `local-cpu-x86_64`, `apple-metal`, or
   `dgx-spark`
@@ -114,6 +119,22 @@ Every eval result should include these sections:
 - `acceptance`: behavior, performance, resource, and overall statuses
 
 Unknown platform fields are represented as `null` or `unavailable`, not omitted.
+
+## Runner Boundary
+
+`bins/evals/src/runner/mod.rs` owns the binary-local runner trait. Each
+runner receives a `RunContext` carrying the parsed scenario, selected bundle,
+profile, artifact root, runtime flags, platform collector, metrics sampler, and
+output sink. Capability runners are responsible for turning backend observations
+into the shared sectioned `ResultRecord`; the CLI is responsible only for
+parsing flags, loading scenarios, selecting a runner, and writing emitted
+records.
+
+The embeddings exemplar proves this boundary with `evals run --bundle
+embeddinggemma_300m --scenario embeddings_similarity`: it parses TOML, validates
+the snake_case capability filter, starts one compiled embedding bundle, samples
+startup and request latencies plus RSS/swap resources, emits JSONL, and applies
+the `similar_gt_dissimilar` assertion.
 
 ## Migration Strategy
 
@@ -153,3 +174,10 @@ authoritative evidence moves to eval JSONL.
 
 Rejected. Manifests are useful, but acceptance requires a reusable runner,
 result schema, platform/profile capture, and reports.
+
+## Platform Note
+
+GB10/AArch64 currently blocks full embedding eval runs before the pattern is
+under test: `motlie-models` `embeddings_basic` fails in `gemm-f16` fullfp16
+inline asm even without CUDA enabled. Treat that as a target-feature/toolchain
+issue for a separate fix; x86 hosts reported evals crate build and clippy pass.

@@ -4,7 +4,7 @@ capability = "embeddings"
 summary = "Embed one input and compare a similar pair against a dissimilar pair."
 
 [bundle_filter]
-capability = "Embeddings"
+capability = "embeddings"
 backend = ["MistralRs"]
 
 [input]
