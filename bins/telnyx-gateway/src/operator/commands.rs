@@ -330,6 +330,23 @@ impl ConversationSmokeTestArg {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConversationBargeInArg {
+    On,
+    Off,
+    Status,
+}
+
+impl ConversationBargeInArg {
+    fn enabled(self) -> Option<bool> {
+        match self {
+            Self::On => Some(true),
+            Self::Off => Some(false),
+            Self::Status => None,
+        }
+    }
+}
+
 impl From<ConversationModeArg> for ConversationMode {
     fn from(mode: ConversationModeArg) -> Self {
         match mode {
@@ -347,6 +364,10 @@ pub enum ConversationCommand {
     SmokeTest {
         #[arg(value_enum)]
         state: ConversationSmokeTestArg,
+    },
+    BargeIn {
+        #[arg(value_enum)]
+        state: Option<ConversationBargeInArg>,
     },
     Attach {
         call: Option<String>,
@@ -507,6 +528,10 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
         format!(
             "conversation-handler: {}",
             context.conversation.handler_label()
+        ),
+        format!(
+            "conversation-barge-in: {}",
+            context.conversation.barge_in_label()
         ),
         format!(
             "webhook-url: {}",
@@ -1499,7 +1524,11 @@ async fn conversation_command(
                 name: id.clone(),
             })?;
             Ok(CommandOutput {
-                lines: conversation_status_lines(call, context.conversation.handler_label()),
+                lines: conversation_status_lines(
+                    call,
+                    context.conversation.handler_label(),
+                    context.conversation.barge_in_label(),
+                ),
                 effects: Vec::new(),
             })
         }
@@ -1514,6 +1543,21 @@ async fn conversation_command(
                 .log(LogLevel::Info, format!("conversation smoke-test {label}"));
             Ok(CommandOutput::line(format!(
                 "conversation smoke-test: {label}"
+            )))
+        }
+        ConversationCommand::BargeIn { state } => {
+            if let Some(enabled) = state.and_then(ConversationBargeInArg::enabled) {
+                context.conversation.set_barge_in_enabled(enabled);
+                let label = if enabled { "on" } else { "off" };
+                context
+                    .state
+                    .write()
+                    .await
+                    .log(LogLevel::Info, format!("conversation barge-in {label}"));
+            }
+            Ok(CommandOutput::line(format!(
+                "conversation barge-in: {}",
+                context.conversation.barge_in_label()
             )))
         }
         ConversationCommand::Attach { call } => {
@@ -1705,6 +1749,7 @@ async fn approve_conversation_proposal(
 fn conversation_status_lines(
     call: &crate::operator::state::CallSession,
     handler_label: &str,
+    barge_in_label: &str,
 ) -> Vec<String> {
     let conversation = &call.conversation;
     let mut lines = vec![
@@ -1713,6 +1758,7 @@ fn conversation_status_lines(
         format!("attached: {}", conversation.attached),
         format!("mode: {}", conversation.mode.label()),
         format!("handler: {handler_label}"),
+        format!("barge_in: {barge_in_label}"),
         format!("status: {}", conversation.status.label()),
         format!(
             "last_user: {}",
@@ -2024,6 +2070,7 @@ fn gateway_root_help() -> String {
         "  speak cancel [call-id]         Clear active TTS on the selected call",
         "  conversation status [call-id]  Show attachment, mode, handler, and latest turns",
         "  conversation smoke-test on|off Enable or disable test-only echo replies",
+        "  conversation barge-in on|off|status Enable or disable transcript-triggered TTS clear",
         "  conversation disapprove [call-id] Stop TTS and detach conversation",
         "  reject [call-id]",
         "  hangup [call-id]",
@@ -2315,6 +2362,7 @@ fn conversation_help() -> String {
         "Usage:",
         "  conversation status [call-id]",
         "  conversation smoke-test <on|off>",
+        "  conversation barge-in [on|off|status]",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
         "  conversation disapprove [call-id]",
@@ -2333,12 +2381,14 @@ fn conversation_help() -> String {
         "",
         "Smoke-test two-way loop:",
         "  conversation smoke-test on",
+        "  conversation barge-in off    # optional: prevent echo tests from cutting TTS",
         "  answer    # or: dial <callee-e164>",
         "  conversation status",
         "  speak cancel",
         "  conversation smoke-test off",
         "",
         "Controls:",
+        "  barge-in off keeps active TTS from being cleared by partial/final transcripts.",
         "  disapprove cancels active conversation TTS and leaves transcription-only mode.",
         "  mode manual records assistant proposals; approve/say speaks the pending proposal",
         "  using this source's selected TTS backend.",
@@ -2503,7 +2553,7 @@ fn socket_help() -> String {
         "Agent workflows:",
         "  inbound: calls -> answer [call-id] -> conversation status [call-id]",
         "  outbound: dial <callee-e164> -> conversation status",
-        "  smoke test: conversation smoke-test on -> answer or dial -> speak cancel if needed",
+        "  smoke test: conversation smoke-test on -> conversation barge-in off -> answer or dial",
         "  stop assistant audio: conversation disapprove [call-id]",
         "  inspect: status, calls, call show [call-id], transcript follow [call-id]",
         "",
@@ -2521,6 +2571,7 @@ fn socket_help() -> String {
         "    conversation status [call-id]",
         "    conversation attach|detach [call-id]",
         "    conversation smoke-test on|off",
+        "    conversation barge-in [on|off|status]",
         "    conversation approve [call-id]",
         "    conversation disapprove [call-id]",
         "    hangup [call-id]",
@@ -2528,8 +2579,8 @@ fn socket_help() -> String {
         "Source-local state:",
         "  Each socket connection has its own selected call, next ASR backend, and next TTS backend.",
         "  A later socket starts from the code defaults, not another source's choices.",
-        "  The smoke-test handler mode is gateway-wide because media-triggered turns are",
-        "  not associated with one TUI/socket command source.",
+        "  The smoke-test handler mode is gateway-wide; barge-in mode is also gateway-wide",
+        "  because media-triggered turns are not associated with one TUI/socket command source.",
     ]
     .join("\n")
 }
@@ -3274,6 +3325,35 @@ mod tests {
             .expect("disable smoke test");
         assert_eq!(disabled.lines, vec!["conversation smoke-test: off"]);
         assert!(!engine.context().conversation.smoke_test_enabled());
+    }
+
+    #[tokio::test]
+    async fn conversation_barge_in_command_toggles_runtime_setting() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let status = engine
+            .run_line("conversation barge-in status")
+            .await
+            .expect("barge-in status");
+        assert_eq!(status.lines, vec!["conversation barge-in: on"]);
+        assert!(engine.context().conversation.barge_in_enabled());
+
+        let disabled = engine
+            .run_line("conversation barge-in off")
+            .await
+            .expect("disable barge-in");
+        assert_eq!(disabled.lines, vec!["conversation barge-in: off"]);
+        assert!(!engine.context().conversation.barge_in_enabled());
+
+        let enabled = engine
+            .run_line("conversation barge-in on")
+            .await
+            .expect("enable barge-in");
+        assert_eq!(enabled.lines, vec!["conversation barge-in: on"]);
+        assert!(engine.context().conversation.barge_in_enabled());
     }
 
     #[tokio::test]
