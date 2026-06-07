@@ -86,8 +86,21 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
     }
 
     output_audit_task.abort();
+    let _ = output_audit_task.await;
+    shutdown_state(&state).await;
     let _ = fs::remove_file(&socket);
     Ok(())
+}
+
+async fn shutdown_state(state: &Arc<Mutex<DaemonState>>) {
+    let timer_tasks = {
+        let mut state = state.lock().await;
+        state.abort_timer_tasks()
+    };
+    for task in timer_tasks {
+        let _ = task.await;
+    }
+    state.lock().await.shutdown_event_store();
 }
 
 async fn handle_connection(

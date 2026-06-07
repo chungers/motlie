@@ -2,13 +2,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{
+    sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
+};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
 use motlie_tmux::{
     CreateSessionOptions, Error as TmuxError, Fleet, FleetTargetSpec, HostHandle, KeySequence,
@@ -47,7 +49,10 @@ const EVENT_TEXT_MAX_CHARS: usize = 16 * 1024;
 const EVENT_STORE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const EVENT_STORE_MAX_RECORDS: usize = 10_000;
 const EVENT_STORE_COMPACT_INTERVAL: u64 = 256;
-const EVENT_STORE_QUEUE_CAPACITY: usize = 4_096;
+const EVENT_STORE_LOSSLESS_QUEUE_CAPACITY: usize = 4_096;
+const EVENT_STORE_BEST_EFFORT_QUEUE_CAPACITY: usize = 4_096;
+const EVENT_STORE_WARNING_WINDOW_SECS: u64 = 60;
+const EVENT_STORE_BEST_EFFORT_POLL_MS: u64 = 20;
 const OUTPUT_AUDIT_CHANNEL_CAPACITY: usize = 4_096;
 
 pub struct DaemonState {
@@ -78,61 +83,178 @@ impl Default for DaemonState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventPersistenceMode {
+    Lossless,
+    BestEffort,
+}
+
+#[derive(Default)]
+struct EventStoreObservability {
+    agent_output_dropped: AtomicU64,
+    lossless_enqueue_failures: AtomicU64,
+    persist_failures: AtomicU64,
+    last_warning_window: AtomicU64,
+}
+
+impl EventStoreObservability {
+    fn record_agent_output_drop(&self, message: &str) {
+        self.agent_output_dropped.fetch_add(1, Ordering::Relaxed);
+        self.warn_once_per_window(message);
+    }
+
+    fn record_lossless_enqueue_failure(&self, message: &str) {
+        self.lossless_enqueue_failures
+            .fetch_add(1, Ordering::Relaxed);
+        self.warn_once_per_window(message);
+    }
+
+    fn record_persist_failure(&self, message: String) {
+        self.persist_failures.fetch_add(1, Ordering::Relaxed);
+        self.warn_once_per_window(&message);
+    }
+
+    fn warn_once_per_window(&self, message: &str) {
+        let window = current_event_store_warning_window();
+        if self.last_warning_window.swap(window, Ordering::Relaxed) != window {
+            eprintln!("{message}");
+        }
+    }
+
+    fn snapshot(&self) -> EventStoreMetricsSnapshot {
+        EventStoreMetricsSnapshot {
+            agent_output_dropped: self.agent_output_dropped.load(Ordering::Relaxed),
+            lossless_enqueue_failures: self.lossless_enqueue_failures.load(Ordering::Relaxed),
+            persist_failures: self.persist_failures.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Default)]
+struct EventStoreMetricsSnapshot {
+    agent_output_dropped: u64,
+    lossless_enqueue_failures: u64,
+    persist_failures: u64,
+}
+
+impl EventStoreMetricsSnapshot {
+    fn degraded(&self) -> bool {
+        self.agent_output_dropped > 0
+            || self.lossless_enqueue_failures > 0
+            || self.persist_failures > 0
+    }
+}
+
 struct EventStore {
-    sender: Option<SyncSender<EventRecord>>,
+    lossless_sender: Option<SyncSender<EventRecord>>,
+    best_effort_sender: Option<SyncSender<EventRecord>>,
     thread: Option<ThreadJoinHandle<()>>,
-    warning_logged: AtomicBool,
+    observability: Arc<EventStoreObservability>,
 }
 
 impl EventStore {
     fn start(path: PathBuf, retained_events: Vec<EventRecord>) -> anyhow::Result<Self> {
-        let (sender, receiver) = sync_channel(EVENT_STORE_QUEUE_CAPACITY);
+        let (lossless_sender, lossless_receiver) =
+            sync_channel(EVENT_STORE_LOSSLESS_QUEUE_CAPACITY);
+        let (best_effort_sender, best_effort_receiver) =
+            sync_channel(EVENT_STORE_BEST_EFFORT_QUEUE_CAPACITY);
+        let observability = Arc::new(EventStoreObservability::default());
+        let writer_observability = Arc::clone(&observability);
         let thread = thread::Builder::new()
             .name("mstream-event-store".to_string())
             .spawn(move || {
-                let mut writer = EventStoreWriter::new(path, retained_events);
-                while let Ok(event) = receiver.recv() {
-                    if let Err(err) = writer.append_event(event) {
-                        eprintln!("mstream event audit writer failed: {err}");
-                    }
-                }
-                if let Err(err) = writer.compact_on_shutdown() {
-                    eprintln!("mstream event audit final compaction failed: {err}");
-                }
+                let mut writer = EventStoreWriter::new(path, retained_events, writer_observability);
+                writer.run(lossless_receiver, best_effort_receiver);
             })
             .context("failed to start event audit writer")?;
         Ok(Self {
-            sender: Some(sender),
+            lossless_sender: Some(lossless_sender),
+            best_effort_sender: Some(best_effort_sender),
             thread: Some(thread),
-            warning_logged: AtomicBool::new(false),
+            observability,
         })
     }
 
-    fn enqueue(&self, event: EventRecord) {
-        let Some(sender) = &self.sender else {
+    fn enqueue(&self, event: EventRecord, mode: EventPersistenceMode) -> anyhow::Result<()> {
+        match mode {
+            EventPersistenceMode::Lossless => self.enqueue_lossless(event),
+            EventPersistenceMode::BestEffort => {
+                self.enqueue_best_effort(event);
+                Ok(())
+            }
+        }
+    }
+
+    fn enqueue_lossless(&self, event: EventRecord) -> anyhow::Result<()> {
+        let Some(sender) = &self.lossless_sender else {
+            self.observability.record_lossless_enqueue_failure(
+                "mstream event audit degraded: lossless audit writer is unavailable",
+            );
+            bail!("lossless event audit writer is unavailable");
+        };
+        match sender.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(event)) => {
+                self.observability.warn_once_per_window(
+                    "mstream event audit backpressure: waiting to preserve lossless audit event",
+                );
+                sender.send(event).map_err(|_| {
+                    self.observability.record_lossless_enqueue_failure(
+                        "mstream event audit degraded: lossless audit writer stopped while backpressured",
+                    );
+                    anyhow!("lossless event audit writer stopped")
+                })
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.observability.record_lossless_enqueue_failure(
+                    "mstream event audit degraded: lossless audit writer stopped",
+                );
+                bail!("lossless event audit writer stopped")
+            }
+        }
+    }
+
+    fn enqueue_best_effort(&self, event: EventRecord) {
+        let Some(sender) = &self.best_effort_sender else {
+            self.observability.record_agent_output_drop(
+                "mstream event audit degraded: best-effort agent_output writer is unavailable",
+            );
             return;
         };
         match sender.try_send(event) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => self.log_enqueue_warning(
-                "mstream event audit queue full; durable event append dropped",
+            Err(TrySendError::Full(_)) => self.observability.record_agent_output_drop(
+                "mstream event audit degraded: dropped best-effort agent_output event because audit queue is full",
             ),
-            Err(TrySendError::Disconnected(_)) => self.log_enqueue_warning(
-                "mstream event audit writer stopped; durable event append dropped",
+            Err(TrySendError::Disconnected(_)) => self.observability.record_agent_output_drop(
+                "mstream event audit degraded: dropped best-effort agent_output event because audit writer stopped",
             ),
         }
     }
 
-    fn log_enqueue_warning(&self, message: &str) {
-        if !self.warning_logged.swap(true, Ordering::Relaxed) {
-            eprintln!("{message}");
+    fn status_json(&self) -> Value {
+        event_store_status_json(true, self.observability.snapshot())
+    }
+
+    #[cfg(test)]
+    fn disconnected_for_test() -> Self {
+        let (lossless_sender, lossless_receiver) = sync_channel(1);
+        let (best_effort_sender, best_effort_receiver) = sync_channel(1);
+        drop(lossless_receiver);
+        drop(best_effort_receiver);
+        Self {
+            lossless_sender: Some(lossless_sender),
+            best_effort_sender: Some(best_effort_sender),
+            thread: None,
+            observability: Arc::new(EventStoreObservability::default()),
         }
     }
 }
 
 impl Drop for EventStore {
     fn drop(&mut self) {
-        self.sender.take();
+        self.lossless_sender.take();
+        self.best_effort_sender.take();
         if let Some(thread) = self.thread.take() {
             if thread.join().is_err() {
                 eprintln!("mstream event audit writer panicked");
@@ -145,22 +267,88 @@ struct EventStoreWriter {
     path: PathBuf,
     retained_events: VecDeque<EventRecord>,
     writes_since_compact: u64,
+    dirty: bool,
+    observability: Arc<EventStoreObservability>,
 }
 
 impl EventStoreWriter {
-    fn new(path: PathBuf, retained_events: Vec<EventRecord>) -> Self {
+    fn new(
+        path: PathBuf,
+        retained_events: Vec<EventRecord>,
+        observability: Arc<EventStoreObservability>,
+    ) -> Self {
         let mut writer = Self {
             path,
             retained_events: retained_events.into(),
             writes_since_compact: 0,
+            dirty: false,
+            observability,
         };
         writer.trim_retained_events();
         writer
     }
 
+    fn run(
+        &mut self,
+        lossless_receiver: Receiver<EventRecord>,
+        best_effort_receiver: Receiver<EventRecord>,
+    ) {
+        let mut lossless_closed = false;
+        let mut best_effort_closed = false;
+        while !(lossless_closed && best_effort_closed) {
+            match lossless_receiver.try_recv() {
+                Ok(event) => {
+                    self.persist_event(event);
+                    continue;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => lossless_closed = true,
+            }
+
+            if best_effort_closed {
+                match lossless_receiver.recv() {
+                    Ok(event) => self.persist_event(event),
+                    Err(_) => lossless_closed = true,
+                }
+                continue;
+            }
+
+            if lossless_closed {
+                match best_effort_receiver.recv() {
+                    Ok(event) => self.persist_event(event),
+                    Err(_) => best_effort_closed = true,
+                }
+                continue;
+            }
+
+            match best_effort_receiver
+                .recv_timeout(Duration::from_millis(EVENT_STORE_BEST_EFFORT_POLL_MS))
+            {
+                Ok(event) => self.persist_event(event),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => best_effort_closed = true,
+            }
+        }
+
+        if let Err(err) = self.compact_on_shutdown() {
+            self.observability.record_persist_failure(format!(
+                "mstream event audit degraded: final compaction failed: {err}"
+            ));
+        }
+    }
+
+    fn persist_event(&mut self, event: EventRecord) {
+        if let Err(err) = self.append_event(event) {
+            self.observability.record_persist_failure(format!(
+                "mstream event audit degraded: failed to persist event: {err}"
+            ));
+        }
+    }
+
     fn append_event(&mut self, event: EventRecord) -> anyhow::Result<()> {
         self.retained_events.push_back(event.clone());
         self.trim_retained_events();
+        self.dirty = true;
         append_event_to_store_path(&self.path, &event)?;
         self.writes_since_compact += 1;
         let size = fs::metadata(&self.path)
@@ -174,7 +362,7 @@ impl EventStoreWriter {
     }
 
     fn compact_on_shutdown(&mut self) -> anyhow::Result<()> {
-        if self.writes_since_compact > 0 {
+        if self.dirty {
             self.compact()?;
         }
         Ok(())
@@ -184,6 +372,7 @@ impl EventStoreWriter {
         let events = self.retained_events.iter().cloned().collect::<Vec<_>>();
         write_event_store_snapshot(&self.path, &events)?;
         self.writes_since_compact = 0;
+        self.dirty = false;
         Ok(())
     }
 
@@ -315,6 +504,16 @@ struct EventRecord {
     #[serde(default)]
     truncated: bool,
     timestamp: String,
+}
+
+impl EventRecord {
+    fn persistence_mode(&self) -> EventPersistenceMode {
+        if self.kind == "agent_output" {
+            EventPersistenceMode::BestEffort
+        } else {
+            EventPersistenceMode::Lossless
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -581,6 +780,7 @@ impl DaemonState {
                     "hosts": state.hosts.len(),
                     "workstreams": state.workstreams.len(),
                     "sessions": state.sessions.len(),
+                    "audit": state.audit_status_json(),
                 })])
             }
             ClientRequest::DaemonStop => Ok(vec![jsonl::ok("daemon_stop")]),
@@ -628,6 +828,17 @@ impl DaemonState {
         let mut state = Self::default();
         state.load_event_store(path)?;
         Ok(state)
+    }
+
+    pub(crate) fn abort_timer_tasks(&mut self) -> Vec<JoinHandle<()>> {
+        self.timers
+            .values_mut()
+            .filter_map(|timer| timer.task.take())
+            .collect()
+    }
+
+    pub(crate) fn shutdown_event_store(&mut self) {
+        self.event_store.take();
     }
 
     pub async fn spawn_output_audit_task(
@@ -2943,6 +3154,7 @@ impl DaemonState {
                 "idle_after_secs": activity_options.idle_after_secs,
             },
             "agents": agents,
+            "audit": self.audit_status_json(),
         }))
     }
 
@@ -2997,6 +3209,7 @@ impl DaemonState {
                 "text": text,
                 "cursor": cursor,
                 "ordering": "arrival",
+                "audit": self.audit_status_json(),
             }));
         }
         Ok(json!({
@@ -3005,6 +3218,7 @@ impl DaemonState {
             "events": events,
             "cursor": cursor,
             "ordering": "arrival",
+            "audit": self.audit_status_json(),
         }))
     }
 
@@ -4001,10 +4215,18 @@ impl DaemonState {
         self.next_generation = self.next_generation.max(generation.saturating_add(1));
     }
 
-    fn enqueue_event_for_store(&self, event: &EventRecord) {
+    fn enqueue_event_for_store(&self, event: &EventRecord) -> anyhow::Result<()> {
         if let Some(store) = &self.event_store {
-            store.enqueue(event.clone());
+            store.enqueue(event.clone(), event.persistence_mode())?;
         }
+        Ok(())
+    }
+
+    fn audit_status_json(&self) -> Value {
+        self.event_store.as_ref().map_or_else(
+            || event_store_status_json(false, EventStoreMetricsSnapshot::default()),
+            EventStore::status_json,
+        )
     }
 
     fn retained_events_for_store(&self) -> Vec<EventRecord> {
@@ -4056,7 +4278,7 @@ impl DaemonState {
             workstream_record.prune_events();
             (cursor, event)
         };
-        self.enqueue_event_for_store(&event);
+        self.enqueue_event_for_store(&event)?;
         Ok(cursor)
     }
 
@@ -4952,6 +5174,25 @@ fn default_event_actor() -> EventActor {
     EventActor::Mstream
 }
 
+fn current_event_store_warning_window() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() / EVENT_STORE_WARNING_WINDOW_SECS)
+        .unwrap_or_default()
+}
+
+fn event_store_status_json(enabled: bool, metrics: EventStoreMetricsSnapshot) -> Value {
+    json!({
+        "enabled": enabled,
+        "degraded": metrics.degraded(),
+        "control_durability": "lossless",
+        "agent_output_durability": "best_effort",
+        "agent_output_dropped": metrics.agent_output_dropped,
+        "lossless_enqueue_failures": metrics.lossless_enqueue_failures,
+        "persist_failures": metrics.persist_failures,
+    })
+}
+
 fn create_event_store_parent(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path
         .parent()
@@ -5068,7 +5309,7 @@ fn scrub_phone_numbers(text: &str) -> (String, bool) {
             let mut digits = 0usize;
             let mut last_digit = None;
             while end < chars.len() && is_phone_candidate_char(chars[end]) {
-                if chars[end].is_ascii_digit() {
+                if is_phone_digit(chars[end]) {
                     digits += 1;
                     last_digit = Some(end);
                 }
@@ -5093,11 +5334,15 @@ fn scrub_phone_numbers(text: &str) -> (String, bool) {
 }
 
 fn is_phone_candidate_start(ch: char) -> bool {
-    ch.is_ascii_digit() || ch == '+' || ch == '('
+    is_phone_digit(ch) || ch == '+' || ch == '('
 }
 
 fn is_phone_candidate_char(ch: char) -> bool {
-    ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | '(' | ')' | ' ')
+    is_phone_digit(ch) || ch.is_whitespace() || matches!(ch, '+' | '-' | '.' | '(' | ')')
+}
+
+fn is_phone_digit(ch: char) -> bool {
+    ch.is_ascii_digit() || (ch.is_numeric() && !ch.is_ascii_alphabetic())
 }
 
 fn render_readable_event(event: &EventRecord) -> String {
@@ -7080,6 +7325,123 @@ mod tests {
     }
 
     #[test]
+    fn event_store_redacts_multiline_tab_and_unicode_digits() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+        open_test_workstream(&mut state, "issue-409");
+        let multiline_sensitive =
+            interleave_phone_like_text(&generated_phone_like_text(), &["\n", "\t"]);
+        let unicode_sensitive =
+            interleave_phone_like_text(&generated_unicode_digit_text(), &["\t"]);
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("agent_output")
+                    .direction_from_agent()
+                    .target("local::worker")
+                    .text(format!(
+                        "agent printed {multiline_sensitive} and {unicode_sensitive}"
+                    )),
+            )
+            .expect("record event");
+
+        let text = state
+            .workstream("issue-409")
+            .expect("workstream")
+            .events
+            .back()
+            .expect("event")
+            .text
+            .clone()
+            .expect("text");
+        assert!(text.contains("[REDACTED_PHONE]"));
+        assert!(!text.contains(&multiline_sensitive));
+        assert!(!text.contains(&unicode_sensitive));
+        drop(state);
+        let persisted = fs::read_to_string(store_path).expect("audit log");
+        assert!(persisted.contains("[REDACTED_PHONE]"));
+        assert!(!persisted.contains(&multiline_sensitive));
+        assert!(!persisted.contains(&unicode_sensitive));
+    }
+
+    #[test]
+    fn event_store_shutdown_drains_queued_events() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+        open_test_workstream(&mut state, "issue-409");
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("message_sent")
+                    .direction_to_agent()
+                    .target("local::worker")
+                    .text("durable control message"),
+            )
+            .expect("record event");
+
+        state.shutdown_event_store();
+        let persisted = fs::read_to_string(store_path).expect("audit log");
+        assert!(persisted.contains("durable control message"));
+    }
+
+    #[test]
+    fn agent_output_drop_is_best_effort_and_observable() {
+        let mut state = DaemonState::default();
+        open_test_workstream(&mut state, "issue-409");
+        state.event_store = Some(EventStore::disconnected_for_test());
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("agent_output")
+                    .direction_from_agent()
+                    .target("local::worker")
+                    .text("chatty output"),
+            )
+            .expect("best-effort agent output does not fail command");
+
+        let events = state
+            .events(EventsRequest {
+                workstream: "issue-409".to_string(),
+                after: None,
+                limit: 10,
+                readable: false,
+            })
+            .expect("events");
+        assert_eq!(events["audit"]["degraded"], true);
+        assert_eq!(events["audit"]["agent_output_dropped"], 1);
+    }
+
+    #[test]
+    fn lossless_audit_enqueue_failure_is_error_and_observable() {
+        let mut state = DaemonState::default();
+        open_test_workstream(&mut state, "issue-409");
+        state.event_store = Some(EventStore::disconnected_for_test());
+        let error = state
+            .record_event(
+                "issue-409",
+                EventDraft::new("message_sent")
+                    .direction_to_agent()
+                    .target("local::worker")
+                    .text("control message"),
+            )
+            .expect_err("lossless control event must fail when writer is unavailable");
+        assert!(error.to_string().contains("lossless event audit writer"));
+
+        let events = state
+            .events(EventsRequest {
+                workstream: "issue-409".to_string(),
+                after: None,
+                limit: 10,
+                readable: false,
+            })
+            .expect("events");
+        assert_eq!(events["audit"]["degraded"], true);
+        assert_eq!(events["audit"]["lossless_enqueue_failures"], 1);
+    }
+
+    #[test]
     fn event_text_is_capped_and_marked_truncated() {
         let mut state = DaemonState::default();
         open_test_workstream(&mut state, "issue-409");
@@ -7163,6 +7525,23 @@ mod tests {
         (0..10)
             .map(|index| char::from(b'0' + (index % 10) as u8))
             .collect()
+    }
+
+    fn generated_unicode_digit_text() -> String {
+        (0..10)
+            .map(|index| char::from_u32(0x0660 + (index % 10) as u32).expect("unicode digit"))
+            .collect()
+    }
+
+    fn interleave_phone_like_text(value: &str, separators: &[&str]) -> String {
+        let mut rendered = String::new();
+        for (index, ch) in value.chars().enumerate() {
+            if index > 0 {
+                rendered.push_str(separators[(index - 1) % separators.len()]);
+            }
+            rendered.push(ch);
+        }
+        rendered
     }
 
     #[test]

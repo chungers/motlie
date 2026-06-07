@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-07 | @codex-401-impl | Clarified issue #409 audit durability: non-`agent_output` events are lossless-enqueued, high-volume `agent_output` is best-effort with observable degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
 | 2026-06-06 | @codex-401-impl | Added issue #409 durable audit call-log events: redacted `to_agent`/`from_agent` text, OutputBus agent output capture, socket-adjacent JSONL replay, and readable transcripts that survive daemon restart. |
 | 2026-06-06 | @codex-401-impl | Added issue #410 `new`/`recruit --agent-arg` passthrough for agent argv flags such as Claude `--permission-mode auto`. |
 | 2026-06-06 | @codex-401-impl | Added issue #401 session lifecycle commands: `retire` to mark live agents `quarantined` and `reclaim` for gated teardown. |
@@ -35,9 +36,12 @@ avoid colliding with attached human typing.
 Workstream event history is served from an in-memory per-workstream ring and is
 also appended to a socket-adjacent JSONL audit log named
 `<socket>.events.jsonl`. Daemon startup replays retained audit records so
-`events --readable` survives daemon restart. `snapshot` and `summary-input` use
-bounded one-shot tmux capture for joined sessions; pane/process-state stuck
-hints remain implementation follow-ups.
+`events --readable` survives daemon restart. Non-`agent_output` audit events are
+lossless-enqueued to the writer; high-volume `agent_output` entries are
+best-effort and report dropped/degraded counters through `status` and `events`
+`audit` fields. `snapshot` and `summary-input` use bounded one-shot tmux capture
+for joined sessions; pane/process-state stuck hints remain implementation
+follow-ups.
 
 Install the release binary from the Motlie checkout before using this API:
 
@@ -92,9 +96,10 @@ the in-memory event ring and `events` API retention, and defaults to 1000 when
 omitted. Re-opening an existing workstream can raise or lower this limit;
 lowering it trims old events immediately. The daemon also compacts the durable
 audit JSONL to retained events, with a global safety cap, so call-log output
-cannot grow without bound. `--mmux-label` stores a short label that `join`,
-`new`, and
-`recruit` apply to participating sessions as `@mmux/mstream`, and sets
+cannot grow without bound. On daemon stop, timer/output audit tasks are stopped
+and the audit writer is explicitly drained before the foreground daemon returns.
+`--mmux-label` stores a short label that `join`, `new`, and `recruit` apply to
+participating sessions as `@mmux/mstream`, and sets
 `@mmux/__selected-key=mstream` so mmux can group/display the workstream label.
 Labels are enforced as one or two whitespace-separated words, with no control
 or Unicode format characters, and no more than 24 display columns.
@@ -353,7 +358,10 @@ Each status agent includes:
 - `activity_error`: host activity refresh error when known
 
 The default hint thresholds classify sessions with activity in the last 30
-seconds as `active` and sessions quiet for at least 300 seconds as `idle`.
+seconds as `active` and sessions quiet for at least 300 seconds as `idle`. The
+workstream `status` response also includes an `audit` object with
+`degraded`, `agent_output_dropped`, `lossless_enqueue_failures`, and
+`persist_failures` counters.
 
 Event cursors are opaque base64 JSON owned by `mstream`; they embed the
 workstream timeline generation. A cursor from an older generation returns a
@@ -367,13 +375,18 @@ state, summary, text, and `redacted`/`truncated` flags. Outbound messages from
 `send`, `broadcast`, handoffs, timer fires, closeout standby sends, and initial
 managed prompts are stored as `to_agent` entries. Agent terminal output observed
 through tmux monitoring is stored as `from_agent` `agent_output` entries, and
-explicit `session mark --summary` reports are also agent-authored events.
+explicit `session mark --summary` reports are also agent-authored events. All
+non-`agent_output` events use the lossless audit queue; `agent_output` uses a
+best-effort queue so bursty terminal output cannot block control-plane commands
+or evict acknowledged control audit messages. Structured `events` and
+`events_readable` responses include the same `audit` counters as `status`.
 
 Before entering memory or disk, event text and summaries are scrubbed for
-phone-like digit runs and replaced with `[REDACTED_PHONE]`. Text fields are
-capped per event and marked `truncated=true` when capped. Daemon startup skips
-malformed or partial audit-log JSONL lines with a stderr warning rather than
-failing startup.
+phone-like digit runs, including runs split by tabs/newlines/Unicode whitespace
+or using non-ASCII numeric digits, and replaced with `[REDACTED_PHONE]`. Text
+fields are capped per event and marked `truncated=true` when capped. Daemon
+startup skips malformed or partial audit-log JSONL lines with a stderr warning
+rather than failing startup.
 
 `events --readable` prints a plain-text audit transcript for human-facing
 summaries. Call-log message bodies are rendered as indented blocks instead of

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-07 | @codex-401-impl | Defined issue #409 audit durability contract: non-`agent_output` events are lossless, `agent_output` is best-effort with degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
 | 2026-06-07 | @codex-401-impl | Reconciled issue #409 durable audit log semantics with the state/recovery requirements: redacted socket-adjacent event JSONL is replayed on startup, but host/session/timer/workflow state remains non-durable. |
 | 2026-06-06 | @codex-401-impl | Added issue #401 lifecycle semantics: `quarantined` state, workstream-retained `retire`, gated `reclaim`, and scan-time registry reconciliation. |
 | 2026-05-30 | @codex-360-og | Added issue #360 live session rename/retag design using stable tmux session ids, existing freshness checks, and mmux label lifecycle refresh. |
@@ -141,9 +142,11 @@ unstick collaborators.
 - SR4: Durable session/workstream metadata lives in tmux session user options
   under the `mstream` namespace.
 - SR5: Tmux history remains the durable output snapshot source. OutputBus
-  buffers are live/volatile, while `mstream` records redacted to-agent and
-  from-agent audit events to the socket-adjacent JSONL so `events --readable`
-  can replay the call log after daemon restart.
+  buffers are live/volatile. `mstream` records redacted audit events to the
+  socket-adjacent JSONL so readable events can replay the call log after daemon
+  restart: all non-`agent_output` control/report/handoff/timer events are
+  lossless-enqueued, while high-volume `agent_output` is best-effort and
+  exposes dropped/degraded counters.
 - SR6: Empty operational workstreams are ephemeral when they have no tagged
   session metadata and no retained audit events. Audit replay may recreate a
   timeline-only workstream for transcript reads, but it must not restore
@@ -806,7 +809,10 @@ with explicit completion states.
 `events` returns bounded structured event records after a cursor. The retained
 ring is mirrored to a socket-adjacent redacted audit JSONL so readable events
 and closeout transcripts survive daemon restart; malformed or partial replay
-lines are skipped with diagnostics rather than aborting startup.
+lines are skipped with diagnostics rather than aborting startup. The `status`
+and `events` APIs include an `audit` object so orchestrators can detect degraded
+persistence, best-effort `agent_output` drops, lossless enqueue failures, and
+writer persistence failures.
 
 `snapshot` returns bounded transcript text suitable for direct summarization.
 
@@ -851,7 +857,12 @@ host/session output bus can feed multiple workstream timelines because session
 tags determine membership and subscriptions can filter by host/session. Durable
 audit writes are queued to a bounded writer so high-frequency agent output does
 not perform filesystem I/O while the daemon state mutex is held; compaction is
-batched by writer-owned count/size thresholds.
+batched by writer-owned count/size thresholds. The writer has separate
+lossless and best-effort queues: control-plane, to-agent, explicit from-agent
+reports, handoff, timer, and system events are lossless-enqueued, while raw
+`agent_output` may be dropped under backpressure and increments observable
+degraded counters. Foreground daemon shutdown aborts output/timer producers and
+drains the writer before returning.
 
 Before issue #322 lands, timeline ordering is best-effort arrival order with
 source labels. After #322, `mstream` should delegate timestamp-aware merge-sort
@@ -938,8 +949,9 @@ coverage for:
 - JSONL output shape
 - bounded observation and cursor behavior
 - arrival-order timeline behavior before issue #322
-- durable audit replay, redaction, queueing outside the state lock, malformed
-  line tolerance, and bounded JSONL compaction
+- durable audit replay, redaction, lossless-vs-best-effort queueing outside
+  the state lock, degraded counters, shutdown drain, malformed line tolerance,
+  and bounded JSONL compaction
 - coordinator-to-agent `send`, `interrupt`, and `broadcast`
 - coordinator-owned `session mark <target>` state transitions
 - handoff arming, firing, cancellation, and daemon-restart loss behavior
