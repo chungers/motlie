@@ -8,6 +8,7 @@
 | 2026-06-07 18:16 PDT | @codex-366-impl | Expanded M5 #402 into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared toggle, including a 120 ms resumed-speech onset threshold, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that chunk. |
 | 2026-06-07 | @codex-366-impl | Fixed live ASR end-of-turn latency by finishing the active ASR session after the replay-sized trailing-silence pad; final transcripts no longer wait for a later utterance when Sherpa does not endpoint first. |
 | 2026-06-07 | @codex-366-impl | Added `conversation barge-in on|off|status` for TUI/socket live tests; default remains on, while off suppresses transcript-triggered TTS clear so smoke-test echo playback can finish. |
+| 2026-06-06 23:27 PDT | @codex-367-design | Added the M4 implementation PLAN from the approved text-call DESIGN: socket mux validation, phone-number-keyed inbound subscription/offer flow, blocking outbound text-call dial, bidirectional text WebSocket contract, `bins/telnyx-agent` tmux bridge daemon, cargo commands, module locations, and comprehensive M4 test coverage. |
 | 2026-06-06 15:00 PDT | @codex-366-impl | Added M3 partial-ASR-triggered barge-in: meaningful unsuppressed partials on attached calls cancel active playback through the existing M2 clear/cancel path; final transcripts still drive regeneration, and frame-level speech-onset barge-in was later folded into M5 #402 / PR #417. |
 | 2026-06-06 13:40 PDT | @codex-366-impl | Made M3 echo replies opt-in for testing via `--conversation-smoke-test` or `conversation smoke-test on`, and wired outbound `dial` to auto-attach conversation like inbound `answer`; default attached conversations now remain transcription-only unless a test handler is enabled. |
 | 2026-06-06 13:12 PDT | @codex-366-impl | Applied M3 manual acceptance feedback: default conversation attach/answer is auto-approved, `conversation disapprove` cancels active TTS and returns calls to transcription-only, and status listener formatting is operator-friendly. |
@@ -65,17 +66,17 @@ Derived from [DESIGN.md](./DESIGN.md). This PLAN assumes brownfield work against
 Execution policy for the initial implementation:
 
 - the gateway starts as an idle operator-controlled application with an HTTP/WebSocket listener; `--tui` enables the local TUI, `--socket <path>` enables headless Unix-domain command control, and the gateway does not answer inbound calls until an operator command source enables inbound mode or runs `answer`
-- in milestone 4 (#367), local agents must be able to drive the gateway through the Unix-domain socket using NDJSON command requests, structured command results, call snapshots, and cursor-based event polling; authenticated Gateway Control API and gateway application webhooks remain separate appserver integration surfaces
+- in milestone 4 (#367), the already-implemented Unix-domain command socket and command-source mux are validation targets; remote appservers integrate through the new text-call protocol: phone-number-keyed inbound subscriptions, sequential callback offers, blocking outbound dial with callback URL, and a per-call bidirectional text WebSocket
 - milestone 1 (#364) is inbound calls answered and managed in the TUI, with ASR transcription in the selected-call detail pane
 - milestone 1.5 (#371) is Sherpa-only ASR quality tuning using captured audio replay, WER reports, hotwords/context bias, and model/decoder A/B before considering non-Sherpa ASR
 - milestone 2 (#365) is outbound dialing plus TTS driven through the shared command engine from either the TUI or the Unix-domain socket; selected-call detail text input is a TUI affordance over the same `speak` command path
 - milestone 3 (#366) is full-duplex conversation driven by a TUI chat interface over the selected call
-- milestone 4 (#367) is external integration: local agent socket tooling, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
+- milestone 4 (#367) is external integration: socket mux validation, appserver text-call protocol, phone-number-keyed inbound subscriptions, blocking outbound text-call dial, bidirectional text WebSocket, and a new `bins/telnyx-agent` daemon that bridges text turns to a local tmux agent session
 - milestone 5 (#402) is conversational realism latency hardening for the M3 duplex path: endpoint finalization, partial/frame-level barge-in with a 120 ms resumed-speech onset threshold, chunked enqueue, frame pacing validation, and live smoke-test measurements
 - `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
 - `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
 - all work needed only for those follow-on pairings belongs in phase 10 or later
-- phases are capability layers; milestones #364-#367 are shippable increments gated in Phase 8, so Phase 6 API/webhook tasks define contracts and stubs until their milestone 4 implementation gate
+- phases are capability layers; milestones #364-#367 are shippable increments gated in Phase 8, so Phase 6 API/text-call tasks define contracts and stubs until their milestone 4 implementation gate
 
 ---
 
@@ -113,8 +114,8 @@ Extend the existing provider-neutral voice layer and add the Telnyx-specific dep
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Crate Hierarchy and API Surfaces`
 - [ ] Add startup flags `--tui` and `--socket <path>`; allow either, both, or neither when the process relies only on `--load` and/or authenticated HTTP Control API, and route both live local input sources through one serialized command dispatcher when both are enabled.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Gateway Configuration Requirement`
-- [ ] Add `api/{control.rs,auth.rs,subscriptions.rs}` and `events/{envelope.rs,dispatcher.rs,delivery.rs}` scaffolding for the external Control API and gateway application webhook delivery; implement and validate these surfaces in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Crate Hierarchy and API Surfaces`
+- [ ] Retarget the existing external-integration scaffolding for M4: keep `api/auth.rs` and read-only `api/calls.rs`, replace app-webhook subscription work with `api/inbound_subscriptions.rs`, add `api/outbound_calls.rs`, and add `text_calls/{subscriber_registry.rs,offers.rs,websocket.rs,turns.rs}` for the callback/text-stream protocol.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API`, `Crate Hierarchy and API Surfaces`
 - [ ] Start the gateway as an idle listener by default; do not register Telnyx apps, bind numbers, answer inbound calls, or dial outbound calls until a configured command source or authenticated Control API request does so.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Staged Build Strategy`
 - [ ] Keep `bins/telnyx-gateway` focused on Telnyx protocol mapping, Telnyx call control, process configuration, and wiring.
@@ -212,8 +213,8 @@ Assemble and validate the first useful Telnyx slice: inbound call handling plus 
 
 - [ ] Implement `StdoutTranscriptSink` for the first live inbound validation.
   DESIGN reference: `Staged Build Strategy`, `Inbound Handler Surface`
-- [ ] Implement gateway-local `TuiTranscriptSink` so milestone 1 can render transcripts to the selected-call detail pane; keep `WebhookTranscriptSink` for milestone 4 external integration.
-  DESIGN reference: `Staged Build Strategy`, `Application Webhooks and Gateway Control API`
+- [ ] Implement gateway-local `TuiTranscriptSink` so milestone 1 can render transcripts to the selected-call detail pane; keep the M4 appserver path as a text-call conversation sink that emits `caller.turn` frames after ASR finalization.
+  DESIGN reference: `Staged Build Strategy`, `Application Text Call Protocol and Gateway Control API`
 - [ ] Add a test sink that records transcript events for assertions.
   DESIGN reference: `Staged Build Strategy`, `Testing Scope for PLAN`
 - [ ] Add a documented extension point for a future tmux sink that maps final transcripts to `motlie_tmux::KeySequence` and `Target::send_keys()`.
@@ -322,11 +323,11 @@ Wire call-control operations for inbound and outbound calls.
 
 - [ ] Add `motlie-driver` commands for gateway status, config, and persistence: `status`, `listener status`, `state dump [path]`, `shutdown [dump_path]`, `config show`, `config set webhook-url <https-url>`, `config set media-url <wss-url>`, `config set from-number <e164>`, and `config set state-path <path>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Define `motlie-driver` commands for external automation: `api token create`, `api token revoke`, `webhook subscription list`, `webhook subscription add <url> --events <event,...>`, `webhook subscription upsert <subscription-id> <url> --events <event,...> --secret-ref <secret-ref>`, `webhook subscription remove <subscription-id>`, and `webhook subscription test <subscription-id>`; implement and validate them in milestone 4 (#367).
-  DESIGN reference: `Operator REPL and TUI Control Surface`, `Application Webhooks and Gateway Control API`
+- [ ] Define `motlie-driver` commands for M4 external automation: `api token create`, `api token revoke`, `inbound subscription list [--phone-number <phone-number>]`, `inbound subscription upsert <subscription-id> --phone-number <phone-number> --callback-url <https-url> --priority <n> --secret-ref <secret-ref>`, `inbound subscription remove <subscription-id>`, `inbound subscription test <subscription-id>`, and `outbound dial --to <destination> --callback-url <https-url> [--from <phone-number>]`; implement and validate them in milestone 4 (#367).
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Application Text Call Protocol and Gateway Control API`
 - [ ] Add Telnyx provisioning commands: `telnyx app list`, `telnyx app create <name>`, `telnyx app use <connection-id>`, `telnyx app webhook set <https-url>`, `telnyx number list`, `telnyx number use <e164>`, and `telnyx number bind <e164> <connection-id>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Add inbound call commands: `inbound status`, `inbound enable --manual`, `inbound enable --auto-transcribe`, `inbound disable`, `calls`, `call use <call>`, `answer [call] [--sink tui|stdout|webhook:<subscription-id>]`, `reject [call]`, `hangup [call]`, and transcript follow/clear commands.
+- [ ] Add inbound call commands: `inbound status`, `inbound enable --manual`, `inbound enable --auto-transcribe`, `inbound disable`, `calls`, `call use <call>`, `answer [call] [--sink tui|stdout|conversation]`, `reject [call]`, `hangup [call]`, and transcript follow/clear commands.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Route command results, Telnyx API responses, pending/active call state, media metadata, and transcript events to the global status stream, top call roster, or selected-call detail pane as appropriate.
   DESIGN reference: `Operator REPL and TUI Control Surface`
@@ -349,52 +350,62 @@ Wire call-control operations for inbound and outbound calls.
   DESIGN reference: `Replayable State Dumps`, `Gateway Configuration Requirement`
 - [ ] Implement replayable dump generation as command text, not an opaque binary snapshot.
   DESIGN reference: `Replayable State Dumps`
-- [ ] Include durable state in dumps: public webhook/media URLs, selected Telnyx app/connection, selected/bound phone number, default from number, inbound mode, webhook subscriptions/event filters, secret references, token metadata or token hash references, and selected ASR/TTS model names when configured through the operator command surface.
+- [ ] Include durable state in dumps: public webhook/media URLs, selected Telnyx app/connection, selected/bound phone number, default from number, inbound mode, inbound text-call subscriptions keyed by phone number, callback secret references, token metadata or token hash references, and selected ASR/TTS model names when configured through the operator command surface.
   DESIGN reference: `Replayable State Dumps`
 - [ ] Exclude transient state from dumps: active calls, pending calls, media sessions, transcript history, in-flight TTS playback, and retry queues unless a later event journal explicitly persists them.
   DESIGN reference: `Replayable State Dumps`
 - [ ] Ensure replay commands are idempotent and prefer `use`, `bind`, and `upsert` forms over create-only commands that would duplicate remote or local objects.
   DESIGN reference: `Replayable State Dumps`
-- [ ] Never dump raw Telnyx API keys, application webhook HMAC secrets, or bearer tokens; persist only secret references or hashed token material.
+- [ ] Never dump raw Telnyx API keys, application callback HMAC secrets, bearer tokens, unredacted phone numbers in examples, or per-call text stream state; persist only secret references or hashed token material.
   DESIGN reference: `Replayable State Dumps`
 
-### 6.5 - Gateway Control API
+### 6.5 - M4 text-call Control API
 
-Phase 6.5 defines the HTTP Control API contract and lightweight routing stubs only. Full implementation and validation belong to milestone 4 (#367), not M1, M2, or M3.
+Phase 6.5 defines the HTTP API surfaces that remote appservers use for text-call integration. Implementation begins only after the design merges and M3.5 lands.
 
-- [ ] Define authenticated call read endpoints: `GET /api/v1/calls` with state/direction filters and cursor pagination, plus `GET /api/v1/calls/{call_id}` with full call detail, media/transcript/TTS state, provider diagnostic IDs, attachments, last error, and recent timeline entries; implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Define authenticated call attachment endpoints: `POST /api/v1/calls/{call_id}/attachments`, `GET /api/v1/calls/{call_id}/attachments`, and `DELETE /api/v1/calls/{call_id}/attachments/{attachment_id}`; implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Define attachment semantics so an app server can bind an existing webhook subscription to one call's transcript/events before or after answer; deleting the attachment stops delivery for that subscription without hanging up the call. Implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Define authenticated call-control endpoints: `POST /api/v1/calls/{call_id}/answer`, `POST /api/v1/calls/{call_id}/reject`, and `POST /api/v1/calls/{call_id}/hangup`; implement and validate the HTTP API in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Define outbound dialer/TTS endpoints: `POST /api/v1/calls`, `POST /api/v1/calls/{call_id}/say`, and `POST /api/v1/calls/{call_id}/interrupt`; implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
-- [ ] Define routing so Control API requests enter the same internal command/controller layer as operator commands and answer, dial, hangup, and say behavior cannot drift; implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Operator REPL and TUI Control Surface`
-- [ ] Define authentication and `Idempotency-Key` requirements for mutating Control API requests, including call attachment create/delete operations; implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
+- [ ] Add `api/inbound_subscriptions.rs` with authenticated CRUD for `POST /api/v1/inbound-subscriptions`, `GET /api/v1/inbound-subscriptions`, `GET /api/v1/inbound-subscriptions/{subscription_id}`, `DELETE /api/v1/inbound-subscriptions/{subscription_id}`, and `POST /api/v1/inbound-subscriptions/{subscription_id}/test`.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Subscriber Registration`
+- [ ] Store inbound subscriptions in `operator::state` / durable runtime config keyed by normalized called phone number; sort enabled subscribers by `priority`, then creation time.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Subscriber Registration`
+- [ ] Require idempotent upsert semantics for subscription create/update so `bins/telnyx-agent` can re-register on daemon restart without duplicate subscriber rows.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Subscriber Registration`
+- [ ] Add `api/outbound_calls.rs` with authenticated `POST /api/v1/outbound-calls`; request fields are destination, optional caller ID, callback URL, timeout, and metadata placeholders only.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Outbound Blocking Dial API`
+- [ ] Make `POST /api/v1/outbound-calls` block until Telnyx answer plus callback acceptance plus text WebSocket establishment, or until rejection, timeout, Telnyx failure, callback failure, or text-stream setup failure.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Outbound Blocking Dial API`
+- [ ] Keep optional read-only reconciliation endpoints in `api/calls.rs`: `GET /api/v1/calls` and `GET /api/v1/calls/{call_id}`. Do not require these endpoints for inbound acceptance or outbound success.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Optional Read APIs`
+- [ ] Retire the old M4 answer/attachment/say API from the active plan: no `POST /api/v1/calls/{call_id}/answer`, no per-call webhook attachments, and no appserver `say` endpoint for the text-call path.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Alternatives Considered for M4`
+- [ ] Apply bearer token or mTLS auth to Control API routes, HMAC signatures to gateway callbacks, stale timestamp rejection, callback ID deduplication, and short callback timeouts.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Auth and Common Rules`
 
-### 6.6 - Gateway application webhooks
+### 6.6 - M4 inbound offer and text WebSocket runtime
 
-Phase 6.6 defines the application webhook contract and event taxonomy only. Full subscription storage, delivery, retries, and harness validation belong to milestone 4 (#367).
+Phase 6.6 implements the gateway-owned callback and text stream runtime above the existing Telnyx media/ASR/TTS path.
 
-- [ ] Define subscription CRUD endpoints: `POST /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions/{subscription_id}`, `DELETE /api/v1/webhook-subscriptions/{subscription_id}`, and `POST /api/v1/webhook-subscriptions/{subscription_id}/test`; implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Define outbound application webhook delivery as HTTP `POST <subscription.url>` with `Content-Type: application/json`, the gateway event envelope as the body, and HMAC delivery headers; implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Define delivery acknowledgement and retry semantics: treat any `2xx` webhook response as acknowledgement, and treat non-`2xx`, timeout, and connection failure as retryable delivery failure; implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Define inbound service event types for milestone 4 delivery: `call.inbound.pending`, `call.answering`, `call.answered`, `media.started`, `transcript.partial`, `transcript.final`, `call.ended`, and `call.failed`.
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Inbound Call Handler Design`
-- [ ] Define outbound service event types for milestone 4 delivery: `call.outbound.created`, `call.dialing`, `call.ringing`, `call.answered`, `media.started`, `tts.playback.started`, `tts.playback.finished`, `tts.playback.failed`, `call.ended`, and `call.failed`.
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
-- [ ] Define milestone 3 conversation event types for milestone 4 delivery: `conversation.attached`, `conversation.command.created`, `conversation.command.completed`, and `conversation.detached`.
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Conversation Handler Contract`
-- [ ] Deliver application webhooks asynchronously with bounded retries; never block Telnyx webhook handling on subscriber delivery. Implement and validate in milestone 4 (#367).
-  DESIGN reference: `Application Webhooks and Gateway Control API`
+- [ ] Add `text_calls/subscriber_registry.rs` to look up enabled subscribers by called phone number, returning a deterministic ordered list for one inbound call.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
+- [ ] Add `text_calls/offers.rs` to create signed `call.offer` callbacks, send them sequentially, and classify responses as accept (`200 OK` + valid `call_url`), decline (`3xx` redirect), failed offer, or timeout.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
+- [ ] Treat any `3xx` offer response as decline without following the redirect for call handling; continue to the next subscriber.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
+- [ ] If an accepted `call_url` cannot be opened before answering Telnyx, continue to the next subscriber rather than answering into a dead text stream.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
+- [ ] If the inbound subscriber list is exhausted, answer only long enough to speak `Sorry no one is here to handle your call. bye!` through the existing outbound speech path, then hang up.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
+- [ ] Add `text_calls/websocket.rs` for gateway-as-client WebSocket connections to application `call_url` endpoints; use JSON text frames only and reject binary/audio frames.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
+- [ ] Add `text_calls/turns.rs` with typed frame enums for `session.start`, `caller.turn`, `playback.started`, `playback.finished`, `session.end`, `agent.turn`, `agent.close`, and `error`.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
+- [ ] Route only ASR-final text to `caller.turn` by default; keep ASR partials out of the M4 appserver protocol unless a later extension is explicitly designed.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
+- [ ] Route `agent.turn.text` through the existing M3/M2 outbound speech controller and emit playback status frames from the existing playback lifecycle.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`, `Outbound Call Handler Design`
+- [ ] Reuse the existing M3 clear/cancel barge-in path; on caller interruption, emit the next ASR-final `caller.turn` with a new turn id and suppress duplicates by `turn_id` / sequence.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
+- [ ] End the Telnyx call on missed text-stream heartbeat, app `agent.close`, malformed protocol after an error frame, or WebSocket close.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
 
 ## Phase 7: Pipeline Orchestration
 
@@ -565,20 +576,40 @@ Verification (@codex-366-impl, 2026-06-05 23:34 PDT): `cargo build -p motlie-tel
 - [ ] Capture live M5 validation numbers for endpoint-to-final latency, final-to-first-frame latency, outbound frame pacing, barge-in cut time, and human-reported playback smoothness. (@codex-366-impl, 2026-06-07 22:15 PDT: include chunked-enqueue boundary residuals in this validation: per-text-chunk resampler edge transients, up to about 20 ms zero-padding at each text-chunk boundary, and mid-utterance underrun risk when a later chunk synthesizes slower than playback drains.)
   DESIGN reference: `Testing Scope for PLAN`, `Real-Time Latency Requirements`
 
-### 8.4 - Milestone 4 external integration harness (#367)
+### 8.4 - Milestone 4 text-call integration and agent daemon (#367)
 
-- [ ] Implement startup with `--socket <path>` for headless Unix-domain command control; when both `--tui` and `--socket` are present, route both through the command-source mux.
-  DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Implement the local-agent milestone 4 flow over the socket only: configure gateway state, enable inbound, poll `events poll` until `call.inbound.pending`, inspect `call get`, run `answer <call_id>`, poll transcript events, and run `hangup <call_id>` without using appserver webhooks or the HTTP Control API.
-  DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
-- [ ] Implement the programmatic milestone 1 flow: application webhook subscription -> `call.inbound.pending` event -> optional `GET /api/v1/calls/{call_id}` state reconciliation -> `POST /api/v1/calls/{call_id}/attachments` to bind transcript/event delivery -> `POST /api/v1/calls/{call_id}/answer` -> media start -> `transcript.partial` / `transcript.final` webhooks.
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Inbound Call Handler Design`
-- [ ] Implement the programmatic milestone 2 flow: `POST /api/v1/calls` -> outbound Telnyx dial with media -> `POST /api/v1/calls/{call_id}/say` -> outbound TTS media -> TTS playback webhooks.
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
-- [ ] Add a harness appserver that can register a webhook subscription, verify HMAC signatures, reconcile call state, attach to calls, answer inbound calls, drive outbound dial/say, and record observed events.
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Verify socket/TUI selection isolation and command-source mux ordering under concurrent command submissions.
-  DESIGN reference: `Operator REPL and TUI Control Surface`
+M4 implementation must wait for the DESIGN to merge and M3.5 to land. This section is the implementation checklist for that later work.
+
+- [ ] Validate the already-implemented Unix-domain command socket and command-source mux with `--socket <path>` and combined `--tui --socket <path>` startup; do not redesign the socket protocol while adding appserver text calls.
+  DESIGN reference: `Milestone 4: External Integration Harness`, `Operator REPL and TUI Control Surface`
+- [ ] Add gateway M4 modules under `bins/telnyx-gateway/src/api/{inbound_subscriptions.rs,outbound_calls.rs,calls.rs}` and `bins/telnyx-gateway/src/text_calls/{subscriber_registry.rs,offers.rs,websocket.rs,turns.rs}`; wire the existing `webhook/mod.rs` `call.initiated` path into `text_calls::subscriber_registry` and `text_calls::offers` when inbound text-call mode is enabled; remove or leave unused only with an inline note any older app-webhook attachment modules that are superseded by text calls.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API`, `Crate Hierarchy and API Surfaces`
+- [ ] Implement inbound subscriber registration keyed by called phone number with authenticated API, operator command parity, replayable state dump/load, idempotent upsert, priority ordering, and callback HMAC secret references.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Subscriber Registration`, `Replayable State Dumps`
+- [ ] Implement inbound sequential-notify flow: on inbound call, look up subscribers for the called number, send signed `call.offer` callbacks one at a time, accept only `200 OK` + valid `call_url`, treat redirects as declines, and continue on timeout/failure.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
+- [ ] Implement the exhaustion fallback: after all subscribers decline or fail, answer, speak `Sorry no one is here to handle your call. bye!`, and terminate the call.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
+- [ ] Implement outbound blocking dial: `POST /api/v1/outbound-calls` dials Telnyx with existing media setup, waits for answer, sends the app callback, opens the returned WebSocket, then returns success only after text stream setup; rejection/timeouts return structured errors.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Outbound Blocking Dial API`, `Outbound Call Handler Design`
+- [ ] Implement one bidirectional text WebSocket runtime for inbound and outbound calls: gateway sends ASR-final `caller.turn`, app sends `agent.turn`, gateway speaks via existing TTS path, and playback/error/session lifecycle frames are sequenced.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
+- [ ] Add the new workspace member `bins/telnyx-agent` as a daemon crate only during implementation: `Cargo.toml`, `src/main.rs`, `src/{config.rs,gateway_client.rs,http.rs,text_ws.rs,tmux_bridge.rs,socket.rs,error.rs}`.
+  DESIGN reference: `Telnyx Agent Daemon` / `Responsibilities`
+- [ ] Implement `telnyx-agent daemon --gateway-url <https-url> --public-url <https-url> --subscribe-number <called-phone-number> --tmux-target <target> --socket <path>` to register inbound subscriptions, serve inbound/outbound callbacks, and serve per-call `call_url` WebSockets.
+  DESIGN reference: `Telnyx Agent Daemon` / `Daemon Usage Sketch`
+- [ ] Implement the daemon place-call socket with NDJSON request/response frames, e.g. `{"id":"req-1","type":"dial","to":"<destination-phone-number-or-sip-uri>"}`, and make it call gateway `POST /api/v1/outbound-calls` internally.
+  DESIGN reference: `Telnyx Agent Daemon` / `Daemon Usage Sketch`
+- [ ] Implement the daemon tmux input bridge with `motlie-tmux` target resolution and `KeySequence::literal(...).then_enter()`; never shell out raw `tmux send-keys` for call turns.
+  DESIGN reference: `Telnyx Agent Daemon` / `Input to Tmux`
+- [ ] Implement the daemon tmux output bridge by starting `motlie-tmux` monitoring once, subscribing to `OutputBus`, building a bounded `HistoryHandle`, recording a baseline before each turn, and extracting text until a matching turn-end marker appears.
+  DESIGN reference: `Telnyx Agent Daemon` / `Output from Tmux`
+- [ ] Keep app-layer scrape logic minimal: the daemon may own marker detection and turn correlation, while ANSI stripping, pane assembly, coalescing, history trimming, and discontinuity markers stay in `motlie-tmux` monitor/history.
+  DESIGN reference: `Telnyx Agent Daemon` / `Output from Tmux`
+- [ ] Add a fake appserver/fake gateway harness for M4 validation under `bins/telnyx-gateway/tests/` and `bins/telnyx-agent/tests/`; use placeholders for every phone value and avoid committing live numbers.
+  DESIGN reference: `Telnyx Agent Daemon` / `Validation Scope`, `Application Text Call Protocol and Gateway Control API`
+- [ ] Expected implementation commands after M4 opens: `cargo fmt -p motlie-telnyx-gateway -p motlie-telnyx-agent`, `cargo check -p motlie-telnyx-gateway --features "sherpa piper"`, `cargo test -p motlie-telnyx-gateway --features "sherpa piper"`, `cargo clippy -p motlie-telnyx-gateway --features "sherpa piper" -- -D warnings`, `cargo check -p motlie-telnyx-agent`, `cargo test -p motlie-telnyx-agent`, and `cargo clippy -p motlie-telnyx-agent -- -D warnings`.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API`, `Telnyx Agent Daemon`
 
 ## Phase 9: Verification, Examples, and Operational Docs
 
@@ -616,13 +647,25 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Add a milestone 1 structured-log check that verifies gateway call id, Telnyx diagnostic ids, stream id, observed codec, observed sample rate, transcript partial/final events, and Telnyx termination details are logged during an inbound transcription session.
   DESIGN reference: `Inbound Call Handler Design`, `Open Concerns`
-- [ ] Add Control API tests for authenticated call list/detail reads, call attachment create/list/delete, attach-before-answer and attach-after-answer behavior, answer/reject/hangup, outbound dial/say, idempotency handling, and refusal of unauthenticated mutating requests.
-  DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Add application webhook delivery tests for event envelope shape, HMAC signature verification, retry behavior, event filtering, and duplicate-event deduplication by event ID.
-  DESIGN reference: `Application Webhooks and Gateway Control API`
+- [ ] Add socket-mux validation tests proving TUI, socket, replay, and API-originated command envelopes serialize through the same dispatcher, route responses to the submitting source, preserve source-local selected-call state, and publish state changes to the shared event/status stream.
+  DESIGN reference: `Milestone 4: External Integration Harness`, `Operator REPL and TUI Control Surface`
+- [ ] Add inbound subscription API tests for authenticated CRUD/upsert, phone-number normalization, priority ordering, idempotent daemon re-registration, state dump/load, and refusal of unauthenticated mutating requests.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Subscriber Registration`
+- [ ] Add inbound sequential-notify tests covering: first subscriber accepts with `200 OK` + `call_url`; first redirects and second accepts; timeout/invalid JSON/non-2xx/non-3xx advances to the next subscriber; accepted WebSocket open failure advances to the next subscriber; exhausted list triggers the exact fallback phrase and hangup.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
+- [ ] Add callback security tests for `X-Motlie-Callback-Id`, timestamp freshness, HMAC signature verification, duplicate callback ID handling, and redaction of phone values from logs/fixtures.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Auth and Common Rules`
+- [ ] Add blocking outbound dial API tests proving the HTTP request remains pending while Telnyx rings, returns success only after callback acceptance and text WebSocket setup, and returns structured rejection/timeout/callback-failure/WebSocket-failure errors.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Outbound Blocking Dial API`
+- [ ] Add bidirectional text WebSocket contract tests for `session.start`, ASR-final-only `caller.turn`, one active `turn_id`, `agent.turn` to TTS routing, playback status frames, `agent.close`, invalid turn error frames, binary frame rejection, heartbeat timeout, and barge-in cancel/regenerate sequencing.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
+- [ ] Add `bins/telnyx-agent` daemon tests with a fake gateway: startup re-registers inbound subscriptions idempotently, inbound offer accept/decline callbacks work, outbound place-call socket blocks until text stream setup, and one WebSocket-to-tmux bridge implementation handles inbound and outbound calls.
+  DESIGN reference: `Telnyx Agent Daemon` / `Validation Scope`
+- [ ] Add tmux bridge tests using `motlie-tmux` monitor/history or a fake `HistoryHandle`: inbound `caller.turn` becomes `KeySequence` input, marker-delimited reply extraction returns exactly one `agent.turn`, duplicate scrape logic is not introduced in the daemon, and missing marker/timeouts fail the turn without hanging the daemon.
+  DESIGN reference: `Telnyx Agent Daemon` / `Input to Tmux`, `Telnyx Agent Daemon` / `Output from Tmux`
 - [ ] Add persistence tests that dump state, restart with `--load <dump_path>`, and assert the replayed gateway state matches durable Telnyx/app-server configuration without resurrecting active calls or media sessions.
   DESIGN reference: `Replayable State Dumps`, `Gateway Configuration Requirement`
-- [ ] Add secret-safety tests that generated dumps contain secret references or hashes, not raw Telnyx API keys, application webhook HMAC secrets, or bearer tokens.
+- [ ] Add secret-safety tests that generated dumps contain secret references or hashes, not raw Telnyx API keys, application callback HMAC secrets, bearer tokens, or unredacted phone values.
   DESIGN reference: `Replayable State Dumps`
 - [ ] Add compile-fail or equivalent type-level tests for wrong rate, wrong channel layout, wrong sample type, and wrong stage order.
   DESIGN reference: `Testing Scope for PLAN`, `Compile-Time Pipeline Assembly`
@@ -645,12 +688,14 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Staged Build Strategy`, `Concrete Combination Requirements`
 - [ ] Add one milestone 1 TUI walkthrough: `telnyx app create/use`, `telnyx number bind`, `inbound enable --manual`, incoming call highlighted in the top roster, `call use <call>` or keyboard selection, `answer [call]`, and transcript in the selected-call detail pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
-- [ ] Add one milestone 4 inbound service walkthrough: register a webhook subscription, receive `call.inbound.pending`, reconcile with `GET /api/v1/calls/{call_id}`, attach the subscription to the call with `POST /api/v1/calls/{call_id}/attachments`, call `POST /api/v1/calls/{call_id}/answer`, and receive transcript webhooks.
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Inbound Call Handler Design`
+- [ ] Add one milestone 4 inbound text-call walkthrough: register an inbound subscription for `<called-phone-number>`, receive a signed `call.offer`, return redirect to decline or `200 OK` with `call_url` to accept, exchange text WebSocket turns, and verify the fallback phrase/hangup when no subscriber accepts.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API`, `Inbound Call Handler Design`
 - [ ] Add one milestone 2 outbound dial/speak example configuration for Piper TTS through `OutboundSpeechController::speak()`.
   DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
-- [ ] Add one milestone 4 outbound service walkthrough: call `POST /api/v1/calls`, then `POST /api/v1/calls/{call_id}/say`, and observe TTS playback webhooks.
-  DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
+- [ ] Add one milestone 4 outbound text-call walkthrough: appserver calls `POST /api/v1/outbound-calls` with callback URL, gateway blocks until answer + callback + WebSocket setup, then appserver and gateway exchange turn-based text frames.
+  DESIGN reference: `Application Text Call Protocol and Gateway Control API`, `Outbound Call Handler Design`
+- [ ] Add one `bins/telnyx-agent` walkthrough showing daemon startup, subscription registration, local daemon socket outbound call request, and tmux marker/history reply extraction with phone placeholders only.
+  DESIGN reference: `Telnyx Agent Daemon`
 - [ ] Add one milestone 3 end-to-end example configuration for Sherpa + Piper only after the inbound ASR and outbound TTS milestones are independently stable.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Document the first live-call checklist, including observed codec logging, Telnyx termination reason logging, and bidirectional PCMU silence keepalive validation.
