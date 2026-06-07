@@ -890,20 +890,22 @@ stand by, and active workstream timers are stopped. At closeout, tell the user
 what merged, what remains open, which agents were freed, which timers were
 stopped, and whether any local uncommitted changes remain.
 
-**MANDATORY — capture the full mstream timeline as the final audit trail.**
-Before (or at) every closeout you MUST save the complete human-readable timeline
-to a transcript artifact. This timeline IS the authoritative audit trail of the
-workstream — it is not optional and not a convenience:
+**MANDATORY — capture the full mstream timeline as the final audit trail, INLINED into the GitHub closeout.**
+Before (or at) every closeout you MUST capture the complete human-readable timeline
+and **inline its content into the GitHub closeout comment** (a fenced code block).
+This timeline IS the authoritative audit trail — it is not optional:
 
 ```sh
-mstream events <workstream> --readable --limit 5000 \
-  > ~/sessions/<session>/closeouts/transcript-<workstream>.txt
+mstream events <workstream> --readable --limit 5000   # pipe its OUTPUT into the closeout body
 ```
 
-Use a `--limit` high enough to cover the whole workstream (do not truncate the
-audit trail). The daemon retains the timeline even AFTER `mstream close`, so it
-stays recoverable if missed — but capture it as part of the close so the audit
-trail is never lost.
+- **Inline the content, never a path.** A reference like `~/sessions/.../transcript-X.txt`
+  is meaningless to anyone reading on GitHub — embed the actual timeline text in the
+  comment so the audit trail is self-contained. A local file copy is only a backup, not
+  a substitute. Use a `--limit` high enough to cover the whole workstream (do not truncate).
+- If the timeline is unexpectedly empty (e.g. the daemon was restarted and the in-memory
+  event buffer was lost — events are not durable today), say so explicitly in the closeout
+  rather than referencing a file; do not imply a record exists when it does not.
 
 Keep mstream boundaries clean during closeout. `mstream` is responsible for
 workstream/session/timer/timeline primitives; it should not decide which GitHub
