@@ -1,7 +1,9 @@
+pub mod asr;
 pub mod chat;
 pub mod embeddings;
 pub mod perf;
 pub mod support;
+pub mod tts;
 
 use std::path::PathBuf;
 

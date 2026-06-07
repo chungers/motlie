@@ -26,7 +26,7 @@ Derived from [DESIGN_CURATED_MODEL_EVALS.md](./DESIGN_CURATED_MODEL_EVALS.md).
   DESIGN reference: Migration Strategy.
 - [x] Incorporate early CHANGE-PATTERN feedback before batch refactoring.
   DESIGN reference: Runner Boundary.
-- [ ] Re-ping for quick pattern re-review before batch refactoring.
+- [x] Re-ping for quick pattern re-review before batch refactoring.
   DESIGN reference: Migration Strategy.
 
 ## Phase 2: Eval Binary Module Skeleton
@@ -44,11 +44,11 @@ Derived from [DESIGN_CURATED_MODEL_EVALS.md](./DESIGN_CURATED_MODEL_EVALS.md).
 
 - [x] Add `bins/evals` as the workspace binary crate.
   DESIGN reference: Target Layout.
-- [ ] Implement `evals list bundles`.
+- [x] Implement `evals list bundles`.
   DESIGN reference: Decision.
 - [x] Implement `evals list scenarios`.
   DESIGN reference: Naming Rules.
-- [x] Implement a minimal `run --bundle <id> --scenario embeddings_similarity`.
+- [x] Implement `run --bundle <id> --scenario ...` for embeddings, chat, ASR, TTS, and perf scenarios.
   DESIGN reference: Result Record.
 - [ ] Implement `report --input <jsonl> --format markdown`.
   DESIGN reference: Decision.
@@ -63,17 +63,17 @@ Derived from [DESIGN_CURATED_MODEL_EVALS.md](./DESIGN_CURATED_MODEL_EVALS.md).
   DESIGN reference: Migration Strategy.
 - [ ] Migrate TTS examples to `tts_basic` while preserving legacy targets.
   DESIGN reference: Migration Strategy.
-- [ ] Convert `bench_chat` evidence into `perf_chat_startup`.
+- [x] Convert `bench_chat` evidence into `bench_chat_startup`.
   DESIGN reference: Naming Rules.
 
 ## Phase 5: Verification
 
-- [ ] `cargo fmt`
-- [ ] `cargo build`
-- [ ] `cargo test`
-- [ ] `cargo clippy -- -D warnings`
+- [x] `cargo fmt`
+- [x] `cargo build`
+- [x] `cargo test`
+- [x] `cargo clippy -- -D warnings`
 - [ ] targeted example checks for each migrated compatibility target
-- [ ] targeted `evals` checks after the CLI exists
+- [x] targeted `evals` checks after the CLI exists
 
 ## Platform Follow-Up
 

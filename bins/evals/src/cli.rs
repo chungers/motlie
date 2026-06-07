@@ -5,9 +5,11 @@ use anyhow::{bail, Context, Result};
 use crate::metrics::MetricsSampler;
 use crate::platform::PlatformCollector;
 use crate::report::OutputSink;
+use crate::runner::asr::AsrRunner;
 use crate::runner::chat::ChatRunner;
 use crate::runner::embeddings::EmbeddingSimilarityRunner;
 use crate::runner::perf::PerfRunner;
+use crate::runner::tts::TtsRunner;
 use crate::runner::{BundleSelection, ProfileSelection, RunContext, RuntimeFlags, ScenarioRunner};
 use crate::scenario::{self, CapabilityName};
 
@@ -83,8 +85,11 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
         CapabilityName::Perf => {
             PerfRunner.run(context).await?;
         }
-        CapabilityName::Asr | CapabilityName::Tts => {
-            bail!("`evals run` support for asr and tts is added in the next batch slice")
+        CapabilityName::Asr => {
+            AsrRunner.run(context).await?;
+        }
+        CapabilityName::Tts => {
+            TtsRunner.run(context).await?;
         }
     }
     Ok(())

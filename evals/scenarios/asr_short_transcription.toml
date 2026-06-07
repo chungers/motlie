@@ -1,0 +1,35 @@
+schema_version = 1
+id = "asr_short_transcription"
+capability = "asr"
+summary = "Short WAV transcription smoke for curated ASR bundles."
+
+[bundle_filter]
+capability = "asr"
+backend = ["WhisperCpp", "SherpaOnnx", "Ort"]
+
+[input]
+audio = "libs/models/examples/tts_qwen3_tts_cpp/assets/jarvis-ref-16k.wav"
+language = "en"
+streaming_chunk_ms = 200
+
+[assertions]
+min_transcript_chars = 1
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+capture_peak_rss = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 0
+
+[profiles.local-cpu-aarch64.gates]
+max_process_swap_delta_bytes = 0
+
+[profiles.apple-metal]
+
+[profiles.dgx-spark.gates]
+max_process_swap_delta_bytes = 0
+
+[profiles.cuda-workstation.gates]
+max_process_swap_delta_bytes = 0

@@ -451,6 +451,34 @@ capture_request_latency = true
         }
     }
 
+    #[test]
+    fn parses_asr_scenario_shape() {
+        let scenario = load_scenario(&repo_eval_root(), "asr_short_transcription").unwrap();
+
+        assert_eq!(scenario.capability(), CapabilityName::Asr);
+        match scenario.kind {
+            ScenarioKind::Asr(asr) => {
+                assert_eq!(asr.assertions.min_transcript_chars, Some(1));
+                assert_eq!(asr.input.language.as_deref(), Some("en"));
+            }
+            other => panic!("expected ASR scenario, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_tts_scenario_shape() {
+        let scenario = load_scenario(&repo_eval_root(), "tts_synthesis_smoke").unwrap();
+
+        assert_eq!(scenario.capability(), CapabilityName::Tts);
+        match scenario.kind {
+            ScenarioKind::Tts(tts) => {
+                assert_eq!(tts.assertions.min_sample_count, Some(1));
+                assert_eq!(tts.input.text, "Hello from Motlie.");
+            }
+            other => panic!("expected TTS scenario, got {other:?}"),
+        }
+    }
+
     fn repo_eval_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()

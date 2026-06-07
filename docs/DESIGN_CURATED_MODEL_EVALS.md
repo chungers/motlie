@@ -95,12 +95,11 @@ Evals are scenario-first:
   and serde maps them to Rust enums
 - `capability` is the serde tag for `ScenarioKind`, so each scenario carries
   capability-specific `input` and `assertions` payloads; embeddings is the
-  runnable exemplar, while chat/ASR/TTS/perf stubs keep the batch shape
-  from collapsing into an embeddings-only schema
+  runnable exemplar, with chat, ASR, TTS, and perf runners using the same tagged scenario and nested capability-metrics shape
 
 Performance is not a human example. It is captured by perf scenarios and the
 standard JSONL result schema. `bench_chat` should become a compatibility wrapper
-around the eval runner once `evals` has a `perf_chat_startup` scenario.
+around the eval runner once `evals` has a `bench_chat_startup` scenario.
 
 Reports are generated from result JSONL and should be ignored by default unless
 a curated release intentionally checks in a snapshot.
@@ -157,17 +156,17 @@ introducing capability-first names.
 | Current target | New human example | Eval or perf scenario |
 |---|---|---|
 | `embeddings` | `embeddings_basic` | `embeddings_similarity` |
-| `chat_tool_binding` | `tool_use_basic` | `tool_weather_math` |
-| `chat_mistral_qwen3` | `chat_basic` | `chat_smoke`, `completion_smoke`, `tool_weather_math` |
-| `chat_gguf_gwen3_gemma4` | `chat_basic` | `chat_smoke`, `completion_smoke`, `tool_weather_math`, `perf_chat_startup` |
-| `chat_multimodal_gemma4` | `multimodal_basic` | `chat_smoke`, `multimodal_image_caption`, `tool_weather_math` |
-| `chat_multimodal_qwen3_6_27b` | `chat_basic` | `chat_smoke`, `completion_smoke` |
-| `bench_chat` | none | `perf_chat_startup` |
-| `asr_whisper` | `asr_basic` | `asr_short_clip` |
-| `asr_sherpa_onnx` | `asr_streaming` | `asr_streaming_clip` |
-| `asr_moonshine` | `asr_streaming` | `asr_streaming_clip` |
-| `tts_piper` | `tts_basic` | `tts_basic`, `tts_asr_roundtrip` |
-| `tts_qwen3_tts_cpp` | `tts_basic` | `tts_basic`, `tts_asr_roundtrip` |
+| `chat_tool_binding` | `tool_use_basic` | `chat_tool_use_smoke` |
+| `chat_mistral_qwen3` | `chat_basic` | `chat_smoke`, `chat_completion_smoke`, `chat_tool_use_smoke` |
+| `chat_gguf_gwen3_gemma4` | `chat_basic` | `chat_smoke`, `chat_completion_smoke`, `chat_tool_use_smoke`, `bench_chat_startup` |
+| `chat_multimodal_gemma4` | `multimodal_basic` | `chat_smoke`, `multimodal_image_caption`, `chat_tool_use_smoke` |
+| `chat_multimodal_qwen3_6_27b` | `chat_basic` | `chat_smoke`, `chat_completion_smoke` |
+| `bench_chat` | none | `bench_chat_startup` |
+| `asr_whisper` | `asr_basic` | `asr_short_transcription` |
+| `asr_sherpa_onnx` | `asr_streaming` | `asr_short_transcription` |
+| `asr_moonshine` | `asr_streaming` | `asr_short_transcription` |
+| `tts_piper` | `tts_basic` | `tts_synthesis_smoke` |
+| `tts_qwen3_tts_cpp` | `tts_basic` | `tts_synthesis_smoke` |
 
 ## Alternatives Considered
 
@@ -203,7 +202,6 @@ driver version, and CUDA version when available. Memory fields may be `null` on
 GB10 when `nvidia-smi` reports `N/A`; GPU identity should still be present.
 
 D decision: keep `PlatformCollector` as the single profile-aware platform
-section source. NVIDIA population is wired through `nvidia-smi` now. Metal
-population should use a macOS command fallback such as `system_profiler` or a
+section source. NVIDIA population is wired through `nvidia-smi` now. Metal population should use a macOS command fallback such as `system_profiler` or a
 small Metal probe and can land as a fast-follow after A-C, before applying the
 chat/ASR/TTS/bench batch migration.
