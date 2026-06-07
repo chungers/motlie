@@ -89,7 +89,7 @@ unstick collaborators.
 - FR6: Create a new tmux session on a connected host, start an agent binary,
   tag the session, and join it to a workstream.
 - FR7: Leave a session from a workstream without killing it.
-- FR8: Kill a session only through an explicit destructive command.
+- FR8: Reclaim a session only through an explicit destructive command.
 - FR9: Recruit agents from connected/scanned hosts, preferring tagged available
   sessions and goal/context matches before creating new sessions.
 - FR10: Scan connected hosts and hydrate workstream/session state from tmux
@@ -337,7 +337,7 @@ State ownership:
   inferred from output silence alone.
 - `quarantined`: set by `retire` when an agent must not be recruited for new
   work but should stay alive in its current workstream for audit-logged cleanup.
-  `reclaim`/`kill` are gated on this state and on `managed=true`.
+  `reclaim` is gated on this state and on `managed=true`.
 
 `last-report-*` tags are intentionally small. Detailed reports belong in the
 agent pane transcript or PR/issue comments.
@@ -429,7 +429,7 @@ that does only `mkdir -p`, `cd`, and `exec <agent>` with validated/escaped
 arguments. A later `motlie-tmux` improvement may add `new-session -c` support
 to `CreateSessionOptions`.
 
-Close, leave, or kill:
+Close, leave, retire, or reclaim:
 
 ```sh
 mstream close pr-322 \
@@ -452,8 +452,7 @@ sessions.
 sets the agent state to `quarantined`, and excludes it from recruitment while
 allowing cleanup messages in the audit log. `reclaim` is the terminal teardown
 step: it kills and deregisters only a live tmux target whose mstream tags prove
-`managed=true` and `state=quarantined`; `kill` is a compatibility alias for that
-same gated path.
+`managed=true` and `state=quarantined`.
 
 `mstream` treats the workstream name as an opaque handle. The handle may include
 human naming conventions such as `issue-337` or `pr-330`, but the daemon does
@@ -464,7 +463,7 @@ messages, and expose bounded timeline/transcript output through `events`,
 `snapshot`, and `summary-input`.
 
 `leave` unsets workstream-specific tags but leaves the session running.
-`kill` is explicit and destructive.
+`reclaim` is explicit and destructive.
 
 ### Communication And Handoff
 
@@ -510,7 +509,7 @@ used when the message assigns new work, including handoff-generated messages.
 
 #### Interrupt
 
-Non-destructive interruption is separate from `kill`:
+Non-destructive interruption is separate from `reclaim`:
 
 ```sh
 mstream interrupt amd1::gpt55-mmux-reviewer

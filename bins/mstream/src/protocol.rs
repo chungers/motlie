@@ -107,9 +107,6 @@ pub enum ClientRequest {
     Reclaim {
         target: String,
     },
-    Kill {
-        target: String,
-    },
     Send(SendRequest),
     Interrupt(InterruptRequest),
     Broadcast(BroadcastRequest),

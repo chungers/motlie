@@ -372,10 +372,7 @@ impl DaemonState {
             ClientRequest::New(request) => Self::new_session_shared(shared, request).await,
             ClientRequest::Leave(request) => Self::leave_shared(shared, request).await,
             ClientRequest::Retire(request) => Self::retire_shared(shared, request).await,
-            ClientRequest::Reclaim { target } => {
-                Self::reclaim_shared(shared, target, "reclaim").await
-            }
-            ClientRequest::Kill { target } => Self::reclaim_shared(shared, target, "kill").await,
+            ClientRequest::Reclaim { target } => Self::reclaim_shared(shared, target).await,
             ClientRequest::Send(request) => Self::send_shared(shared, request).await,
             ClientRequest::Interrupt(request) => Self::interrupt_shared(shared, request).await,
             ClientRequest::Broadcast(request) => Self::broadcast_shared(shared, request).await,
@@ -1168,7 +1165,6 @@ impl DaemonState {
     async fn reclaim_shared(
         shared: Arc<Mutex<Self>>,
         target: String,
-        op: &'static str,
     ) -> anyhow::Result<Vec<Value>> {
         let target: SessionTarget = target.parse()?;
         let handle = {
@@ -1224,7 +1220,7 @@ impl DaemonState {
 
         Ok(vec![json!({
             "type": "ok",
-            "op": op,
+            "op": "reclaim",
             "workstream": workstream,
             "target": stable_target.to_string(),
             "cursor": cursor,
@@ -5473,10 +5469,9 @@ mod tests {
             .observe_tmux_session(&session_info("worker", "$1", 100, 150));
         let shared = Arc::new(Mutex::new(state));
 
-        let err =
-            DaemonState::reclaim_shared(Arc::clone(&shared), "local::$1".to_string(), "reclaim")
-                .await
-                .expect_err("busy session should not reclaim");
+        let err = DaemonState::reclaim_shared(Arc::clone(&shared), "local::$1".to_string())
+            .await
+            .expect_err("busy session should not reclaim");
 
         assert!(err.to_string().contains("not quarantined"));
         let state = shared.lock().await;
@@ -5535,10 +5530,9 @@ mod tests {
             );
 
         let shared = Arc::new(Mutex::new(state));
-        let records =
-            DaemonState::reclaim_shared(Arc::clone(&shared), "local::$1".to_string(), "reclaim")
-                .await
-                .expect("reclaim");
+        let records = DaemonState::reclaim_shared(Arc::clone(&shared), "local::$1".to_string())
+            .await
+            .expect("reclaim");
 
         assert_eq!(records[0]["op"], "reclaim");
         assert_eq!(records[0]["workstream"], "issue-401");

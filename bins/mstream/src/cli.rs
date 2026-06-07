@@ -66,9 +66,6 @@ pub enum Command {
     Reclaim {
         target: String,
     },
-    Kill {
-        target: String,
-    },
     Send(SendArgs),
     Interrupt(InterruptArgs),
     Broadcast(BroadcastArgs),
@@ -146,7 +143,6 @@ impl Command {
                 target: args.target,
             })),
             Command::Reclaim { target } => Ok(ClientRequest::Reclaim { target }),
-            Command::Kill { target } => Ok(ClientRequest::Kill { target }),
             Command::Send(args) => Ok(ClientRequest::Send(args.into_request()?)),
             Command::Interrupt(args) => Ok(ClientRequest::Interrupt(InterruptRequest {
                 target: args.target,
@@ -906,18 +902,6 @@ mod tests {
         let request = cli.command.into_request().expect("reclaim request");
         let ClientRequest::Reclaim { target } = request else {
             panic!("expected reclaim request");
-        };
-        assert_eq!(target, "local::$1");
-    }
-
-    #[test]
-    fn kill_command_remains_compatibility_request() {
-        let cli =
-            Cli::try_parse_from(["mstream", "kill", "local::$1"]).expect("kill command parses");
-
-        let request = cli.command.into_request().expect("kill request");
-        let ClientRequest::Kill { target } = request else {
-            panic!("expected kill request");
         };
         assert_eq!(target, "local::$1");
     }
