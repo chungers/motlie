@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-07 | @codex-366-impl | Clarified that gateway release docs do not override workspace-level release decisions to build fully static binaries. |
 | 2026-06-07 | @codex-366-impl | Added release-build guidance that treats Cargo features as part of the gateway release contract, including Kokoro default TTS, Piper fallback TTS, and Sherpa static ONNX Runtime verification. |
 
 This document records release-specific build checks for `telnyx-gateway`.
@@ -101,9 +102,15 @@ listed as an available fallback.
 
 ## Static-Linkage Nuance
 
-The Linux release binary is not currently a fully static executable. It is
-expected to depend on system libraries such as OpenSSL, libstdc++, libm,
-libgcc_s, libc, and the dynamic loader.
+The gateway docs do not override workspace-level release decisions. At release
+time, the human release owner may choose a target and toolchain that produces a
+fully static binary; in that case, even system runtime dependencies such as
+libc may be absent. Follow the workspace release manifest and release skill for
+the target-specific static-vs-dynamic decision.
+
+The locally validated GNU/Linux release build for the current live-test path is
+not a fully static executable. It may depend on system libraries such as OpenSSL,
+libstdc++, libm, libgcc_s, libc, and the dynamic loader.
 
 Sherpa's ONNX Runtime dependency is different: the upstream `sherpa-onnx` Rust
 crate downloads and statically links its native archive, including the
@@ -120,8 +127,11 @@ readelf -d target/release/telnyx-gateway
 
 Expected:
 
-- `file` may report a dynamically linked ELF.
-- `ldd` may list system libraries.
+- For a GNU/Linux dynamic build, `file` may report a dynamically linked ELF and
+  `ldd` may list system libraries.
+- For a workspace-approved fully static build, `ldd` may report that the binary
+  is not dynamically linked and `readelf -d` may have no dynamic `NEEDED`
+  entries.
 - `readelf -d` must not list `libonnxruntime.so` in `NEEDED`.
 
 Do not set `ORT_LIB_PATH`, `ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK`, or
