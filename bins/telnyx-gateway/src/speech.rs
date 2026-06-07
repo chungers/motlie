@@ -7,7 +7,9 @@ use crate::media::{
     SharedMediaRegistry, SpeechCancelToken,
 };
 use crate::operator::state::{LogLevel, SharedState};
-use crate::tts::{split_speech_text, LiveTtsBackend, SharedTtsRegistry, PIPER_SAMPLE_RATE_HZ};
+use crate::tts::{
+    split_speech_text, LiveTtsBackend, SharedTtsRegistry, TtsAudio, PIPER_SAMPLE_RATE_HZ,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuedSpeech {
@@ -142,11 +144,15 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
         if job.cancel.is_canceled() {
             return Ok(SpeechJobOutcome::NoAudioOrCanceled);
         }
-        let audio_chunks = job
-            .tts
-            .factory(job.tts_backend)
-            .synthesize_chunks(text_chunk)
-            .await?;
+        let audio_chunks = synthesize_chunks_with_fallback(
+            &job.state,
+            &job.tts,
+            job.tts_backend,
+            &job.gateway_call_id,
+            &job.playback_id,
+            text_chunk,
+        )
+        .await?;
         for audio_chunk in audio_chunks {
             if job.cancel.is_canceled() {
                 return Ok(SpeechJobOutcome::NoAudioOrCanceled);
@@ -214,4 +220,106 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
         return Ok(SpeechJobOutcome::MarkQueued);
     }
     Ok(SpeechJobOutcome::NoAudioOrCanceled)
+}
+
+async fn synthesize_chunks_with_fallback(
+    state: &SharedState,
+    tts: &SharedTtsRegistry,
+    backend: LiveTtsBackend,
+    gateway_call_id: &str,
+    playback_id: &str,
+    text_chunk: String,
+) -> anyhow::Result<Vec<TtsAudio>> {
+    let primary = tts.factory(backend);
+    match primary.synthesize_chunks(text_chunk.clone()).await {
+        Ok(chunks) => Ok(chunks),
+        Err(error) => {
+            let Some(fallback) = backend.fallback() else {
+                return Err(error);
+            };
+            let error_message = format!("{error:#}");
+            {
+                let mut guard = state.write().await;
+                guard.log(
+                    LogLevel::Warn,
+                    format!(
+                        "TTS backend {} failed for {gateway_call_id} playback={playback_id}; falling back to {}: {error_message}",
+                        backend.label(),
+                        fallback.label()
+                    ),
+                );
+            }
+            tracing::warn!(
+                gateway_call_id,
+                playback_id,
+                backend = backend.label(),
+                backend_model = backend.model_label(),
+                fallback = fallback.label(),
+                fallback_model = fallback.model_label(),
+                error = %error_message,
+                "tts.speak.fallback"
+            );
+            tts.factory(fallback)
+                .synthesize_chunks(text_chunk)
+                .await
+                .with_context(|| {
+                    format!(
+                        "fallback TTS backend {} after {} failed: {error_message}",
+                        fallback.label(),
+                        backend.label()
+                    )
+                })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operator::state::shared_state;
+    use crate::tts::{OutboundTtsFactory, StaticTtsFactory, TtsRegistry};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct FailingTtsFactory;
+
+    #[async_trait]
+    impl OutboundTtsFactory for FailingTtsFactory {
+        async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+            bail!("kokoro test failure")
+        }
+
+        fn label(&self) -> &'static str {
+            "failing-test-tts"
+        }
+    }
+
+    #[tokio::test]
+    async fn kokoro_synthesis_failure_falls_back_to_piper() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let tts = Arc::new(TtsRegistry::new(
+            Arc::new(FailingTtsFactory),
+            Arc::new(StaticTtsFactory::new(vec![1_000; 2_205])),
+        ));
+
+        let chunks = synthesize_chunks_with_fallback(
+            &state,
+            &tts,
+            LiveTtsBackend::Kokoro82m,
+            "gwc_test",
+            "tts_test",
+            "hello".to_string(),
+        )
+        .await
+        .expect("fallback should synthesize with Piper");
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].sample_rate_hz(), PIPER_SAMPLE_RATE_HZ);
+        let guard = state.read().await;
+        assert!(guard.logs.iter().any(|entry| {
+            entry.level == LogLevel::Warn
+                && entry.message.contains("falling back to piper")
+                && entry.message.contains("kokoro test failure")
+        }));
+    }
 }

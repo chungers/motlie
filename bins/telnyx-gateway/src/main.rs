@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -16,11 +16,7 @@ use motlie_telnyx_gateway::operator::script::run_repl_file;
 use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
 use motlie_telnyx_gateway::replay::ReplayBackend;
 use motlie_telnyx_gateway::serve::{serve, AppServices};
-#[cfg(not(feature = "piper"))]
-use motlie_telnyx_gateway::tts::unavailable_registry;
-use motlie_telnyx_gateway::tts::SharedTtsRegistry;
-#[cfg(feature = "piper")]
-use motlie_telnyx_gateway::tts::{SharedTtsFactory, TtsRegistry};
+use motlie_telnyx_gateway::tts::{SharedTtsFactory, SharedTtsRegistry, TtsRegistry};
 use tokio::time::{self, Duration};
 
 #[tokio::main]
@@ -221,21 +217,44 @@ fn print_corpus_report(report: &motlie_telnyx_gateway::replay::CorpusReplayRepor
 }
 
 fn build_tts_registry(cli: &Cli) -> SharedTtsRegistry {
-    #[cfg(feature = "piper")]
-    {
-        let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
-        let piper: SharedTtsFactory = Arc::new(motlie_telnyx_gateway::tts::PiperTtsFactory::new(
-            artifact_root,
-            !cli.no_asr_download,
-        ));
-        Arc::new(TtsRegistry::new(piper))
-    }
+    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+    let allow_download = !cli.no_asr_download;
+    Arc::new(TtsRegistry::new(
+        build_kokoro_tts_factory(&artifact_root, allow_download),
+        build_piper_tts_factory(&artifact_root, allow_download),
+    ))
+}
 
-    #[cfg(not(feature = "piper"))]
-    {
-        let _ = cli;
-        unavailable_registry()
-    }
+#[cfg(feature = "kokoro")]
+fn build_kokoro_tts_factory(artifact_root: &Path, allow_download: bool) -> SharedTtsFactory {
+    Arc::new(motlie_telnyx_gateway::tts::KokoroTtsFactory::new(
+        artifact_root.to_path_buf(),
+        allow_download,
+    ))
+}
+
+#[cfg(not(feature = "kokoro"))]
+fn build_kokoro_tts_factory(_artifact_root: &Path, _allow_download: bool) -> SharedTtsFactory {
+    Arc::new(motlie_telnyx_gateway::tts::UnavailableTtsFactory::new(
+        motlie_telnyx_gateway::tts::LiveTtsBackend::Kokoro82m.model_label(),
+        "Kokoro-82M TTS is unavailable; rebuild with --features kokoro",
+    ))
+}
+
+#[cfg(feature = "piper")]
+fn build_piper_tts_factory(artifact_root: &Path, allow_download: bool) -> SharedTtsFactory {
+    Arc::new(motlie_telnyx_gateway::tts::PiperTtsFactory::new(
+        artifact_root.to_path_buf(),
+        allow_download,
+    ))
+}
+
+#[cfg(not(feature = "piper"))]
+fn build_piper_tts_factory(_artifact_root: &Path, _allow_download: bool) -> SharedTtsFactory {
+    Arc::new(motlie_telnyx_gateway::tts::UnavailableTtsFactory::new(
+        motlie_telnyx_gateway::tts::LiveTtsBackend::Piper.model_label(),
+        "Piper TTS is unavailable; rebuild with --features piper",
+    ))
 }
 
 fn print_replay_report(report: &motlie_telnyx_gateway::replay::ReplayReport) {

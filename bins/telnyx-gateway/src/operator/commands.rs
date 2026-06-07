@@ -2011,7 +2011,7 @@ fn gateway_root_help() -> String {
         "  asr use kroko-2025|sherpa-2023 Select backend for the next answered/dialed call",
         "  tts list",
         "  tts status",
-        "  tts use piper                 Select TTS backend for the next speak command",
+        "  tts use kokoro-82m|piper       Select TTS backend for the next speak command",
         "",
         "Calls:",
         "  calls                          List calls in operator roster order",
@@ -2020,7 +2020,7 @@ fn gateway_root_help() -> String {
         "  status [call-id]               Show gateway status or selected call status",
         "  answer [call-id]               Answer one waiting inbound call; auto-attach conversation",
         "  dial <+e164> [--from +e164]    Place an outbound call; auto-attach conversation",
-        "  speak [call-id] <text...>      Queue cancellable Piper TTS over the media socket",
+        "  speak [call-id] <text...>      Queue cancellable TTS over the media socket",
         "  speak cancel [call-id]         Clear active TTS on the selected call",
         "  conversation status [call-id]  Show attachment, mode, handler, and latest turns",
         "  conversation smoke-test on|off Enable or disable test-only echo replies",
@@ -2109,12 +2109,15 @@ fn tts_help() -> String {
     [
         "tts list",
         "tts status",
+        "tts use kokoro-82m",
         "tts use piper",
         "",
         "Inspect or select the outbound TTS backend used by `speak`.",
+        "Kokoro-82M is the default live backend; Piper remains selectable",
+        "and is used automatically as the fallback when Kokoro fails.",
         "",
-        "Milestone 2 supports Piper. If `tts status` reports unavailable, restart",
-        "the gateway from a binary built with `--features \"sherpa piper\"`.",
+        "If `tts status` reports unavailable, restart the gateway from a binary",
+        "built with `--features \"sherpa piper kokoro\"`.",
         "",
         "After `dial`, wait until the call state is `media` or `transcribing`, then run:",
         "  speak <text...>",
@@ -2124,6 +2127,7 @@ fn tts_help() -> String {
         "Examples:",
         "  tts list",
         "  tts status",
+        "  tts use kokoro-82m",
         "  tts use piper",
     ]
     .join("\n")
@@ -2553,7 +2557,7 @@ mod tests {
     use crate::operator::state::{
         shared_state, CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus,
     };
-    use crate::tts::{StaticTtsFactory, TtsRegistry};
+    use crate::tts::{StaticTtsFactory, TtsRegistry, KOKORO_SAMPLE_RATE_HZ};
 
     #[tokio::test]
     async fn inbound_is_disabled_by_default() {
@@ -2653,7 +2657,7 @@ mod tests {
         assert!(rendered.contains("load <path>"));
         assert!(rendered.contains("quit [dump_path]"));
         assert!(rendered.contains("tts list"));
-        assert!(rendered.contains("tts use piper"));
+        assert!(rendered.contains("tts use kokoro-82m|piper"));
         assert!(rendered.contains("conversation status [call-id]"));
         assert!(rendered.contains("test-only echo reply handler"));
         assert!(rendered.contains("help socket"));
@@ -2708,7 +2712,10 @@ mod tests {
 
         assert_eq!(
             output.lines,
-            vec!["piper piper/en_us_ljspeech_medium available"]
+            vec![
+                "kokoro-82m kokoro/kokoro_82m available",
+                "piper piper/en_us_ljspeech_medium available",
+            ]
         );
     }
 
@@ -2721,16 +2728,15 @@ mod tests {
 
         let output = engine.run_line("tts status").await.expect("tts status");
 
-        assert!(output.lines.iter().any(|line| line == "next=piper"));
+        assert!(output.lines.iter().any(|line| line == "next=kokoro-82m"));
         assert!(output
             .lines
             .iter()
-            .any(|line| line == "next_model=piper/en_us_ljspeech_medium"));
+            .any(|line| line == "next_model=kokoro/kokoro_82m"));
         assert!(output.lines.iter().any(|line| line == "status=unavailable"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "reason=Piper TTS is unavailable; rebuild with --features piper"));
+        assert!(output.lines.iter().any(|line| {
+            line == "reason=Kokoro-82M TTS is unavailable; rebuild with --features kokoro"
+        }));
     }
 
     #[tokio::test]
@@ -2740,7 +2746,15 @@ mod tests {
         let context = context_with_static_tts(state, telnyx, SharedMediaRegistry::default());
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
-        let output = engine.run_line("tts use piper").await.expect("tts use");
+        assert_eq!(
+            engine.context().session.next_tts_backend,
+            LiveTtsBackend::Kokoro82m
+        );
+
+        let output = engine
+            .run_line("tts use piper")
+            .await
+            .expect("tts use piper");
 
         assert_eq!(
             output.lines,
@@ -2749,6 +2763,20 @@ mod tests {
         assert_eq!(
             engine.context().session.next_tts_backend,
             LiveTtsBackend::Piper
+        );
+
+        let output = engine
+            .run_line("tts use kokoro-82m")
+            .await
+            .expect("tts use kokoro");
+
+        assert_eq!(
+            output.lines,
+            vec!["tts backend for next speech: kokoro-82m (kokoro/kokoro_82m)"]
+        );
+        assert_eq!(
+            engine.context().session.next_tts_backend,
+            LiveTtsBackend::Kokoro82m
         );
     }
 
@@ -3550,10 +3578,13 @@ mod tests {
         telnyx: TelnyxClient,
         media: SharedMediaRegistry,
     ) -> GatewayContext {
-        let tts = Arc::new(TtsRegistry::new(Arc::new(StaticTtsFactory::new(vec![
-            1_000;
-            2_205
-        ]))));
+        let tts = Arc::new(TtsRegistry::new(
+            Arc::new(StaticTtsFactory::with_sample_rate(
+                vec![1_000; 2_400],
+                KOKORO_SAMPLE_RATE_HZ,
+            )),
+            Arc::new(StaticTtsFactory::new(vec![1_000; 2_205])),
+        ));
         let conversation = ConversationRuntime::new(
             telnyx.clone(),
             tts.clone(),
