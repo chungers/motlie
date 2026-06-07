@@ -211,6 +211,8 @@ pub struct NewRequest {
     pub role: String,
     pub cwd: PathBuf,
     pub agent: String,
+    #[serde(default)]
+    pub agent_args: Vec<String>,
     pub task: Option<String>,
 }
 
@@ -351,6 +353,8 @@ pub struct RecruitRequest {
     pub workstream: String,
     pub role: String,
     pub agent: Option<String>,
+    #[serde(default)]
+    pub agent_args: Vec<String>,
     pub count: usize,
     pub goal: Option<String>,
     pub selectors: BTreeMap<String, String>,

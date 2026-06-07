@@ -131,6 +131,7 @@ impl Command {
                 role: args.role,
                 cwd: args.cwd,
                 agent: args.agent,
+                agent_args: args.agent_args,
                 task: args.task,
             })),
             Command::Leave(args) => Ok(ClientRequest::Leave(LeaveRequest {
@@ -308,6 +309,13 @@ pub struct NewArgs {
         help = "Agent executable to start. Remote lookup uses the host non-login SSH PATH; pass an absolute path if needed."
     )]
     pub agent: String,
+    #[arg(
+        long = "agent-arg",
+        allow_hyphen_values = true,
+        num_args = 1,
+        help = "Argument to pass to the agent executable. Repeat for multiple argv entries."
+    )]
+    pub agent_args: Vec<String>,
     #[arg(long)]
     pub task: Option<String>,
 }
@@ -628,6 +636,13 @@ pub struct RecruitArgs {
     pub role: String,
     #[arg(long)]
     pub agent: Option<String>,
+    #[arg(
+        long = "agent-arg",
+        allow_hyphen_values = true,
+        num_args = 1,
+        help = "Argument expected in the recruited agent argv. Repeat for multiple argv entries."
+    )]
+    pub agent_args: Vec<String>,
     #[arg(long, default_value_t = 1)]
     pub count: usize,
     #[arg(long)]
@@ -644,6 +659,7 @@ impl RecruitArgs {
             workstream: self.workstream,
             role: self.role,
             agent: self.agent,
+            agent_args: self.agent_args,
             count: self.count,
             goal: self.goal,
             selectors: parse_pairs("selector", self.selectors)?,
@@ -785,6 +801,60 @@ mod tests {
 
         assert!(help.contains("Remote lookup uses the host non-login SSH PATH"));
         assert!(help.contains("absolute path"));
+        assert!(help.contains("--agent-arg <AGENT_ARGS>"));
+    }
+
+    #[test]
+    fn new_command_builds_request_with_agent_args() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "new",
+            "issue-410",
+            "local::claude-reviewer",
+            "--role",
+            "reviewer",
+            "--cwd",
+            "/tmp/issue-410",
+            "--agent",
+            "claude",
+            "--agent-arg",
+            "--permission-mode",
+            "--agent-arg",
+            "auto",
+        ])
+        .expect("new command parses");
+
+        let request = cli.command.into_request().expect("new request");
+        let ClientRequest::New(request) = request else {
+            panic!("expected new request");
+        };
+        assert_eq!(request.agent, "claude");
+        assert_eq!(request.agent_args, ["--permission-mode", "auto"]);
+    }
+
+    #[test]
+    fn recruit_command_builds_request_with_agent_args() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "recruit",
+            "issue-410",
+            "--role",
+            "reviewer",
+            "--agent",
+            "claude",
+            "--agent-arg",
+            "--permission-mode",
+            "--agent-arg",
+            "auto",
+        ])
+        .expect("recruit command parses");
+
+        let request = cli.command.into_request().expect("recruit request");
+        let ClientRequest::Recruit(request) = request else {
+            panic!("expected recruit request");
+        };
+        assert_eq!(request.agent.as_deref(), Some("claude"));
+        assert_eq!(request.agent_args, ["--permission-mode", "auto"]);
     }
 
     #[test]

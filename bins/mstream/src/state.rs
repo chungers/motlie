@@ -75,6 +75,7 @@ struct HostRecord {
 struct SessionRecord {
     role: Option<String>,
     agent: Option<String>,
+    agent_args: Vec<String>,
     identity: String,
     state: AgentState,
     cwd: Option<PathBuf>,
@@ -238,6 +239,7 @@ struct AssignmentTags<'a> {
     role: &'a str,
     identity: &'a str,
     agent: Option<&'a str>,
+    agent_args: Option<&'a [String]>,
     cwd: Option<&'a Path>,
     state: AgentState,
 }
@@ -257,6 +259,7 @@ struct SessionRetagPlan {
     new_workstream: Option<String>,
     role: Option<String>,
     agent: Option<String>,
+    agent_args: Vec<String>,
     cwd: Option<PathBuf>,
     state: AgentState,
     workstream_meta: Option<WorkstreamMeta>,
@@ -294,6 +297,7 @@ struct BroadcastTargetSnapshot {
 struct RecruitPlan {
     target: ResolvedTarget,
     agent: Option<String>,
+    agent_args: Vec<String>,
     cwd: Option<PathBuf>,
     state: AgentState,
 }
@@ -302,6 +306,7 @@ struct RecruitPlanSnapshot {
     target: SessionTarget,
     handle: HostHandle,
     agent: Option<String>,
+    agent_args: Vec<String>,
     cwd: Option<PathBuf>,
     state: AgentState,
 }
@@ -511,6 +516,7 @@ impl DaemonState {
                     record.state = state_value;
                     record.role = parsed.role.clone();
                     record.agent = parsed.agent.clone();
+                    record.agent_args = parsed.agent_args.clone();
                     record.workstream = parsed.workstream.clone();
                     record.last_report_kind = parsed.last_report_kind.clone();
                     record.last_report_summary = parsed.last_report_summary.clone();
@@ -606,6 +612,7 @@ impl DaemonState {
                 role: &request.role,
                 identity: resolved.target.session_name(),
                 agent: None,
+                agent_args: None,
                 cwd: None,
                 state: AgentState::Busy,
             },
@@ -689,7 +696,7 @@ impl DaemonState {
             )
         };
         validate_agent_executable(&handle, &request.agent).await?;
-        let command = bootstrap_command(&request.cwd, &request.agent);
+        let command = bootstrap_command(&request.cwd, &request.agent, &request.agent_args);
         let env = session_environment(&request.workstream, &request.role)?;
         let opts = CreateSessionOptions {
             command: Some(command),
@@ -728,6 +735,7 @@ impl DaemonState {
                 role: &request.role,
                 identity: resolved.target.session_name(),
                 agent: Some(&request.agent),
+                agent_args: Some(&request.agent_args),
                 cwd: Some(&request.cwd),
                 state: AgentState::Busy,
             },
@@ -762,11 +770,11 @@ impl DaemonState {
                 Some(request.cwd.clone()),
                 AgentState::Busy,
             )?;
-            if let (Some(record), Some(session)) = (
-                state.sessions.get_mut(&stable_target),
-                resolved.target.session_info(),
-            ) {
-                record.observe_tmux_session(session);
+            if let Some(record) = state.sessions.get_mut(&stable_target) {
+                record.agent_args = request.agent_args;
+                if let Some(session) = resolved.target.session_info() {
+                    record.observe_tmux_session(session);
+                }
             }
             let mut cursor = state.record_event(
                 &request.workstream,
@@ -1478,6 +1486,7 @@ impl DaemonState {
                     role,
                     identity: &plan.new_name,
                     agent: plan.agent.as_deref(),
+                    agent_args: Some(&plan.agent_args),
                     cwd: plan.cwd.as_deref(),
                     state: plan.state,
                 },
@@ -2238,6 +2247,7 @@ impl DaemonState {
                     role: &request.role,
                     identity: plan.target.target.session_name(),
                     agent: plan.agent.as_deref(),
+                    agent_args: Some(&plan.agent_args),
                     cwd: plan.cwd.as_deref(),
                     state: plan.state,
                 },
@@ -2272,6 +2282,9 @@ impl DaemonState {
                     plan.cwd.clone(),
                     plan.state,
                 )?;
+                if let Some(record) = state.sessions.get_mut(&plan.target.spec) {
+                    record.agent_args = plan.agent_args.clone();
+                }
             }
             changes.push(
                 Self::apply_resolved_session_state_shared(
@@ -3151,6 +3164,11 @@ impl DaemonState {
         if let Some(agent) = assignment.agent {
             pairs.push(("agent", agent.to_string()));
         }
+        if let Some(agent_args) = assignment.agent_args {
+            if !agent_args.is_empty() {
+                pairs.push(("agent-args", encode_agent_args_tag(agent_args)));
+            }
+        }
         if let Some(cwd) = assignment.cwd {
             pairs.push(("cwd", cwd.display().to_string()));
         }
@@ -3162,6 +3180,12 @@ impl DaemonState {
         }
         if meta.domain.is_none() {
             unset.push("workstream-domain");
+        }
+        if assignment
+            .agent_args
+            .is_some_and(|agent_args| agent_args.is_empty())
+        {
+            unset.push("agent-args");
         }
         if unset.is_empty() {
             return Ok(());
@@ -3432,6 +3456,9 @@ impl DaemonState {
             new_workstream,
             role,
             agent: record.and_then(|record| record.agent.clone()),
+            agent_args: record
+                .map(|record| record.agent_args.clone())
+                .unwrap_or_default(),
             cwd: record.and_then(|record| record.cwd.clone()),
             state: record
                 .map(|record| record.state)
@@ -3492,6 +3519,7 @@ impl DaemonState {
         }
         record.role = plan.role.clone();
         record.agent = plan.agent.clone();
+        record.agent_args = plan.agent_args.clone();
         record.cwd = plan.cwd.clone();
         record.state = plan.state;
         record.workstream = plan.new_workstream.clone();
@@ -3775,6 +3803,7 @@ impl DaemonState {
             plans.push(RecruitPlan {
                 target,
                 agent: snapshot.agent,
+                agent_args: snapshot.agent_args,
                 cwd: snapshot.cwd,
                 state: snapshot.state,
             });
@@ -3798,6 +3827,11 @@ impl DaemonState {
                     .agent
                     .as_ref()
                     .is_some_and(|agent| record.agent.as_ref() != Some(agent))
+                {
+                    return None;
+                }
+                if !request.agent_args.is_empty()
+                    && record.agent_args.as_slice() != request.agent_args.as_slice()
                 {
                     return None;
                 }
@@ -3831,6 +3865,13 @@ impl DaemonState {
                         .agent
                         .clone()
                         .or_else(|| record.and_then(|record| record.agent.clone())),
+                    agent_args: if request.agent_args.is_empty() {
+                        record
+                            .map(|record| record.agent_args.clone())
+                            .unwrap_or_default()
+                    } else {
+                        request.agent_args.clone()
+                    },
                     cwd: record.and_then(|record| record.cwd.clone()),
                     target,
                     state,
@@ -3855,6 +3896,7 @@ impl SessionRecord {
         Self {
             role: None,
             agent: None,
+            agent_args: Vec::new(),
             identity: session_identity_seed(target),
             state,
             cwd: None,
@@ -3903,6 +3945,7 @@ impl SessionRecord {
             "target": target.to_string(),
             "role": self.role,
             "agent": self.agent,
+            "agent_args": self.agent_args,
             "state": self.state.as_str(),
             "last_report_kind": self.last_report_kind,
             "last_report_summary": self.last_report_summary,
@@ -3992,6 +4035,7 @@ impl SessionRecord {
             "target": target.to_string(),
             "role": self.role,
             "agent": self.agent,
+            "agent_args": self.agent_args,
             "identity": self.identity,
             "state": self.state.as_str(),
             "cwd": self.cwd,
@@ -4154,6 +4198,7 @@ struct ParsedTags {
     workstream_title: Option<String>,
     role: Option<String>,
     agent: Option<String>,
+    agent_args: Vec<String>,
     cwd: Option<PathBuf>,
     state: Option<AgentState>,
     last_report_kind: Option<String>,
@@ -4178,6 +4223,7 @@ impl ParsedTags {
                 "workstream-title" => parsed.workstream_title = Some(tag.value().to_string()),
                 "role" => parsed.role = Some(tag.value().to_string()),
                 "agent" => parsed.agent = Some(tag.value().to_string()),
+                "agent-args" => parsed.agent_args = parse_agent_args_tag(tag.value()),
                 "cwd" => parsed.cwd = Some(PathBuf::from(tag.value())),
                 "state" => parsed.state = parse_state(tag.value()),
                 "last-report-kind" => parsed.last_report_kind = Some(tag.value().to_string()),
@@ -4363,13 +4409,22 @@ fn is_created_session_not_found(error: &TmuxError, session_name: &str) -> bool {
     }
 }
 
-fn bootstrap_command(cwd: &Path, agent: &str) -> String {
-    format!(
-        "mkdir -p {} && cd {} && exec {}",
-        shell_quote(&cwd.display().to_string()),
-        shell_quote(&cwd.display().to_string()),
-        shell_quote(agent)
-    )
+fn bootstrap_command(cwd: &Path, agent: &str, agent_args: &[String]) -> String {
+    let cwd = shell_quote(&cwd.display().to_string());
+    let mut command = format!("mkdir -p {cwd} && cd {cwd} && exec {}", shell_quote(agent));
+    for arg in agent_args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
+    }
+    command
+}
+
+fn encode_agent_args_tag(agent_args: &[String]) -> String {
+    serde_json::to_string(agent_args).expect("agent args should serialize")
+}
+
+fn parse_agent_args_tag(value: &str) -> Vec<String> {
+    serde_json::from_str(value).unwrap_or_default()
 }
 
 fn session_environment(workstream: &str, role: &str) -> anyhow::Result<Vec<SessionEnvVar>> {
@@ -5908,6 +5963,127 @@ mod tests {
         assert_eq!(record.tmux_session_created, Some(200));
     }
 
+    #[test]
+    fn bootstrap_command_forwards_agent_args_as_argv() {
+        let agent_args = vec![
+            "--permission-mode".to_string(),
+            "auto".to_string(),
+            "review mode".to_string(),
+            "quote's safe".to_string(),
+        ];
+
+        let command = bootstrap_command(Path::new("/tmp/issue-410"), "claude", &agent_args);
+
+        assert_eq!(
+            command,
+            "mkdir -p '/tmp/issue-410' && cd '/tmp/issue-410' && exec 'claude' '--permission-mode' 'auto' 'review mode' 'quote'\\''s safe'"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_session_forwards_agent_args_to_spawned_command() {
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("command -v 'claude'", "found")
+            .with_response(
+                "list-sessions",
+                "__MOTLIE_S__ claude-reviewer $1 200 0 1  250\n",
+            )
+            .with_shell_data(vec![b"%output %5 ready\n".to_vec()])
+            .with_default("");
+        let commands = mock.command_log();
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-410");
+        let shared = Arc::new(Mutex::new(state));
+
+        DaemonState::new_session_shared(
+            Arc::clone(&shared),
+            NewRequest {
+                workstream: "issue-410".to_string(),
+                target: "local::claude-reviewer".to_string(),
+                role: "reviewer".to_string(),
+                cwd: PathBuf::from("/tmp/issue-410"),
+                agent: "claude".to_string(),
+                agent_args: vec!["--permission-mode".to_string(), "auto".to_string()],
+                task: None,
+            },
+        )
+        .await
+        .expect("new session with agent args");
+
+        let commands = commands.lock().expect("command log");
+        let create_command = commands
+            .iter()
+            .find(|command| command.contains("new-session"))
+            .expect("new-session command");
+        assert!(create_command.contains("--permission-mode"));
+        assert!(create_command.contains("auto"));
+
+        let state = shared.lock().await;
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let record = state.sessions.get(&target).expect("session record");
+        assert_eq!(record.agent.as_deref(), Some("claude"));
+        assert_eq!(record.agent_args, ["--permission-mode", "auto"]);
+    }
+
+    #[test]
+    fn recruit_plan_snapshots_match_agent_args_and_preserve_metadata() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mut state = DaemonState::default();
+        register_mock_host(
+            &mut state,
+            "local",
+            motlie_tmux::transport::MockTransport::new().with_default(""),
+        );
+        state.hosts.insert(
+            "local".to_string(),
+            HostRecord {
+                uri: "mock://local".to_string(),
+                labels: BTreeMap::new(),
+                capacity: BTreeMap::new(),
+                work_root: None,
+            },
+        );
+        open_test_workstream(&mut state, "issue-410");
+        let mut record = SessionRecord::from_target(&target, AgentState::Available, None);
+        record.identity = "claude-reviewer".to_string();
+        record.agent = Some("claude".to_string());
+        record.agent_args = vec!["--permission-mode".to_string(), "auto".to_string()];
+        record.cwd = Some(PathBuf::from("/tmp/issue-410"));
+        record.tmux_session_created = Some(100);
+        state.sessions.insert(target.clone(), record);
+
+        let request = RecruitRequest {
+            workstream: "issue-410".to_string(),
+            role: "reviewer".to_string(),
+            agent: Some("claude".to_string()),
+            agent_args: vec!["--permission-mode".to_string(), "auto".to_string()],
+            count: 1,
+            goal: None,
+            selectors: BTreeMap::new(),
+            task: None,
+        };
+
+        let snapshots = state
+            .recruit_plan_snapshots(&request)
+            .expect("matching agent args");
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].target, target);
+        assert_eq!(snapshots[0].agent.as_deref(), Some("claude"));
+        assert_eq!(snapshots[0].agent_args, ["--permission-mode", "auto"]);
+
+        let mismatch = RecruitRequest {
+            agent_args: vec!["--permission-mode".to_string(), "manual".to_string()],
+            ..request
+        };
+        let error = match state.recruit_plan_snapshots(&mismatch) {
+            Ok(_) => panic!("mismatched agent args should not recruit"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("only 0 available session(s)"));
+    }
+
     #[tokio::test]
     async fn new_session_fails_fast_when_agent_missing_on_non_login_path() {
         let mock = motlie_tmux::transport::MockTransport::new()
@@ -5927,6 +6103,7 @@ mod tests {
                 role: "implementer".to_string(),
                 cwd: PathBuf::from("/tmp/issue-386"),
                 agent: "missing-agent".to_string(),
+                agent_args: Vec::new(),
                 task: None,
             },
         )
@@ -5968,6 +6145,7 @@ mod tests {
                 role: "implementer".to_string(),
                 cwd: PathBuf::from("/tmp/issue-386"),
                 agent: "agent-new".to_string(),
+                agent_args: Vec::new(),
                 task: None,
             },
         )
@@ -6006,6 +6184,7 @@ mod tests {
                 role: "implementer".to_string(),
                 cwd: cwd.clone(),
                 agent: "agent-new".to_string(),
+                agent_args: Vec::new(),
                 task: None,
             },
         )
