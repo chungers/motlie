@@ -487,7 +487,6 @@ impl DaemonState {
             let mut hydrated = 0usize;
             let mut abort_tasks = Vec::new();
             let mut observed_targets = BTreeSet::new();
-            let mut tagged_targets = BTreeSet::new();
             for session in sessions {
                 let target = SessionTarget::session_id(&alias, session.id.as_str())?;
                 observed_targets.insert(target.clone());
@@ -504,7 +503,6 @@ impl DaemonState {
                 let parsed = ParsedTags::from_tags(tags);
                 if parsed.managed || parsed.workstream.is_some() || parsed.state.is_some() {
                     hydrated += 1;
-                    tagged_targets.insert(target.clone());
                     let state_value = parsed.state.unwrap_or(AgentState::Idle);
                     let record = state.sessions.entry(target.clone()).or_insert_with(|| {
                         SessionRecord::from_target(&target, state_value, parsed.updated_at)
@@ -556,7 +554,7 @@ impl DaemonState {
                 .sessions
                 .keys()
                 .filter_map(|target| {
-                    if target.host_alias() == alias.as_str() && !tagged_targets.contains(target) {
+                    if target.host_alias() == alias.as_str() && !observed_targets.contains(target) {
                         Some(target.clone())
                     } else {
                         None
@@ -564,11 +562,7 @@ impl DaemonState {
                 })
                 .collect();
             for target in stale_targets {
-                let reason = if observed_targets.contains(&target) {
-                    format!("tmux session {target} is no longer tagged as mstream-managed")
-                } else {
-                    format!("tmux session {target} is no longer present")
-                };
+                let reason = format!("tmux session {target} is no longer present");
                 abort_tasks.extend(state.quarantine_stale_session_target(&target, &reason, None));
             }
             (hydrated, abort_tasks)
@@ -5641,6 +5635,72 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("no longer present"));
+    }
+
+    #[tokio::test]
+    async fn scan_keeps_live_untagged_session_records() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ live $1 100 0 1  160\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-401");
+        state
+            .add_session_to_workstream(
+                "issue-401",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("live", "$1", 100, 150));
+        state.timers.insert(
+            "poll".to_string(),
+            timer_record("poll", target.clone(), Some(100)),
+        );
+        state
+            .workstream_mut("issue-401")
+            .expect("workstream")
+            .handoffs
+            .insert(
+                "h1".to_string(),
+                handoff_record("h1", target.clone(), Some(100)),
+            );
+
+        let shared = Arc::new(Mutex::new(state));
+        let records = DaemonState::scan_shared(Arc::clone(&shared), "local".to_string())
+            .await
+            .expect("scan");
+
+        assert_eq!(records[0]["hydrated_sessions"], 0);
+        let state = shared.lock().await;
+        assert!(state.sessions.contains_key(&target));
+        assert!(state
+            .workstream("issue-401")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
+        assert!(state
+            .timers
+            .get("poll")
+            .expect("timer")
+            .last_error
+            .is_none());
+        assert!(state
+            .workstream("issue-401")
+            .expect("workstream")
+            .handoffs
+            .get("h1")
+            .expect("handoff")
+            .canceled_reason
+            .is_none());
     }
 
     #[tokio::test]
