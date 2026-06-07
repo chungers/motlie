@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 | @codex-401-impl | Added issue #401 lifecycle semantics: `quarantined` state, workstream-retained `retire`, gated `reclaim`, and scan-time registry reconciliation. |
 | 2026-05-30 | @codex-360-og | Added issue #360 live session rename/retag design using stable tmux session ids, existing freshness checks, and mmux label lifecycle refresh. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 mmux-visible workstream labels owned by mstream tags, with selected-key preservation and leave/close cleanup. |
 | 2026-05-28 | @codex | Added issue #344 input-quiet timer delivery guard: timed prompts defer when attached-client input was recent, while read-only polling remains unaffected. |
@@ -88,7 +89,7 @@ unstick collaborators.
 - FR6: Create a new tmux session on a connected host, start an agent binary,
   tag the session, and join it to a workstream.
 - FR7: Leave a session from a workstream without killing it.
-- FR8: Kill a session only through an explicit destructive command.
+- FR8: Reclaim a session only through an explicit destructive command.
 - FR9: Recruit agents from connected/scanned hosts, preferring tagged available
   sessions and goal/context matches before creating new sessions.
 - FR10: Scan connected hosts and hydrate workstream/session state from tmux
@@ -289,7 +290,7 @@ Initial tags:
 @mstream/role=reviewer
 @mstream/agent=codex
 @mstream/identity=ops47-mmux-reviewer
-@mstream/state=available|reserved|busy|idle|done|blocked|needs-input
+@mstream/state=available|reserved|busy|idle|done|blocked|needs-input|quarantined
 @mstream/cwd=/abs/path
 @mstream/context-domains=tmux,vmm
 @mstream/context-specialties=output-bus,timeline-review
@@ -334,6 +335,9 @@ State ownership:
   the orchestrator observes durable evidence such as pushed commits, PRs,
   review comments, test output, blockers, or direct questions. These are never
   inferred from output silence alone.
+- `quarantined`: set by `retire` when an agent must not be recruited for new
+  work but should stay alive in its current workstream for audit-logged cleanup.
+  `reclaim` is gated on this state and on `managed=true`.
 
 `last-report-*` tags are intentionally small. Detailed reports belong in the
 agent pane transcript or PR/issue comments.
@@ -425,7 +429,7 @@ that does only `mkdir -p`, `cd`, and `exec <agent>` with validated/escaped
 arguments. A later `motlie-tmux` improvement may add `new-session -c` support
 to `CreateSessionOptions`.
 
-Close, leave, or kill:
+Close, leave, retire, or reclaim:
 
 ```sh
 mstream close pr-322 \
@@ -434,7 +438,8 @@ mstream close pr-322 \
   --specialty output-bus \
   --specialty timeline-review
 mstream leave pr-322 amd1::gpt55-mmux-reviewer
-mstream kill amd1::gpt55-mmux-reviewer
+mstream retire pr-322 amd1::gpt55-mmux-reviewer
+mstream reclaim amd1::gpt55-mmux-reviewer
 ```
 
 `close` concludes a workstream. For each participating session, it marks the
@@ -442,6 +447,12 @@ agent available for new work, clears active workstream membership, records the
 closed workstream as `last-workstream`, and merges any provided domain,
 specialty, and summary text into reusable context tags. Closing does not kill
 sessions.
+
+`retire` is different from `leave`: it preserves current workstream membership,
+sets the agent state to `quarantined`, and excludes it from recruitment while
+allowing cleanup messages in the audit log. `reclaim` is the terminal teardown
+step: it kills and deregisters only a live tmux target whose mstream tags prove
+`managed=true` and `state=quarantined`.
 
 `mstream` treats the workstream name as an opaque handle. The handle may include
 human naming conventions such as `issue-337` or `pr-330`, but the daemon does
@@ -452,7 +463,7 @@ messages, and expose bounded timeline/transcript output through `events`,
 `snapshot`, and `summary-input`.
 
 `leave` unsets workstream-specific tags but leaves the session running.
-`kill` is explicit and destructive.
+`reclaim` is explicit and destructive.
 
 ### Communication And Handoff
 
@@ -498,7 +509,7 @@ used when the message assigns new work, including handoff-generated messages.
 
 #### Interrupt
 
-Non-destructive interruption is separate from `kill`:
+Non-destructive interruption is separate from `reclaim`:
 
 ```sh
 mstream interrupt amd1::gpt55-mmux-reviewer

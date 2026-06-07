@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 | @codex-401-impl | Added issue #410 `new`/`recruit --agent-arg` passthrough for agent argv flags such as Claude `--permission-mode auto`. |
+| 2026-06-06 | @codex-401-impl | Added issue #401 session lifecycle commands: `retire` to mark live agents `quarantined` and `reclaim` for gated teardown. |
 | 2026-05-30 | @codex-360-og | Added issue #360 live session rename/retag commands with id-stable tmux rename, role/workstream retagging, and mmux label refresh. |
 | 2026-06-06 | @codex-386-impl | Documented `mstream new` agent executable preflight on the remote non-login PATH and absolute-path guidance. |
 | 2026-05-30 | @codex-355-rv | Switched daemon session bookkeeping to stable `(host, session_id)` targets while keeping tmux session names as display metadata. |
@@ -117,8 +119,17 @@ mstream new pr-324 local::codex-worker \
   --agent codex \
   --task "Implement the next phase."
 
+mstream new pr-324 local::claude-reviewer \
+  --role reviewer \
+  --cwd /tmp/mstream-reviewer \
+  --agent /opt/homebrew/bin/claude \
+  --agent-arg --permission-mode \
+  --agent-arg auto \
+  --task "Review this branch."
+
 mstream leave pr-324 local::codex-worker --available
-mstream kill local::codex-worker
+mstream retire pr-324 local::codex-worker
+mstream reclaim local::codex-worker
 
 mstream rename local::codex-worker codex-reviewer
 mstream rename local::codex-worker codex-reviewer --role reviewer --workstream pr-324 --mmux-label "PR 324"
@@ -128,9 +139,12 @@ mstream session retag local::$7 --role reviewer --workstream pr-324 --mmux-label
 `new` validates absolute `--cwd` and validates `--agent` before session
 creation with a non-login `command -v` on the target host. Remote agents must
 be visible on that non-login PATH; pass an absolute executable path when login
-shell setup is required. After validation, `new` creates the directory on the
-target host and starts the agent through a narrow shell bootstrap. Joined/new
-sessions receive
+shell setup is required. `--agent-arg <ARG>` is repeatable and forwards each
+value as a separate agent argv entry, so flags such as Claude
+`--permission-mode auto` do not need wrapper scripts or shell-joined
+`--agent` strings. After validation, `new` creates the directory on the target
+host and starts the agent through a narrow shell bootstrap whose final command
+is an `exec <agent> <arg>...` argv. Joined/new sessions receive
 `@mstream/*` tags and a managed-agent reporting prompt when a task is sent. If
 the workstream has an mmux label, assignment also writes:
 
@@ -143,7 +157,10 @@ the workstream has an mmux label, assignment also writes:
 ```
 
 Recruited sessions also receive workstream-membership tags before any task is
-sent, so restart plus `scan` can hydrate their assignment.
+sent, so restart plus `scan` can hydrate their assignment. `recruit --agent-arg`
+uses the same repeated argument form to match available sessions that were
+created with that agent argv profile and preserves that metadata on the
+recruited assignment.
 
 `rename <target> <new-name>` resolves the target to the stable `(host,
 session_id)` record, runs `tmux rename-session -t $id <new-name>`, and updates
@@ -166,6 +183,11 @@ unsets the selected key when there was no previous value. If a user or another
 tool changed `@mmux/__selected-key` after mstream applied the label, cleanup
 leaves that selected key unchanged.
 
+`retire` keeps the target in its workstream, writes `@mstream/state=quarantined`,
+and records the transition so cleanup directives remain audit-logged. `reclaim`
+then kills and deregisters only a managed target whose live tmux tags are
+`quarantined`.
+
 ## Communication And Handoff
 
 ```sh
@@ -180,6 +202,8 @@ mstream broadcast pr-324 --state busy --text "Wrap up your current step and summ
 
 mstream session mark local::codex-worker --state done --summary "Implemented requested fixes."
 mstream session mark local::codex-worker --state blocked --summary "Need host credentials."
+mstream send pr-324 local::codex-worker --require-state quarantined \
+  --text "Rename your worktree with a TBR- prefix, then summarize." --enter
 ```
 
 When the target is joined to an open workstream, `interrupt` appends an

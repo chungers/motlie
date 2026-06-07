@@ -8,11 +8,12 @@ use clap::{Args, Parser, Subcommand};
 use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
-    NewRequest, OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest,
-    SessionRetagRequest, SnapshotRequest, SummaryInputRequest, TimerStartRequest,
-    WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS, DEFAULT_STATUS_IDLE_AFTER_SECS,
-    DEFAULT_TIMER_INPUT_QUIET_FOR_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
-    DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
+    NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
+    SessionMarkRequest, SessionRetagRequest, SnapshotRequest, SummaryInputRequest,
+    TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
+    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS,
+    DEFAULT_TIMER_SUBMIT_RETRIES, DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS,
+    DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -61,7 +62,8 @@ pub enum Command {
     Join(JoinArgs),
     New(NewArgs),
     Leave(LeaveArgs),
-    Kill {
+    Retire(RetireArgs),
+    Reclaim {
         target: String,
     },
     Send(SendArgs),
@@ -129,6 +131,7 @@ impl Command {
                 role: args.role,
                 cwd: args.cwd,
                 agent: args.agent,
+                agent_args: args.agent_args,
                 task: args.task,
             })),
             Command::Leave(args) => Ok(ClientRequest::Leave(LeaveRequest {
@@ -136,7 +139,11 @@ impl Command {
                 target: args.target,
                 available: args.available,
             })),
-            Command::Kill { target } => Ok(ClientRequest::Kill { target }),
+            Command::Retire(args) => Ok(ClientRequest::Retire(RetireRequest {
+                workstream: args.workstream,
+                target: args.target,
+            })),
+            Command::Reclaim { target } => Ok(ClientRequest::Reclaim { target }),
             Command::Send(args) => Ok(ClientRequest::Send(args.into_request()?)),
             Command::Interrupt(args) => Ok(ClientRequest::Interrupt(InterruptRequest {
                 target: args.target,
@@ -302,6 +309,13 @@ pub struct NewArgs {
         help = "Agent executable to start. Remote lookup uses the host non-login SSH PATH; pass an absolute path if needed."
     )]
     pub agent: String,
+    #[arg(
+        long = "agent-arg",
+        allow_hyphen_values = true,
+        num_args = 1,
+        help = "Argument to pass to the agent executable. Repeat for multiple argv entries."
+    )]
+    pub agent_args: Vec<String>,
     #[arg(long)]
     pub task: Option<String>,
 }
@@ -312,6 +326,12 @@ pub struct LeaveArgs {
     pub target: String,
     #[arg(long)]
     pub available: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RetireArgs {
+    pub workstream: String,
+    pub target: String,
 }
 
 #[derive(Debug, Args)]
@@ -616,6 +636,13 @@ pub struct RecruitArgs {
     pub role: String,
     #[arg(long)]
     pub agent: Option<String>,
+    #[arg(
+        long = "agent-arg",
+        allow_hyphen_values = true,
+        num_args = 1,
+        help = "Argument expected in the recruited agent argv. Repeat for multiple argv entries."
+    )]
+    pub agent_args: Vec<String>,
     #[arg(long, default_value_t = 1)]
     pub count: usize,
     #[arg(long)]
@@ -632,6 +659,7 @@ impl RecruitArgs {
             workstream: self.workstream,
             role: self.role,
             agent: self.agent,
+            agent_args: self.agent_args,
             count: self.count,
             goal: self.goal,
             selectors: parse_pairs("selector", self.selectors)?,
@@ -773,6 +801,60 @@ mod tests {
 
         assert!(help.contains("Remote lookup uses the host non-login SSH PATH"));
         assert!(help.contains("absolute path"));
+        assert!(help.contains("--agent-arg <AGENT_ARGS>"));
+    }
+
+    #[test]
+    fn new_command_builds_request_with_agent_args() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "new",
+            "issue-410",
+            "local::claude-reviewer",
+            "--role",
+            "reviewer",
+            "--cwd",
+            "/tmp/issue-410",
+            "--agent",
+            "claude",
+            "--agent-arg",
+            "--permission-mode",
+            "--agent-arg",
+            "auto",
+        ])
+        .expect("new command parses");
+
+        let request = cli.command.into_request().expect("new request");
+        let ClientRequest::New(request) = request else {
+            panic!("expected new request");
+        };
+        assert_eq!(request.agent, "claude");
+        assert_eq!(request.agent_args, ["--permission-mode", "auto"]);
+    }
+
+    #[test]
+    fn recruit_command_builds_request_with_agent_args() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "recruit",
+            "issue-410",
+            "--role",
+            "reviewer",
+            "--agent",
+            "claude",
+            "--agent-arg",
+            "--permission-mode",
+            "--agent-arg",
+            "auto",
+        ])
+        .expect("recruit command parses");
+
+        let request = cli.command.into_request().expect("recruit request");
+        let ClientRequest::Recruit(request) = request else {
+            panic!("expected recruit request");
+        };
+        assert_eq!(request.agent.as_deref(), Some("claude"));
+        assert_eq!(request.agent_args, ["--permission-mode", "auto"]);
     }
 
     #[test]
@@ -867,6 +949,31 @@ mod tests {
         assert_eq!(request.role.as_deref(), Some("implementer"));
         assert_eq!(request.workstream.as_deref(), Some("issue-360"));
         assert_eq!(request.mmux_label.as_deref(), Some("360 impl"));
+    }
+
+    #[test]
+    fn retire_command_builds_request() {
+        let cli = Cli::try_parse_from(["mstream", "retire", "issue-401", "local::$1"])
+            .expect("retire command parses");
+
+        let request = cli.command.into_request().expect("retire request");
+        let ClientRequest::Retire(request) = request else {
+            panic!("expected retire request");
+        };
+        assert_eq!(request.workstream, "issue-401");
+        assert_eq!(request.target, "local::$1");
+    }
+
+    #[test]
+    fn reclaim_command_builds_request() {
+        let cli = Cli::try_parse_from(["mstream", "reclaim", "local::$1"])
+            .expect("reclaim command parses");
+
+        let request = cli.command.into_request().expect("reclaim request");
+        let ClientRequest::Reclaim { target } = request else {
+            panic!("expected reclaim request");
+        };
+        assert_eq!(target, "local::$1");
     }
 
     #[test]

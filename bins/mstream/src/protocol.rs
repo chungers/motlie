@@ -21,6 +21,7 @@ pub enum AgentState {
     Done,
     Blocked,
     NeedsInput,
+    Quarantined,
 }
 
 impl AgentState {
@@ -33,6 +34,7 @@ impl AgentState {
             AgentState::Done => "done",
             AgentState::Blocked => "blocked",
             AgentState::NeedsInput => "needs-input",
+            AgentState::Quarantined => "quarantined",
         }
     }
 
@@ -101,7 +103,8 @@ pub enum ClientRequest {
     Join(JoinRequest),
     New(NewRequest),
     Leave(LeaveRequest),
-    Kill {
+    Retire(RetireRequest),
+    Reclaim {
         target: String,
     },
     Send(SendRequest),
@@ -208,6 +211,8 @@ pub struct NewRequest {
     pub role: String,
     pub cwd: PathBuf,
     pub agent: String,
+    #[serde(default)]
+    pub agent_args: Vec<String>,
     pub task: Option<String>,
 }
 
@@ -216,6 +221,12 @@ pub struct LeaveRequest {
     pub workstream: String,
     pub target: String,
     pub available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetireRequest {
+    pub workstream: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,6 +353,8 @@ pub struct RecruitRequest {
     pub workstream: String,
     pub role: String,
     pub agent: Option<String>,
+    #[serde(default)]
+    pub agent_args: Vec<String>,
     pub count: usize,
     pub goal: Option<String>,
     pub selectors: BTreeMap<String, String>,
