@@ -35,7 +35,8 @@ use capture::MediaCapture;
 
 const SPEECH_RMS_THRESHOLD: f32 = 180.0;
 const SPEECH_PEAK_THRESHOLD: i16 = 900;
-const LOW_ENERGY_HANGOVER_FRAMES: usize = 75;
+const ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS: u64 =
+    crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS as u64;
 const PCMU_SILENCE_BYTE: u8 = 0xff;
 const PCMA_SILENCE_BYTE: u8 = 0xd5;
 const SILENCE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(20);
@@ -950,6 +951,7 @@ async fn ingest_frame(
     media_state.decoded_frame_count += 1;
     record_decoded_capture(media_state.capture.as_mut(), &samples);
     let stats = sample_stats(&samples);
+    let frame_duration_ms = frame_duration_ms(samples.len(), format.sample_rate_hz);
     log_decoded_frame_stats(
         media_state.decoded_frame_count,
         &format,
@@ -958,12 +960,33 @@ async fn ingest_frame(
         &stats,
         samples.len(),
     );
-    match media_state
-        .asr_gate
-        .accept(media_state.decoded_frame_count, stream_id, &stats)
-    {
+    match media_state.asr_gate.accept(
+        media_state.decoded_frame_count,
+        stream_id,
+        frame_duration_ms,
+        &stats,
+    ) {
         AsrFrameDecision::Suppress => return Ok(()),
         AsrFrameDecision::Continue => {}
+        AsrFrameDecision::Finalize {
+            trailing_silence_ms,
+        } => {
+            tracing::info!(
+                gateway_call_id,
+                stream_id,
+                trailing_silence_ms,
+                "asr.local_endpoint.finalizing"
+            );
+            finish_asr_session(
+                state,
+                media_state,
+                Some(gateway_call_id.as_str()),
+                Some(stream_id.to_string()),
+            )
+            .await?;
+            media_state.asr_gate.wait_for_next_speech();
+            return Ok(());
+        }
     }
     if media_state.session.is_none() {
         open_asr_session(
@@ -1135,6 +1158,13 @@ impl SampleStats {
     }
 }
 
+fn frame_duration_ms(sample_count: usize, sample_rate_hz: u32) -> u64 {
+    if sample_rate_hz == 0 {
+        return 0;
+    }
+    (sample_count as u64 * 1_000) / u64::from(sample_rate_hz)
+}
+
 fn sample_stats(samples: &[i16]) -> SampleStats {
     if samples.is_empty() {
         return SampleStats {
@@ -1167,7 +1197,7 @@ fn sample_stats(samples: &[i16]) -> SampleStats {
 #[derive(Default)]
 struct AsrGate {
     speech_started: bool,
-    low_energy_run: usize,
+    low_energy_run_ms: u64,
     suppressed_initial_frames: usize,
     suppressed_tail_frames: usize,
 }
@@ -1176,6 +1206,7 @@ struct AsrGate {
 enum AsrFrameDecision {
     Suppress,
     Continue,
+    Finalize { trailing_silence_ms: u64 },
 }
 
 impl AsrGate {
@@ -1183,13 +1214,15 @@ impl AsrGate {
         &mut self,
         frame_index: usize,
         stream_id: &str,
+        frame_duration_ms: u64,
         stats: &SampleStats,
     ) -> AsrFrameDecision {
         if stats.has_speech_energy() {
             let was_started = self.speech_started;
-            let resumed_after_tail = self.low_energy_run > LOW_ENERGY_HANGOVER_FRAMES;
+            let resumed_after_tail =
+                self.low_energy_run_ms > ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS;
             self.speech_started = true;
-            self.low_energy_run = 0;
+            self.low_energy_run_ms = 0;
             if !was_started {
                 tracing::info!(
                     stream_id,
@@ -1213,8 +1246,8 @@ impl AsrGate {
         }
 
         if self.speech_started {
-            self.low_energy_run = self.low_energy_run.saturating_add(1);
-            if self.low_energy_run <= LOW_ENERGY_HANGOVER_FRAMES {
+            self.low_energy_run_ms = self.low_energy_run_ms.saturating_add(frame_duration_ms);
+            if self.low_energy_run_ms <= ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS {
                 return AsrFrameDecision::Continue;
             }
             self.suppressed_tail_frames = self.suppressed_tail_frames.saturating_add(1);
@@ -1223,13 +1256,15 @@ impl AsrGate {
                     stream_id,
                     frame_index,
                     suppressed_tail_frames = self.suppressed_tail_frames,
-                    low_energy_run = self.low_energy_run,
+                    low_energy_run_ms = self.low_energy_run_ms,
                     peak = stats.peak,
                     rms = stats.rms,
-                    "media.frame.suppressed_low_energy_tail"
+                    "media.frame.local_endpoint"
                 );
             }
-            return AsrFrameDecision::Suppress;
+            return AsrFrameDecision::Finalize {
+                trailing_silence_ms: self.low_energy_run_ms,
+            };
         }
 
         self.suppressed_initial_frames = self.suppressed_initial_frames.saturating_add(1);
@@ -1249,7 +1284,7 @@ impl AsrGate {
 
     fn wait_for_next_speech(&mut self) {
         self.speech_started = false;
-        self.low_energy_run = 0;
+        self.low_energy_run_ms = 0;
     }
 }
 
@@ -1938,8 +1973,15 @@ mod tests {
         assert_eq!(call.transcripts[0].text, "received 16000 samples");
     }
 
+    #[test]
+    fn frame_duration_uses_observed_media_rate() {
+        assert_eq!(frame_duration_ms(160, 8_000), 20);
+        assert_eq!(frame_duration_ms(320, 16_000), 20);
+        assert_eq!(frame_duration_ms(320, 0), 0);
+    }
+
     #[tokio::test]
-    async fn low_energy_media_is_suppressed_after_hangover() {
+    async fn low_energy_media_finishes_after_local_endpoint() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
@@ -1965,8 +2007,9 @@ mod tests {
         .await
         .expect("speech should pass into ASR");
 
+        let endpoint_frames = local_endpoint_silence_frames();
         let silence = STANDARD.encode(l16_samples(320, 0));
-        for sequence in 2..=(LOW_ENERGY_HANGOVER_FRAMES + 3) {
+        for sequence in 2..=(endpoint_frames + 3) {
             handle_text(
                 &media_event("stream-1", &sequence.to_string(), &silence),
                 &state,
@@ -1977,11 +2020,12 @@ mod tests {
             .expect("silence should be accepted by transport");
         }
 
-        assert_eq!(counting_asr.ingests(), 1 + LOW_ENERGY_HANGOVER_FRAMES);
+        assert_eq!(counting_asr.ingests(), 1 + endpoint_frames);
+        assert_eq!(counting_asr.finishes(), 1);
     }
 
     #[tokio::test]
-    async fn speech_resume_after_silence_keeps_asr_session() {
+    async fn speech_resume_before_local_endpoint_keeps_asr_session() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
@@ -2007,8 +2051,64 @@ mod tests {
         .await
         .expect("first speech frame should pass into ASR");
 
+        let short_pause_frames = local_endpoint_silence_frames() - 1;
         let silence = STANDARD.encode(l16_samples(320, 0));
-        for sequence in 2..=(LOW_ENERGY_HANGOVER_FRAMES + 3) {
+        for offset in 0..short_pause_frames {
+            let sequence = 2 + offset;
+            handle_text(
+                &media_event("stream-1", &sequence.to_string(), &silence),
+                &state,
+                &asr,
+                &mut media_state,
+            )
+            .await
+            .expect("short silence should stay in the ASR session");
+        }
+
+        handle_text(
+            &media_event("stream-1", &(2 + short_pause_frames).to_string(), &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("resumed speech should continue ASR ingestion");
+
+        assert_eq!(counting_asr.opens(), 1);
+        assert_eq!(counting_asr.finishes(), 0);
+        assert_eq!(counting_asr.ingests(), 2 + short_pause_frames);
+    }
+
+    #[tokio::test]
+    async fn speech_resume_after_local_endpoint_opens_fresh_asr_session() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let counting_asr = Arc::new(CountingAsrFactory::default());
+        let asr = registry_with_factory(counting_asr.clone());
+        let mut media_state = MediaSocketState::new();
+
+        handle_text(
+            &start_event("call-1", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("start event should open ASR session");
+
+        let speech = STANDARD.encode(l16_samples(320, 4_000));
+        handle_text(
+            &media_event("stream-1", "1", &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("first speech frame should pass into ASR");
+
+        let endpoint_frames = local_endpoint_silence_frames();
+        let silence = STANDARD.encode(l16_samples(320, 0));
+        for sequence in 2..=(endpoint_frames + 3) {
             handle_text(
                 &media_event("stream-1", &sequence.to_string(), &silence),
                 &state,
@@ -2019,22 +2119,19 @@ mod tests {
             .expect("silence should be accepted by transport");
         }
         assert_eq!(counting_asr.opens(), 1);
+        assert_eq!(counting_asr.finishes(), 1);
 
         handle_text(
-            &media_event(
-                "stream-1",
-                &(LOW_ENERGY_HANGOVER_FRAMES + 4).to_string(),
-                &speech,
-            ),
+            &media_event("stream-1", &(endpoint_frames + 4).to_string(), &speech),
             &state,
             &asr,
             &mut media_state,
         )
         .await
-        .expect("resumed speech should continue ASR ingestion");
+        .expect("resumed speech should open a fresh ASR session");
 
-        assert_eq!(counting_asr.opens(), 1);
-        assert_eq!(counting_asr.ingests(), 2 + LOW_ENERGY_HANGOVER_FRAMES);
+        assert_eq!(counting_asr.opens(), 2);
+        assert_eq!(counting_asr.ingests(), 2 + endpoint_frames);
 
         let guard = state.read().await;
         let call = guard.calls.get(&_gateway_call_id).expect("call exists");
@@ -2324,10 +2421,16 @@ mod tests {
         )
     }
 
+    fn local_endpoint_silence_frames() -> usize {
+        let frame_ms = SILENCE_KEEPALIVE_INTERVAL.as_millis() as u64;
+        (ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS / frame_ms) as usize
+    }
+
     #[derive(Default)]
     struct CountingAsrFactory {
         opens: AtomicUsize,
         ingests: Arc<AtomicUsize>,
+        finishes: Arc<AtomicUsize>,
     }
 
     impl CountingAsrFactory {
@@ -2338,6 +2441,10 @@ mod tests {
         fn ingests(&self) -> usize {
             self.ingests.load(Ordering::SeqCst)
         }
+
+        fn finishes(&self) -> usize {
+            self.finishes.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait]
@@ -2346,12 +2453,14 @@ mod tests {
             self.opens.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(CountingAsrSession {
                 ingests: Arc::clone(&self.ingests),
+                finishes: Arc::clone(&self.finishes),
             }))
         }
     }
 
     struct CountingAsrSession {
         ingests: Arc<AtomicUsize>,
+        finishes: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -2365,6 +2474,7 @@ mod tests {
         }
 
         async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+            self.finishes.fetch_add(1, Ordering::SeqCst);
             Ok(Vec::new())
         }
     }
