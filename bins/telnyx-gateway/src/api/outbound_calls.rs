@@ -143,7 +143,7 @@ pub async fn post_outbound_call(
         }
     };
 
-    connect_application_stream(
+    if let Err(error) = connect_application_stream(
         services.text_call_services(),
         TextCallSetup {
             gateway_call_id: gateway_call_id.clone(),
@@ -152,12 +152,13 @@ pub async fn post_outbound_call(
         },
     )
     .await
-    .map_err(|error| {
-        ApiError::conflict(
+    {
+        let _ = hangup_outbound(&services, &gateway_call_id).await;
+        return Err(ApiError::conflict(
             "text_stream_failed",
             format!("connect text stream: {error:#}"),
-        )
-    })?;
+        ));
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -230,6 +231,114 @@ async fn hangup_outbound(services: &AppServices, gateway_call_id: &str) -> anyho
     };
     if let Some(call_control_id) = call_control_id {
         services.telnyx.hangup_call(&call_control_id).await?;
+        let mut guard = services.state.write().await;
+        if let Some(call) = guard.calls.get_mut(gateway_call_id) {
+            call.status = CallStatus::Ended;
+            call.push_timeline("outbound text-call setup failed; hangup requested");
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::adapter::{AsrRegistry, UnavailableAsrFactory};
+    use crate::call_control::TelnyxClient;
+    use crate::conversation::{default_conversation_handler, ConversationRuntime};
+    use crate::media::SharedMediaRegistry;
+    use crate::operator::state::{shared_state, CallStatus};
+    use crate::serve::AppServices;
+    use crate::text_calls::turns::{AcceptCallResponse, TEXT_CALL_PROTOCOL};
+    use crate::text_calls::SharedTextCallRegistry;
+    use crate::tts::unavailable_registry;
+
+    #[tokio::test]
+    async fn accepted_callback_with_unreachable_text_ws_hangs_up_and_returns_structured_error() {
+        async fn accept_with_bad_ws() -> Json<AcceptCallResponse> {
+            Json(AcceptCallResponse {
+                protocol: TEXT_CALL_PROTOCOL.to_string(),
+                call_url: "ws://127.0.0.1:1/unreachable-text-call".to_string(),
+                accept: true,
+            })
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake callback");
+        let callback_addr = listener.local_addr().expect("callback addr");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/connected", post(accept_with_bad_ws)),
+            )
+            .await
+            .expect("serve fake callback");
+        });
+
+        let services = test_services().await;
+        let error = post_outbound_call(
+            State(services.clone()),
+            HeaderMap::new(),
+            Json(OutboundCallRequest {
+                to: "<destination-phone-number-or-sip-uri>".to_string(),
+                from: Some("<caller-phone-number>".to_string()),
+                callback_url: format!("http://{callback_addr}/connected"),
+                timeout_ms: Some(1_000),
+                secret_ref: None,
+                metadata: BTreeMap::new(),
+            }),
+        )
+        .await
+        .expect_err("unreachable accepted call_url should fail the blocking POST");
+
+        assert_eq!(error.code, "text_stream_failed");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(error.message.contains("connect text stream"));
+
+        let guard = services.state.read().await;
+        let call = guard.calls.values().next().expect("dialed call recorded");
+        assert_eq!(call.status, CallStatus::Ended);
+        assert!(call
+            .timeline
+            .iter()
+            .any(|entry| entry.message == "outbound text-call setup failed; hangup requested"));
+    }
+
+    async fn test_services() -> AppServices {
+        let state = shared_state("127.0.0.1:0".parse().expect("bind addr"));
+        {
+            let mut guard = state.write().await;
+            guard.config.selected_connection_id = Some("connection-test".to_string());
+            guard.config.public_media_url =
+                Some("wss://gateway.example.test/telnyx/media".to_string());
+        }
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let tts = unavailable_registry();
+        let unavailable_asr = Arc::new(UnavailableAsrFactory::new("ASR unavailable in API test"));
+        let asr = Arc::new(AsrRegistry::new(unavailable_asr.clone(), unavailable_asr));
+        let conversation = ConversationRuntime::new(
+            telnyx.clone(),
+            tts.clone(),
+            default_conversation_handler(),
+            false,
+        );
+        AppServices {
+            state,
+            telnyx,
+            asr,
+            media: SharedMediaRegistry::default(),
+            tts,
+            conversation,
+            text_calls: SharedTextCallRegistry::default(),
+        }
+    }
 }
