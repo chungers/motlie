@@ -25,6 +25,8 @@ pub struct DaemonArgs {
     pub public_url: String,
     #[arg(long = "subscribe-number")]
     pub subscribe_numbers: Vec<String>,
+    #[arg(long, default_value = "env:MOTLIE_APP_CALLBACK_SECRET")]
+    pub callback_secret_ref: String,
     #[arg(long)]
     pub tmux_target: String,
     #[arg(long)]

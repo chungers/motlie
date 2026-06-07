@@ -20,6 +20,7 @@ use super::offers::validate_call_url;
 use super::turns::{AgentTextFrame, GatewayTextFrame, TextCallDirection, TEXT_CALL_PROTOCOL};
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
+const MAX_ACTIVE_TEXT_CALL_TURNS: usize = 32;
 const MEDIA_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const PLAYBACK_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -47,7 +48,13 @@ impl SharedTextCallRegistry {
             return Ok(None);
         };
         let turn_id = format!("turn_{}", Uuid::new_v4().simple());
-        handle.active_turns.lock().await.insert(turn_id.clone());
+        {
+            let mut active_turns = handle.active_turns.lock().await;
+            if active_turns.len() >= MAX_ACTIVE_TEXT_CALL_TURNS {
+                anyhow::bail!("too many outstanding text-call turns");
+            }
+            active_turns.insert(turn_id.clone());
+        }
         handle
             .send(GatewayTextFrame::CallerTurn {
                 turn_id: turn_id.clone(),
@@ -209,6 +216,7 @@ async fn run_text_call_session<W, R>(
         }
     }
 
+    handle.active_turns.lock().await.clear();
     services.registry.remove(&gateway_call_id).await;
     if !gateway_closed {
         let _ =
@@ -410,5 +418,73 @@ mod tests {
             .await
             .expect("registry should not fail");
         assert_eq!(turn, None);
+    }
+
+    #[tokio::test]
+    async fn caller_turn_allows_multiple_outstanding_turns() {
+        let registry = SharedTextCallRegistry::default();
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let handle = test_handle(tx);
+        registry
+            .insert("call-test".to_string(), handle.clone())
+            .await;
+
+        let first = registry
+            .send_caller_turn("call-test", "first".to_string())
+            .await
+            .expect("first turn should send")
+            .expect("first turn id");
+        let second = registry
+            .send_caller_turn("call-test", "second".to_string())
+            .await
+            .expect("second turn should send")
+            .expect("second turn id");
+
+        assert_ne!(first, second);
+        assert_eq!(handle.active_turns.lock().await.len(), 2);
+        assert!(matches!(
+            rx.recv().await,
+            Some(GatewayTextFrame::CallerTurn { text, .. }) if text == "first"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(GatewayTextFrame::CallerTurn { text, .. }) if text == "second"
+        ));
+    }
+
+    #[tokio::test]
+    async fn caller_turn_rejects_when_outstanding_turn_cap_is_reached() {
+        let registry = SharedTextCallRegistry::default();
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let handle = test_handle(tx);
+        {
+            let mut active_turns = handle.active_turns.lock().await;
+            for index in 0..MAX_ACTIVE_TEXT_CALL_TURNS {
+                active_turns.insert(format!("turn-preexisting-{index}"));
+            }
+        }
+        registry
+            .insert("call-test".to_string(), handle.clone())
+            .await;
+
+        let error = registry
+            .send_caller_turn("call-test", "overflow".to_string())
+            .await
+            .expect_err("turn cap should reject new caller turns");
+
+        assert!(format!("{error:#}").contains("too many outstanding text-call turns"));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            handle.active_turns.lock().await.len(),
+            MAX_ACTIVE_TEXT_CALL_TURNS
+        );
+    }
+
+    fn test_handle(tx: mpsc::Sender<GatewayTextFrame>) -> TextCallSessionHandle {
+        TextCallSessionHandle {
+            tx,
+            sequence: Arc::new(AtomicU64::new(1)),
+            active_turns: Arc::new(Mutex::new(BTreeSet::new())),
+        }
     }
 }

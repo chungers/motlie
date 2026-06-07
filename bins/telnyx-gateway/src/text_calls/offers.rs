@@ -84,7 +84,14 @@ async fn post_callback<T: Serialize>(
             }
         }
     };
-    let mut headers = callback_headers(secret_ref, &raw_body);
+    let mut headers = match callback_headers(secret_ref, &raw_body) {
+        Ok(headers) => headers,
+        Err(error) => {
+            return CallbackDecision::Failed {
+                reason: format!("sign callback: {error:#}"),
+            }
+        }
+    };
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
     let response = client
@@ -169,19 +176,19 @@ fn validate_url_scheme(value: &str, allowed: &[&str]) -> anyhow::Result<()> {
     }
 }
 
-fn callback_headers(secret_ref: Option<&str>, raw_body: &[u8]) -> HeaderMap {
+fn callback_headers(secret_ref: Option<&str>, raw_body: &[u8]) -> anyhow::Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     let callback_id = format!("cb_{}", Uuid::new_v4().simple());
     let timestamp = Utc::now().to_rfc3339();
     insert_header(&mut headers, "X-Motlie-Callback-Id", &callback_id);
     insert_header(&mut headers, "X-Motlie-Timestamp", &timestamp);
-    let signature = match secret_ref.and_then(resolve_secret_ref) {
-        Some(secret) => sign_callback(&timestamp, raw_body, secret.as_bytes())
-            .unwrap_or_else(|_| "v1=unavailable".to_string()),
-        None => "v1=unconfigured".to_string(),
-    };
+    let secret_ref = secret_ref
+        .filter(|value| !value.trim().is_empty())
+        .context("callback secret_ref is required")?;
+    let secret = resolve_secret_ref(secret_ref).context("callback secret_ref did not resolve")?;
+    let signature = sign_callback(&timestamp, raw_body, secret.as_bytes())?;
     insert_header(&mut headers, "X-Motlie-Signature", &signature);
-    headers
+    Ok(headers)
 }
 
 fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
@@ -218,6 +225,25 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
+    async fn missing_secret_ref_fails_before_posting_callback() {
+        let client = callback_http_client().expect("client");
+        let decision = post_callback(
+            &client,
+            "http://127.0.0.1:1/offer",
+            None,
+            &json!({"type":"call.offer"}),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            decision,
+            CallbackDecision::Failed {
+                reason: "sign callback: callback secret_ref is required".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn redirect_response_declines_offer_without_following() {
         async fn handler() -> axum::response::Response {
             (
@@ -238,11 +264,12 @@ mod tests {
                 .expect("serve fake callback");
         });
 
+        let secret_ref = install_test_callback_secret("MOTLIE_TEST_CALLBACK_SECRET_DECLINE");
         let client = callback_http_client().expect("client");
         let decision = post_callback(
             &client,
             &format!("http://{addr}/offer"),
-            None,
+            Some(&secret_ref),
             &json!({"type":"call.offer"}),
             Duration::from_secs(1),
         )
@@ -268,11 +295,12 @@ mod tests {
                 .expect("serve fake callback");
         });
 
+        let secret_ref = install_test_callback_secret("MOTLIE_TEST_CALLBACK_SECRET_ACCEPT");
         let client = callback_http_client().expect("client");
         let decision = post_callback(
             &client,
             &format!("http://{addr}/offer"),
-            None,
+            Some(&secret_ref),
             &json!({"type":"call.offer"}),
             Duration::from_secs(1),
         )
@@ -283,5 +311,10 @@ mod tests {
                 call_url: "ws://127.0.0.1/text-call".to_string(),
             }
         );
+    }
+
+    fn install_test_callback_secret(env_name: &str) -> String {
+        std::env::set_var(env_name, "callback-test-secret");
+        format!("env:{env_name}")
     }
 }

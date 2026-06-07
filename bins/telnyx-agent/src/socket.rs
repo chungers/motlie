@@ -57,7 +57,12 @@ async fn handle_connection(stream: UnixStream, state: AgentState) -> anyhow::Res
                 let callback_url = format!("{}/motlie/outbound-connected", state.public_url);
                 match state
                     .gateway
-                    .place_outbound_call(&request.to, &callback_url, state.outbound_timeout_ms)
+                    .place_outbound_call(
+                        &request.to,
+                        &callback_url,
+                        state.outbound_timeout_ms,
+                        Some(&state.callback_secret_ref),
+                    )
                     .await
                 {
                     Ok(call) => DialResponse {

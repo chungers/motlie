@@ -10,6 +10,7 @@
 | 2026-06-07 18:16 PDT | @codex-366-impl: Expanded M5 #402 conversational realism scope into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared `conversation barge-in` toggle, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that text chunk. | Milestone 5: Conversational Realism Latency Improvements, Milestone 3: Full-Duplex TUI Chat Conversation, Returning TTS Audio |
 | 2026-06-07 | @codex-366-impl: Fixed live ASR end-of-turn latency by replacing indefinite low-energy tail suppression with replay-sized local endpoint finalization: after the trailing silence pad, the gateway finishes the active ASR session and waits for new speech, so final transcripts do not depend on a later utterance. | Inbound Call Handler Design, Testing Scope |
 | 2026-06-07 | @codex-366-impl: Added a gateway-wide `conversation barge-in on|off|status` toggle for TUI/socket live tests; default remains on, while off prevents transcript-triggered TTS clear during smoke-test echo validation. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
+| 2026-06-07 11:44 PDT | @codex-367-design: Clarified the M4 text WebSocket supports multiple concurrent caller turns with distinct `turn_id`s, requires invalid-turn rejection for unknown/completed turns, and expects bounded outstanding-turn cleanup on teardown. | Application Text Call Protocol and Gateway Control API, Telnyx Agent Daemon |
 | 2026-06-06 20:05 PDT | @codex-367-design: Reframed M4 around validation of the already-implemented command socket mux plus a phone-number-keyed inbound text-call subscription protocol, blocking outbound text-call dial API, bidirectional text WebSocket contract, and future `bins/telnyx-agent` tmux bridge daemon. | Milestone 4: External Integration Harness, Application Text Call Protocol and Gateway Control API, Telnyx Agent Daemon |
 | 2026-06-06 15:00 PDT | @codex-366-impl: Folded partial-ASR-triggered barge-in into M3: unsuppressed meaningful partial transcripts for attached calls now cancel active playback through the existing clear/cancel path, while final transcripts still drive regeneration; frame-level speech-onset barge-in was later folded into M5 #402 / PR #417. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
 | 2026-06-06 13:40 PDT | @codex-366-impl: Made the M3 echo conversation handler explicitly test-only and wired outbound `dial` into the same auto-attach conversation path: default attached conversations are transcription-only, `--conversation-smoke-test` or `conversation smoke-test on` enables the echo reply loop, and status surfaces the active handler mode. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
@@ -1346,11 +1347,12 @@ Application-to-gateway frames:
 Turn rules:
 
 - the gateway sends `caller.turn` only for ASR-final text by default
-- each `caller.turn` opens one expected application response
-- the application responds with one `agent.turn`, or `agent.close` if it wants the gateway to end the call
-- the gateway speaks `agent.turn.text` with TTS, then sends playback status frames
+- multiple caller turns may be outstanding at the same time; each `caller.turn` mints a distinct `turn_id` and opens one expected application response
+- the application responds with one `agent.turn` correlated by `turn_id`, or `agent.close` if it wants the gateway to end the call
+- the gateway removes the `turn_id` when the matching `agent.turn` is accepted and speaks `agent.turn.text` with TTS, then sends playback status frames
+- application frames that reference an unknown or completed `turn_id` should be rejected with an `invalid_turn` error frame and ignored
+- session teardown clears all outstanding `active_turns`, and implementations should cap outstanding turns to a small sane bound so a non-responding appserver cannot grow memory unbounded
 - if caller barge-in cancels playback, the gateway should use the existing M3 clear/cancel path, emit a new `caller.turn` when ASR finalizes the interruption, and leave duplicate suppression to `turn_id` / sequence handling
-- application frames that reference an unknown or completed `turn_id` should be rejected with an error frame and ignored
 - either side may send WebSocket ping/pong; missed heartbeat should end the text stream and hang up the call
 
 Recommended error frame:
@@ -1508,8 +1510,8 @@ The app layer should only own marker detection and turn correlation. ANSI stripp
 
 M4 validation for `bins/telnyx-agent` should cover:
 
-- daemon re-registers inbound subscriptions idempotently on restart
-- inbound offer redirect decline and accept paths work against a fake gateway
+- daemon re-registers inbound subscriptions idempotently on restart using opaque hashed subscription IDs rather than raw routing values
+- inbound offer redirect decline and accept paths work against a fake gateway with valid HMAC headers, stale timestamp rejection, and callback ID replay protection
 - outbound daemon socket request calls the gateway blocking dial API and returns only after text stream setup
 - one tmux bridge implementation handles both inbound and outbound calls
 - marker-delimited history extraction does not duplicate low-level scrape logic

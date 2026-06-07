@@ -284,6 +284,8 @@ mod tests {
             .expect("serve fake callback");
         });
 
+        let secret_ref =
+            install_test_callback_secret("MOTLIE_TEST_OUTBOUND_WS_FAIL_CALLBACK_SECRET");
         let services = test_services().await;
         let error = post_outbound_call(
             State(services.clone()),
@@ -293,7 +295,7 @@ mod tests {
                 from: Some("<caller-phone-number>".to_string()),
                 callback_url: format!("http://{callback_addr}/connected"),
                 timeout_ms: Some(1_000),
-                secret_ref: None,
+                secret_ref: Some(secret_ref),
                 metadata: BTreeMap::new(),
             }),
         )
@@ -311,6 +313,11 @@ mod tests {
             .timeline
             .iter()
             .any(|entry| entry.message == "outbound text-call setup failed; hangup requested"));
+    }
+
+    fn install_test_callback_secret(env_name: &str) -> String {
+        std::env::set_var(env_name, "callback-test-secret");
+        format!("env:{env_name}")
     }
 
     async fn test_services() -> AppServices {

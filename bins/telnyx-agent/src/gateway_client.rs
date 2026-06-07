@@ -14,6 +14,8 @@ struct SubscriptionRequest<'a> {
     phone_number: &'a str,
     callback_url: &'a str,
     priority: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_ref: Option<&'a str>,
     enabled: bool,
 }
 
@@ -22,6 +24,8 @@ struct OutboundCallRequest<'a> {
     to: &'a str,
     callback_url: &'a str,
     timeout_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_ref: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -44,12 +48,14 @@ impl GatewayClient {
         subscription_id: String,
         phone_number: &str,
         callback_url: &str,
+        secret_ref: Option<&str>,
     ) -> anyhow::Result<()> {
         let request = SubscriptionRequest {
             subscription_id,
             phone_number,
             callback_url,
             priority: 100,
+            secret_ref,
             enabled: true,
         };
         let response = self
@@ -72,11 +78,13 @@ impl GatewayClient {
         to: &str,
         callback_url: &str,
         timeout_ms: u64,
+        secret_ref: Option<&str>,
     ) -> anyhow::Result<OutboundCallResponse> {
         let request = OutboundCallRequest {
             to,
             callback_url,
             timeout_ms,
+            secret_ref,
         };
         let response = self
             .request(reqwest::Method::POST, "/api/v1/outbound-calls")
