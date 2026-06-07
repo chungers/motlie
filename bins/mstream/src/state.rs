@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -44,6 +47,7 @@ const EVENT_TEXT_MAX_CHARS: usize = 16 * 1024;
 const EVENT_STORE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const EVENT_STORE_MAX_RECORDS: usize = 10_000;
 const EVENT_STORE_COMPACT_INTERVAL: u64 = 256;
+const EVENT_STORE_QUEUE_CAPACITY: usize = 4_096;
 const OUTPUT_AUDIT_CHANNEL_CAPACITY: usize = 4_096;
 
 pub struct DaemonState {
@@ -74,10 +78,120 @@ impl Default for DaemonState {
     }
 }
 
-#[derive(Debug, Clone)]
 struct EventStore {
+    sender: Option<SyncSender<EventRecord>>,
+    thread: Option<ThreadJoinHandle<()>>,
+    warning_logged: AtomicBool,
+}
+
+impl EventStore {
+    fn start(path: PathBuf, retained_events: Vec<EventRecord>) -> anyhow::Result<Self> {
+        let (sender, receiver) = sync_channel(EVENT_STORE_QUEUE_CAPACITY);
+        let thread = thread::Builder::new()
+            .name("mstream-event-store".to_string())
+            .spawn(move || {
+                let mut writer = EventStoreWriter::new(path, retained_events);
+                while let Ok(event) = receiver.recv() {
+                    if let Err(err) = writer.append_event(event) {
+                        eprintln!("mstream event audit writer failed: {err}");
+                    }
+                }
+                if let Err(err) = writer.compact_on_shutdown() {
+                    eprintln!("mstream event audit final compaction failed: {err}");
+                }
+            })
+            .context("failed to start event audit writer")?;
+        Ok(Self {
+            sender: Some(sender),
+            thread: Some(thread),
+            warning_logged: AtomicBool::new(false),
+        })
+    }
+
+    fn enqueue(&self, event: EventRecord) {
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        match sender.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => self.log_enqueue_warning(
+                "mstream event audit queue full; durable event append dropped",
+            ),
+            Err(TrySendError::Disconnected(_)) => self.log_enqueue_warning(
+                "mstream event audit writer stopped; durable event append dropped",
+            ),
+        }
+    }
+
+    fn log_enqueue_warning(&self, message: &str) {
+        if !self.warning_logged.swap(true, Ordering::Relaxed) {
+            eprintln!("{message}");
+        }
+    }
+}
+
+impl Drop for EventStore {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                eprintln!("mstream event audit writer panicked");
+            }
+        }
+    }
+}
+
+struct EventStoreWriter {
     path: PathBuf,
+    retained_events: VecDeque<EventRecord>,
     writes_since_compact: u64,
+}
+
+impl EventStoreWriter {
+    fn new(path: PathBuf, retained_events: Vec<EventRecord>) -> Self {
+        let mut writer = Self {
+            path,
+            retained_events: retained_events.into(),
+            writes_since_compact: 0,
+        };
+        writer.trim_retained_events();
+        writer
+    }
+
+    fn append_event(&mut self, event: EventRecord) -> anyhow::Result<()> {
+        self.retained_events.push_back(event.clone());
+        self.trim_retained_events();
+        append_event_to_store_path(&self.path, &event)?;
+        self.writes_since_compact += 1;
+        let size = fs::metadata(&self.path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        if self.writes_since_compact >= EVENT_STORE_COMPACT_INTERVAL || size > EVENT_STORE_MAX_BYTES
+        {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    fn compact_on_shutdown(&mut self) -> anyhow::Result<()> {
+        if self.writes_since_compact > 0 {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    fn compact(&mut self) -> anyhow::Result<()> {
+        let events = self.retained_events.iter().cloned().collect::<Vec<_>>();
+        write_event_store_snapshot(&self.path, &events)?;
+        self.writes_since_compact = 0;
+        Ok(())
+    }
+
+    fn trim_retained_events(&mut self) {
+        while self.retained_events.len() > EVENT_STORE_MAX_RECORDS {
+            self.retained_events.pop_front();
+        }
+    }
 }
 
 struct HostRecord {
@@ -536,10 +650,8 @@ impl DaemonState {
 
     fn load_event_store(&mut self, path: PathBuf) -> anyhow::Result<()> {
         self.replay_event_store(&path)?;
-        self.event_store = Some(EventStore {
-            path,
-            writes_since_compact: 0,
-        });
+        let retained_events = self.retained_events_for_store();
+        self.event_store = Some(EventStore::start(path, retained_events)?);
         Ok(())
     }
 
@@ -3889,61 +4001,10 @@ impl DaemonState {
         self.next_generation = self.next_generation.max(generation.saturating_add(1));
     }
 
-    fn append_event_to_store(&mut self, event: &EventRecord) -> anyhow::Result<()> {
-        let Some(path) = self.event_store.as_ref().map(|store| store.path.clone()) else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create event audit log directory {}",
-                    parent.display()
-                )
-            })?;
+    fn enqueue_event_for_store(&self, event: &EventRecord) {
+        if let Some(store) = &self.event_store {
+            store.enqueue(event.clone());
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("failed to open event audit log {}", path.display()))?;
-        serde_json::to_writer(&mut file, event)
-            .with_context(|| format!("failed to encode event audit log {}", path.display()))?;
-        file.write_all(b"\n")
-            .with_context(|| format!("failed to write event audit log {}", path.display()))?;
-        file.flush()
-            .with_context(|| format!("failed to flush event audit log {}", path.display()))?;
-        let size = file
-            .metadata()
-            .map(|metadata| metadata.len())
-            .unwrap_or_default();
-        let compact_due = if let Some(store) = &mut self.event_store {
-            store.writes_since_compact += 1;
-            store.writes_since_compact >= EVENT_STORE_COMPACT_INTERVAL
-                || size > EVENT_STORE_MAX_BYTES
-        } else {
-            false
-        };
-        drop(file);
-        if compact_due {
-            self.compact_event_store()?;
-        }
-        Ok(())
-    }
-
-    fn compact_event_store(&mut self) -> anyhow::Result<()> {
-        let Some(path) = self.event_store.as_ref().map(|store| store.path.clone()) else {
-            return Ok(());
-        };
-        let mut events = self.retained_events_for_store();
-        if events.len() > EVENT_STORE_MAX_RECORDS {
-            let drop_count = events.len() - EVENT_STORE_MAX_RECORDS;
-            events.drain(0..drop_count);
-        }
-        write_event_store_snapshot(&path, &events)?;
-        if let Some(store) = &mut self.event_store {
-            store.writes_since_compact = 0;
-        }
-        Ok(())
     }
 
     fn retained_events_for_store(&self) -> Vec<EventRecord> {
@@ -3995,9 +4056,7 @@ impl DaemonState {
             workstream_record.prune_events();
             (cursor, event)
         };
-        if let Err(err) = self.append_event_to_store(&event) {
-            eprintln!("mstream event audit append failed: {err}");
-        }
+        self.enqueue_event_for_store(&event);
         Ok(cursor)
     }
 
@@ -4893,8 +4952,11 @@ fn default_event_actor() -> EventActor {
     EventActor::Mstream
 }
 
-fn write_event_store_snapshot(path: &Path, events: &[EventRecord]) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
+fn create_event_store_parent(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent).with_context(|| {
             format!(
                 "failed to create event audit log directory {}",
@@ -4902,6 +4964,27 @@ fn write_event_store_snapshot(path: &Path, events: &[EventRecord]) -> anyhow::Re
             )
         })?;
     }
+    Ok(())
+}
+
+fn append_event_to_store_path(path: &Path, event: &EventRecord) -> anyhow::Result<()> {
+    create_event_store_parent(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open event audit log {}", path.display()))?;
+    serde_json::to_writer(&mut file, event)
+        .with_context(|| format!("failed to encode event audit log {}", path.display()))?;
+    file.write_all(b"\n")
+        .with_context(|| format!("failed to write event audit log {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed to flush event audit log {}", path.display()))?;
+    Ok(())
+}
+
+fn write_event_store_snapshot(path: &Path, events: &[EventRecord]) -> anyhow::Result<()> {
+    create_event_store_parent(path)?;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp_path = PathBuf::from(tmp);
@@ -6979,14 +7062,18 @@ mod tests {
             )
             .expect("record event");
 
-        let event = state
-            .workstream("issue-409")
-            .expect("workstream")
-            .events
-            .back()
-            .expect("event");
-        assert!(event.redacted);
-        assert_eq!(event.text.as_deref(), Some("call [REDACTED_PHONE] now"));
+        let (redacted, text) = {
+            let event = state
+                .workstream("issue-409")
+                .expect("workstream")
+                .events
+                .back()
+                .expect("event");
+            (event.redacted, event.text.clone())
+        };
+        assert!(redacted);
+        assert_eq!(text.as_deref(), Some("call [REDACTED_PHONE] now"));
+        drop(state);
         let persisted = fs::read_to_string(store_path).expect("audit log");
         assert!(persisted.contains("[REDACTED_PHONE]"));
         assert!(!persisted.contains(&sensitive));
