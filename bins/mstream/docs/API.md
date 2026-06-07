@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 | @codex-401-impl | Added issue #401 session lifecycle commands: `retire` to mark live agents `quarantined`, `reclaim` for gated teardown, and `kill` as a gated compatibility alias. |
 | 2026-05-30 | @codex-360-og | Added issue #360 live session rename/retag commands with id-stable tmux rename, role/workstream retagging, and mmux label refresh. |
 | 2026-06-06 | @codex-386-impl | Documented `mstream new` agent executable preflight on the remote non-login PATH and absolute-path guidance. |
 | 2026-05-30 | @codex-355-rv | Switched daemon session bookkeeping to stable `(host, session_id)` targets while keeping tmux session names as display metadata. |
@@ -118,6 +119,9 @@ mstream new pr-324 local::codex-worker \
   --task "Implement the next phase."
 
 mstream leave pr-324 local::codex-worker --available
+mstream retire pr-324 local::codex-worker
+mstream reclaim local::codex-worker
+# Compatibility alias for gated reclaim:
 mstream kill local::codex-worker
 
 mstream rename local::codex-worker codex-reviewer
@@ -166,6 +170,12 @@ unsets the selected key when there was no previous value. If a user or another
 tool changed `@mmux/__selected-key` after mstream applied the label, cleanup
 leaves that selected key unchanged.
 
+`retire` keeps the target in its workstream, writes `@mstream/state=quarantined`,
+and records the transition so cleanup directives remain audit-logged. `reclaim`
+then kills and deregisters only a managed target whose live tmux tags are
+`quarantined`; `kill` is retained as a compatibility alias for the same gated
+terminal path.
+
 ## Communication And Handoff
 
 ```sh
@@ -180,6 +190,8 @@ mstream broadcast pr-324 --state busy --text "Wrap up your current step and summ
 
 mstream session mark local::codex-worker --state done --summary "Implemented requested fixes."
 mstream session mark local::codex-worker --state blocked --summary "Need host credentials."
+mstream send pr-324 local::codex-worker --require-state quarantined \
+  --text "Rename your worktree with a TBR- prefix, then summarize." --enter
 ```
 
 When the target is joined to an open workstream, `interrupt` appends an

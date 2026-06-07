@@ -21,6 +21,7 @@ pub enum AgentState {
     Done,
     Blocked,
     NeedsInput,
+    Quarantined,
 }
 
 impl AgentState {
@@ -33,6 +34,7 @@ impl AgentState {
             AgentState::Done => "done",
             AgentState::Blocked => "blocked",
             AgentState::NeedsInput => "needs-input",
+            AgentState::Quarantined => "quarantined",
         }
     }
 
@@ -101,6 +103,10 @@ pub enum ClientRequest {
     Join(JoinRequest),
     New(NewRequest),
     Leave(LeaveRequest),
+    Retire(RetireRequest),
+    Reclaim {
+        target: String,
+    },
     Kill {
         target: String,
     },
@@ -216,6 +222,12 @@ pub struct LeaveRequest {
     pub workstream: String,
     pub target: String,
     pub available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetireRequest {
+    pub workstream: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

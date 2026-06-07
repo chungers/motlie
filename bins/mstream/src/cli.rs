@@ -8,11 +8,12 @@ use clap::{Args, Parser, Subcommand};
 use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
-    NewRequest, OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest,
-    SessionRetagRequest, SnapshotRequest, SummaryInputRequest, TimerStartRequest,
-    WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS, DEFAULT_STATUS_IDLE_AFTER_SECS,
-    DEFAULT_TIMER_INPUT_QUIET_FOR_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
-    DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
+    NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
+    SessionMarkRequest, SessionRetagRequest, SnapshotRequest, SummaryInputRequest,
+    TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
+    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS,
+    DEFAULT_TIMER_SUBMIT_RETRIES, DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS,
+    DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -61,6 +62,10 @@ pub enum Command {
     Join(JoinArgs),
     New(NewArgs),
     Leave(LeaveArgs),
+    Retire(RetireArgs),
+    Reclaim {
+        target: String,
+    },
     Kill {
         target: String,
     },
@@ -136,6 +141,11 @@ impl Command {
                 target: args.target,
                 available: args.available,
             })),
+            Command::Retire(args) => Ok(ClientRequest::Retire(RetireRequest {
+                workstream: args.workstream,
+                target: args.target,
+            })),
+            Command::Reclaim { target } => Ok(ClientRequest::Reclaim { target }),
             Command::Kill { target } => Ok(ClientRequest::Kill { target }),
             Command::Send(args) => Ok(ClientRequest::Send(args.into_request()?)),
             Command::Interrupt(args) => Ok(ClientRequest::Interrupt(InterruptRequest {
@@ -312,6 +322,12 @@ pub struct LeaveArgs {
     pub target: String,
     #[arg(long)]
     pub available: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RetireArgs {
+    pub workstream: String,
+    pub target: String,
 }
 
 #[derive(Debug, Args)]
@@ -867,6 +883,43 @@ mod tests {
         assert_eq!(request.role.as_deref(), Some("implementer"));
         assert_eq!(request.workstream.as_deref(), Some("issue-360"));
         assert_eq!(request.mmux_label.as_deref(), Some("360 impl"));
+    }
+
+    #[test]
+    fn retire_command_builds_request() {
+        let cli = Cli::try_parse_from(["mstream", "retire", "issue-401", "local::$1"])
+            .expect("retire command parses");
+
+        let request = cli.command.into_request().expect("retire request");
+        let ClientRequest::Retire(request) = request else {
+            panic!("expected retire request");
+        };
+        assert_eq!(request.workstream, "issue-401");
+        assert_eq!(request.target, "local::$1");
+    }
+
+    #[test]
+    fn reclaim_command_builds_request() {
+        let cli = Cli::try_parse_from(["mstream", "reclaim", "local::$1"])
+            .expect("reclaim command parses");
+
+        let request = cli.command.into_request().expect("reclaim request");
+        let ClientRequest::Reclaim { target } = request else {
+            panic!("expected reclaim request");
+        };
+        assert_eq!(target, "local::$1");
+    }
+
+    #[test]
+    fn kill_command_remains_compatibility_request() {
+        let cli =
+            Cli::try_parse_from(["mstream", "kill", "local::$1"]).expect("kill command parses");
+
+        let request = cli.command.into_request().expect("kill request");
+        let ClientRequest::Kill { target } = request else {
+            panic!("expected kill request");
+        };
+        assert_eq!(target, "local::$1");
     }
 
     #[test]
