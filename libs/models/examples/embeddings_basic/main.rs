@@ -2,7 +2,7 @@ use anyhow::Result;
 
 #[path = "../support/embeddings.rs"]
 mod embedding_example_support;
-#[path = "../support.rs"]
+#[path = "../support/runtime.rs"]
 mod support;
 
 #[tokio::main]

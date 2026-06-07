@@ -1,18 +1,20 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
     QuantizationBits, StartOptions,
 };
 use motlie_model_mistral::MistralTextSpec;
 use motlie_models::{
-    ModelSelector, chat::ChatModels, default_artifact_root, quantization_label_isq,
+    chat::ChatModels, default_artifact_root, quantization_label_isq, ModelSelector,
 };
 use std::path::PathBuf;
 use std::time::Instant;
 
-#[path = "../support.rs"]
+#[path = "../support/feature_matrix.rs"]
+mod feature_matrix;
+#[path = "../support/runtime.rs"]
 mod support;
-#[path = "../tool_demo_support.rs"]
+#[path = "../support/tool_demo.rs"]
 mod tool_demo_support;
 
 #[tokio::main]

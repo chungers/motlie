@@ -33,7 +33,7 @@ Current example groups:
 | catalog only | `mistral.rs` | Gemma 4 E4B-it safetensors | `Chat` + `Vision` + `ToolUse` | Curated bundle is registered behind `model-gemma4-e4b` with Q8 default quantization, Gemma recommended sampling params, and the same shared Gemma safetensors tool transcript adapter used by E2B. |
 | `chat_multimodal_qwen3_6_27b` | `llama.cpp` | Qwen3.6 27B GGUF | `Chat` + `Completion` | Text chat/completion only. `Vision` and `ToolUse` are not advertised for this bundle yet. |
 
-The shared tool demo support lives in [`tool_demo_support.rs`](./tool_demo_support.rs).
+The shared helper modules live under [`support/`](./support/). The tool demo support lives in [`support/tool_demo.rs`](./support/tool_demo.rs).
 It intentionally keeps tool execution caller-owned: model backends request
 `ToolCall`s, and the example layer executes the Rust functions through
 static `ToolList` tuple dispatch. The math tool uses `cel-cxx`, a Rust binding to the mature
@@ -57,6 +57,36 @@ land in a future PR.
 Use `--tool-demo "What is Rust?"` on the model-backed chat examples to run the
 ordinary chat path first and then the weather-plus-math tool loop. Use
 `--tool-demo-only` to isolate just the tool loop.
+
+## Example Feature Matrix
+
+Human-facing examples are built by backend family. The CEL-backed chat/tool
+examples (`chat_tool_binding`, `chat_mistral_qwen3`, `chat_multimodal_gemma4`,
+and `chat_gguf_gwen3_gemma4`) include [`support/feature_matrix.rs`](./support/feature_matrix.rs),
+which fails at compile time if an ORT-backed Piper, Moonshine, or Sherpa feature
+is enabled in the same Cargo invocation. This keeps the static ONNX Runtime and
+`cel-cxx` protobuf objects out of the same example link.
+
+Allowed chat/tool build:
+
+```bash
+cargo build -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3
+```
+
+Allowed ORT-backed TTS build, with the host ONNX Runtime environment configured:
+
+```bash
+cargo build -p motlie-models --no-default-features --features model-piper-en-us-ljspeech-medium --example tts_piper
+```
+
+Denied by design:
+
+```bash
+cargo build -p motlie-models --no-default-features --features "model-qwen3-4b model-piper-en-us-ljspeech-medium" --example chat_mistral_qwen3
+```
+
+The denied command should fail with the `motlie-models example feature matrix`
+compile error before native ORT or `cel-cxx` link steps run.
 
 ## Demo Output Ledger
 

@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use motlie_model::TranscriptSegment;
 use motlie_model::typed::{AudioBuf, Mono};
+use motlie_model::TranscriptSegment;
 use motlie_voice::pipeline::convert::{decode_samples_to_f32, downmix_to_mono};
 use motlie_voice::pipeline::resample::{LinearInterpolator, Resampler};
 use motlie_voice::wav::decode_streaming_wav_to_f32;
 
-use crate::audio_support::{WavInput, open_wav_reader};
+use crate::audio_support::{open_wav_reader, WavInput};
 
 pub const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 
@@ -61,7 +61,11 @@ pub fn render_plain_transcript(segments: &[TranscriptSegment]) -> Option<String>
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 pub fn print_plain_transcript(segments: &[TranscriptSegment]) {

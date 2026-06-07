@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, CapabilityKind, ChatMessage, ChatModel, ChatRequest, ChatRole,
     CompletionModel, ContentPart, QuantizationBits, StartOptions,
@@ -7,7 +7,7 @@ use motlie_models::{chat::ChatModels, default_artifact_root, quantization_label_
 use std::path::Path;
 use std::time::Instant;
 
-#[path = "../support.rs"]
+#[path = "../support/runtime.rs"]
 mod support;
 
 #[tokio::main]

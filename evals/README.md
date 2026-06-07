@@ -26,6 +26,21 @@ evals/
 - `metrics` requests performance and resource capture.
 - `profiles.<name>.gates` may define optional acceptance thresholds.
 
+## Gate Scope
+
+Issue #399 gates the eval suite with eval-scoped formatting plus the eval binary
+build, tests, and clippy. The intended commands are:
+
+```sh
+cargo fmt -p evals --check
+cargo build -p evals --all-targets
+cargo test -p evals --all-targets
+cargo clippy -p evals --all-targets -- -D warnings
+```
+
+Full-workspace `cargo fmt --check` may report pre-existing formatting drift
+outside the eval suite; that broader cleanup is separate from this issue.
+
 ## Current Scenarios
 
 - `embeddings_similarity`: embedding dimensions plus similar-vs-dissimilar cosine ordering.
