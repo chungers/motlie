@@ -4,6 +4,7 @@
 
 - 2026-06-06 16:19 PDT, @codex-381-impl -- Added the reversed TTS quality A/B harness runbook for issue #381, covering Piper baseline, Kokoro-82M, Qwen3-TTS, codec round-trip scoring, objective audio signals, and M3.5 live-path interpretation.
 - 2026-06-06 22:11 PDT, @codex-381-impl -- Updated Kokoro-82M from an external-command experiment to a curated in-repo ONNX backend that shares the workspace static ONNX Runtime link path.
+- 2026-06-06 22:50 PDT, @codex-381-impl -- Made Qwen3-TTS an explicit opt-in golden-ab lane after DGX review found a single runaway sample could generate hundreds of seconds of audio and retain high RSS; default bakeoff is now Piper + Kokoro only.
 
 ## Purpose
 
@@ -25,7 +26,8 @@ Default engine order is:
 
 1. `piper` (`piper/en_us_ljspeech_medium`) as the current practical baseline
 2. `kokoro-82m` as the first candidate to beat Piper for M3.5 live full-duplex suitability
-3. `qwen3-tts-cpp` as the second candidate, using the existing Motlie Qwen3-TTS C++ backend path
+
+`qwen3-tts-cpp` remains available as an explicit `--engine qwen3-tts-cpp` lane, but it is no longer part of the implicit default matrix. DGX review found a Qwen3 runaway sample that generated hundreds of seconds of audio, took several minutes, and retained high RSS. Keep Qwen3 opt-in until that backend has a hard per-sample output-duration/timeout guard.
 
 Kokoro-82M is a curated in-repo ONNX backend. It uses the workspace `ort`/`ort-sys` link path, so the full golden A/B binary must still link exactly one static ONNX Runtime and no dynamic `libonnxruntime`.
 
@@ -45,7 +47,7 @@ cargo run -p motlie-telnyx-gateway --features piper -- \
   --output-json /tmp/motlie-tts-golden-ab-smoke.json
 ```
 
-Run the full default matrix when Piper, Qwen3-TTS, Sherpa, and Kokoro artifacts are available:
+Run the full default matrix when Piper, Sherpa, and Kokoro artifacts are available:
 
 ```bash
 cargo run -p motlie-telnyx-gateway --features golden-ab -- \
@@ -54,13 +56,23 @@ cargo run -p motlie-telnyx-gateway --features golden-ab -- \
   --output-json /tmp/motlie-tts-golden-ab-call-center.json
 ```
 
-Run the PM/orchestration corpus with the same engines and codecs:
+Run the PM/orchestration corpus with the same default engines and codecs:
 
 ```bash
 cargo run -p motlie-telnyx-gateway --features golden-ab -- \
   tts-golden-ab bins/telnyx-gateway/corpus/qwen3-pm-orchestration-golden.json \
   --output-dir /tmp/motlie-tts-golden-ab-pm \
   --output-json /tmp/motlie-tts-golden-ab-pm.json
+```
+
+Run Qwen3-TTS only when explicitly investigating that lane and when the host can tolerate a possible long sample; this is not part of the default matrix:
+
+```bash
+cargo run -p motlie-telnyx-gateway --features golden-ab -- \
+  tts-golden-ab bins/telnyx-gateway/corpus/qwen3-call-center-golden.json \
+  --engine qwen3-tts-cpp \
+  --output-dir /tmp/motlie-tts-golden-ab-qwen3 \
+  --output-json /tmp/motlie-tts-golden-ab-qwen3.json
 ```
 
 Run only Kokoro first, which is the #381 priority candidate:

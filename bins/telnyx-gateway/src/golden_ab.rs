@@ -1219,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn tts_golden_ab_defaults_include_baseline_and_candidates() {
+    fn tts_golden_ab_defaults_include_baseline_and_kokoro_candidate() {
         let args = TtsGoldenAbArgs {
             manifest: PathBuf::from("manifest.json"),
             output_dir: PathBuf::from("/tmp/motlie-tts-golden-ab-test"),
@@ -1234,11 +1234,7 @@ mod tests {
 
         assert_eq!(
             args.selected_engines(),
-            vec![
-                TtsGoldenEngineArg::Piper,
-                TtsGoldenEngineArg::Kokoro82m,
-                TtsGoldenEngineArg::Qwen3TtsCpp,
-            ]
+            vec![TtsGoldenEngineArg::Piper, TtsGoldenEngineArg::Kokoro82m]
         );
         assert_eq!(
             args.selected_codecs(),

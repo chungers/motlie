@@ -188,7 +188,7 @@ pub struct TtsGoldenAbArgs {
     #[arg(long, default_value = "/tmp/motlie-tts-golden-ab")]
     pub output_dir: PathBuf,
 
-    /// TTS engine to run. Repeat to compare multiple engines.
+    /// TTS engine to run. Repeat to compare multiple engines. Defaults to Piper + Kokoro; Qwen3 is opt-in.
     #[arg(long, value_enum)]
     pub engine: Vec<TtsGoldenEngineArg>,
 
@@ -220,11 +220,7 @@ pub struct TtsGoldenAbArgs {
 impl TtsGoldenAbArgs {
     pub fn selected_engines(&self) -> Vec<TtsGoldenEngineArg> {
         if self.engine.is_empty() {
-            vec![
-                TtsGoldenEngineArg::Piper,
-                TtsGoldenEngineArg::Kokoro82m,
-                TtsGoldenEngineArg::Qwen3TtsCpp,
-            ]
+            vec![TtsGoldenEngineArg::Piper, TtsGoldenEngineArg::Kokoro82m]
         } else {
             self.engine.clone()
         }
