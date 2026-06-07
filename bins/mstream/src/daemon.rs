@@ -60,7 +60,9 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
     prepare_socket(&socket).await?;
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind daemon socket {}", socket.display()))?;
-    let state = Arc::new(Mutex::new(DaemonState::default()));
+    let event_store_path = DaemonState::event_store_path_for_socket(&socket);
+    let state = Arc::new(Mutex::new(DaemonState::with_event_store(event_store_path)?));
+    let output_audit_task = DaemonState::spawn_output_audit_task(Arc::clone(&state)).await?;
     let (stop_tx, mut stop_rx) = watch::channel(false);
 
     loop {
@@ -83,8 +85,22 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
         }
     }
 
+    output_audit_task.abort();
+    let _ = output_audit_task.await;
+    shutdown_state(&state).await;
     let _ = fs::remove_file(&socket);
     Ok(())
+}
+
+async fn shutdown_state(state: &Arc<Mutex<DaemonState>>) {
+    let timer_tasks = {
+        let mut state = state.lock().await;
+        state.abort_timer_tasks()
+    };
+    for task in timer_tasks {
+        let _ = task.await;
+    }
+    state.lock().await.shutdown_event_store();
 }
 
 async fn handle_connection(

@@ -4,7 +4,6 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-01 | @codex-364-impl | Replaced the Sherpa backend internals with the upstream `sherpa-onnx` Rust crate, preserving the existing curated selector while using upstream online recognizer state, endpointing, and static native archive download/linking. |
 | 2026-04-17 | @codex-asr | Renamed the shipped ASR example targets and paths to `asr_whisper`, `asr_sherpa_onnx`, and `asr_moonshine`, and updated the build-plan references accordingly. |
 | 2026-04-14 | @codex-asr | Added the concrete Phase 2 `sherpa-onnx` follow-on slice to keep the PLAN aligned with the implemented backend crate, curated bundle, feature flags, explicit ONNX Runtime provisioning, and `models_v0_6` example. |
 | 2026-04-13 | @codex-asr | Addressed R1 review feedback by adding explicit tasks for the stream-scoped `AudioSpec`, `Option<TranscriptionUpdate>`, runtime metrics, exact brownfield file touch points, `QuantizationSupport::none()`, and the websocket deferral details for the first implementation slice. |
@@ -234,13 +233,10 @@ Track the true-streaming ONNX backend as the second ASR slice on top of the same
 - [x] Add `BackendKind::SherpaOnnx` and use `CheckpointFormat::Onnx` for the curated streaming bundle.
   DESIGN reference: `Generic Backend Design`
 - [x] Implement the streaming transducer runtime with persistent stream state and incremental decode over `ort`.
-  Superseded 2026-06-01: the backend now delegates streaming decode to upstream `sherpa-onnx::OnlineRecognizer` / `OnlineStream` instead of maintaining Motlie's own encoder/decoder/joiner loop.
   DESIGN reference: `Recommended Vertical Slice`, `Generic Backend Design`
-- [x] Keep ONNX Runtime provisioning static by enabling the workspace `ort/download-binaries` path so Cargo downloads and statically links the prebuilt `libonnxruntime.a` archive with no manual ORT env vars.
-  Superseded 2026-06-01 for Sherpa: upstream `sherpa-onnx` now downloads and statically links its own prebuilt native archive, including the ONNX Runtime library used internally by Sherpa. The workspace `ort/download-binaries` rule still applies to Motlie-owned Pyke `ort` backends.
+- [x] Keep ONNX Runtime provisioning explicit by avoiding `ort` build-time binary download; require ONNX Runtime through `ORT_LIB_PATH`, `pkg-config`, or another explicit system installation path.
   DESIGN reference: `Generic Backend Design`
 - [x] Reuse the existing `MOTLIE_MODEL_FORCE_CPU` convention as the runtime escape hatch when the backend is compiled with CUDA support.
-  Superseded 2026-06-01 for Sherpa: the upstream-backed path is CPU/static-archive first; CUDA remains deferred until a supported upstream archive path is chosen.
   DESIGN reference: `Generic Backend Design`, `Feature Flag Design`
 
 ### 5B.2 - Curated bundle, flags, and example

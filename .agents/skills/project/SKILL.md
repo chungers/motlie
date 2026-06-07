@@ -30,7 +30,7 @@ These rules hold across every section below. They are stated once here; later se
 2. **mstream is the coordination boundary.** Do not bypass it with direct `ssh`/`tmux` for liveness, listing, snapshots, monitoring, or messaging. If mstream lacks a needed signal, extend it in the active PR or ask the user before any temporary manual path.
 3. **Keep the daemon alive.** Once assigned, keep one daemon on one stable socket across turns. Do not stop or restart it after routine commands or transient SSH errors. Never stop it unless the user explicitly asks. If it seems unreachable, report and ask before replacing it.
 4. **Durable context outranks runtime state.** tmux and daemon memory are recoverable runtime, not the source of truth. Persist issue/PR/branch/commit/host/session/role facts to durable places (GitHub, worktrees, notes) so resets are survivable.
-5. **Side effects need approval.** Treat `connect`, `open`, `join`/`new`/`recruit`, `send`, `interrupt`, `handoff`, `label`, `leave`, `kill`, `close`, and `daemon start` as side-effecting. If the latest request asks for an outline, staffing, or risk plan, deliver that and wait. Otherwise summarize intended side effects before running them. On failure, stop the sequence, report the exact failure and implication, then decide the next step with the user unless the fix is local and obvious.
+5. **Side effects need approval.** Treat `connect`, `open`, `join`/`new`/`recruit`, `send`, `interrupt`, `handoff`, `label`, `leave`, `retire`, `reclaim`, `close`, and `daemon start` as side-effecting. If the latest request asks for an outline, staffing, or risk plan, deliver that and wait. Otherwise summarize intended side effects before running them. On failure, stop the sequence, report the exact failure and implication, then decide the next step with the user unless the fix is local and obvious.
 6. **Never invent state.** Do not fabricate credentials, host aliases, SSH URIs, issue numbers, or product direction. Ask the user (see Prerequisites To Collect).
 7. **Report quietly, by outcome.** Surface material state changes, blockers, risks, and decisions needing a human. Do not narrate routine tool calls or paste raw logs; summarize the relevant result.
 8. **TUI submit retry.** Agent TUIs sometimes miss the submit newline. If the timeline shows typed-but-unsubmitted text after a send, wait briefly and send one extra empty `--enter`. This is a targeted retry, not a default double-send.
@@ -75,7 +75,8 @@ Shared enums:
 | | `join <ws> <target> --role` | Join existing session | `--task` |
 | | `recruit <ws> --role` | Recruit tagged agents | `--agent`, `--count` (1), `--goal`, `--selector k=v` (repeatable), `--task` |
 | | `leave <ws> <target>` | Remove from workstream, keep tmux | `--available` |
-| | `kill <target>` | Destroy tmux session (terminal) | |
+| | `retire <ws> <target>` | Move agent to `quarantined` (no further assignment; stays alive + taskable) | |
+| | `reclaim <target>` | Terminal teardown: kill tmux + deregister. **GATED**: requires `managed` + `quarantined` | |
 | | `session list` | List sessions | |
 | | `session mark <target> --state --summary` | Annotate session state | |
 | Messaging | `send <ws> <target> --text` | Send to one session | `--enter`/`--no-enter`, `--interrupt-first`, `--settle-ms` (500), `--paste-mode bracketed\|literal`, `--require-state`, `--set-state` |
@@ -323,7 +324,7 @@ As project manager, keep enough durable context to survive these resets. When a 
 
 Use when an agent must be replaced, a host/session is going away, or the user
 asks to move ownership of in-flight work. Build transfer from existing mstream
-primitives (`send`, `new`/`join`/`recruit`, `session mark`, `leave`, `kill`); do
+primitives (`send`, `new`/`join`/`recruit`, `session mark`, `leave`, `retire`/`reclaim`); do
 not request a new `mstream transfer` command — if a primitive gap blocks you,
 stop and report it.
 
@@ -392,11 +393,11 @@ mstream send <workstream> <successor-target> --set-state busy --enter \
 
 5. **Quarantine, then retire the predecessor** once the successor is ready: mark
    it `reserved` to keep it out of recruitment, then prefer `leave` (keeps the
-   tmux session for later inspection) over `kill` (terminal).
+   tmux session for later inspection) over `reclaim` (terminal, gated on `quarantined`).
 
 ```sh
 mstream session mark <source-target> --state reserved --summary "succeeded by <successor-target>; retiring"
-mstream leave <workstream> <source-target>   # or: mstream kill <source-target>
+mstream leave <workstream> <source-target>   # or terminal: mstream retire <workstream> <source-target> && mstream reclaim <source-target>
 ```
 
 Record the outcome in the closeout log: source, successor, durable checkpoint,
@@ -565,15 +566,20 @@ When starting a new agent, include:
 - instruction to use `@{session_name}` in comments and submissions
 - working directory and branch naming expectations
 - exact repository URL and issue context. Do not make agents guess repository owner/name; include `https://github.com/chungers/motlie.git` for Motlie work unless the user gives a different URL.
-- permission-mode guidance when useful. Treat `mstream new --agent` as the executable name unless the current CLI supports arguments; otherwise start the executable, such as `claude` or `codex`, and use the initial task to request auto permission mode, for example Claude auto mode or Codex `/permission` auto mode.
+- **Permission mode is MANDATORY INITIAL SETUP for every Codex agent — set it BEFORE assigning any work.** `mstream new --agent` takes a bare executable path (`claude` or `codex`); never pass CLI flags or wrappers. As soon as the Codex TUI is ready (confirm with `mstream snapshot`), the orchestrator sets the mode by driving the TUI through mstream, in this exact order:
+  1. `mstream send <ws> <target> --enter --text "/permissions"` — opens the Codex permission selector.
+  2. `mstream snapshot <ws>` — read the selector (options: 1 Default, 2 Auto-review, 3 Full Access).
+  3. `mstream send <ws> <target> --enter --text "2"` — pick **option 2, Auto-review** (workspace-write + on-request approvals routed through the auto-reviewer subagent).
+  4. `mstream snapshot <ws>` — confirm the pane shows `Permissions updated to Auto-review`.
+  NEVER pick option 3 (Full Access / `danger-full-access` = yolo). Do this only with the user's approval for the host/workstream. (For Claude agents, launch in auto permission mode via `mstream new --agent <claude-path> --agent-arg --permission-mode --agent-arg auto` — #410 added `--agent-arg` passthrough, so Claude no longer needs per-command hand-approval.) A bare empty `--enter` submits stuck/queued input.
 
 Remote non-login shells may not have the same `PATH` as an interactive shell.
-Prefer user-provided absolute executable paths or workstream-local wrappers when
-creating sessions. If you need to discover executable paths and mstream lacks a
-safe host probe, ask the user or add the needed mstream capability instead of
-running direct SSH probes.
+Prefer user-provided absolute executable paths when creating sessions (do NOT
+create workstream-local wrapper scripts). If you need to discover executable
+paths and mstream lacks a safe host probe, ask the user or add the needed
+mstream capability instead of running direct SSH probes.
 
-If an agent needs CLI flags and `mstream new --agent` accepts only an executable path, create a small wrapper under the workstream root, for example `~/sessions/{workstream}/bin/codex-auto`, and pass the wrapper path as `--agent`. Use this only after the user has approved the permission mode for the target host and workstream.
+NEVER create launcher wrapper scripts (e.g. a `codex-auto` that bakes in `--ask-for-approval`/`--sandbox danger-full-access` flags), and NEVER create a wrapper that execs uncommitted code. Launch via `mstream new --agent <absolute-executable-path>` (Codex bare, then `/permissions` Auto-review; Claude with `--agent-arg --permission-mode --agent-arg auto` per #410), then run the mandatory permission-mode setup as the FIRST step before the agent does any work — the `/permissions` → pick **2 Auto-review** procedure above. Permission posture is set interactively via mstream — never via on-disk wrapper flags.
 
 When a TUI is sensitive to startup timing, create the session first without a long `--task`, confirm the prompt is ready with `mstream snapshot`, then send the assignment with `mstream send --interrupt-first --enter`. Verify the timeline shows the agent started acting on the assignment.
 
@@ -744,6 +750,16 @@ mstream snapshot issue-337-tmux-fleet-api --max-chars 12000
 mstream summary-input issue-337-tmux-fleet-api --max-chars 12000
 ```
 
+These read the daemon's **passively-buffered timeline**: mstream records workstream
+activity continuously, so you can answer "what is agent X doing?" on demand —
+including ad-hoc user questions — with no prior trigger or capture step. Query these
+instead of shelling out to raw `ssh <host> tmux capture-pane` (or other direct host
+probes): `status` is the cheapest liveness check, `summary-input` the fastest "what
+is it doing right now", `events --readable` the human timeline, and `snapshot` the
+live pane. Reserve direct tmux/host probes for state mstream genuinely cannot surface,
+and per Prerequisites prefer asking the user or adding an mstream capability over
+ad-hoc SSH.
+
 Use `mstream status` liveness fields to decide when to look deeper:
 `activity_hint`, `tmux_present`, `last_output_secs`, and
 `observed_activity_idle_secs`. `active` means recent tmux input or output,
@@ -862,10 +878,10 @@ Use `leave --available` to free individual agents without killing sessions:
 mstream leave issue-337-tmux-fleet-api amd1::opus47-337-rv --available
 ```
 
-Use `kill` only when explicitly destructive session cleanup is intended:
+Use `reclaim` for terminal teardown (gated: agent must be `quarantined` via `retire` first; refuses non-managed/non-quarantined targets):
 
 ```sh
-mstream kill amd1::gpt55-337-og
+mstream retire <ws> amd1::gpt55-337-og && mstream reclaim amd1::gpt55-337-og
 ```
 
 Before closeout, verify the complete chain: PR merged, original issue closed
@@ -874,13 +890,30 @@ stand by, and active workstream timers are stopped. At closeout, tell the user
 what merged, what remains open, which agents were freed, which timers were
 stopped, and whether any local uncommitted changes remain.
 
-Keep mstream boundaries clean during closeout. `mstream` is responsible for
-workstream/session/timer/timeline primitives; it should not decide which GitHub
-issue or PR to comment on and should not post closeout logs itself. When a
-closeout log is useful, build it as the orchestrator from neutral primitives:
+**MANDATORY — capture the full mstream timeline as the final audit trail, INLINED into the GitHub closeout.**
+Before (or at) every closeout you MUST capture the complete human-readable timeline
+and **inline its content into the GitHub closeout comment** (a fenced code block).
+This timeline IS the authoritative audit trail — it is not optional:
 
 ```sh
-mstream events <workstream> --limit 100 --readable
+mstream events <workstream> --readable --limit 5000   # pipe its OUTPUT into the closeout body
+```
+
+- **Inline the content, never a path.** A reference like `~/sessions/.../transcript-X.txt`
+  is meaningless to anyone reading on GitHub — embed the actual timeline text in the
+  comment so the audit trail is self-contained. A local file copy is only a backup, not
+  a substitute. Use a `--limit` high enough to cover the whole workstream (do not truncate).
+- If the timeline is unexpectedly empty (e.g. the daemon was restarted and the in-memory
+  event buffer was lost — events are not durable today), say so explicitly in the closeout
+  rather than referencing a file; do not imply a record exists when it does not.
+
+Keep mstream boundaries clean during closeout. `mstream` is responsible for
+workstream/session/timer/timeline primitives; it should not decide which GitHub
+issue or PR to comment on and should not post closeout logs itself. Build the
+closeout log as the orchestrator from neutral primitives:
+
+```sh
+mstream events <workstream> --readable --limit 5000   # full timeline = the audit trail
 mstream summary-input <workstream> --max-chars 12000
 mstream snapshot <workstream> --max-chars 12000
 ```
@@ -888,12 +921,16 @@ mstream snapshot <workstream> --max-chars 12000
 Then use your own GitHub context to decide whether to post the synthesized log
 to the PR, the issue, both, or neither. The log should be concise: result,
 agents/roles, important timeline points, validation, remaining risks, and
-follow-up issues. Add timestamps with timezone to important milestones when the
-source data has them, especially workstream open, agent recruitment, PR open,
-review verdicts, fix pushes, merge, issue close, and workstream close. End the
-log with a short stats summary: elapsed wall-clock time from first known
-milestone to closeout, agent count by role/model, review rounds, commits or
-pushes, timer wakeups or orchestrator turns if known, and any follow-up issue
-count. If a timestamp or count is unavailable, omit it or mark it `unknown`
-rather than inventing precision. (Invariant 1: do not ask collaborator agents to
-use mstream for this.)
+follow-up issues. Every closeout log and posted transcript MUST include both,
+led by a compact stats block (table or list) before the narrative:
+1. **Timestamps** (with timezone) on key milestones: workstream open, agent
+   recruitment, PR open, each review verdict, fix pushes, merge, issue close,
+   and workstream close.
+2. **Stats:** number of **review rounds** (per project/skill), agent count by
+   role/model, elapsed wall-clock from first known milestone to closeout,
+   commits/pushes with merge/commit SHAs, timer wakeups or orchestrator turns if
+   known, and any follow-up issue count.
+
+If a timestamp or count is genuinely unavailable, mark it `unknown` rather than
+inventing precision or dropping the block. (Invariant 1: do not ask collaborator
+agents to use mstream for this.)

@@ -15,6 +15,12 @@ Run it with:
 cargo run -p motlie-models --example chat_tool_binding --no-default-features
 ```
 
+Select the recommendation source explicitly:
+
+```bash
+cargo run -p motlie-models --no-default-features --example chat_tool_binding -- --model=gemma4-e4b
+```
+
 To exercise the real Gemma 4 E4B GGUF spec recommendations without loading an
 LLM, enable the GGUF feature:
 

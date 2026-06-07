@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 | @codex-401-impl | Added issue #401 implementation notes for `quarantined`, `retire`, gated `reclaim`, and scan registry self-heal. |
 | 2026-05-30 | @codex-360-og | Added and completed issue #360 tasks for id-stable live session rename/retag, mmux refresh, stale-id safety, and test coverage. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 implementation slice for mmux-visible workstream labels, selected-key preservation, hydration, cleanup, and docs/tests. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #347 follow-up tasks for self-target timers, workstream timer scope, readable events, and closeout ergonomics. |
@@ -262,8 +263,11 @@ Tasks:
   review comments in normal output; the orchestrator owns mstream state.
 - [x] 6.6 Implement `mstream leave <workstream> <target>` by removing
   workstream membership tags while preserving non-workstream metadata.
-- [x] 6.7 Implement `mstream kill <target>` as a separate explicit destructive
+- [x] 6.7 Implement `mstream reclaim <target>` as a separate explicit destructive
   command.
+  - 2026-06-06 @codex-401-impl: issue #401 adds `mstream retire <workstream>
+    <target>` for `quarantined` and renames terminal teardown to
+    `mstream reclaim <target>`, gated on managed + quarantined.
 - [x] 6.8 Ensure each state-changing command returns a JSONL cursor or enough
   metadata for the orchestrating agent to poll next.
 - [x] 6.9 Make `mstream close <workstream>` mark participating agents available,
@@ -339,7 +343,7 @@ Tasks:
 - [x] 8.3 Implement `send --require-state <state>` and `send --set-state busy`
   so new assignments can update state atomically without guessing from output.
 - [x] 8.4 Implement `mstream interrupt <target> [--key esc|ctrl-c]` as a
-  non-destructive command distinct from `kill`.
+  non-destructive command distinct from `reclaim`.
 - [x] 8.5 Implement `mstream send --interrupt-first [--settle-ms N]` as one
   daemon-side sequence: interrupt, wait, text, optional Enter, JSONL result.
 - [x] 8.6 Implement `mstream broadcast <workstream> --text <text>` with
@@ -347,7 +351,7 @@ Tasks:
   - 2026-05-24 @codex: broadcast updates `@mstream/updated-at` and the
     in-memory session timestamp after each successful target send.
 - [x] 8.7 Implement `mstream session mark <target> --state
-  done|blocked|needs-input|available|reserved|busy|idle --summary <text>`.
+  done|blocked|needs-input|available|reserved|busy|idle|quarantined --summary <text>`.
 - [x] 8.8 Require explicit `<host>::<session>` targets for session marks; update
   `@mstream/state`, `@mstream/last-report-kind`,
   `@mstream/last-report-summary`, and `@mstream/updated-at` on successful

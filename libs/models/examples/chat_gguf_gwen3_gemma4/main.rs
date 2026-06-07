@@ -7,11 +7,13 @@ fn main() -> anyhow::Result<()> {
     feature = "model-qwen3-6-27b-gguf",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
+    feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
 )))]
 mod gguf_example {
     pub fn run() -> anyhow::Result<()> {
         anyhow::bail!(
-            "enable at least one GGUF chat feature: model-qwen3-4b-gguf, model-qwen3-6-27b-gguf, model-gemma4-e2b-gguf, or model-gemma4-e4b-gguf"
+            "enable at least one GGUF chat feature: model-qwen3-4b-gguf, model-qwen3-6-27b-gguf, model-gemma4-e2b-gguf, model-gemma4-e4b-gguf, model-gemma4-12b-gguf, or model-gemma4-12b-qat-q4-0-gguf"
         )
     }
 }
@@ -21,6 +23,8 @@ mod gguf_example {
     feature = "model-qwen3-6-27b-gguf",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
+    feature = "model-gemma4-12b-gguf",
+    feature = "model-gemma4-12b-qat-q4-0-gguf",
 ))]
 mod gguf_example {
     use anyhow::{bail, Context, Result};
@@ -84,11 +88,11 @@ mod gguf_example {
         let input = input_parts.join(" ");
         if input.trim().is_empty() {
             bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- \
-             [--download-artifacts] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf|google/gemma4_e4b_gguf] \
+                "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- \
+             [--download-artifacts] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf|google/gemma4_e4b_gguf|google/gemma4_12b_gguf|google/gemma4_12b_qat_q4_0_gguf] \
              [--precision=q4|q5|q8|f16] [--thinking=off|disabled|auto] [--system=TEXT|--no-system] [--assistant=TEXT] <prompt>\n\n\
              This example demonstrates chat generation via the llama.cpp backend using GGUF-quantized weights."
-        );
+            );
         }
 
         let selected = select_model(chat_selector)?;
@@ -103,6 +107,8 @@ mod gguf_example {
         let chat_params =
             GenerationParams::default().with_defaults(&selected.spec.recommended_generation_params);
         let effective_thinking = thinking.unwrap_or(selected.spec.thinking);
+        let tool_demo_thinking =
+            tool_demo_thinking(selected.model, thinking, selected.spec.thinking);
         let effective_system_prompt = if no_system {
             None
         } else if let Some(prompt) = system_prompt_override {
@@ -124,7 +130,10 @@ mod gguf_example {
             "process-before-start",
             &support::current_process_snapshot(),
         );
-        println!("quantization: {}", quantization_label_gguf(quantization));
+        println!(
+            "quantization: {}",
+            quantization_label_for_model(selected.model, quantization)
+        );
         println!(
             "recommended-generation-params: {:?}",
             selected.spec.recommended_generation_params
@@ -135,11 +144,12 @@ mod gguf_example {
         );
         println!(
             "recommended-quantization: {}",
-            quantization_label_gguf(selected.spec.quantization.recommended())
+            quantization_label_for_model(selected.model, selected.spec.quantization.recommended())
         );
         println!("recommended-thinking: {:?}", selected.spec.thinking);
         println!("effective-chat-params: {chat_params:?}");
         println!("thinking: {:?}", effective_thinking);
+        println!("tool-demo-thinking: {:?}", tool_demo_thinking);
         println!(
             "system-prompt: {}",
             if no_system {
@@ -236,7 +246,7 @@ mod gguf_example {
                 tool_demo_support::ToolDemoOptions {
                     generation_defaults: &selected.spec.recommended_generation_params,
                     system_prompt: effective_system_prompt.as_deref(),
-                    thinking: Some(effective_thinking),
+                    thinking: Some(tool_demo_thinking),
                 },
             )
             .await?;
@@ -325,7 +335,7 @@ mod gguf_example {
                 tool_demo_support::ToolDemoOptions {
                     generation_defaults: &selected.spec.recommended_generation_params,
                     system_prompt: effective_system_prompt.as_deref(),
-                    thinking: Some(effective_thinking),
+                    thinking: Some(tool_demo_thinking),
                 },
             )
             .await?;
@@ -376,6 +386,7 @@ mod gguf_example {
 
     struct SelectedGgufModel {
         selector_label: String,
+        model: ChatModels,
         bundle_id: BundleId,
         descriptor: BundleDescriptor,
         bundle: CuratedBundle,
@@ -399,6 +410,7 @@ mod gguf_example {
 
         Ok(SelectedGgufModel {
             selector_label: model.to_string(),
+            model,
             bundle_id: model.bundle_id(),
             descriptor: model.descriptor(),
             bundle: model.bundle(),
@@ -433,6 +445,29 @@ mod gguf_example {
         not(feature = "model-qwen3-4b-gguf"),
         not(feature = "model-gemma4-e4b-gguf"),
         not(feature = "model-gemma4-e2b-gguf"),
+        feature = "model-gemma4-12b-gguf"
+    ))]
+    fn default_gguf_model() -> Result<ChatModels> {
+        Ok(ChatModels::Gemma4_12B_Gguf)
+    }
+
+    #[cfg(all(
+        not(feature = "model-qwen3-4b-gguf"),
+        not(feature = "model-gemma4-e4b-gguf"),
+        not(feature = "model-gemma4-e2b-gguf"),
+        not(feature = "model-gemma4-12b-gguf"),
+        feature = "model-gemma4-12b-qat-q4-0-gguf"
+    ))]
+    fn default_gguf_model() -> Result<ChatModels> {
+        Ok(ChatModels::Gemma4_12B_QatQ4_0_Gguf)
+    }
+
+    #[cfg(all(
+        not(feature = "model-qwen3-4b-gguf"),
+        not(feature = "model-gemma4-e4b-gguf"),
+        not(feature = "model-gemma4-e2b-gguf"),
+        not(feature = "model-gemma4-12b-gguf"),
+        not(feature = "model-gemma4-12b-qat-q4-0-gguf"),
         feature = "model-qwen3-6-27b-gguf"
     ))]
     fn default_gguf_model() -> Result<ChatModels> {
@@ -450,8 +485,50 @@ mod gguf_example {
             ChatModels::Gemma4E2B_Gguf => Ok(LlamaCppTextSpec::gemma4_e2b()),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
             ChatModels::Gemma4E4B_Gguf => Ok(LlamaCppTextSpec::gemma4_e4b()),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            ChatModels::Gemma4_12B_Gguf => Ok(LlamaCppTextSpec::gemma4_12b()),
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            ChatModels::Gemma4_12B_QatQ4_0_Gguf => Ok(LlamaCppTextSpec::gemma4_12b_qat_q4_0()),
             other => bail!("`{}` is not a llama.cpp GGUF chat model", other.as_str()),
         }
+    }
+
+    fn quantization_label_for_model(
+        model: ChatModels,
+        quantization: Option<QuantizationBits>,
+    ) -> &'static str {
+        #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+        if matches!(model, ChatModels::Gemma4_12B_QatQ4_0_Gguf) {
+            return match quantization {
+                Some(QuantizationBits::Four) => "GGUF Q4_0",
+                _ => "unsupported QAT GGUF precision",
+            };
+        }
+
+        let _ = model;
+        quantization_label_gguf(quantization)
+    }
+
+    fn tool_demo_thinking(
+        model: ChatModels,
+        requested: Option<ThinkingMode>,
+        recommended: ThinkingMode,
+    ) -> ThinkingMode {
+        if let Some(requested) = requested {
+            return requested;
+        }
+
+        #[cfg(feature = "model-gemma4-12b-gguf")]
+        if matches!(model, ChatModels::Gemma4_12B_Gguf) {
+            return ThinkingMode::Disabled;
+        }
+
+        #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+        if matches!(model, ChatModels::Gemma4_12B_QatQ4_0_Gguf) {
+            return ThinkingMode::Disabled;
+        }
+
+        recommended
     }
 
     fn parse_thinking(value: &str) -> Result<ThinkingMode> {
