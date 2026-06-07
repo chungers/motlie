@@ -370,11 +370,11 @@ mod tests {
 
         assert_eq!(list["ok"], true);
         assert_eq!(list["data"]["kind"], "tts_list");
-        assert_eq!(list["data"]["backends"][0]["backend"], "piper");
+        assert_eq!(list["data"]["backends"][0]["backend"], "kokoro-82m");
         assert_eq!(list["data"]["backends"][0]["status"], "unavailable");
         assert_eq!(status["ok"], true);
         assert_eq!(status["data"]["kind"], "tts");
-        assert_eq!(status["data"]["fields"]["next"], "piper");
+        assert_eq!(status["data"]["fields"]["next"], "kokoro-82m");
         assert_eq!(status["data"]["fields"]["status"], "unavailable");
 
         socket_task.abort();

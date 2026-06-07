@@ -10,9 +10,11 @@ members = [
     "libs/model/backends/espeak_ng",
     "libs/model/backends/llama_cpp",
     "libs/model/backends/ort",
+    "libs/model/backends/kokoro",
     "libs/model/backends/piper",
     "libs/model/backends/qwen3_tts_cpp",
     "libs/model/backends/sherpa_onnx",
+    "libs/model/vendor/sherpa-onnx-sys",
     "libs/model/backends/whisper_cpp",
     "libs/model-eval",
     "libs/models",
@@ -44,6 +46,7 @@ thiserror = "2.0.18"
 csv = "1.3"
 env_logger = "0.10"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "api-24"] }
+ort-sys = { version = "2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-native", "api-24"] }
 
 # Root package for examples
 [package]
@@ -217,3 +220,6 @@ path = "bins/motlie/tests/db_cli.rs"
 
 [dev-dependencies]
 tempfile = "3.25.0"
+
+[patch.crates-io]
+sherpa-onnx-sys = { path = "libs/model/vendor/sherpa-onnx-sys" }

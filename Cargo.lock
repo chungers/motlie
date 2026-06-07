@@ -5405,6 +5405,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-model-kokoro"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "motlie-model",
+ "motlie-model-espeak-ng",
+ "motlie-model-ort",
+ "ndarray",
+ "ort",
+ "serde_json",
+ "tokenizers 0.21.4",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "motlie-model-llama-cpp"
 version = "0.1.0"
 dependencies = [
@@ -5516,6 +5532,7 @@ dependencies = [
  "hound",
  "libc",
  "motlie-model",
+ "motlie-model-kokoro",
  "motlie-model-llama-cpp",
  "motlie-model-mistral",
  "motlie-model-moonshine",
@@ -5564,6 +5581,7 @@ dependencies = [
  "hound",
  "motlie-driver",
  "motlie-model",
+ "motlie-model-kokoro",
  "motlie-model-moonshine",
  "motlie-model-piper",
  "motlie-model-qwen3-tts-cpp",
@@ -8566,10 +8584,9 @@ dependencies = [
 [[package]]
 name = "sherpa-onnx-sys"
 version = "1.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f3fe4987367b162336027b5d1ffca6dcd627bee6a324e46f80e82dfcb4365b"
 dependencies = [
  "bzip2",
+ "ort-sys",
  "tar",
  "ureq 2.12.1",
 ]

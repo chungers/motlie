@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -16,11 +16,7 @@ use motlie_telnyx_gateway::operator::script::run_repl_file;
 use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
 use motlie_telnyx_gateway::replay::ReplayBackend;
 use motlie_telnyx_gateway::serve::{serve, AppServices};
-#[cfg(not(feature = "piper"))]
-use motlie_telnyx_gateway::tts::unavailable_registry;
-use motlie_telnyx_gateway::tts::SharedTtsRegistry;
-#[cfg(feature = "piper")]
-use motlie_telnyx_gateway::tts::{SharedTtsFactory, TtsRegistry};
+use motlie_telnyx_gateway::tts::{SharedTtsFactory, SharedTtsRegistry, TtsRegistry};
 use tokio::time::{self, Duration};
 
 #[tokio::main]
@@ -78,6 +74,21 @@ async fn main() -> anyhow::Result<()> {
                 .collect();
             let report = motlie_telnyx_gateway::golden_ab::run_golden_ab(args, backends).await?;
             print_golden_ab_report(&report);
+            return Ok(());
+        }
+        Some(CliCommand::TtsGoldenAb(args)) => {
+            let asr_backend = args.asr_backend;
+            let fixed_asr =
+                ReplayBackend::new(asr_backend.label(), build_asr_factory(&cli, asr_backend));
+            let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+            let report = motlie_telnyx_gateway::golden_ab::run_tts_golden_ab(
+                args,
+                fixed_asr,
+                artifact_root,
+                !cli.no_asr_download,
+            )
+            .await?;
+            print_tts_golden_ab_report(&report);
             return Ok(());
         }
         None => {}
@@ -206,21 +217,44 @@ fn print_corpus_report(report: &motlie_telnyx_gateway::replay::CorpusReplayRepor
 }
 
 fn build_tts_registry(cli: &Cli) -> SharedTtsRegistry {
-    #[cfg(feature = "piper")]
-    {
-        let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
-        let piper: SharedTtsFactory = Arc::new(motlie_telnyx_gateway::tts::PiperTtsFactory::new(
-            artifact_root,
-            !cli.no_asr_download,
-        ));
-        Arc::new(TtsRegistry::new(piper))
-    }
+    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+    let allow_download = !cli.no_asr_download;
+    Arc::new(TtsRegistry::new(
+        build_kokoro_tts_factory(&artifact_root, allow_download),
+        build_piper_tts_factory(&artifact_root, allow_download),
+    ))
+}
 
-    #[cfg(not(feature = "piper"))]
-    {
-        let _ = cli;
-        unavailable_registry()
-    }
+#[cfg(feature = "kokoro")]
+fn build_kokoro_tts_factory(artifact_root: &Path, allow_download: bool) -> SharedTtsFactory {
+    Arc::new(motlie_telnyx_gateway::tts::KokoroTtsFactory::new(
+        artifact_root.to_path_buf(),
+        allow_download,
+    ))
+}
+
+#[cfg(not(feature = "kokoro"))]
+fn build_kokoro_tts_factory(_artifact_root: &Path, _allow_download: bool) -> SharedTtsFactory {
+    Arc::new(motlie_telnyx_gateway::tts::UnavailableTtsFactory::new(
+        motlie_telnyx_gateway::tts::LiveTtsBackend::Kokoro82m.model_label(),
+        "Kokoro-82M TTS is unavailable; rebuild with --features kokoro",
+    ))
+}
+
+#[cfg(feature = "piper")]
+fn build_piper_tts_factory(artifact_root: &Path, allow_download: bool) -> SharedTtsFactory {
+    Arc::new(motlie_telnyx_gateway::tts::PiperTtsFactory::new(
+        artifact_root.to_path_buf(),
+        allow_download,
+    ))
+}
+
+#[cfg(not(feature = "piper"))]
+fn build_piper_tts_factory(_artifact_root: &Path, _allow_download: bool) -> SharedTtsFactory {
+    Arc::new(motlie_telnyx_gateway::tts::UnavailableTtsFactory::new(
+        motlie_telnyx_gateway::tts::LiveTtsBackend::Piper.model_label(),
+        "Piper TTS is unavailable; rebuild with --features piper",
+    ))
 }
 
 fn print_replay_report(report: &motlie_telnyx_gateway::replay::ReplayReport) {
@@ -331,6 +365,46 @@ fn print_golden_ab_report(report: &motlie_telnyx_gateway::golden_ab::GoldenAbRep
             summary.ingest_avg_ms,
             summary.finish_avg_ms,
             summary.wall_avg_ms
+        );
+    }
+}
+
+fn print_tts_golden_ab_report(report: &motlie_telnyx_gateway::golden_ab::TtsGoldenAbReport) {
+    println!("manifest: {}", report.manifest_path);
+    println!("output_dir: {}", report.output_dir);
+    println!("asr_backend: {}", report.asr_backend);
+    println!("chunk_ms: {}", report.chunk_ms);
+    println!(
+        "trailing_silence_pad_ms: {}",
+        report.trailing_silence_pad_ms
+    );
+    println!("entries: {}", report.entries.len());
+    println!("failures: {}", report.failures.len());
+    for summary in &report.summaries {
+        println!(
+            "summary: engine={} codec={} category={} samples={} wer={:.1}% errors={}/{} tts_avg_ms={:.1} rtf_avg={:.2} wpm_avg={:.1} clipping_avg={:.3}% asr_wall_avg_ms={:.1}",
+            summary.engine,
+            summary.codec,
+            summary.category,
+            summary.sample_count,
+            summary.wer_percent,
+            summary.errors,
+            summary.reference_words,
+            summary.tts_elapsed_avg_ms,
+            summary.tts_realtime_factor_avg,
+            summary.speaking_rate_wpm_avg,
+            summary.clipping_percent_avg,
+            summary.asr_wall_avg_ms
+        );
+    }
+    for failure in &report.failures {
+        println!(
+            "failure: engine={} codec={} id={} status={} error={}",
+            failure.engine,
+            failure.codec.as_deref().unwrap_or("n/a"),
+            failure.id,
+            failure.status,
+            failure.error
         );
     }
 }

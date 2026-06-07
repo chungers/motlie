@@ -311,13 +311,11 @@ async fn apply_conversation_command(
                     Ok(())
                 }
                 ConversationMode::Auto => {
-                    // M3's media-triggered conversation path is intentionally
-                    // Piper-locked for the first Sherpa+Piper full-duplex pairing.
                     let queued = speech::queue_speech(
                         state,
                         media_registry,
                         &runtime.tts,
-                        LiveTtsBackend::Piper,
+                        LiveTtsBackend::default(),
                         gateway_call_id.to_string(),
                         response_text.clone(),
                         "conversation say",

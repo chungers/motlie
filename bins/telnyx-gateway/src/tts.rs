@@ -2,20 +2,24 @@ use std::sync::Arc;
 use std::{fmt, str::FromStr};
 
 use anyhow::bail;
+#[cfg(any(feature = "kokoro", feature = "piper"))]
+use anyhow::Context;
 use async_trait::async_trait;
 use clap::ValueEnum;
-
+#[cfg(feature = "kokoro")]
+use motlie_model::typed::BufferedSpeechSynthesizer;
+#[cfg(any(feature = "kokoro", feature = "piper"))]
+use motlie_model::typed::SynthesisRequest;
 #[cfg(feature = "piper")]
-use anyhow::Context;
-#[cfg(feature = "piper")]
-use motlie_model::typed::{SpeechStream, SpeechSynthesizer, SynthesisRequest};
-#[cfg(feature = "piper")]
+use motlie_model::typed::{SpeechStream, SpeechSynthesizer};
+#[cfg(any(feature = "kokoro", feature = "piper"))]
 use motlie_model::{ArtifactPolicy, ModelError, StartOptions};
-#[cfg(feature = "piper")]
+#[cfg(any(feature = "kokoro", feature = "piper"))]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "piper")]
+#[cfg(any(feature = "kokoro", feature = "piper"))]
 use tokio::sync::Mutex;
 
+pub const KOKORO_SAMPLE_RATE_HZ: u32 = 24_000;
 pub const PIPER_SAMPLE_RATE_HZ: u32 = 22_050;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,6 +55,8 @@ impl TtsAudio {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum LiveTtsBackend {
     #[default]
+    #[value(name = "kokoro-82m", alias = "kokoro", alias = "kokoro/kokoro_82m")]
+    Kokoro82m,
     #[value(
         name = "piper",
         alias = "piper-en-us-ljspeech-medium",
@@ -60,19 +66,28 @@ pub enum LiveTtsBackend {
 }
 
 impl LiveTtsBackend {
-    pub const fn available() -> [Self; 1] {
-        [Self::Piper]
+    pub const fn available() -> [Self; 2] {
+        [Self::Kokoro82m, Self::Piper]
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Kokoro82m => "kokoro-82m",
             Self::Piper => "piper",
         }
     }
 
     pub fn model_label(self) -> &'static str {
         match self {
+            Self::Kokoro82m => "kokoro/kokoro_82m",
             Self::Piper => "piper/en_us_ljspeech_medium",
+        }
+    }
+
+    pub fn fallback(self) -> Option<Self> {
+        match self {
+            Self::Kokoro82m => Some(Self::Piper),
+            Self::Piper => None,
         }
     }
 }
@@ -84,7 +99,7 @@ impl fmt::Display for LiveTtsBackend {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("unsupported live TTS backend `{value}`; expected piper")]
+#[error("unsupported live TTS backend `{value}`; expected kokoro-82m or piper")]
 pub struct LiveTtsBackendParseError {
     value: String,
 }
@@ -94,6 +109,7 @@ impl FromStr for LiveTtsBackend {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "kokoro-82m" | "kokoro" | "kokoro/kokoro_82m" => Ok(Self::Kokoro82m),
             "piper" | "piper-en-us-ljspeech-medium" | "piper/en_us_ljspeech_medium" => {
                 Ok(Self::Piper)
             }
@@ -124,14 +140,19 @@ pub type SharedTtsFactory = Arc<dyn OutboundTtsFactory>;
 
 #[derive(Clone)]
 pub struct TtsRegistry {
+    kokoro: SharedTtsFactory,
     piper: SharedTtsFactory,
 }
 
 pub type SharedTtsRegistry = Arc<TtsRegistry>;
 
 impl TtsRegistry {
-    pub fn new(piper: SharedTtsFactory) -> Self {
-        Self { piper }
+    pub fn new(kokoro: SharedTtsFactory, piper: SharedTtsFactory) -> Self {
+        Self { kokoro, piper }
+    }
+
+    pub fn kokoro(&self) -> SharedTtsFactory {
+        self.kokoro.clone()
     }
 
     pub fn piper(&self) -> SharedTtsFactory {
@@ -140,6 +161,7 @@ impl TtsRegistry {
 
     pub fn factory(&self, backend: LiveTtsBackend) -> SharedTtsFactory {
         match backend {
+            LiveTtsBackend::Kokoro82m => self.kokoro(),
             LiveTtsBackend::Piper => self.piper(),
         }
     }
@@ -175,6 +197,58 @@ impl OutboundTtsFactory for UnavailableTtsFactory {
     }
 }
 
+#[cfg(feature = "kokoro")]
+pub struct KokoroTtsFactory {
+    artifact_root: PathBuf,
+    allow_download: bool,
+    handle: Mutex<Option<Arc<motlie_model_kokoro::KokoroHandle>>>,
+}
+
+#[cfg(feature = "kokoro")]
+impl KokoroTtsFactory {
+    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+        Self {
+            artifact_root,
+            allow_download,
+            handle: Mutex::new(None),
+        }
+    }
+
+    async fn handle(&self) -> anyhow::Result<Arc<motlie_model_kokoro::KokoroHandle>> {
+        let mut guard = self.handle.lock().await;
+        if let Some(handle) = guard.as_ref() {
+            return Ok(Arc::clone(handle));
+        }
+
+        let handle = Arc::new(start_kokoro(&self.artifact_root, self.allow_download).await?);
+        *guard = Some(Arc::clone(&handle));
+        Ok(handle)
+    }
+}
+
+#[cfg(feature = "kokoro")]
+#[async_trait]
+impl OutboundTtsFactory for KokoroTtsFactory {
+    async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
+        let handle = self.handle().await?;
+        let audio = handle
+            .synthesize_buffered(SynthesisRequest {
+                text,
+                params: Default::default(),
+            })
+            .await
+            .context("synthesize Kokoro-82M speech")?;
+        Ok(vec![TtsAudio::new(
+            audio.into_samples(),
+            KOKORO_SAMPLE_RATE_HZ,
+        )?])
+    }
+
+    fn label(&self) -> &'static str {
+        "kokoro/kokoro_82m"
+    }
+}
+
 #[cfg(feature = "piper")]
 pub struct PiperTtsFactory {
     artifact_root: PathBuf,
@@ -190,6 +264,10 @@ impl PiperTtsFactory {
             allow_download,
             handle: Mutex::new(None),
         }
+    }
+
+    pub(crate) async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
     }
 
     async fn handle(&self) -> anyhow::Result<Arc<motlie_model_piper::PiperHandle>> {
@@ -258,10 +336,52 @@ fn push_speech_chunk(chunks: &mut Vec<String>, current: &mut String) {
 }
 
 pub fn unavailable_registry() -> SharedTtsRegistry {
-    Arc::new(TtsRegistry::new(Arc::new(UnavailableTtsFactory::new(
-        LiveTtsBackend::Piper.model_label(),
-        "Piper TTS is unavailable; rebuild with --features piper",
-    ))))
+    Arc::new(TtsRegistry::new(
+        Arc::new(UnavailableTtsFactory::new(
+            LiveTtsBackend::Kokoro82m.model_label(),
+            "Kokoro-82M TTS is unavailable; rebuild with --features kokoro",
+        )),
+        Arc::new(UnavailableTtsFactory::new(
+            LiveTtsBackend::Piper.model_label(),
+            "Piper TTS is unavailable; rebuild with --features piper",
+        )),
+    ))
+}
+
+#[cfg(feature = "kokoro")]
+async fn start_kokoro(
+    artifact_root: &Path,
+    allow_download: bool,
+) -> anyhow::Result<motlie_model_kokoro::KokoroHandle> {
+    match motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root)).await {
+        Ok(handle) => Ok(handle),
+        Err(err) if allow_download && missing_local_artifacts(&err) => {
+            tracing::info!(
+                artifact_root = %artifact_root.display(),
+                artifact = "kokoro/kokoro_82m",
+                "downloading Kokoro-82M artifacts"
+            );
+            download_kokoro_artifact(artifact_root)?;
+            motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root))
+                .await
+                .map_err(anyhow::Error::from)
+                .context("start Kokoro-82M after downloading artifacts")
+        }
+        Err(err) if !allow_download && missing_local_artifacts(&err) => {
+            bail_missing_artifacts("kokoro/kokoro_82m", artifact_root)
+        }
+        Err(err) => Err(anyhow::Error::from(err)).context("start Kokoro-82M TTS"),
+    }
+}
+
+#[cfg(feature = "kokoro")]
+fn download_kokoro_artifact(artifact_root: &Path) -> anyhow::Result<()> {
+    let catalog = motlie_models::Catalog::with_defaults();
+    let bundle_id = motlie_models::tts::kokoro_82m::descriptor().id;
+    motlie_models::download_bundle_artifacts(&catalog, &bundle_id, artifact_root)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
+        .context("download Kokoro-82M artifacts")
 }
 
 #[cfg(feature = "piper")]
@@ -306,7 +426,7 @@ fn download_piper_artifact(artifact_root: &Path) -> anyhow::Result<()> {
         .context("download Piper artifacts")
 }
 
-#[cfg(feature = "piper")]
+#[cfg(any(feature = "kokoro", feature = "piper"))]
 fn local_only_options(artifact_root: &Path) -> StartOptions {
     StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -316,7 +436,7 @@ fn local_only_options(artifact_root: &Path) -> StartOptions {
     }
 }
 
-#[cfg(feature = "piper")]
+#[cfg(any(feature = "kokoro", feature = "piper"))]
 fn missing_local_artifacts(error: &ModelError) -> bool {
     match error {
         ModelError::InvalidConfiguration(message) => {
@@ -326,7 +446,7 @@ fn missing_local_artifacts(error: &ModelError) -> bool {
     }
 }
 
-#[cfg(feature = "piper")]
+#[cfg(any(feature = "kokoro", feature = "piper"))]
 fn bail_missing_artifacts<T>(label: &str, artifact_root: &Path) -> anyhow::Result<T> {
     bail!(
         "{} missing for {} under '{}'; rerun without --no-asr-download or preinstall artifacts",
@@ -370,6 +490,36 @@ impl OutboundTtsFactory for StaticTtsFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_tts_default_is_kokoro_with_piper_fallback() {
+        assert_eq!(LiveTtsBackend::default(), LiveTtsBackend::Kokoro82m);
+        assert_eq!(
+            LiveTtsBackend::Kokoro82m.fallback(),
+            Some(LiveTtsBackend::Piper)
+        );
+        assert_eq!(LiveTtsBackend::Piper.fallback(), None);
+        assert_eq!(
+            LiveTtsBackend::available(),
+            [LiveTtsBackend::Kokoro82m, LiveTtsBackend::Piper]
+        );
+    }
+
+    #[test]
+    fn live_tts_backend_parses_curated_aliases() {
+        assert_eq!(
+            "kokoro".parse::<LiveTtsBackend>().unwrap(),
+            LiveTtsBackend::Kokoro82m
+        );
+        assert_eq!(
+            "kokoro/kokoro_82m".parse::<LiveTtsBackend>().unwrap(),
+            LiveTtsBackend::Kokoro82m
+        );
+        assert_eq!(
+            "piper".parse::<LiveTtsBackend>().unwrap(),
+            LiveTtsBackend::Piper
+        );
+    }
 
     #[test]
     fn split_speech_text_uses_sentence_boundaries() {

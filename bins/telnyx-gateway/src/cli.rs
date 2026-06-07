@@ -62,6 +62,9 @@ pub enum CliCommand {
 
     /// Run the offline call-center ASR A/B matrix without the gateway.
     AsrGoldenAb(AsrGoldenAbArgs),
+
+    /// Run the reversed TTS quality A/B matrix over fixed golden text.
+    TtsGoldenAb(TtsGoldenAbArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -176,6 +179,62 @@ pub struct AsrGoldenAbArgs {
     pub output_json: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Args)]
+pub struct TtsGoldenAbArgs {
+    /// Golden text corpus manifest JSON file.
+    pub manifest: PathBuf,
+
+    /// Directory where source and codec round-trip audit WAVs are written.
+    #[arg(long, default_value = "/tmp/motlie-tts-golden-ab")]
+    pub output_dir: PathBuf,
+
+    /// TTS engine to run. Repeat to compare multiple engines. Defaults to Piper + Kokoro; Qwen3 is opt-in.
+    #[arg(long, value_enum)]
+    pub engine: Vec<TtsGoldenEngineArg>,
+
+    /// Telnyx audio spec to score. Repeat to compare multiple specs.
+    #[arg(long, value_enum)]
+    pub codec: Vec<GoldenCodecArg>,
+
+    /// Fixed ASR backend to use for the intelligibility proxy.
+    #[arg(long, value_enum, default_value_t = ReplayBackendArg::SherpaZipformer2023)]
+    pub asr_backend: ReplayBackendArg,
+
+    /// Audio chunk size to feed into the fixed recognizer.
+    #[arg(long, default_value_t = 20)]
+    pub chunk_ms: u32,
+
+    /// Trailing silence to feed before finish so streaming decoders flush final tokens.
+    #[arg(long, default_value_t = DEFAULT_TRAILING_SILENCE_PAD_MS)]
+    pub trailing_silence_pad_ms: u32,
+
+    /// Score only the first N samples for smoke tests.
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Optional JSON report path for the full matrix.
+    #[arg(long)]
+    pub output_json: Option<PathBuf>,
+}
+
+impl TtsGoldenAbArgs {
+    pub fn selected_engines(&self) -> Vec<TtsGoldenEngineArg> {
+        if self.engine.is_empty() {
+            vec![TtsGoldenEngineArg::Piper, TtsGoldenEngineArg::Kokoro82m]
+        } else {
+            self.engine.clone()
+        }
+    }
+
+    pub fn selected_codecs(&self) -> Vec<GoldenCodecArg> {
+        if self.codec.is_empty() {
+            vec![GoldenCodecArg::L16_16k, GoldenCodecArg::Pcmu8k]
+        } else {
+            self.codec.clone()
+        }
+    }
+}
+
 impl AsrGoldenAbArgs {
     pub fn selected_backends(&self) -> Vec<ReplayBackendArg> {
         if self.backend.is_empty() {
@@ -205,6 +264,26 @@ pub enum GoldenCodecArg {
     L16_16k,
     #[value(name = "pcmu-8k")]
     Pcmu8k,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum TtsGoldenEngineArg {
+    #[value(name = "piper", alias = "piper-en-us-ljspeech-medium")]
+    Piper,
+    #[value(name = "kokoro-82m", alias = "kokoro")]
+    Kokoro82m,
+    #[value(name = "qwen3-tts-cpp", alias = "qwen3")]
+    Qwen3TtsCpp,
+}
+
+impl TtsGoldenEngineArg {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Piper => "piper/en_us_ljspeech_medium",
+            Self::Kokoro82m => "kokoro/kokoro_82m",
+            Self::Qwen3TtsCpp => "qwen3-tts-cpp-0.6b",
+        }
+    }
 }
 
 impl GoldenCodecArg {
