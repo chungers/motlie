@@ -34,3 +34,9 @@ max_swap_used_bytes = 0
 
 [profiles.apple-metal.gates]
 max_swap_used_bytes = 0
+
+[profiles.dgx-spark.gates]
+max_swap_used_bytes = 0
+
+[profiles.cuda-workstation.gates]
+max_swap_used_bytes = 0

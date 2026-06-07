@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 | @codex-399-impl | Wired GB10 Linux/AArch64 fp16/fhm Cargo flags, NVIDIA platform capture, and CUDA profile gates for final pattern review. |
 | 2026-06-06 | @codex-399-impl | Applied early pattern review changes: sectioned result record, explicit `RunContext`, runnable embeddings eval path, support namespace, snake_case capability TOML, and GB10/AArch64 build blocker note. |
 | 2026-06-06 | @codex-399-impl | Updated scope to keep eval engine modules in the single `bins/evals` binary crate; no separate eval library expansion. |
 | 2026-06-06 | @codex-399-impl | Initial brownfield design for separating human examples, curation evals, performance/resource evidence, and generated reports for issue #399. |
@@ -106,10 +107,11 @@ Every eval result should include these sections:
 - top-level `schema_version`: result contract version
 - `identity`: run id, git SHA, branch, command line
 - `selection`: bundle id, selector, backend, checkpoint, artifact snapshot
-- `profile`: explicit profile such as `local-cpu-x86_64`, `apple-metal`, or
-  `dgx-spark`
+- `profile`: explicit profile such as `local-cpu-x86_64`, `apple-metal`,
+  `dgx-spark`, or `cuda-workstation`
 - `platform`: OS, kernel, libc, target triple, CPU, RAM, swap, limits, GPU and
-  accelerator inventory
+  accelerator inventory, including NVIDIA identity and driver/CUDA metadata via
+  `nvidia-smi` when available
 - `runtime`: cargo features, build profile, quantization, context, generation
   params, relevant env vars
 - `performance`: startup, warmup, request latency, token throughput, ASR/TTS
@@ -175,9 +177,16 @@ authoritative evidence moves to eval JSONL.
 Rejected. Manifests are useful, but acceptance requires a reusable runner,
 result schema, platform/profile capture, and reports.
 
-## Platform Note
+## Platform Notes
 
-GB10/AArch64 currently blocks full embedding eval runs before the pattern is
-under test: `motlie-models` `embeddings_basic` fails in `gemm-f16` fullfp16
-inline asm even without CUDA enabled. Treat that as a target-feature/toolchain
-issue for a separate fix; x86 hosts reported evals crate build and clippy pass.
+GB10/Linux AArch64 needs `+fp16,+fhm` target features for the `gemm-f16`
+inline assembly used by the embedding backend. The repo wires this through
+`.cargo/config.toml` for `cfg(all(target_arch = "aarch64", target_os =
+"linux"))`, so the default eval command builds on GB10 without manual
+`RUSTFLAGS`.
+
+CUDA-class profiles such as `dgx-spark` and `cuda-workstation` should emit
+NVIDIA identity when `nvidia-smi` is present: `gpu_backend = "nvidia"`, one
+`gpus[]` entry per device, and `accelerator_metadata` containing the collector,
+driver version, and CUDA version when available. Memory fields may be `null` on
+GB10 when `nvidia-smi` reports `N/A`; GPU identity should still be present.

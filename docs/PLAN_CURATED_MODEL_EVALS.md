@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 | @codex-399-impl | Added durable GB10 Linux/AArch64 build flags, NVIDIA platform inventory, and dgx-spark/cuda-workstation profile gates. |
 | 2026-06-06 | @codex-399-impl | Incorporated early pattern review: sectioned result schema, explicit runner context, runnable embeddings path, support namespace, canonical TOML capability values, and platform blocker tracking. |
 | 2026-06-06 | @codex-399-impl | Updated plan for the single `bins/evals` binary crate and marked the exemplar module scaffolding now added. |
 | 2026-06-06 | @codex-399-impl | Initial implementation plan for issue #399, aligned with `DESIGN_CURATED_MODEL_EVALS.md`. |
@@ -73,10 +74,13 @@ Derived from [DESIGN_CURATED_MODEL_EVALS.md](./DESIGN_CURATED_MODEL_EVALS.md).
 - [ ] targeted example checks for each migrated compatibility target
 - [ ] targeted `evals` checks after the CLI exists
 
-## Known Blockers
+## Platform Follow-Up
 
-- GB10/AArch64 full embedding runs currently fail before eval logic starts in
-  `gemm-f16` fullfp16 inline asm when building `motlie-models`
-  `embeddings_basic`, even without CUDA. Track as a separate
-  target-feature/toolchain fix; keep x86/DGX evals crate checks as pattern
-  verification until that platform issue is resolved.
+- GB10/Linux AArch64 now uses repo-wired `+fp16,+fhm` target features through
+  `.cargo/config.toml`, so default `cargo build -p evals --features ...` and
+  `cargo run -p evals --features ...` commands no longer require manual
+  `RUSTFLAGS`.
+- CUDA-class profiles now have initial scenario gates and `PlatformCollector`
+  records NVIDIA identity through `nvidia-smi` when available. Future profile
+  hardening can add GPU memory/utilization acceptance gates once result policy
+  requires them.

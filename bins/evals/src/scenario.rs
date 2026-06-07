@@ -168,6 +168,8 @@ mod tests {
             scenario.assertions.similarity_order,
             SimilarityOrder::SimilarGtDissimilar
         );
+        assert!(scenario.profiles.contains_key("dgx-spark"));
+        assert!(scenario.profiles.contains_key("cuda-workstation"));
     }
 
     fn repo_eval_root() -> PathBuf {
