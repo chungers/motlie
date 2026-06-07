@@ -831,10 +831,15 @@ impl DaemonState {
     }
 
     pub(crate) fn abort_timer_tasks(&mut self) -> Vec<JoinHandle<()>> {
-        self.timers
+        let tasks = self
+            .timers
             .values_mut()
             .filter_map(|timer| timer.task.take())
-            .collect()
+            .collect::<Vec<_>>();
+        for task in &tasks {
+            task.abort();
+        }
+        tasks
     }
 
     pub(crate) fn shutdown_event_store(&mut self) {
@@ -7382,6 +7387,48 @@ mod tests {
             .expect("record event");
 
         state.shutdown_event_store();
+        let persisted = fs::read_to_string(store_path).expect("audit log");
+        assert!(persisted.contains("durable control message"));
+    }
+
+    #[tokio::test]
+    async fn abort_timer_tasks_cancels_tasks_before_event_store_drain() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+        open_test_workstream(&mut state, "issue-409");
+        state
+            .record_event(
+                "issue-409",
+                EventDraft::new("message_sent")
+                    .direction_to_agent()
+                    .target("local::worker")
+                    .text("durable control message"),
+            )
+            .expect("record event");
+        let mut timer = timer_record(
+            "never-ending",
+            "local::worker".parse().expect("target"),
+            None,
+        );
+        timer.task = Some(tokio::spawn(async {
+            loop {
+                sleep(Duration::from_secs(60)).await;
+            }
+        }));
+        state.timers.insert(timer.name.clone(), timer);
+
+        let tasks = state.abort_timer_tasks();
+        for task in tasks {
+            let result = tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("aborted timer task should finish promptly");
+            assert!(result
+                .expect_err("timer task should be cancelled")
+                .is_cancelled());
+        }
+        state.shutdown_event_store();
+
         let persisted = fs::read_to_string(store_path).expect("audit log");
         assert!(persisted.contains("durable control message"));
     }
