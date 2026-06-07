@@ -45,7 +45,12 @@ cargo run -p evals --features "model-google-gemma-300m model-qwen3-embedding-06b
 ```
 
 When `nvidia-smi` is available, platform records include `gpu_backend =
-"nvidia"`, GPU identity, and driver/CUDA metadata.
+"nvidia"`, GPU identity, and driver/CUDA metadata. Resource acceptance uses
+process swap delta gates on Linux/CUDA profiles; `apple-metal` intentionally
+does not gate on machine-wide swap because macOS reports system swap rather
+than per-process bundle swap through the current sampler. Performance output
+keeps common latency fields plus a nested `capability_metrics` object tagged by
+capability.
 
 Generated JSONL results should be consumed by `evals report` once the reporting
 command lands.

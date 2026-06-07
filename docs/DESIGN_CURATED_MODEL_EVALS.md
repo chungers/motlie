@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-07 | @codex-399-impl | Addressed Metal review: process-swap resource gates, section-specific failure reasons, tagged per-capability scenarios, and nested capability metrics. |
 | 2026-06-06 | @codex-399-impl | Wired GB10 Linux/AArch64 fp16/fhm Cargo flags, NVIDIA platform capture, and CUDA profile gates for final pattern review. |
 | 2026-06-06 | @codex-399-impl | Applied early pattern review changes: sectioned result record, explicit `RunContext`, runnable embeddings eval path, support namespace, snake_case capability TOML, and GB10/AArch64 build blocker note. |
 | 2026-06-06 | @codex-399-impl | Updated scope to keep eval engine modules in the single `bins/evals` binary crate; no separate eval library expansion. |
@@ -92,6 +93,10 @@ Evals are scenario-first:
   gates
 - capability values serialize as snake_case in TOML, for example `embeddings`,
   and serde maps them to Rust enums
+- `capability` is the serde tag for `ScenarioKind`, so each scenario carries
+  capability-specific `input` and `assertions` payloads; embeddings is the
+  runnable exemplar, while chat/ASR/TTS/perf stubs keep the batch shape
+  from collapsing into an embeddings-only schema
 
 Performance is not a human example. It is captured by perf scenarios and the
 standard JSONL result schema. `bench_chat` should become a compatibility wrapper
@@ -114,13 +119,19 @@ Every eval result should include these sections:
   `nvidia-smi` when available
 - `runtime`: cargo features, build profile, quantization, context, generation
   params, relevant env vars
-- `performance`: startup, warmup, request latency, token throughput, ASR/TTS
-  real-time factor, embedding vectors per second
-- `resources`: RSS, peak RSS, CPU time, page faults, swap, GPU memory and
-  utilization where available
+- `performance`: startup, warmup, common request latency, and a nested
+  `capability_metrics` object tagged by capability for embedding vectors per
+  second, chat token throughput, ASR/TTS real-time factor, or perf summaries
+- `resources`: RSS, peak RSS, CPU time, page faults, process swap delta,
+  GPU memory and utilization where available
 - `acceptance`: behavior, performance, resource, and overall statuses
 
 Unknown platform fields are represented as `null` or `unavailable`, not omitted.
+
+Acceptance failure reasons must name the section and gate that failed. A resource
+failure cannot reuse a passing behavior assertion message; for example a process
+swap gate failure should report the `max_process_swap_delta_bytes` threshold and
+the observed `process_swap_delta_peak_bytes` value.
 
 ## Runner Boundary
 
@@ -135,7 +146,7 @@ records.
 The embeddings exemplar proves this boundary with `evals run --bundle
 embeddinggemma_300m --scenario embeddings_similarity`: it parses TOML, validates
 the snake_case capability filter, starts one compiled embedding bundle, samples
-startup and request latencies plus RSS/swap resources, emits JSONL, and applies
+startup and request latencies plus RSS/process-swap resources, emits JSONL, and applies
 the `similar_gt_dissimilar` assertion.
 
 ## Migration Strategy
@@ -190,3 +201,9 @@ NVIDIA identity when `nvidia-smi` is present: `gpu_backend = "nvidia"`, one
 `gpus[]` entry per device, and `accelerator_metadata` containing the collector,
 driver version, and CUDA version when available. Memory fields may be `null` on
 GB10 when `nvidia-smi` reports `N/A`; GPU identity should still be present.
+
+D decision: keep `PlatformCollector` as the single profile-aware platform
+section source. NVIDIA population is wired through `nvidia-smi` now. Metal
+population should use a macOS command fallback such as `system_profiler` or a
+small Metal probe and can land as a fast-follow after A-C, before applying the
+chat/ASR/TTS/bench batch migration.

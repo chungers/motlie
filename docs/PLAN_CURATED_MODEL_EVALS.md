@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-07 | @codex-399-impl | Fixed Metal review items A-C and recorded the Metal platform population fast-follow decision. |
 | 2026-06-06 | @codex-399-impl | Added durable GB10 Linux/AArch64 build flags, NVIDIA platform inventory, and dgx-spark/cuda-workstation profile gates. |
 | 2026-06-06 | @codex-399-impl | Incorporated early pattern review: sectioned result schema, explicit runner context, runnable embeddings path, support namespace, canonical TOML capability values, and platform blocker tracking. |
 | 2026-06-06 | @codex-399-impl | Updated plan for the single `bins/evals` binary crate and marked the exemplar module scaffolding now added. |
@@ -30,9 +31,9 @@ Derived from [DESIGN_CURATED_MODEL_EVALS.md](./DESIGN_CURATED_MODEL_EVALS.md).
 
 ## Phase 2: Eval Binary Module Skeleton
 
-- [x] Add `bins/evals/src/scenario.rs` for scenario listing and future parsed TOML metadata.
+- [x] Add `bins/evals/src/scenario.rs` for scenario listing and tagged per-capability TOML metadata.
   DESIGN reference: Naming Rules.
-- [x] Add `bins/evals/src/result.rs` for the sectioned JSONL result contract.
+- [x] Add `bins/evals/src/result.rs` for the sectioned JSONL result contract with nested capability metrics.
   DESIGN reference: Result Record.
 - [x] Add binary-local platform/profile skeletons.
   DESIGN reference: Result Record.
@@ -84,3 +85,6 @@ Derived from [DESIGN_CURATED_MODEL_EVALS.md](./DESIGN_CURATED_MODEL_EVALS.md).
   records NVIDIA identity through `nvidia-smi` when available. Future profile
   hardening can add GPU memory/utilization acceptance gates once result policy
   requires them.
+- D decision: Metal device population stays in `PlatformCollector` and can land
+  as a focused fast-follow before batch migration; A-C are fixed in the
+  exemplar first so the schema and resource acceptance semantics are stable.

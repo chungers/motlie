@@ -15,26 +15,74 @@ pub struct ScenarioSummary {
 pub struct Scenario {
     pub schema_version: u32,
     pub id: String,
-    pub capability: CapabilityName,
     pub summary: String,
     pub bundle_filter: BundleFilter,
-    pub input: EmbeddingsInput,
-    pub assertions: EmbeddingsAssertions,
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileConfig>,
+    #[serde(flatten)]
+    pub kind: ScenarioKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+impl Scenario {
+    pub fn capability(&self) -> CapabilityName {
+        self.kind.capability()
+    }
+
+    pub fn embeddings(&self) -> Option<&EmbeddingsScenario> {
+        match &self.kind {
+            ScenarioKind::Embeddings(scenario) => Some(scenario),
+            _ => None,
+        }
+    }
+
+    pub fn gates_for_profile(&self, profile_name: &str) -> Option<&ProfileGates> {
+        self.profiles
+            .get(profile_name)
+            .and_then(|profile| profile.gates.as_ref())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "capability", rename_all = "snake_case")]
+pub enum ScenarioKind {
+    Embeddings(EmbeddingsScenario),
+    Chat(ChatScenario),
+    Asr(AsrScenario),
+    Tts(TtsScenario),
+    Perf(PerfScenario),
+}
+
+impl ScenarioKind {
+    pub fn capability(&self) -> CapabilityName {
+        match self {
+            Self::Embeddings(_) => CapabilityName::Embeddings,
+            Self::Chat(_) => CapabilityName::Chat,
+            Self::Asr(_) => CapabilityName::Asr,
+            Self::Tts(_) => CapabilityName::Tts,
+            Self::Perf(_) => CapabilityName::Perf,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityName {
     Embeddings,
+    Chat,
+    Asr,
+    Tts,
+    Perf,
 }
 
 impl CapabilityName {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Embeddings => "embeddings",
+            Self::Chat => "chat",
+            Self::Asr => "asr",
+            Self::Tts => "tts",
+            Self::Perf => "perf",
         }
     }
 }
@@ -44,6 +92,12 @@ pub struct BundleFilter {
     pub capability: CapabilityName,
     #[serde(default)]
     pub backend: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EmbeddingsScenario {
+    pub input: EmbeddingsInput,
+    pub assertions: EmbeddingsAssertions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -68,6 +122,75 @@ pub enum SimilarityOrder {
     SimilarGtDissimilar,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChatScenario {
+    pub input: ChatInput,
+    pub assertions: ChatAssertions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChatInput {
+    pub prompt: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChatAssertions {
+    pub min_response_chars: Option<usize>,
+    #[serde(default)]
+    pub required_substrings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AsrScenario {
+    pub input: AsrInput,
+    pub assertions: AsrAssertions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AsrInput {
+    pub audio: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AsrAssertions {
+    pub max_word_error_rate: Option<f64>,
+    #[serde(default)]
+    pub required_substrings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TtsScenario {
+    pub input: TtsInput,
+    pub assertions: TtsAssertions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TtsInput {
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TtsAssertions {
+    pub min_audio_duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerfScenario {
+    pub input: PerfInput,
+    pub assertions: PerfAssertions,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PerfInput {
+    pub workload: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PerfAssertions {
+    pub max_mean_latency_ms: Option<f64>,
+    pub max_p95_latency_ms: Option<f64>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MetricsConfig {
     #[serde(default)]
@@ -89,15 +212,7 @@ pub struct ProfileConfig {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProfileGates {
-    pub max_swap_used_bytes: Option<u64>,
-}
-
-impl Scenario {
-    pub fn gates_for_profile(&self, profile_name: &str) -> Option<&ProfileGates> {
-        self.profiles
-            .get(profile_name)
-            .and_then(|profile| profile.gates.as_ref())
-    }
+    pub max_process_swap_delta_bytes: Option<u64>,
 }
 
 pub fn list_scenarios(eval_root: &Path) -> Result<Vec<ScenarioSummary>> {
@@ -159,17 +274,62 @@ mod tests {
     fn parses_embeddings_similarity() {
         let scenario = load_scenario(&repo_eval_root(), "embeddings_similarity").unwrap();
 
-        assert_eq!(scenario.capability, CapabilityName::Embeddings);
+        assert_eq!(scenario.capability(), CapabilityName::Embeddings);
         assert_eq!(
             scenario.bundle_filter.capability,
             CapabilityName::Embeddings
         );
+        let embeddings = scenario.embeddings().unwrap();
         assert_eq!(
-            scenario.assertions.similarity_order,
+            embeddings.assertions.similarity_order,
             SimilarityOrder::SimilarGtDissimilar
         );
+        assert!(scenario.profiles.contains_key("apple-metal"));
         assert!(scenario.profiles.contains_key("dgx-spark"));
         assert!(scenario.profiles.contains_key("cuda-workstation"));
+        assert_eq!(
+            scenario
+                .profiles
+                .get("apple-metal")
+                .and_then(|profile| profile.gates.as_ref())
+                .and_then(|gates| gates.max_process_swap_delta_bytes),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_chat_scenario_shape() {
+        let raw = r#"
+schema_version = 1
+id = "chat_smoke"
+capability = "chat"
+summary = "Minimal chat smoke scenario."
+
+[bundle_filter]
+capability = "chat"
+backend = ["MistralRs"]
+
+[input]
+prompt = "Say hello."
+
+[assertions]
+min_response_chars = 1
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+"#;
+
+        let scenario = toml::from_str::<Scenario>(raw).unwrap();
+
+        assert_eq!(scenario.capability(), CapabilityName::Chat);
+        match scenario.kind {
+            ScenarioKind::Chat(chat) => {
+                assert_eq!(chat.input.prompt, "Say hello.");
+                assert_eq!(chat.assertions.min_response_chars, Some(1));
+            }
+            other => panic!("expected chat scenario, got {other:?}"),
+        }
     }
 
     fn repo_eval_root() -> PathBuf {

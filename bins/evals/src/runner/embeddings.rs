@@ -10,13 +10,15 @@ use motlie_model::{
 };
 use motlie_models::{download_bundle_artifacts, Catalog};
 
-use crate::metrics::PerformanceMetrics;
+use crate::metrics::{
+    CapabilityPerformanceMetrics, EmbeddingPerformanceMetrics, PerformanceMetrics,
+};
 use crate::result::{
     overall_status, AcceptanceSection, AcceptanceStatus, AssertionOutcome, IdentitySection,
     ProfileSection, ResultRecord, RuntimeSection, SelectionSection,
 };
 use crate::runner::{RunContext, ScenarioRunner};
-use crate::scenario::{CapabilityName, SimilarityOrder};
+use crate::scenario::{CapabilityName, EmbeddingsAssertions, SimilarityOrder};
 
 pub struct EmbeddingSimilarityRunner;
 
@@ -24,7 +26,7 @@ pub struct EmbeddingSimilarityRunner;
 impl ScenarioRunner for EmbeddingSimilarityRunner {
     async fn run(&self, mut context: RunContext) -> Result<ResultRecord> {
         ensure!(
-            context.scenario.capability == CapabilityName::Embeddings,
+            context.scenario.capability() == CapabilityName::Embeddings,
             "scenario `{}` is not an embeddings scenario",
             context.scenario.id
         );
@@ -33,6 +35,13 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
             "scenario `{}` bundle filter must use capability=embeddings",
             context.scenario.id
         );
+        let embeddings_scenario = context
+            .scenario
+            .embeddings()
+            .context("embeddings scenario should carry embeddings input/assertions")?
+            .clone();
+        let input = embeddings_scenario.input;
+        let assertions = embeddings_scenario.assertions;
 
         let catalog = Catalog::with_defaults();
         let bundle_id = BundleId::new(context.bundle_selection.bundle_id.clone());
@@ -98,7 +107,7 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
         let custom_started_at = std::time::Instant::now();
         let custom_response = embeddings
             .embed(EmbeddingRequest {
-                inputs: vec![context.scenario.input.custom_text.clone()],
+                inputs: vec![input.custom_text.clone()],
             })
             .await
             .context("custom embedding request failed")?;
@@ -112,24 +121,16 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
         let embedding_dimensions = custom_vector.len();
 
         let similar_started_at = std::time::Instant::now();
-        let similar_cosine = embed_pair(
-            embeddings,
-            &context.scenario.input.similar_a,
-            &context.scenario.input.similar_b,
-        )
-        .await
-        .context("similar embedding pair failed")?;
+        let similar_cosine = embed_pair(embeddings, &input.similar_a, &input.similar_b)
+            .await
+            .context("similar embedding pair failed")?;
         let similar_latency_ms = elapsed_ms(similar_started_at.elapsed());
         context.metrics_sampler.sample();
 
         let dissimilar_started_at = std::time::Instant::now();
-        let dissimilar_cosine = embed_pair(
-            embeddings,
-            &context.scenario.input.dissimilar_a,
-            &context.scenario.input.dissimilar_b,
-        )
-        .await
-        .context("dissimilar embedding pair failed")?;
+        let dissimilar_cosine = embed_pair(embeddings, &input.dissimilar_a, &input.dissimilar_b)
+            .await
+            .context("dissimilar embedding pair failed")?;
         let dissimilar_latency_ms = elapsed_ms(dissimilar_started_at.elapsed());
         context.metrics_sampler.sample();
 
@@ -139,7 +140,9 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
             .await
             .with_context(|| format!("failed to shut down bundle `{bundle_id}`"))?;
 
-        let request_latency_sum_ms = custom_latency_ms + similar_latency_ms + dissimilar_latency_ms;
+        let request_latencies_ms =
+            vec![custom_latency_ms, similar_latency_ms, dissimilar_latency_ms];
+        let request_latency_sum_ms = request_latencies_ms.iter().sum::<u64>();
         let vectors_per_second = if request_latency_sum_ms == 0 {
             None
         } else {
@@ -148,13 +151,7 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
         let similarity_gap = similar_cosine - dissimilar_cosine;
 
         let model_embedding_metrics = model_metrics.and_then(|snapshot| snapshot.embeddings);
-        let performance = PerformanceMetrics {
-            startup_ms: Some(startup_ms),
-            request_latencies_ms: vec![
-                custom_latency_ms,
-                similar_latency_ms,
-                dissimilar_latency_ms,
-            ],
+        let embedding_metrics = EmbeddingPerformanceMetrics {
             custom_embedding_latency_ms: Some(custom_latency_ms),
             similar_pair_latency_ms: Some(similar_latency_ms),
             dissimilar_pair_latency_ms: Some(dissimilar_latency_ms),
@@ -170,31 +167,33 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
                 .as_ref()
                 .and_then(|metrics| metrics.input_count),
         };
+        let performance = PerformanceMetrics {
+            startup_ms: Some(startup_ms),
+            request_latencies_ms,
+            capability_metrics: CapabilityPerformanceMetrics::Embeddings(embedding_metrics),
+        };
         let resources = context.metrics_sampler.finish();
 
         let assertion = evaluate_assertion(
             embedding_dimensions,
             similar_cosine,
             dissimilar_cosine,
-            &context,
+            &assertions,
         );
         let behavior_status = assertion.status.clone();
-        let performance_status = if performance.startup_ms.is_some()
-            && !performance.request_latencies_ms.is_empty()
-            && performance.embedding_dimensions.is_some()
-        {
-            AcceptanceStatus::Pass
-        } else {
-            AcceptanceStatus::NotMeasured
-        };
-        let resource_status = evaluate_resource_status(&resources, &context);
+        let performance_evaluation = evaluate_performance_status(&performance);
+        let resource_evaluation = evaluate_resource_status(&resources, &context);
+        let performance_status = performance_evaluation.status.clone();
+        let resource_status = resource_evaluation.status.clone();
         let overall_status =
             overall_status(&behavior_status, &performance_status, &resource_status);
-        let failure_reason = if overall_status == AcceptanceStatus::Pass {
-            None
-        } else {
-            assertion.message.clone()
-        };
+        let failure_reason = failure_reason(
+            &overall_status,
+            &behavior_status,
+            &assertion,
+            &performance_evaluation,
+            &resource_evaluation,
+        );
 
         let checkpoint = descriptor.checkpoint();
         let record = ResultRecord {
@@ -225,7 +224,7 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
                     .unwrap_or_default(),
                 artifact_files: downloaded_artifacts,
                 scenario: context.scenario.id.clone(),
-                capability: context.scenario.capability.as_str().to_owned(),
+                capability: context.scenario.capability().as_str().to_owned(),
             },
             profile: ProfileSection {
                 name: context.profile.name.clone(),
@@ -286,15 +285,13 @@ fn evaluate_assertion(
     embedding_dimensions: usize,
     similar_cosine: f64,
     dissimilar_cosine: f64,
-    context: &RunContext,
+    assertions: &EmbeddingsAssertions,
 ) -> AssertionOutcome {
-    let dimensions_ok =
-        embedding_dimensions >= context.scenario.assertions.min_embedding_dimensions;
+    let dimensions_ok = embedding_dimensions >= assertions.min_embedding_dimensions;
     let similarity_gap = similar_cosine - dissimilar_cosine;
-    let similarity_ok = match context.scenario.assertions.similarity_order {
+    let similarity_ok = match assertions.similarity_order {
         SimilarityOrder::SimilarGtDissimilar => {
-            similar_cosine > dissimilar_cosine
-                && similarity_gap >= context.scenario.assertions.min_similarity_gap
+            similar_cosine > dissimilar_cosine && similarity_gap >= assertions.min_similarity_gap
         }
     };
 
@@ -317,27 +314,128 @@ fn evaluate_assertion(
     }
 }
 
-fn evaluate_resource_status(
-    resources: &crate::metrics::ResourceMetrics,
-    context: &RunContext,
-) -> AcceptanceStatus {
-    let Some(gates) = context.scenario.gates_for_profile(&context.profile.name) else {
-        return if resources.rss_peak_bytes.is_some() {
-            AcceptanceStatus::Pass
-        } else {
-            AcceptanceStatus::NotMeasured
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SectionEvaluation {
+    status: AcceptanceStatus,
+    failure_reason: Option<String>,
+}
+
+fn evaluate_performance_status(performance: &PerformanceMetrics) -> SectionEvaluation {
+    let CapabilityPerformanceMetrics::Embeddings(metrics) = &performance.capability_metrics else {
+        return SectionEvaluation {
+            status: AcceptanceStatus::NotMeasured,
+            failure_reason: Some("performance capability metrics were not measured".to_owned()),
         };
     };
 
-    if let Some(max_swap_used_bytes) = gates.max_swap_used_bytes {
-        return match resources.swap_peak_bytes {
-            Some(value) if value <= max_swap_used_bytes => AcceptanceStatus::Pass,
-            Some(_) => AcceptanceStatus::Fail,
-            None => AcceptanceStatus::NotMeasured,
-        };
+    if performance.startup_ms.is_some()
+        && !performance.request_latencies_ms.is_empty()
+        && metrics.embedding_dimensions.is_some()
+    {
+        SectionEvaluation {
+            status: AcceptanceStatus::Pass,
+            failure_reason: None,
+        }
+    } else {
+        SectionEvaluation {
+            status: AcceptanceStatus::NotMeasured,
+            failure_reason: Some(
+                "performance metrics missing startup, request latency, or embedding dimensions"
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
+fn evaluate_resource_status(
+    resources: &crate::metrics::ResourceMetrics,
+    context: &RunContext,
+) -> SectionEvaluation {
+    if let Some(gates) = context.scenario.gates_for_profile(&context.profile.name) {
+        if let Some(max_process_swap_delta_bytes) = gates.max_process_swap_delta_bytes {
+            match resources.process_swap_delta_peak_bytes {
+                Some(value) if value <= max_process_swap_delta_bytes => {}
+                Some(value) => {
+                    return SectionEvaluation {
+                        status: AcceptanceStatus::Fail,
+                        failure_reason: Some(format!(
+                            "resource gate max_process_swap_delta_bytes={} exceeded: process_swap_delta_peak={} ({} bytes)",
+                            max_process_swap_delta_bytes,
+                            format_bytes(value),
+                            value
+                        )),
+                    };
+                }
+                None => {
+                    return SectionEvaluation {
+                        status: AcceptanceStatus::NotMeasured,
+                        failure_reason: Some(
+                            "resource gate max_process_swap_delta_bytes could not be evaluated: process swap delta unavailable"
+                                .to_owned(),
+                        ),
+                    };
+                }
+            }
+        }
     }
 
-    AcceptanceStatus::NotApplicable
+    if resources.rss_peak_bytes.is_some() {
+        SectionEvaluation {
+            status: AcceptanceStatus::Pass,
+            failure_reason: None,
+        }
+    } else {
+        SectionEvaluation {
+            status: AcceptanceStatus::NotMeasured,
+            failure_reason: Some("resource metrics missing rss_peak_bytes".to_owned()),
+        }
+    }
+}
+
+fn failure_reason(
+    overall_status: &AcceptanceStatus,
+    behavior_status: &AcceptanceStatus,
+    assertion: &AssertionOutcome,
+    performance_evaluation: &SectionEvaluation,
+    resource_evaluation: &SectionEvaluation,
+) -> Option<String> {
+    if matches!(overall_status, AcceptanceStatus::Pass) {
+        return None;
+    }
+
+    if matches!(
+        behavior_status,
+        AcceptanceStatus::Fail | AcceptanceStatus::Blocked
+    ) {
+        return Some(format!(
+            "behavior assertion `{}` failed: {}",
+            assertion.name,
+            assertion
+                .message
+                .as_deref()
+                .unwrap_or("no assertion detail")
+        ));
+    }
+
+    if matches!(
+        performance_evaluation.status,
+        AcceptanceStatus::Fail | AcceptanceStatus::Blocked | AcceptanceStatus::NotMeasured
+    ) {
+        if let Some(reason) = &performance_evaluation.failure_reason {
+            return Some(format!("performance section not accepted: {reason}"));
+        }
+    }
+
+    if matches!(
+        resource_evaluation.status,
+        AcceptanceStatus::Fail | AcceptanceStatus::Blocked | AcceptanceStatus::NotMeasured
+    ) {
+        if let Some(reason) = &resource_evaluation.failure_reason {
+            return Some(format!("resources section not accepted: {reason}"));
+        }
+    }
+
+    None
 }
 
 fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationBits>> {
@@ -429,4 +527,156 @@ fn runtime_env() -> BTreeMap<String, Option<String>> {
     .into_iter()
     .map(|key| (key.to_owned(), std::env::var(key).ok()))
     .collect()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * KIB;
+    const GIB: f64 = 1024.0 * MIB;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2}GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.2}MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.2}KiB", bytes / KIB)
+    } else {
+        format!("{bytes:.0}B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::ResourceMetrics;
+    use crate::runner::{BundleSelection, ProfileSelection, RunContext, RuntimeFlags};
+    use crate::{metrics::MetricsSampler, platform::PlatformCollector, report::OutputSink};
+
+    #[test]
+    fn resource_failure_reason_names_failing_gate() {
+        let context = test_context("local-cpu-x86_64");
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            process_swap_delta_peak_bytes: Some(1_677_721_600),
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status(&resources, &context);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Fail);
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("max_process_swap_delta_bytes=0 exceeded"));
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("process_swap_delta_peak=1.56GiB"));
+    }
+
+    #[test]
+    fn apple_profile_without_swap_gate_passes_when_rss_is_measured() {
+        let context = test_context("apple-metal");
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            process_swap_delta_peak_bytes: None,
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status(&resources, &context);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Pass);
+        assert_eq!(evaluation.failure_reason, None);
+    }
+
+    #[test]
+    fn overall_failure_reason_prefers_resource_failure_over_passing_behavior_message() {
+        let assertion = AssertionOutcome {
+            name: "similar_gt_dissimilar".to_owned(),
+            status: AcceptanceStatus::Pass,
+            message: Some("similar=0.9 dissimilar=0.1 gap=0.8".to_owned()),
+        };
+        let performance = SectionEvaluation {
+            status: AcceptanceStatus::Pass,
+            failure_reason: None,
+        };
+        let resources = SectionEvaluation {
+            status: AcceptanceStatus::Fail,
+            failure_reason: Some("resource gate exceeded".to_owned()),
+        };
+
+        let reason = failure_reason(
+            &AcceptanceStatus::Fail,
+            &assertion.status,
+            &assertion,
+            &performance,
+            &resources,
+        )
+        .unwrap();
+
+        assert_eq!(
+            reason,
+            "resources section not accepted: resource gate exceeded"
+        );
+    }
+
+    fn test_context(profile_name: &str) -> RunContext {
+        let scenario = toml::from_str(
+            r#"
+schema_version = 1
+id = "embeddings_similarity"
+capability = "embeddings"
+summary = "Embed one input and compare a similar pair against a dissimilar pair."
+
+[bundle_filter]
+capability = "embeddings"
+backend = ["MistralRs"]
+
+[input]
+custom_text = "motlie curated model bundle"
+similar_a = "A small orange cat is sleeping on the couch."
+similar_b = "An orange kitten is napping on a sofa."
+dissimilar_a = "A small orange cat is sleeping on the couch."
+dissimilar_b = "Quarterly revenue increased by twelve percent year over year."
+
+[assertions]
+min_embedding_dimensions = 1
+similarity_order = "similar_gt_dissimilar"
+min_similarity_gap = 0.05
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 0
+
+[profiles.apple-metal]
+"#,
+        )
+        .unwrap();
+
+        RunContext {
+            scenario,
+            bundle_selection: BundleSelection {
+                bundle_id: "embeddinggemma_300m".to_owned(),
+                selector: None,
+            },
+            profile: ProfileSelection {
+                name: profile_name.to_owned(),
+            },
+            artifact_root: std::path::PathBuf::from("/tmp/motlie-test-artifacts"),
+            runtime_flags: RuntimeFlags {
+                command_line: Vec::new(),
+                download_artifacts: false,
+                precision: None,
+                quiet_backend_logs: false,
+            },
+            platform_collector: PlatformCollector::new(profile_name),
+            metrics_sampler: MetricsSampler::new(),
+            output_sink: OutputSink::Stdout,
+        }
+    }
 }
