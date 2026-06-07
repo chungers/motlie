@@ -106,9 +106,9 @@ expected to depend on system libraries such as OpenSSL, libstdc++, libm,
 libgcc_s, libc, and the dynamic loader.
 
 Sherpa's ONNX Runtime dependency is different: the upstream `sherpa-onnx` Rust
-crate downloads and statically links its native archive, including the ONNX
-Runtime library used internally by Sherpa. A release binary should not have a
-dynamic `libonnxruntime.so` dependency.
+crate downloads and statically links its native archive, including the
+`onnxruntime.a` static library used internally by Sherpa. A release binary
+should not have a dynamic `libonnxruntime.so` dependency.
 
 Check the dynamic dependencies with:
 
