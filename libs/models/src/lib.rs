@@ -715,6 +715,7 @@ impl BundleHandle for CuratedHandle {
     }
 
     fn embeddings(&self) -> std::result::Result<&Self::Embeddings, ModelError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(_) => Ok(self),
@@ -828,6 +829,7 @@ impl EmbeddingModel for CuratedHandle {
         &self,
         request: motlie_model::EmbeddingRequest,
     ) -> std::result::Result<motlie_model::EmbeddingResponse, ModelError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(handle) => handle.embed(request).await,

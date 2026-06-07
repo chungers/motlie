@@ -7,5 +7,5 @@ mod support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    embedding_example_support::run("embeddings").await
+    embedding_example_support::run("embeddings_basic").await
 }

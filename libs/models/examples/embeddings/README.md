@@ -2,6 +2,8 @@
 
 This example demonstrates the curated embedding slice in `libs/models`.
 
+This legacy target now shares its implementation with the capability-first [`embeddings_basic`](../embeddings_basic/README.md) target. New commands should prefer `embeddings_basic` with `--bundle`; existing `--embedding=...` commands remain supported.
+
 It is intentionally built with exactly two curated embedding bundle features enabled:
 
 - `embeddinggemma_300m` (`google/embeddinggemma-300m`)

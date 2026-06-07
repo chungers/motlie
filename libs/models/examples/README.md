@@ -13,6 +13,7 @@ Current example groups:
   - [`asr_moonshine`](./asr_moonshine/README.md)
 - Embeddings
   - [`embeddings`](./embeddings/README.md)
+  - [`embeddings_basic`](./embeddings_basic/README.md)
 - Chat
   - [`chat_mistral_qwen3`](./chat_mistral_qwen3/README.md)
   - [`chat_tool_binding`](./chat_tool_binding/README.md)
