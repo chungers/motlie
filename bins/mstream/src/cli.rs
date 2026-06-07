@@ -297,7 +297,10 @@ pub struct NewArgs {
     pub role: String,
     #[arg(long)]
     pub cwd: PathBuf,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Agent executable to start. Remote lookup uses the host non-login SSH PATH; pass an absolute path if needed."
+    )]
     pub agent: String,
     #[arg(long)]
     pub task: Option<String>,
@@ -742,6 +745,7 @@ fn parse_duration_secs(value: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn parse_duration_accepts_seconds_and_minutes() {
@@ -756,6 +760,19 @@ mod tests {
         assert!(parse_duration_secs("").is_err());
         assert!(parse_duration_secs("0s").is_err());
         assert!(parse_duration_secs("soon").is_err());
+    }
+
+    #[test]
+    fn new_command_help_documents_remote_agent_path_lookup() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("new")
+            .expect("new subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("Remote lookup uses the host non-login SSH PATH"));
+        assert!(help.contains("absolute path"));
     }
 
     #[test]

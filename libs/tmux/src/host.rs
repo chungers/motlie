@@ -495,6 +495,20 @@ impl HostHandle {
         control::tmux_hostname_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// Check whether an executable resolves in the host's non-login command environment.
+    ///
+    /// This intentionally does not use the login-shell fallback from tmux
+    /// discovery. Callers use it to match the PATH seen by non-interactive SSH
+    /// commands such as `tmux new-session`.
+    pub async fn executable_exists_non_login(&self, executable: &str) -> Result<bool> {
+        let command = format!(
+            "if command -v {} >/dev/null 2>&1; then printf found; else printf missing; fi",
+            control::shell_escape(executable)
+        );
+        let output = self.inner.transport.exec(&command).await?;
+        Ok(output.trim() == "found")
+    }
+
     /// List namespaced metadata tags for several session infos in one tmux call.
     ///
     /// This is intended for callers that enrich an existing session listing and
@@ -3225,6 +3239,32 @@ mod tests {
 
     fn mock_host(mock: MockTransport) -> HostHandle {
         HostHandle::new(TransportKind::Mock(mock), None)
+    }
+
+    #[tokio::test]
+    async fn executable_exists_non_login_uses_plain_command_v() {
+        let mock = MockTransport::new().with_response("command -v 'codex'", "found");
+        let commands = mock.command_log();
+        let host = mock_host(mock);
+
+        assert!(host.executable_exists_non_login("codex").await.unwrap());
+
+        let commands = commands.lock().unwrap();
+        assert_eq!(
+            commands.as_slice(),
+            ["if command -v 'codex' >/dev/null 2>&1; then printf found; else printf missing; fi"]
+        );
+    }
+
+    #[tokio::test]
+    async fn executable_exists_non_login_reports_missing() {
+        let mock = MockTransport::new().with_response("command -v 'missing-agent'", "missing");
+        let host = mock_host(mock);
+
+        assert!(!host
+            .executable_exists_non_login("missing-agent")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

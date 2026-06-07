@@ -6,8 +6,8 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
 use motlie_tmux::{
-    CreateSessionOptions, Fleet, FleetTargetSpec, HostHandle, KeySequence, ResolvedFleetTarget,
-    SessionEnvVar, SessionInfo, SessionTag, SshConfig, Target,
+    CreateSessionOptions, Error as TmuxError, Fleet, FleetTargetSpec, HostHandle, KeySequence,
+    ResolvedFleetTarget, SessionEnvVar, SessionInfo, SessionTag, SshConfig, Target,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -670,6 +670,7 @@ impl DaemonState {
                 state.workstream_meta(&request.workstream)?,
             )
         };
+        validate_agent_executable(&handle, &request.agent).await?;
         let command = bootstrap_command(&request.cwd, &request.agent);
         let env = session_environment(&request.workstream, &request.role)?;
         let opts = CreateSessionOptions {
@@ -677,7 +678,18 @@ impl DaemonState {
             initial_environment: env,
             ..Default::default()
         };
-        let tmux_target = handle.create_session(target.session_name(), &opts).await?;
+        let tmux_target = match handle.create_session(target.session_name(), &opts).await {
+            Ok(tmux_target) => tmux_target,
+            Err(error) if is_created_session_not_found(&error, target.session_name()) => {
+                bail!(
+                    "agent session {} on {} exited immediately during startup while running agent executable {}; tmux did not report it as live after creation",
+                    target.session_name(),
+                    target.host_alias(),
+                    request.agent
+                );
+            }
+            Err(error) => return Err(error.into()),
+        };
         let stable_target = SessionTarget::session_id(
             target.host_alias(),
             tmux_target
@@ -4196,6 +4208,38 @@ fn is_unicode_format_char(ch: char) -> bool {
     )
 }
 
+async fn validate_agent_executable(handle: &HostHandle, agent: &str) -> anyhow::Result<()> {
+    if agent.trim().is_empty() {
+        bail!("--agent must not be empty");
+    }
+    let exists = handle
+        .executable_exists_non_login(agent)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to validate agent executable {} on {} non-login PATH",
+                agent,
+                handle.host_alias()
+            )
+        })?;
+    if !exists {
+        bail!(
+            "agent executable {} not found on {} non-login PATH - pass an absolute path",
+            agent,
+            handle.host_alias()
+        );
+    }
+    Ok(())
+}
+
+fn is_created_session_not_found(error: &TmuxError, session_name: &str) -> bool {
+    if let TmuxError::State(message) = error {
+        message == &format!("session '{session_name}' created but not found in list")
+    } else {
+        false
+    }
+}
+
 fn bootstrap_command(cwd: &Path, agent: &str) -> String {
     format!(
         "mkdir -p {} && cd {} && exec {}",
@@ -5405,9 +5449,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_session_fails_fast_when_agent_missing_on_non_login_path() {
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("command -v 'missing-agent'", "missing")
+            .with_default("");
+        let commands = mock.command_log();
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "remote", mock);
+        open_test_workstream(&mut state, "issue-386");
+        let shared = Arc::new(Mutex::new(state));
+
+        let error = DaemonState::new_session_shared(
+            shared,
+            NewRequest {
+                workstream: "issue-386".to_string(),
+                target: "remote::worker".to_string(),
+                role: "implementer".to_string(),
+                cwd: PathBuf::from("/tmp/issue-386"),
+                agent: "missing-agent".to_string(),
+                task: None,
+            },
+        )
+        .await
+        .expect_err("missing agent should fail before creating a session");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "agent executable missing-agent not found on remote non-login PATH - pass an absolute path"
+            ),
+            "unexpected error: {message}"
+        );
+        let commands = commands.lock().unwrap();
+        assert!(commands
+            .iter()
+            .any(|command| command.contains("command -v 'missing-agent'")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.contains("new-session")));
+    }
+
+    #[tokio::test]
+    async fn new_session_reports_immediate_agent_exit_after_creation() {
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("command -v 'agent-new'", "found")
+            .with_response("list-sessions", "")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "remote", mock);
+        open_test_workstream(&mut state, "issue-386");
+        let shared = Arc::new(Mutex::new(state));
+
+        let error = DaemonState::new_session_shared(
+            shared,
+            NewRequest {
+                workstream: "issue-386".to_string(),
+                target: "remote::worker".to_string(),
+                role: "implementer".to_string(),
+                cwd: PathBuf::from("/tmp/issue-386"),
+                agent: "agent-new".to_string(),
+                task: None,
+            },
+        )
+        .await
+        .expect_err("immediate session death should be reported clearly");
+
+        let message = error.to_string();
+        assert!(message.contains("exited immediately during startup"));
+        assert!(message.contains("agent-new"));
+        assert!(
+            !message.contains("not found in list"),
+            "misleading lower-level error leaked: {message}"
+        );
+    }
+
+    #[tokio::test]
     async fn new_session_quarantines_reused_session_id_before_adopting() {
         let target = SessionTarget::session_id("local", "$1").expect("target");
         let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("command -v 'agent-new'", "found")
             .with_response("list-sessions", "__MOTLIE_S__ fresh $1 200 0 1  250\n")
             .with_shell_data(vec![b"%output %5 ready\n".to_vec()])
             .with_default("");
