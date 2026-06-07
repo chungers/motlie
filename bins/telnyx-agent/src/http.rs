@@ -22,7 +22,7 @@ use crate::config::DaemonArgs;
 use crate::gateway_client::GatewayClient;
 use crate::socket;
 use crate::text_ws;
-use crate::tmux_bridge::TmuxBridge;
+use crate::tmux_bridge::{KeystrokeInjectionConfig, TmuxBridge};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -68,9 +68,16 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let public_url = args.public_url.trim_end_matches('/').to_string();
     let callback_secret_ref = args.callback_secret_ref.clone();
     let callback_security = CallbackSecurity::from_secret_ref(&callback_secret_ref)?;
-    let bridge = TmuxBridge::new(
+    let bridge = TmuxBridge::new_with_config(
         &args.tmux_target,
         Duration::from_millis(args.reply_timeout_ms),
+        KeystrokeInjectionConfig::new(
+            Duration::from_millis(args.input_quiet_for_ms),
+            Duration::from_millis(args.input_backoff_initial_ms),
+            Duration::from_millis(args.input_backoff_max_ms),
+            !args.no_trailing_enter,
+            Duration::from_millis(args.trailing_enter_delay_ms),
+        ),
     )
     .await?;
     let state = AgentState {

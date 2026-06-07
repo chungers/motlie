@@ -11,6 +11,7 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Daemon(DaemonArgs),
@@ -39,6 +40,16 @@ pub struct DaemonArgs {
     pub outbound_timeout_ms: u64,
     #[arg(long, default_value_t = 120_000)]
     pub reply_timeout_ms: u64,
+    #[arg(long, default_value_t = 10_000)]
+    pub input_quiet_for_ms: u64,
+    #[arg(long, default_value_t = 250)]
+    pub input_backoff_initial_ms: u64,
+    #[arg(long, default_value_t = 5_000)]
+    pub input_backoff_max_ms: u64,
+    #[arg(long, default_value_t = 750)]
+    pub trailing_enter_delay_ms: u64,
+    #[arg(long = "no-trailing-enter", default_value_t = false)]
+    pub no_trailing_enter: bool,
 }
 
 #[derive(Clone, Debug, Args)]

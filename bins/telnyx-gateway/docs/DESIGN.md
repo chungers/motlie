@@ -10,6 +10,7 @@
 | 2026-06-07 18:16 PDT | @codex-366-impl: Expanded M5 #402 conversational realism scope into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared `conversation barge-in` toggle, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that text chunk. | Milestone 5: Conversational Realism Latency Improvements, Milestone 3: Full-Duplex TUI Chat Conversation, Returning TTS Audio |
 | 2026-06-07 | @codex-366-impl: Fixed live ASR end-of-turn latency by replacing indefinite low-energy tail suppression with replay-sized local endpoint finalization: after the trailing silence pad, the gateway finishes the active ASR session and waits for new speech, so final transcripts do not depend on a later utterance. | Inbound Call Handler Design, Testing Scope |
 | 2026-06-07 | @codex-366-impl: Added a gateway-wide `conversation barge-in on|off|status` toggle for TUI/socket live tests; default remains on, while off prevents transcript-triggered TTS clear during smoke-test echo validation. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
+| 2026-06-07 12:19 PDT | @codex-367-design: Added the M4 telnyx-agent activity-aware tmux keystroke injection requirement: reuse motlie-tmux client activity/history checks, queue/back off while the target is active or has uncommitted composer text, and send a configurable default-on trailing Enter after prompt injection. | Telnyx Agent Daemon |
 | 2026-06-07 11:44 PDT | @codex-367-design: Clarified the M4 text WebSocket supports multiple concurrent caller turns with distinct `turn_id`s, requires invalid-turn rejection for unknown/completed turns, and expects bounded outstanding-turn cleanup on teardown. | Application Text Call Protocol and Gateway Control API, Telnyx Agent Daemon |
 | 2026-06-06 20:05 PDT | @codex-367-design: Reframed M4 around validation of the already-implemented command socket mux plus a phone-number-keyed inbound text-call subscription protocol, blocking outbound text-call dial API, bidirectional text WebSocket contract, and future `bins/telnyx-agent` tmux bridge daemon. | Milestone 4: External Integration Harness, Application Text Call Protocol and Gateway Control API, Telnyx Agent Daemon |
 | 2026-06-06 15:00 PDT | @codex-366-impl: Folded partial-ASR-triggered barge-in into M3: unsuppressed meaningful partial transcripts for attached calls now cancel active playback through the existing clear/cancel path, while final transcripts still drive regeneration; frame-level speech-onset barge-in was later folded into M5 #402 / PR #417. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
@@ -1442,7 +1443,12 @@ telnyx-agent daemon \
   --gateway-url https://gateway.example.com \
   --public-url https://agent.example.com \
   --subscribe-number <called-phone-number> \
+  --callback-secret-ref env:MOTLIE_APP_CALLBACK_SECRET \
   --tmux-target local:agent \
+  --input-quiet-for-ms 10000 \
+  --input-backoff-initial-ms 250 \
+  --input-backoff-max-ms 5000 \
+  --trailing-enter-delay-ms 750 \
   --socket /tmp/motlie-telnyx-agent.sock
 ```
 
@@ -1471,7 +1477,10 @@ Inbound call turn:
 gateway caller.turn
 -> telnyx-agent WebSocket session
 -> render one prompt turn for the local agent
+-> check motlie-tmux attached-client activity and rendered history/composer state
+-> queue and retry with capped exponential backoff while the target is active
 -> motlie_tmux::KeySequence::literal(...).then_enter()
+-> optional default-on delayed bare Enter submit retry
 -> configured tmux target TUI prompt
 -> motlie-tmux monitor/history observes the agent reply
 -> telnyx-agent extracts one reply turn
@@ -1483,15 +1492,22 @@ Outbound call turn uses the same flow after the daemon places the call through t
 
 ### Input to Tmux
 
-The daemon should use `motlie-tmux` targeting and key construction rather than shelling out raw `tmux send-keys` commands. The intended shape is:
+The daemon should use `motlie-tmux` targeting and key construction rather than shelling out raw `tmux send-keys` commands. The intended shape is activity-aware:
 
 ```rust
 let prompt = format!("[motlie-call turn={}] Caller: {}", turn_id, text);
-let keys = motlie_tmux::KeySequence::literal(&prompt).then_enter();
-target.send_keys(&keys).await?;
+wait_until_target_input_quiet_with_motlie_tmux_activity().await?;
+let baseline = session_watch.render_text().await;
+target.send_keys(&motlie_tmux::KeySequence::literal(&prompt).then_enter()).await?;
+if trailing_enter_enabled {
+    sleep(trailing_enter_delay).await;
+    target.send_keys(&motlie_tmux::KeySequence::parse("{Enter}")?).await?;
+}
 ```
 
-The exact prompt template should be configurable, but it must contain a stable turn marker so the daemon can correlate the reply with the WebSocket `turn_id`.
+Before injecting a caller transcription, the daemon must check the target the same way mstream guards timer delivery: use `HostHandle::session_client_activity()` for recent attached-client input and `SessionWatchHandle` / bounded history rendering for visible uncommitted composer text. If the human is actively typing or the composer contains unsubmitted text, the daemon must not barge in; it queues the transcription at the bridge boundary, waits with capped exponential backoff, and flushes the queued keystrokes when the target becomes quiet. This must reuse `motlie-tmux` monitor/history and `KeySequence`; do not add a parallel `capture-pane` scraper or separate activity detector in `telnyx-agent`.
+
+The first prompt send includes `then_enter()` to submit the rendered call turn. The daemon should also send a delayed bare Enter by default after the prompt send, matching mstream's missed-submit guard. Operators may disable this trailing Enter or tune the delay. The exact prompt template should be configurable, but it must contain a stable turn marker so the daemon can correlate the reply with the WebSocket `turn_id`.
 
 ### Output from Tmux
 
@@ -1514,7 +1530,7 @@ M4 validation for `bins/telnyx-agent` should cover:
 - inbound offer redirect decline and accept paths work against a fake gateway with valid HMAC headers, stale timestamp rejection, and callback ID replay protection
 - outbound daemon socket request calls the gateway blocking dial API and returns only after text stream setup
 - one tmux bridge implementation handles both inbound and outbound calls
-- marker-delimited history extraction does not duplicate low-level scrape logic
+- marker-delimited history extraction and activity-aware input gating do not duplicate low-level scrape or activity logic
 - phone numbers are redacted from daemon logs, state dumps, comments, and fixtures
 
 
