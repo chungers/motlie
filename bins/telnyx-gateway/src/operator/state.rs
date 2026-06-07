@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -42,6 +43,32 @@ pub struct GatewayConfig {
     pub selected_phone_number: Option<String>,
     pub default_from_number: Option<String>,
     pub state_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InboundSubscription {
+    pub id: String,
+    pub phone_number: String,
+    pub normalized_phone_number: String,
+    pub callback_url: String,
+    pub priority: i32,
+    pub secret_ref: Option<String>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpsertInboundSubscription {
+    pub id: String,
+    pub phone_number: String,
+    pub callback_url: String,
+    pub priority: i32,
+    pub secret_ref: Option<String>,
+    pub enabled: bool,
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -414,6 +441,7 @@ pub struct GatewayState {
     pub calls: BTreeMap<String, CallSession>,
     pub call_control_index: BTreeMap<String, String>,
     pub stream_index: BTreeMap<String, String>,
+    pub inbound_subscriptions: BTreeMap<String, InboundSubscription>,
     pub logs: VecDeque<LogEntry>,
     pub shutdown_requested: bool,
 }
@@ -444,6 +472,7 @@ impl GatewayState {
             calls: BTreeMap::new(),
             call_control_index: BTreeMap::new(),
             stream_index: BTreeMap::new(),
+            inbound_subscriptions: BTreeMap::new(),
             logs: VecDeque::new(),
             shutdown_requested: false,
         }
@@ -514,6 +543,69 @@ impl GatewayState {
             .insert(ids.call_control_id, gateway_call_id.clone());
         self.calls.insert(gateway_call_id.clone(), call);
         gateway_call_id
+    }
+
+    pub fn upsert_inbound_subscription(
+        &mut self,
+        request: UpsertInboundSubscription,
+    ) -> InboundSubscription {
+        let now = Utc::now();
+        let created_at = self
+            .inbound_subscriptions
+            .get(&request.id)
+            .map(|subscription| subscription.created_at)
+            .unwrap_or(now);
+        let subscription = InboundSubscription {
+            id: request.id,
+            normalized_phone_number: normalize_phone_number(&request.phone_number),
+            phone_number: request.phone_number,
+            callback_url: request.callback_url,
+            priority: request.priority,
+            secret_ref: request.secret_ref,
+            enabled: request.enabled,
+            metadata: request.metadata,
+            created_at,
+            updated_at: now,
+        };
+        self.inbound_subscriptions
+            .insert(subscription.id.clone(), subscription.clone());
+        subscription
+    }
+
+    pub fn remove_inbound_subscription(&mut self, id: &str) -> Option<InboundSubscription> {
+        self.inbound_subscriptions.remove(id)
+    }
+
+    pub fn inbound_subscription(&self, id: &str) -> Option<&InboundSubscription> {
+        self.inbound_subscriptions.get(id)
+    }
+
+    pub fn inbound_subscriptions_for_phone(&self, phone_number: &str) -> Vec<InboundSubscription> {
+        let normalized = normalize_phone_number(phone_number);
+        let mut subscriptions: Vec<_> = self
+            .inbound_subscriptions
+            .values()
+            .filter(|subscription| {
+                subscription.enabled && subscription.normalized_phone_number == normalized
+            })
+            .cloned()
+            .collect();
+        subscriptions.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then(left.created_at.cmp(&right.created_at))
+                .then(left.id.cmp(&right.id))
+        });
+        subscriptions
+    }
+
+    pub fn has_enabled_inbound_subscribers_for_phone(&self, phone_number: Option<&str>) -> bool {
+        let Some(phone_number) = phone_number else {
+            return false;
+        };
+        !self
+            .inbound_subscriptions_for_phone(phone_number)
+            .is_empty()
     }
 
     pub fn call_by_control_id_mut(&mut self, call_control_id: &str) -> Option<&mut CallSession> {
@@ -870,6 +962,22 @@ fn status_after_tts(call: &CallSession) -> CallStatus {
     }
 }
 
+pub fn normalize_phone_number(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+pub fn redact_phone_for_log(value: Option<&str>) -> &'static str {
+    match value {
+        Some(value) if !value.trim().is_empty() => "<redacted-phone>",
+        _ => "<unknown>",
+    }
+}
+
 pub fn shared_state(bind: SocketAddr) -> SharedState {
     Arc::new(RwLock::new(GatewayState::new(bind)))
 }
@@ -902,6 +1010,7 @@ mod tests {
         assert_eq!(call.current_partial.as_deref(), Some("WOR"));
     }
 
+
     #[test]
     fn stale_tts_cancel_does_not_demote_newer_active_playback() {
         let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
@@ -926,5 +1035,35 @@ mod tests {
         let tts = call.tts.as_ref().expect("new TTS should remain active");
         assert_eq!(tts.playback_id, "tts_new");
         assert_eq!(tts.status, TtsPlaybackStatus::Queued);
+    }
+
+    #[test]
+    fn inbound_subscriptions_are_ordered_by_priority_then_creation() {
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        state.upsert_inbound_subscription(UpsertInboundSubscription {
+            id: "sub-later".to_string(),
+            phone_number: "<called-phone-number>".to_string(),
+            callback_url: "https://agent.example.test/offers".to_string(),
+            priority: 20,
+            secret_ref: None,
+            enabled: true,
+            metadata: BTreeMap::new(),
+        });
+        state.upsert_inbound_subscription(UpsertInboundSubscription {
+            id: "sub-first".to_string(),
+            phone_number: "<called-phone-number>".to_string(),
+            callback_url: "https://agent.example.test/offers".to_string(),
+            priority: 10,
+            secret_ref: None,
+            enabled: true,
+            metadata: BTreeMap::new(),
+        });
+
+        let ordered = state.inbound_subscriptions_for_phone("<called-phone-number>");
+        let ids: Vec<_> = ordered
+            .into_iter()
+            .map(|subscription| subscription.id)
+            .collect();
+        assert_eq!(ids, vec!["sub-first", "sub-later"]);
     }
 }

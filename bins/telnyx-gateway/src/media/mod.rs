@@ -27,6 +27,7 @@ use crate::conversation::{self, ConversationRuntime};
 use crate::operator::state::{
     CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
 };
+use crate::text_calls::SharedTextCallRegistry;
 use crate::tts::PIPER_SAMPLE_RATE_HZ;
 
 mod capture;
@@ -363,6 +364,7 @@ pub async fn handle_socket(
     asr: SharedAsrRegistry,
     media_registry: SharedMediaRegistry,
     conversation: ConversationRuntime,
+    text_calls: SharedTextCallRegistry,
 ) {
     let mut media_state = MediaSocketState::with_conversation(media_registry.clone(), conversation);
     let mut silence_keepalive = time::interval(SILENCE_KEEPALIVE_INTERVAL);
@@ -376,7 +378,7 @@ pub async fn handle_socket(
                 };
                 match message {
                     Ok(Message::Text(text)) => {
-                        if let Err(error) = handle_text(&text, &state, &asr, &mut media_state).await {
+                        if let Err(error) = handle_text_with_text_calls(&text, &state, &asr, &mut media_state, Some(&text_calls)).await {
                             log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
                         } else {
                             ensure_outbound_registered(&media_registry, &mut media_state).await;
@@ -418,6 +420,7 @@ pub async fn handle_socket(
                     media_state.media_format.as_ref(),
                     media_state.capture.as_mut(),
                     events,
+                    Some(&text_calls),
                 )
                 .await;
                 forward_conversation_events(
@@ -746,11 +749,22 @@ pub fn packetize_tts_samples(
     Ok(packets)
 }
 
+#[cfg(test)]
 async fn handle_text(
     text: &str,
     state: &SharedState,
     asr: &SharedAsrRegistry,
     media_state: &mut MediaSocketState,
+) -> anyhow::Result<()> {
+    handle_text_with_text_calls(text, state, asr, media_state, None).await
+}
+
+async fn handle_text_with_text_calls(
+    text: &str,
+    state: &SharedState,
+    asr: &SharedAsrRegistry,
+    media_state: &mut MediaSocketState,
+    text_calls: Option<&SharedTextCallRegistry>,
 ) -> anyhow::Result<()> {
     let discriminator: EventDiscriminator =
         serde_json::from_str(text).context("parse Telnyx media event discriminator")?;
@@ -832,6 +846,7 @@ async fn handle_text(
                     media_state,
                     event.stream_id.as_str(),
                     frame.payload,
+                    text_calls,
                 )
                 .await?;
             }
@@ -841,7 +856,7 @@ async fn handle_text(
             record_raw_capture(media_state.capture.as_mut(), text);
             let event: StopEvent = serde_json::from_str(text).context("parse stop event")?;
             media_state.silence_keepalive = false;
-            let result = finish_stream(state, media_state, event.stream_id).await;
+            let result = finish_stream(state, media_state, event.stream_id, text_calls).await;
             finalize_capture(media_state).await;
             result
         }
@@ -965,6 +980,7 @@ async fn ingest_frame(
     media_state: &mut MediaSocketState,
     stream_id: &str,
     frame: EncodedMediaFrame,
+    text_calls: Option<&SharedTextCallRegistry>,
 ) -> anyhow::Result<()> {
     let format = media_state
         .media_format
@@ -1062,6 +1078,7 @@ async fn ingest_frame(
         Some(&format),
         media_state.capture.as_mut(),
         events,
+        text_calls,
     )
     .await;
     forward_conversation_events(
@@ -1336,9 +1353,17 @@ async fn finish_stream(
     state: &SharedState,
     media_state: &mut MediaSocketState,
     stream_id: Option<String>,
+    text_calls: Option<&SharedTextCallRegistry>,
 ) -> anyhow::Result<()> {
     let gateway_call_id = media_state.gateway_call_id.clone();
-    finish_asr_session(state, media_state, gateway_call_id.as_deref(), stream_id).await?;
+    finish_asr_session(
+        state,
+        media_state,
+        gateway_call_id.as_deref(),
+        stream_id,
+        text_calls,
+    )
+    .await?;
     if let Some(call_id) = gateway_call_id {
         let mut guard = state.write().await;
         if let Some(call) = guard.calls.get_mut(&call_id) {
@@ -1354,6 +1379,7 @@ async fn finish_asr_session(
     media_state: &mut MediaSocketState,
     gateway_call_id: Option<&str>,
     stream_id: Option<String>,
+    text_calls: Option<&SharedTextCallRegistry>,
 ) -> anyhow::Result<()> {
     if let (Some(call_id), Some(asr_session)) = (gateway_call_id, media_state.session.take()) {
         let events = asr_session.finish().await?;
@@ -1365,6 +1391,7 @@ async fn finish_asr_session(
             media_state.media_format.as_ref(),
             media_state.capture.as_mut(),
             events,
+            text_calls,
         )
         .await;
         forward_conversation_events(
@@ -1419,9 +1446,11 @@ async fn record_transcript_events(
     media_format: Option<&MediaFormat>,
     mut capture: Option<&mut MediaCapture>,
     events: Vec<AsrTranscriptEvent>,
+    text_calls: Option<&SharedTextCallRegistry>,
 ) -> bool {
     let mut guard = state.write().await;
     let mut reset_requested = false;
+    let mut final_turns = Vec::new();
     for event in events {
         let kind = if event.event.is_final() {
             TranscriptKind::Final
@@ -1477,7 +1506,10 @@ async fn record_transcript_events(
             continue;
         }
 
-        guard.add_transcript(gateway_call_id, kind, text.clone());
+        guard.add_transcript(gateway_call_id, kind.clone(), text.clone());
+        if matches!(kind, TranscriptKind::Final) {
+            final_turns.push(text.clone());
+        }
         tracing::info!(
             gateway_call_id,
             call_control_id = call_control_id.as_deref(),
@@ -1492,6 +1524,18 @@ async fn record_transcript_events(
             transcript_text = text,
             "{kind_label}"
         );
+    }
+    drop(guard);
+    if let Some(text_calls) = text_calls {
+        for text in final_turns {
+            if let Err(error) = text_calls.send_caller_turn(gateway_call_id, text).await {
+                tracing::warn!(
+                    gateway_call_id,
+                    error = %error,
+                    "text_call.caller_turn.forward_failed"
+                );
+            }
+        }
     }
     reset_requested
 }
@@ -2406,6 +2450,7 @@ mod tests {
                     update: motlie_model::TranscriptionUpdate::default(),
                 }),
             ],
+            None,
         )
         .await;
         assert!(needs_reset);
@@ -2467,6 +2512,7 @@ mod tests {
                 text: repeated_text.to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             })],
+            None,
         )
         .await;
         assert!(!needs_reset);

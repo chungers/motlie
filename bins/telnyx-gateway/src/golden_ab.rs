@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+#[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
 use std::time::Instant;
 
 use anyhow::{bail, Context};
 use motlie_voice::pipeline::convert::{downmix_to_mono, f32_to_i16_clamped};
+#[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
 use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
 use motlie_voice::telephony::{round_trip_telnyx_asr_samples, TelnyxAsrAudioSpec};
 use motlie_voice::wav::decode_streaming_wav_to_f32;
@@ -714,6 +716,7 @@ fn concatenate_tts_chunks(chunks: Vec<crate::tts::TtsAudio>) -> anyhow::Result<(
     Ok((sample_rate_hz, samples))
 }
 
+#[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
 fn normalize_to_source_rate(sample_rate_hz: u32, samples: Vec<i16>) -> anyhow::Result<Vec<i16>> {
     if samples.is_empty() {
         bail!("TTS engine returned empty audio");

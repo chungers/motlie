@@ -22,6 +22,7 @@ members = [
     "libs/driver",
     "bins/voice-agent",
     "bins/telnyx-gateway",
+    "bins/telnyx-agent",
     "bins/tmux/driver",
     "bins/mmux",
     "bins/mstream",

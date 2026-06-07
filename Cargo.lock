@@ -5559,6 +5559,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-telnyx-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.8",
+ "clap",
+ "futures-util",
+ "motlie-telnyx-gateway",
+ "motlie-tmux",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid 1.23.0",
+]
+
+[[package]]
 name = "motlie-telnyx-gateway"
 version = "0.1.0"
 dependencies = [
@@ -5570,6 +5589,8 @@ dependencies = [
  "clap",
  "crossterm 0.29.0",
  "futures-util",
+ "hex",
+ "hmac",
  "hound",
  "motlie-driver",
  "motlie-model",
@@ -5585,9 +5606,11 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "sha2",
  "shlex 1.3.0",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tower 0.5.3",
  "tracing",
  "tracing-appender",
