@@ -192,6 +192,10 @@ impl PiperTtsFactory {
         }
     }
 
+    pub(crate) async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
+    }
+
     async fn handle(&self) -> anyhow::Result<Arc<motlie_model_piper::PiperHandle>> {
         let mut guard = self.handle.lock().await;
         if let Some(handle) = guard.as_ref() {

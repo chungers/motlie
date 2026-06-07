@@ -577,6 +577,10 @@ impl TtsGoldenRunner {
             .piper
             .as_ref()
             .context("Piper handle was not initialized")?;
+        piper
+            .warm()
+            .await
+            .context("warm Piper TTS model before timing sample")?;
         let started_at = Instant::now();
         let chunks = piper
             .synthesize_chunks(sample.text.clone())
