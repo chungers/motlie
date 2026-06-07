@@ -77,6 +77,7 @@ pub enum Command {
     #[command(subcommand)]
     Timer(TimerCommand),
     Status(StatusArgs),
+    #[command(about = "Read durable workstream audit events and call-log entries")]
     Events(EventsArgs),
     Snapshot(SnapshotArgs),
     SummaryInput(SummaryInputArgs),
@@ -603,11 +604,18 @@ pub struct StatusArgs {
 #[derive(Debug, Args)]
 pub struct EventsArgs {
     pub workstream: String,
-    #[arg(long)]
+    #[arg(long, help = "Opaque event cursor returned by a previous events call.")]
     pub after: Option<String>,
-    #[arg(long, default_value_t = 200)]
+    #[arg(
+        long,
+        default_value_t = 200,
+        help = "Maximum retained audit events to return; 0 means no page limit."
+    )]
     pub limit: usize,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Render the durable audit call log as readable transcript text."
+    )]
     pub readable: bool,
 }
 

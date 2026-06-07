@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-06 | @codex-401-impl | Added issue #409 durable audit call-log events: redacted `to_agent`/`from_agent` text, OutputBus agent output capture, socket-adjacent JSONL replay, and readable transcripts that survive daemon restart. |
 | 2026-06-06 | @codex-401-impl | Added issue #410 `new`/`recruit --agent-arg` passthrough for agent argv flags such as Claude `--permission-mode auto`. |
 | 2026-06-06 | @codex-401-impl | Added issue #401 session lifecycle commands: `retire` to mark live agents `quarantined` and `reclaim` for gated teardown. |
 | 2026-05-30 | @codex-360-og | Added issue #360 live session rename/retag commands with id-stable tmux rename, role/workstream retagging, and mmux label refresh. |
@@ -24,17 +25,19 @@
 
 `mstream` is implemented as a `motlie-mstream` package with binary name
 `mstream`. It provides a Unix-domain socket daemon, JSONL client responses,
-strict `<host>::<session-or-id>` target parsing, in-memory workstreams, tmux
-session tags, state marking, live rename/retag, send/interrupt/broadcast,
-handoffs, and bounded observation commands. It also provides daemon-memory
-self-wakeup timers that
-send a configured prompt to an orchestrator tmux session on an interval, with
-default input-quiet guarding to avoid colliding with attached human typing.
+strict `<host>::<session-or-id>` target parsing, in-memory workstreams, durable
+audit events, tmux session tags, state marking, live rename/retag,
+send/interrupt/broadcast, handoffs, and bounded observation commands. It also
+provides daemon-memory self-wakeup timers that send a configured prompt to an
+orchestrator tmux session on an interval, with default input-quiet guarding to
+avoid colliding with attached human typing.
 
-The first implementation keeps command/event history in an in-memory
-per-workstream ring buffer. `snapshot` and `summary-input` use bounded one-shot
-tmux capture for joined sessions. Continuous OutputBus transcript ingestion and
-pane/process-state stuck hints remain implementation follow-ups.
+Workstream event history is served from an in-memory per-workstream ring and is
+also appended to a socket-adjacent JSONL audit log named
+`<socket>.events.jsonl`. Daemon startup replays retained audit records so
+`events --readable` survives daemon restart. `snapshot` and `summary-input` use
+bounded one-shot tmux capture for joined sessions; pane/process-state stuck
+hints remain implementation follow-ups.
 
 Install the release binary from the Motlie checkout before using this API:
 
@@ -85,9 +88,12 @@ mstream close pr-324 --summary "done" --stop-timers --standby-agents
 ```
 
 Host metadata is daemon memory only. Workstream `settings.event_limit` controls
-the in-memory event ring size and defaults to 1000 when omitted. Re-opening an
-existing workstream can raise or lower this limit; lowering it trims old events
-immediately. `--mmux-label` stores a short label that `join`, `new`, and
+the in-memory event ring and `events` API retention, and defaults to 1000 when
+omitted. Re-opening an existing workstream can raise or lower this limit;
+lowering it trims old events immediately. The daemon also compacts the durable
+audit JSONL to retained events, with a global safety cap, so call-log output
+cannot grow without bound. `--mmux-label` stores a short label that `join`,
+`new`, and
 `recruit` apply to participating sessions as `@mmux/mstream`, and sets
 `@mmux/__selected-key=mstream` so mmux can group/display the workstream label.
 Labels are enforced as one or two whitespace-separated words, with no control
@@ -305,8 +311,9 @@ length without echoing the prompt body.
 `close --stop-timers` stops timers scoped to the closing workstream.
 `close --standby-agents` sends a standby message to joined sessions before
 freeing them. Standby send attempts are recorded in the workstream timeline as
-`standby_sent` or `standby_failed`; failed standby sends are reported in
-`standby_failed` and do not abort the rest of closeout.
+`standby_sent` or `standby_failed`; successful standby events include the
+redacted standby message text as a `to_agent` audit entry. Failed standby sends
+are reported in `standby_failed` and do not abort the rest of closeout.
 
 `mstream close` is intentionally workflow-neutral. It does not know about
 GitHub issues, PRs, merges, or external closeout comments, and should not grow
@@ -354,10 +361,25 @@ structured `cursor_stale` JSONL error. Bounded `events --limit N` responses
 return a cursor that advances only to the last returned event, not to the
 workstream watermark.
 
-`events --readable` prints a compact plain-text timeline for human-facing
-summaries. The daemon wire response still carries an `events_readable` record
-with a `text` field, but the CLI unwraps that field before writing stdout. The
-default `events` response remains structured JSONL.
+Event records include `direction` (`to_agent`, `from_agent`, or `system`),
+`actor` (`orchestrator`, `agent`, or `mstream`), target, optional `source_pane`,
+state, summary, text, and `redacted`/`truncated` flags. Outbound messages from
+`send`, `broadcast`, handoffs, timer fires, closeout standby sends, and initial
+managed prompts are stored as `to_agent` entries. Agent terminal output observed
+through tmux monitoring is stored as `from_agent` `agent_output` entries, and
+explicit `session mark --summary` reports are also agent-authored events.
+
+Before entering memory or disk, event text and summaries are scrubbed for
+phone-like digit runs and replaced with `[REDACTED_PHONE]`. Text fields are
+capped per event and marked `truncated=true` when capped. Daemon startup skips
+malformed or partial audit-log JSONL lines with a stderr warning rather than
+failing startup.
+
+`events --readable` prints a plain-text audit transcript for human-facing
+summaries. Call-log message bodies are rendered as indented blocks instead of
+single-line markers. The daemon wire response still carries an
+`events_readable` record with a `text` field, but the CLI unwraps that field
+before writing stdout. The default `events` response remains structured JSONL.
 
 Machine-facing output is JSONL on stdout except for the explicit human-readable
 `events --readable` mode. Errors are also JSONL records, for example:
