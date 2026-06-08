@@ -785,7 +785,7 @@ impl GatewayState {
             }
         });
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
-            if call.status == CallStatus::Speaking {
+            if canceled && call.status == CallStatus::Speaking {
                 call.status = status_after_tts(call);
             }
             if canceled && call.conversation.last_playback_id.as_deref() == Some(playback_id) {
@@ -795,7 +795,9 @@ impl GatewayState {
             if canceled {
                 call.push_timeline(format!("tts {playback_id} canceled"));
             } else {
-                call.push_timeline(format!("tts {playback_id} clear sent after failure"));
+                call.push_timeline(format!(
+                    "tts {playback_id} clear sent after inactive playback"
+                ));
             }
         }
     }
@@ -898,5 +900,31 @@ mod tests {
         let call = state.calls.get(&call_id).expect("call exists");
         assert_eq!(call.final_transcript, "HELLO");
         assert_eq!(call.current_partial.as_deref(), Some("WOR"));
+    }
+
+    #[test]
+    fn stale_tts_cancel_does_not_demote_newer_active_playback() {
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = state.add_or_update_outbound_call(
+            TelnyxIds {
+                call_control_id: "call-1".to_string(),
+                call_session_id: Some("session-1".to_string()),
+                call_leg_id: Some("leg-1".to_string()),
+                stream_id: Some("stream-1".to_string()),
+            },
+            None,
+            None,
+            CallStatus::MediaStarted,
+        );
+        state.start_tts_job(&call_id, "tts_old".to_string(), "old reply");
+        state.start_tts_job(&call_id, "tts_new".to_string(), "new reply");
+
+        state.mark_tts_canceled(&call_id, "tts_old");
+
+        let call = state.calls.get(&call_id).expect("call exists");
+        assert_eq!(call.status, CallStatus::Speaking);
+        let tts = call.tts.as_ref().expect("new TTS should remain active");
+        assert_eq!(tts.playback_id, "tts_new");
+        assert_eq!(tts.status, TtsPlaybackStatus::Queued);
     }
 }

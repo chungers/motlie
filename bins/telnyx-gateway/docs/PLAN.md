@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-07 23:08 PDT | @codex-366-impl | Added M5 cancel-and-replace speech enqueue support for conversational text-agent handoff: active speech can be replaced without poisoning the media/text session, stale clears no longer demote newer playback, and M4 should surface terminal playback status in `playback.finished`. |
 | 2026-06-07 18:16 PDT | @codex-366-impl | Expanded M5 #402 into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared toggle, including a 120 ms resumed-speech onset threshold, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that chunk. |
 | 2026-06-07 | @codex-366-impl | Fixed live ASR end-of-turn latency by finishing the active ASR session after the replay-sized trailing-silence pad; final transcripts no longer wait for a later utterance when Sherpa does not endpoint first. |
 | 2026-06-07 | @codex-366-impl | Added `conversation barge-in on|off|status` for TUI/socket live tests; default remains on, while off suppresses transcript-triggered TTS clear so smoke-test echo playback can finish. |
@@ -559,6 +560,8 @@ Verification (@codex-366-impl, 2026-06-05 23:34 PDT): `cargo build -p motlie-tel
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [x] Enqueue outbound TTS after each synthesized text chunk instead of waiting for the whole utterance. (@codex-366-impl, 2026-06-07 18:16 PDT: `speech::queue_speech` sends the first text chunk before later chunks finish; backend audio chunks inside one text chunk are concatenated before resampling/packetization to avoid short-chunk resampler resets.)
   DESIGN reference: `Transport Streaming vs Incremental TTS`, `Real-Time Latency Requirements`
+- [x] Support cancel-and-replace speech enqueue as the gateway primitive for conversational text-agent streams. (@codex-366-impl, 2026-06-07 23:08 PDT: `speech::queue_speech_with_request(... SpeechQueueRequest { conflict_policy: CancelAndReplace, ... })` cancels the active slot through the existing clear path, returns the replaced playback id, and prevents stale clear acknowledgements from demoting the newer playback. M4 should map that replaced playback to `playback.finished status=canceled` and report stale agent replies as `superseded` instead of protocol errors.)
+  DESIGN reference: `Milestone 5: Conversational Realism Latency Improvements`, `Milestone 4: External Integration Harness`
 - [ ] Capture live M5 validation numbers for endpoint-to-final latency, final-to-first-frame latency, outbound frame pacing, barge-in cut time, and human-reported playback smoothness. (@codex-366-impl, 2026-06-07 22:15 PDT: include chunked-enqueue boundary residuals in this validation: per-text-chunk resampler edge transients, up to about 20 ms zero-padding at each text-chunk boundary, and mid-utterance underrun risk when a later chunk synthesizes slower than playback drains.)
   DESIGN reference: `Testing Scope for PLAN`, `Real-Time Latency Requirements`
 

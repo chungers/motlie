@@ -13,6 +13,7 @@ use crate::call_control::TelnyxClient;
 use crate::media::SharedMediaRegistry;
 use crate::operator::state::{ConversationMode, LogLevel, SharedState};
 use crate::speech;
+use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
 
 const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
@@ -377,27 +378,40 @@ async fn apply_conversation_command(
                         );
                         return Ok(());
                     }
-                    let queued = speech::queue_speech(
+                    let queued = speech::queue_speech_with_request(
                         state,
                         media_registry,
                         &runtime.tts,
-                        LiveTtsBackend::default(),
-                        gateway_call_id.to_string(),
-                        response_text.clone(),
-                        "conversation say",
+                        SpeechQueueRequest {
+                            tts_backend: LiveTtsBackend::default(),
+                            gateway_call_id: gateway_call_id.to_string(),
+                            text: response_text.clone(),
+                            source_label: "conversation say".to_string(),
+                            conflict_policy: SpeechConflictPolicy::CancelAndReplace,
+                        },
                     )
                     .await
                     .with_context(|| format!("queue conversation response for {gateway_call_id}"));
                     match queued {
                         Ok(queued) => {
-                            state.write().await.record_conversation_speaking(
-                                gateway_call_id,
-                                response_text,
-                                queued.playback_id.clone(),
-                            );
+                            {
+                                let mut guard = state.write().await;
+                                if let Some(replaced_playback_id) = &queued.replaced_playback_id {
+                                    guard.record_conversation_interrupted(
+                                        gateway_call_id,
+                                        replaced_playback_id,
+                                    );
+                                }
+                                guard.record_conversation_speaking(
+                                    gateway_call_id,
+                                    response_text,
+                                    queued.playback_id.clone(),
+                                );
+                            }
                             tracing::info!(
                                 gateway_call_id,
                                 playback_id = queued.playback_id,
+                                replaced_playback_id = queued.replaced_playback_id.as_deref(),
                                 "conversation.say.queued"
                             );
                             Ok(())
@@ -408,7 +422,8 @@ async fn apply_conversation_command(
                                 .write()
                                 .await
                                 .record_conversation_failed(gateway_call_id, error.clone());
-                            bail!(error)
+                            tracing::warn!(gateway_call_id, error, "conversation.say.failed");
+                            Ok(())
                         }
                     }
                 }

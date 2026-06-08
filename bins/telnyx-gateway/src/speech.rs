@@ -12,6 +12,22 @@ use crate::tts::{split_speech_text, LiveTtsBackend, SharedTtsRegistry, TtsAudio}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuedSpeech {
     pub playback_id: String,
+    pub replaced_playback_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpeechConflictPolicy {
+    Reject,
+    CancelAndReplace,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpeechQueueRequest {
+    pub tts_backend: LiveTtsBackend,
+    pub gateway_call_id: String,
+    pub text: String,
+    pub source_label: String,
+    pub conflict_policy: SpeechConflictPolicy,
 }
 
 pub async fn queue_speech(
@@ -23,6 +39,34 @@ pub async fn queue_speech(
     text: String,
     source_label: &str,
 ) -> anyhow::Result<QueuedSpeech> {
+    queue_speech_with_request(
+        state,
+        media_registry,
+        tts,
+        SpeechQueueRequest {
+            tts_backend,
+            gateway_call_id,
+            text,
+            source_label: source_label.to_string(),
+            conflict_policy: SpeechConflictPolicy::Reject,
+        },
+    )
+    .await
+}
+
+pub async fn queue_speech_with_request(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    tts: &SharedTtsRegistry,
+    request: SpeechQueueRequest,
+) -> anyhow::Result<QueuedSpeech> {
+    let SpeechQueueRequest {
+        tts_backend,
+        gateway_call_id,
+        text,
+        source_label,
+        conflict_policy,
+    } = request;
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
     let cancel = SpeechCancelToken::default();
     let media = {
@@ -37,11 +81,34 @@ pub async fn queue_speech(
         }
         media
     };
-    let media_handle = media_registry
-        .start_speech(&gateway_call_id, playback_id.clone(), cancel.clone())
-        .await?;
+    let (media_handle, replaced_playback_id) = match conflict_policy {
+        SpeechConflictPolicy::Reject => (
+            media_registry
+                .start_speech(&gateway_call_id, playback_id.clone(), cancel.clone())
+                .await?,
+            None,
+        ),
+        SpeechConflictPolicy::CancelAndReplace => {
+            media_registry
+                .start_speech_replacing_active(
+                    &gateway_call_id,
+                    playback_id.clone(),
+                    cancel.clone(),
+                )
+                .await?
+        }
+    };
     {
         let mut guard = state.write().await;
+        if let Some(replaced_playback_id) = &replaced_playback_id {
+            guard.mark_tts_canceling(&gateway_call_id, replaced_playback_id);
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "{source_label} replaced active speech for {gateway_call_id}: {replaced_playback_id}"
+                ),
+            );
+        }
         guard.start_tts_job(&gateway_call_id, playback_id.clone(), &text);
         guard.log(
             LogLevel::Info,
@@ -65,7 +132,10 @@ pub async fn queue_speech(
         run_speech_job(job).await;
     });
 
-    Ok(QueuedSpeech { playback_id })
+    Ok(QueuedSpeech {
+        playback_id,
+        replaced_playback_id,
+    })
 }
 
 pub async fn cancel_speech(
@@ -622,5 +692,88 @@ mod tests {
             saw_mark,
             "speech job should enqueue a mark after all chunks"
         );
+    }
+
+    #[tokio::test]
+    async fn queue_speech_cancel_and_replace_interrupts_active_slot() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_outbound_call(
+                TelnyxIds {
+                    call_control_id: "call-control-1".to_string(),
+                    call_session_id: Some("session-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                None,
+                None,
+                CallStatus::MediaStarted,
+            )
+        };
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(8);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let existing_cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(
+                &gateway_call_id,
+                "tts_existing".to_string(),
+                existing_cancel.clone(),
+            )
+            .await
+            .expect("register existing speech");
+        state.write().await.start_tts_job(
+            &gateway_call_id,
+            "tts_existing".to_string(),
+            "old reply",
+        );
+        let piper = Arc::new(SequencedTtsFactory::new(
+            PIPER_SAMPLE_RATE_HZ,
+            2_205,
+            None,
+            "unused",
+        ));
+        let tts = Arc::new(TtsRegistry::new(piper.clone(), piper));
+
+        let queued = queue_speech_with_request(
+            &state,
+            &media_registry,
+            &tts,
+            SpeechQueueRequest {
+                tts_backend: LiveTtsBackend::Piper,
+                gateway_call_id: gateway_call_id.clone(),
+                text: "new reply".to_string(),
+                source_label: "test replace".to_string(),
+                conflict_policy: SpeechConflictPolicy::CancelAndReplace,
+            },
+        )
+        .await
+        .expect("replacement speech should queue");
+
+        assert_eq!(queued.replaced_playback_id.as_deref(), Some("tts_existing"));
+        assert!(existing_cancel.is_canceled());
+        assert_eq!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .as_deref(),
+            Some(queued.playback_id.as_str())
+        );
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(
+            call.tts.as_ref().map(|tts| tts.playback_id.as_str()),
+            Some(queued.playback_id.as_str())
+        );
+        assert!(guard.logs.iter().any(|entry| {
+            entry.level == LogLevel::Info
+                && entry
+                    .message
+                    .contains("test replace replaced active speech")
+                && entry.message.contains("tts_existing")
+        }));
     }
 }

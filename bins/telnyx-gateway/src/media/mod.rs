@@ -170,7 +170,7 @@ struct ActiveSpeechJob {
 struct MediaRegistryEntry {
     tx: mpsc::Sender<OutboundMediaCommand>,
     active_speech: Option<ActiveSpeechJob>,
-    pending_clear: Option<String>,
+    pending_clears: VecDeque<String>,
 }
 
 #[derive(Clone, Default)]
@@ -189,7 +189,7 @@ impl SharedMediaRegistry {
             MediaRegistryEntry {
                 tx,
                 active_speech: None,
-                pending_clear: None,
+                pending_clears: VecDeque::new(),
             },
         );
     }
@@ -224,6 +224,33 @@ impl SharedMediaRegistry {
         })
     }
 
+    pub async fn start_speech_replacing_active(
+        &self,
+        gateway_call_id: &str,
+        playback_id: String,
+        cancel: SpeechCancelToken,
+    ) -> anyhow::Result<(CallMediaHandle, Option<String>)> {
+        let mut guard = self.inner.lock().await;
+        let entry = guard
+            .get_mut(gateway_call_id)
+            .with_context(|| format!("media stream is not ready for call {gateway_call_id}"))?;
+        let replaced_playback_id = entry.active_speech.take().map(|active| {
+            active.cancel.cancel();
+            entry.pending_clears.push_back(active.playback_id.clone());
+            active.playback_id
+        });
+        entry.active_speech = Some(ActiveSpeechJob {
+            playback_id,
+            cancel,
+        });
+        Ok((
+            CallMediaHandle {
+                tx: entry.tx.clone(),
+            },
+            replaced_playback_id,
+        ))
+    }
+
     pub async fn cancel_speech(&self, gateway_call_id: &str) -> anyhow::Result<String> {
         let mut guard = self.inner.lock().await;
         let entry = guard
@@ -234,7 +261,7 @@ impl SharedMediaRegistry {
             .take()
             .with_context(|| format!("no active speech job for call {gateway_call_id}"))?;
         active.cancel.cancel();
-        entry.pending_clear = Some(active.playback_id.clone());
+        entry.pending_clears.push_back(active.playback_id.clone());
         Ok(active.playback_id)
     }
 
@@ -243,8 +270,8 @@ impl SharedMediaRegistry {
             .lock()
             .await
             .get_mut(gateway_call_id)?
-            .pending_clear
-            .take()
+            .pending_clears
+            .pop_front()
     }
 
     pub async fn active_speech_playback_id(&self, gateway_call_id: &str) -> Option<String> {
@@ -1784,6 +1811,61 @@ mod tests {
             other => panic!("expected clear to preempt queued frames, got {other:?}"),
         }
         assert!(next_outbound_command(&mut media_state).is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_clears_are_queued_when_replacing_after_prior_cancel() {
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, rx) = mpsc::channel(8);
+        media_registry
+            .register_call("gwc_test".to_string(), tx)
+            .await;
+        media_registry
+            .start_speech(
+                "gwc_test",
+                "tts_first".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("register first speech");
+        media_registry
+            .cancel_speech("gwc_test")
+            .await
+            .expect("cancel first speech");
+        media_registry
+            .start_speech(
+                "gwc_test",
+                "tts_second".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("register second speech");
+        media_registry
+            .start_speech_replacing_active(
+                "gwc_test",
+                "tts_third".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("replace second speech");
+        let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
+        media_state.gateway_call_id = Some("gwc_test".to_string());
+        media_state.outbound_rx = Some(rx);
+
+        match pending_clear_command(&mut media_state)
+            .await
+            .expect("first clear should be queued")
+        {
+            OutboundMediaCommand::Clear { playback_id } => assert_eq!(playback_id, "tts_first"),
+            other => panic!("expected first clear, got {other:?}"),
+        }
+        match pending_clear_command(&mut media_state)
+            .await
+            .expect("second clear should be queued")
+        {
+            OutboundMediaCommand::Clear { playback_id } => assert_eq!(playback_id, "tts_second"),
+            other => panic!("expected second clear, got {other:?}"),
+        }
     }
 
     #[tokio::test]
