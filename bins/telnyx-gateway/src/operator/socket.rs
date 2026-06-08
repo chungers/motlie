@@ -298,6 +298,7 @@ mod tests {
             response["data"]["fields"]["conversation_handler"],
             "disabled"
         );
+        assert_eq!(response["data"]["fields"]["conversation_barge_in"], "on");
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);

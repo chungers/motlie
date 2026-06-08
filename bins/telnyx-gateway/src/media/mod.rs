@@ -35,7 +35,9 @@ use capture::MediaCapture;
 
 const SPEECH_RMS_THRESHOLD: f32 = 180.0;
 const SPEECH_PEAK_THRESHOLD: i16 = 900;
-const LOW_ENERGY_HANGOVER_FRAMES: usize = 75;
+const ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS: u64 =
+    crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS as u64;
+const ASR_SPEECH_ONSET_MIN_SILENCE_MS: u64 = 120;
 const PCMU_SILENCE_BYTE: u8 = 0xff;
 const PCMA_SILENCE_BYTE: u8 = 0xd5;
 const SILENCE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(20);
@@ -168,7 +170,7 @@ struct ActiveSpeechJob {
 struct MediaRegistryEntry {
     tx: mpsc::Sender<OutboundMediaCommand>,
     active_speech: Option<ActiveSpeechJob>,
-    pending_clear: Option<String>,
+    pending_clears: VecDeque<String>,
 }
 
 #[derive(Clone, Default)]
@@ -187,7 +189,7 @@ impl SharedMediaRegistry {
             MediaRegistryEntry {
                 tx,
                 active_speech: None,
-                pending_clear: None,
+                pending_clears: VecDeque::new(),
             },
         );
     }
@@ -222,6 +224,33 @@ impl SharedMediaRegistry {
         })
     }
 
+    pub async fn start_speech_replacing_active(
+        &self,
+        gateway_call_id: &str,
+        playback_id: String,
+        cancel: SpeechCancelToken,
+    ) -> anyhow::Result<(CallMediaHandle, Option<String>)> {
+        let mut guard = self.inner.lock().await;
+        let entry = guard
+            .get_mut(gateway_call_id)
+            .with_context(|| format!("media stream is not ready for call {gateway_call_id}"))?;
+        let replaced_playback_id = entry.active_speech.take().map(|active| {
+            active.cancel.cancel();
+            entry.pending_clears.push_back(active.playback_id.clone());
+            active.playback_id
+        });
+        entry.active_speech = Some(ActiveSpeechJob {
+            playback_id,
+            cancel,
+        });
+        Ok((
+            CallMediaHandle {
+                tx: entry.tx.clone(),
+            },
+            replaced_playback_id,
+        ))
+    }
+
     pub async fn cancel_speech(&self, gateway_call_id: &str) -> anyhow::Result<String> {
         let mut guard = self.inner.lock().await;
         let entry = guard
@@ -232,7 +261,7 @@ impl SharedMediaRegistry {
             .take()
             .with_context(|| format!("no active speech job for call {gateway_call_id}"))?;
         active.cancel.cancel();
-        entry.pending_clear = Some(active.playback_id.clone());
+        entry.pending_clears.push_back(active.playback_id.clone());
         Ok(active.playback_id)
     }
 
@@ -241,8 +270,8 @@ impl SharedMediaRegistry {
             .lock()
             .await
             .get_mut(gateway_call_id)?
-            .pending_clear
-            .take()
+            .pending_clears
+            .pop_front()
     }
 
     pub async fn active_speech_playback_id(&self, gateway_call_id: &str) -> Option<String> {
@@ -950,6 +979,7 @@ async fn ingest_frame(
     media_state.decoded_frame_count += 1;
     record_decoded_capture(media_state.capture.as_mut(), &samples);
     let stats = sample_stats(&samples);
+    let frame_duration_ms = frame_duration_ms(samples.len(), format.sample_rate_hz);
     log_decoded_frame_stats(
         media_state.decoded_frame_count,
         &format,
@@ -958,12 +988,45 @@ async fn ingest_frame(
         &stats,
         samples.len(),
     );
-    match media_state
-        .asr_gate
-        .accept(media_state.decoded_frame_count, stream_id, &stats)
-    {
+    match media_state.asr_gate.accept(
+        media_state.decoded_frame_count,
+        stream_id,
+        frame_duration_ms,
+        &stats,
+    ) {
         AsrFrameDecision::Suppress => return Ok(()),
-        AsrFrameDecision::Continue => {}
+        AsrFrameDecision::Continue { speech_onset } => {
+            if speech_onset {
+                if let Some(runtime) = media_state.conversation.as_ref() {
+                    conversation::handle_speech_onset(
+                        state,
+                        &media_state.media_registry,
+                        runtime,
+                        &gateway_call_id,
+                    )
+                    .await?;
+                }
+            }
+        }
+        AsrFrameDecision::Finalize {
+            trailing_silence_ms,
+        } => {
+            tracing::info!(
+                gateway_call_id,
+                stream_id,
+                trailing_silence_ms,
+                "asr.local_endpoint.finalizing"
+            );
+            finish_asr_session(
+                state,
+                media_state,
+                Some(gateway_call_id.as_str()),
+                Some(stream_id.to_string()),
+            )
+            .await?;
+            media_state.asr_gate.wait_for_next_speech();
+            return Ok(());
+        }
     }
     if media_state.session.is_none() {
         open_asr_session(
@@ -1135,6 +1198,13 @@ impl SampleStats {
     }
 }
 
+fn frame_duration_ms(sample_count: usize, sample_rate_hz: u32) -> u64 {
+    if sample_rate_hz == 0 {
+        return 0;
+    }
+    (sample_count as u64 * 1_000) / u64::from(sample_rate_hz)
+}
+
 fn sample_stats(samples: &[i16]) -> SampleStats {
     if samples.is_empty() {
         return SampleStats {
@@ -1167,7 +1237,7 @@ fn sample_stats(samples: &[i16]) -> SampleStats {
 #[derive(Default)]
 struct AsrGate {
     speech_started: bool,
-    low_energy_run: usize,
+    low_energy_run_ms: u64,
     suppressed_initial_frames: usize,
     suppressed_tail_frames: usize,
 }
@@ -1175,7 +1245,8 @@ struct AsrGate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AsrFrameDecision {
     Suppress,
-    Continue,
+    Continue { speech_onset: bool },
+    Finalize { trailing_silence_ms: u64 },
 }
 
 impl AsrGate {
@@ -1183,13 +1254,16 @@ impl AsrGate {
         &mut self,
         frame_index: usize,
         stream_id: &str,
+        frame_duration_ms: u64,
         stats: &SampleStats,
     ) -> AsrFrameDecision {
         if stats.has_speech_energy() {
             let was_started = self.speech_started;
-            let resumed_after_tail = self.low_energy_run > LOW_ENERGY_HANGOVER_FRAMES;
+            let resumed_after_onset_pause =
+                self.low_energy_run_ms >= ASR_SPEECH_ONSET_MIN_SILENCE_MS;
+            let speech_onset = !was_started || resumed_after_onset_pause;
             self.speech_started = true;
-            self.low_energy_run = 0;
+            self.low_energy_run_ms = 0;
             if !was_started {
                 tracing::info!(
                     stream_id,
@@ -1199,23 +1273,16 @@ impl AsrGate {
                     rms = stats.rms,
                     "media.speech.detected"
                 );
-            } else if resumed_after_tail {
-                tracing::info!(
-                    stream_id,
-                    frame_index,
-                    suppressed_tail_frames = self.suppressed_tail_frames,
-                    peak = stats.peak,
-                    rms = stats.rms,
-                    "media.speech.resumed"
-                );
             }
-            return AsrFrameDecision::Continue;
+            return AsrFrameDecision::Continue { speech_onset };
         }
 
         if self.speech_started {
-            self.low_energy_run = self.low_energy_run.saturating_add(1);
-            if self.low_energy_run <= LOW_ENERGY_HANGOVER_FRAMES {
-                return AsrFrameDecision::Continue;
+            self.low_energy_run_ms = self.low_energy_run_ms.saturating_add(frame_duration_ms);
+            if self.low_energy_run_ms <= ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS {
+                return AsrFrameDecision::Continue {
+                    speech_onset: false,
+                };
             }
             self.suppressed_tail_frames = self.suppressed_tail_frames.saturating_add(1);
             if self.suppressed_tail_frames <= 5 || self.suppressed_tail_frames.is_multiple_of(50) {
@@ -1223,13 +1290,15 @@ impl AsrGate {
                     stream_id,
                     frame_index,
                     suppressed_tail_frames = self.suppressed_tail_frames,
-                    low_energy_run = self.low_energy_run,
+                    low_energy_run_ms = self.low_energy_run_ms,
                     peak = stats.peak,
                     rms = stats.rms,
-                    "media.frame.suppressed_low_energy_tail"
+                    "media.frame.local_endpoint"
                 );
             }
-            return AsrFrameDecision::Suppress;
+            return AsrFrameDecision::Finalize {
+                trailing_silence_ms: self.low_energy_run_ms,
+            };
         }
 
         self.suppressed_initial_frames = self.suppressed_initial_frames.saturating_add(1);
@@ -1249,7 +1318,7 @@ impl AsrGate {
 
     fn wait_for_next_speech(&mut self) {
         self.speech_started = false;
-        self.low_energy_run = 0;
+        self.low_energy_run_ms = 0;
     }
 }
 
@@ -1472,7 +1541,10 @@ mod tests {
     use crate::adapter::{
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
-    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
+    use crate::tts::{
+        LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
+    };
 
     #[test]
     fn pcma_and_pcmu_decode_to_i16_audio() {
@@ -1582,6 +1654,114 @@ mod tests {
         assert!(packets.iter().all(|packet| packet.len() == 160));
     }
 
+    struct FailingSecondChunkTtsFactory {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl OutboundTtsFactory for FailingSecondChunkTtsFactory {
+        async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 2 {
+                bail!("second chunk failed");
+            }
+            Ok(vec![TtsAudio::new(
+                vec![1_000; 2_205],
+                PIPER_SAMPLE_RATE_HZ,
+            )?])
+        }
+
+        fn label(&self) -> &'static str {
+            "failing-second-chunk-test-tts"
+        }
+    }
+
+    #[tokio::test]
+    async fn chunked_tts_failure_requests_clear_and_drops_queued_audio() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_outbound_call(
+                TelnyxIds {
+                    call_control_id: "call-control-1".to_string(),
+                    call_session_id: Some("session-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                None,
+                None,
+                CallStatus::MediaStarted,
+            )
+        };
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, rx) = mpsc::channel(16);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
+        media_state.gateway_call_id = Some(gateway_call_id.clone());
+        media_state.outbound_rx = Some(rx);
+        let failing_tts = Arc::new(FailingSecondChunkTtsFactory {
+            calls: AtomicUsize::new(0),
+        });
+        let tts = Arc::new(TtsRegistry::new(failing_tts.clone(), failing_tts));
+
+        let queued = crate::speech::queue_speech(
+            &state,
+            &media_registry,
+            &tts,
+            LiveTtsBackend::Piper,
+            gateway_call_id.clone(),
+            "Hello, world.".to_string(),
+            "test say",
+        )
+        .await
+        .expect("speech should start");
+
+        let clear = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(command) = pending_clear_command(&mut media_state).await {
+                    return command;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed chunk should request clear");
+
+        match clear {
+            OutboundMediaCommand::Clear { playback_id } => {
+                assert_eq!(playback_id, queued.playback_id)
+            }
+            other => panic!("expected clear command, got {other:?}"),
+        }
+        assert!(next_outbound_command(&mut media_state).is_none());
+        assert!(media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await
+            .is_none());
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        let tts = call.tts.as_ref().expect("TTS state should exist");
+        assert_eq!(tts.status, TtsPlaybackStatus::Failed);
+        assert!(tts
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("second chunk failed")));
+        assert_eq!(call.status, CallStatus::MediaStarted);
+        drop(guard);
+
+        state
+            .write()
+            .await
+            .mark_tts_canceled(&gateway_call_id, &queued.playback_id);
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        let tts = call.tts.as_ref().expect("TTS state should exist");
+        assert_eq!(tts.status, TtsPlaybackStatus::Failed);
+    }
+
     #[tokio::test]
     async fn outbound_clear_preempts_and_drops_queued_frames() {
         let media_registry = SharedMediaRegistry::default();
@@ -1631,6 +1811,61 @@ mod tests {
             other => panic!("expected clear to preempt queued frames, got {other:?}"),
         }
         assert!(next_outbound_command(&mut media_state).is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_clears_are_queued_when_replacing_after_prior_cancel() {
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, rx) = mpsc::channel(8);
+        media_registry
+            .register_call("gwc_test".to_string(), tx)
+            .await;
+        media_registry
+            .start_speech(
+                "gwc_test",
+                "tts_first".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("register first speech");
+        media_registry
+            .cancel_speech("gwc_test")
+            .await
+            .expect("cancel first speech");
+        media_registry
+            .start_speech(
+                "gwc_test",
+                "tts_second".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("register second speech");
+        media_registry
+            .start_speech_replacing_active(
+                "gwc_test",
+                "tts_third".to_string(),
+                SpeechCancelToken::default(),
+            )
+            .await
+            .expect("replace second speech");
+        let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
+        media_state.gateway_call_id = Some("gwc_test".to_string());
+        media_state.outbound_rx = Some(rx);
+
+        match pending_clear_command(&mut media_state)
+            .await
+            .expect("first clear should be queued")
+        {
+            OutboundMediaCommand::Clear { playback_id } => assert_eq!(playback_id, "tts_first"),
+            other => panic!("expected first clear, got {other:?}"),
+        }
+        match pending_clear_command(&mut media_state)
+            .await
+            .expect("second clear should be queued")
+        {
+            OutboundMediaCommand::Clear { playback_id } => assert_eq!(playback_id, "tts_second"),
+            other => panic!("expected second clear, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1938,8 +2173,53 @@ mod tests {
         assert_eq!(call.transcripts[0].text, "received 16000 samples");
     }
 
+    #[test]
+    fn frame_duration_uses_observed_media_rate() {
+        assert_eq!(frame_duration_ms(160, 8_000), 20);
+        assert_eq!(frame_duration_ms(320, 16_000), 20);
+        assert_eq!(frame_duration_ms(320, 0), 0);
+    }
+
+    #[test]
+    fn asr_gate_marks_speech_onset_after_short_pause() {
+        let mut gate = AsrGate::default();
+        let speech = SampleStats {
+            peak: 4_000,
+            rms: 4_000.0,
+            mean: 0.0,
+        };
+        let silence = SampleStats {
+            peak: 0,
+            rms: 0.0,
+            mean: 0.0,
+        };
+
+        assert_eq!(
+            gate.accept(1, "stream-1", 20, &speech),
+            AsrFrameDecision::Continue { speech_onset: true }
+        );
+        for frame_index in 2..=7 {
+            assert_eq!(
+                gate.accept(frame_index, "stream-1", 20, &silence),
+                AsrFrameDecision::Continue {
+                    speech_onset: false,
+                }
+            );
+        }
+        assert_eq!(
+            gate.accept(8, "stream-1", 20, &speech),
+            AsrFrameDecision::Continue { speech_onset: true }
+        );
+        assert_eq!(
+            gate.accept(9, "stream-1", 20, &speech),
+            AsrFrameDecision::Continue {
+                speech_onset: false,
+            }
+        );
+    }
+
     #[tokio::test]
-    async fn low_energy_media_is_suppressed_after_hangover() {
+    async fn low_energy_media_finishes_after_local_endpoint() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
@@ -1965,8 +2245,9 @@ mod tests {
         .await
         .expect("speech should pass into ASR");
 
+        let endpoint_frames = local_endpoint_silence_frames();
         let silence = STANDARD.encode(l16_samples(320, 0));
-        for sequence in 2..=(LOW_ENERGY_HANGOVER_FRAMES + 3) {
+        for sequence in 2..=(endpoint_frames + 3) {
             handle_text(
                 &media_event("stream-1", &sequence.to_string(), &silence),
                 &state,
@@ -1977,11 +2258,12 @@ mod tests {
             .expect("silence should be accepted by transport");
         }
 
-        assert_eq!(counting_asr.ingests(), 1 + LOW_ENERGY_HANGOVER_FRAMES);
+        assert_eq!(counting_asr.ingests(), 1 + endpoint_frames);
+        assert_eq!(counting_asr.finishes(), 1);
     }
 
     #[tokio::test]
-    async fn speech_resume_after_silence_keeps_asr_session() {
+    async fn speech_resume_before_local_endpoint_keeps_asr_session() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
@@ -2007,8 +2289,64 @@ mod tests {
         .await
         .expect("first speech frame should pass into ASR");
 
+        let short_pause_frames = local_endpoint_silence_frames() - 1;
         let silence = STANDARD.encode(l16_samples(320, 0));
-        for sequence in 2..=(LOW_ENERGY_HANGOVER_FRAMES + 3) {
+        for offset in 0..short_pause_frames {
+            let sequence = 2 + offset;
+            handle_text(
+                &media_event("stream-1", &sequence.to_string(), &silence),
+                &state,
+                &asr,
+                &mut media_state,
+            )
+            .await
+            .expect("short silence should stay in the ASR session");
+        }
+
+        handle_text(
+            &media_event("stream-1", &(2 + short_pause_frames).to_string(), &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("resumed speech should continue ASR ingestion");
+
+        assert_eq!(counting_asr.opens(), 1);
+        assert_eq!(counting_asr.finishes(), 0);
+        assert_eq!(counting_asr.ingests(), 2 + short_pause_frames);
+    }
+
+    #[tokio::test]
+    async fn speech_resume_after_local_endpoint_opens_fresh_asr_session() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let counting_asr = Arc::new(CountingAsrFactory::default());
+        let asr = registry_with_factory(counting_asr.clone());
+        let mut media_state = MediaSocketState::new();
+
+        handle_text(
+            &start_event("call-1", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("start event should open ASR session");
+
+        let speech = STANDARD.encode(l16_samples(320, 4_000));
+        handle_text(
+            &media_event("stream-1", "1", &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("first speech frame should pass into ASR");
+
+        let endpoint_frames = local_endpoint_silence_frames();
+        let silence = STANDARD.encode(l16_samples(320, 0));
+        for sequence in 2..=(endpoint_frames + 3) {
             handle_text(
                 &media_event("stream-1", &sequence.to_string(), &silence),
                 &state,
@@ -2019,22 +2357,19 @@ mod tests {
             .expect("silence should be accepted by transport");
         }
         assert_eq!(counting_asr.opens(), 1);
+        assert_eq!(counting_asr.finishes(), 1);
 
         handle_text(
-            &media_event(
-                "stream-1",
-                &(LOW_ENERGY_HANGOVER_FRAMES + 4).to_string(),
-                &speech,
-            ),
+            &media_event("stream-1", &(endpoint_frames + 4).to_string(), &speech),
             &state,
             &asr,
             &mut media_state,
         )
         .await
-        .expect("resumed speech should continue ASR ingestion");
+        .expect("resumed speech should open a fresh ASR session");
 
-        assert_eq!(counting_asr.opens(), 1);
-        assert_eq!(counting_asr.ingests(), 2 + LOW_ENERGY_HANGOVER_FRAMES);
+        assert_eq!(counting_asr.opens(), 2);
+        assert_eq!(counting_asr.ingests(), 2 + endpoint_frames);
 
         let guard = state.read().await;
         let call = guard.calls.get(&_gateway_call_id).expect("call exists");
@@ -2324,10 +2659,16 @@ mod tests {
         )
     }
 
+    fn local_endpoint_silence_frames() -> usize {
+        let frame_ms = SILENCE_KEEPALIVE_INTERVAL.as_millis() as u64;
+        (ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS / frame_ms) as usize
+    }
+
     #[derive(Default)]
     struct CountingAsrFactory {
         opens: AtomicUsize,
         ingests: Arc<AtomicUsize>,
+        finishes: Arc<AtomicUsize>,
     }
 
     impl CountingAsrFactory {
@@ -2338,6 +2679,10 @@ mod tests {
         fn ingests(&self) -> usize {
             self.ingests.load(Ordering::SeqCst)
         }
+
+        fn finishes(&self) -> usize {
+            self.finishes.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait]
@@ -2346,12 +2691,14 @@ mod tests {
             self.opens.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(CountingAsrSession {
                 ingests: Arc::clone(&self.ingests),
+                finishes: Arc::clone(&self.finishes),
             }))
         }
     }
 
     struct CountingAsrSession {
         ingests: Arc<AtomicUsize>,
+        finishes: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -2365,6 +2712,7 @@ mod tests {
         }
 
         async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+            self.finishes.fetch_add(1, Ordering::SeqCst);
             Ok(Vec::new())
         }
     }
