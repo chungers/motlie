@@ -12,6 +12,7 @@ pub mod operator;
 pub mod replay;
 pub mod serve;
 pub mod speech;
+pub mod text_calls;
 pub mod tts;
 pub mod webhook;
 

@@ -16,6 +16,7 @@ use motlie_telnyx_gateway::operator::script::run_repl_file;
 use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
 use motlie_telnyx_gateway::replay::ReplayBackend;
 use motlie_telnyx_gateway::serve::{serve, AppServices};
+use motlie_telnyx_gateway::text_calls::SharedTextCallRegistry;
 use motlie_telnyx_gateway::tts::{SharedTtsFactory, SharedTtsRegistry, TtsRegistry};
 use tokio::time::{self, Duration};
 
@@ -108,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let telnyx = TelnyxClient::new(cli.telnyx_api_base.clone(), api_key, cli.dry_run_telnyx);
     let asr = build_live_asr_registry(&cli);
     let media = SharedMediaRegistry::default();
+    let text_calls = SharedTextCallRegistry::default();
     let tts = build_tts_registry(&cli);
     let conversation = ConversationRuntime::new(
         telnyx.clone(),
@@ -126,7 +128,9 @@ async fn main() -> anyhow::Result<()> {
         telnyx: telnyx.clone(),
         asr,
         media: media.clone(),
+        tts: tts.clone(),
         conversation: conversation.clone(),
+        text_calls: text_calls.clone(),
     };
 
     let server = tokio::spawn(serve(cli.bind, services));

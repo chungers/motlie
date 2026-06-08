@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::operator::state::{
-    CallDirection, CallStatus, InboundMode, LogLevel, SharedState, TelnyxIds,
+    redact_phone_for_log, CallDirection, CallStatus, InboundMode, LogLevel, SharedState, TelnyxIds,
 };
 
 #[derive(Debug, Deserialize)]
@@ -41,10 +41,42 @@ pub struct TelnyxWebhookPayload {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InboundTextCallTrigger {
+    pub gateway_call_id: String,
+    pub call_control_id: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoiceWebhookOutcome {
+    pub message: String,
+    pub inbound_text_call: Option<InboundTextCallTrigger>,
+}
+
+impl VoiceWebhookOutcome {
+    fn message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            inbound_text_call: None,
+        }
+    }
+}
+
 pub async fn handle_voice_webhook(
     state: SharedState,
     body: serde_json::Value,
 ) -> anyhow::Result<String> {
+    handle_voice_webhook_with_outcome(state, body)
+        .await
+        .map(|outcome| outcome.message)
+}
+
+pub async fn handle_voice_webhook_with_outcome(
+    state: SharedState,
+    body: serde_json::Value,
+) -> anyhow::Result<VoiceWebhookOutcome> {
     let envelope: TelnyxWebhookEnvelope = serde_json::from_value(body)?;
     let event_type = envelope.data.event_type.as_str();
     match event_type {
@@ -58,7 +90,7 @@ pub async fn handle_voice_webhook(
                 "call answered",
             )
             .await;
-            Ok("ok".to_string())
+            Ok(VoiceWebhookOutcome::message("ok"))
         }
         "call.hangup" | "call.ended" => {
             update_call_status(
@@ -69,7 +101,7 @@ pub async fn handle_voice_webhook(
                 "call ended",
             )
             .await;
-            Ok("ok".to_string())
+            Ok(VoiceWebhookOutcome::message("ok"))
         }
         "streaming.started" => {
             update_call_status(
@@ -80,7 +112,7 @@ pub async fn handle_voice_webhook(
                 "streaming started webhook",
             )
             .await;
-            Ok("ok".to_string())
+            Ok(VoiceWebhookOutcome::message("ok"))
         }
         "streaming.stopped" => {
             update_call_status(
@@ -91,7 +123,7 @@ pub async fn handle_voice_webhook(
                 "streaming stopped webhook",
             )
             .await;
-            Ok("ok".to_string())
+            Ok(VoiceWebhookOutcome::message("ok"))
         }
         "streaming.failed" => {
             let message = envelope
@@ -108,12 +140,12 @@ pub async fn handle_voice_webhook(
                 &message,
             )
             .await;
-            Ok("ok".to_string())
+            Ok(VoiceWebhookOutcome::message("ok"))
         }
         other => {
             let mut guard = state.write().await;
             guard.log(LogLevel::Info, format!("ignored Telnyx webhook {other}"));
-            Ok("ignored".to_string())
+            Ok(VoiceWebhookOutcome::message("ignored"))
         }
     }
 }
@@ -121,12 +153,12 @@ pub async fn handle_voice_webhook(
 async fn handle_call_initiated(
     state: SharedState,
     envelope: TelnyxWebhookEnvelope,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<VoiceWebhookOutcome> {
     let payload = envelope.data.payload;
     let Some(call_control_id) = payload.call_control_id.clone() else {
         let mut guard = state.write().await;
         guard.log(LogLevel::Warn, "call.initiated missing call_control_id");
-        return Ok("ignored".to_string());
+        return Ok(VoiceWebhookOutcome::message("ignored"));
     };
     let is_inbound = payload.direction.as_deref() == Some("incoming")
         || payload.state.as_deref() == Some("parked");
@@ -138,8 +170,10 @@ async fn handle_call_initiated(
         call_leg_id: payload.call_leg_id.clone(),
         stream_id: None,
     };
+    let has_text_subscribers =
+        is_inbound && guard.has_enabled_inbound_subscribers_for_phone(payload.to.as_deref());
     let (gateway_call_id, status) = if is_inbound {
-        let status = if guard.inbound_mode != InboundMode::Disabled {
+        let status = if guard.inbound_mode != InboundMode::Disabled || has_text_subscribers {
             CallStatus::PendingInbound
         } else {
             CallStatus::IgnoredInbound
@@ -164,8 +198,8 @@ async fn handle_call_initiated(
         guard.log(
             LogLevel::Info,
             format!(
-                "inbound call pending: {gateway_call_id} from {:?}",
-                payload.from
+                "inbound call pending: {gateway_call_id} from {}",
+                redact_phone_for_log(payload.from.as_deref())
             ),
         );
         tracing::info!(
@@ -181,8 +215,8 @@ async fn handle_call_initiated(
         guard.log(
             LogLevel::Info,
             format!(
-                "outbound call dialing: {gateway_call_id} to {:?}",
-                payload.to
+                "outbound call dialing: {gateway_call_id} to {}",
+                redact_phone_for_log(payload.to.as_deref())
             ),
         );
         tracing::info!(
@@ -209,7 +243,22 @@ async fn handle_call_initiated(
         );
     }
 
-    Ok("ok".to_string())
+    let inbound_text_call =
+        if is_inbound && has_text_subscribers && status == CallStatus::PendingInbound {
+            Some(InboundTextCallTrigger {
+                gateway_call_id: gateway_call_id.clone(),
+                call_control_id,
+                from: payload.from,
+                to: payload.to,
+            })
+        } else {
+            None
+        };
+
+    Ok(VoiceWebhookOutcome {
+        message: "ok".to_string(),
+        inbound_text_call,
+    })
 }
 
 async fn update_call_status(
