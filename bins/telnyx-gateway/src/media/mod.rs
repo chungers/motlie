@@ -37,6 +37,7 @@ const SPEECH_RMS_THRESHOLD: f32 = 180.0;
 const SPEECH_PEAK_THRESHOLD: i16 = 900;
 const ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS: u64 =
     crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS as u64;
+const ASR_SPEECH_ONSET_MIN_SILENCE_MS: u64 = 120;
 const PCMU_SILENCE_BYTE: u8 = 0xff;
 const PCMA_SILENCE_BYTE: u8 = 0xd5;
 const SILENCE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(20);
@@ -967,7 +968,19 @@ async fn ingest_frame(
         &stats,
     ) {
         AsrFrameDecision::Suppress => return Ok(()),
-        AsrFrameDecision::Continue => {}
+        AsrFrameDecision::Continue { speech_onset } => {
+            if speech_onset {
+                if let Some(runtime) = media_state.conversation.as_ref() {
+                    conversation::handle_speech_onset(
+                        state,
+                        &media_state.media_registry,
+                        runtime,
+                        &gateway_call_id,
+                    )
+                    .await?;
+                }
+            }
+        }
         AsrFrameDecision::Finalize {
             trailing_silence_ms,
         } => {
@@ -1205,7 +1218,7 @@ struct AsrGate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AsrFrameDecision {
     Suppress,
-    Continue,
+    Continue { speech_onset: bool },
     Finalize { trailing_silence_ms: u64 },
 }
 
@@ -1219,8 +1232,11 @@ impl AsrGate {
     ) -> AsrFrameDecision {
         if stats.has_speech_energy() {
             let was_started = self.speech_started;
+            let resumed_after_onset_pause =
+                self.low_energy_run_ms >= ASR_SPEECH_ONSET_MIN_SILENCE_MS;
             let resumed_after_tail =
                 self.low_energy_run_ms > ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS;
+            let speech_onset = !was_started || resumed_after_onset_pause;
             self.speech_started = true;
             self.low_energy_run_ms = 0;
             if !was_started {
@@ -1242,13 +1258,15 @@ impl AsrGate {
                     "media.speech.resumed"
                 );
             }
-            return AsrFrameDecision::Continue;
+            return AsrFrameDecision::Continue { speech_onset };
         }
 
         if self.speech_started {
             self.low_energy_run_ms = self.low_energy_run_ms.saturating_add(frame_duration_ms);
             if self.low_energy_run_ms <= ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS {
-                return AsrFrameDecision::Continue;
+                return AsrFrameDecision::Continue {
+                    speech_onset: false,
+                };
             }
             self.suppressed_tail_frames = self.suppressed_tail_frames.saturating_add(1);
             if self.suppressed_tail_frames <= 5 || self.suppressed_tail_frames.is_multiple_of(50) {
@@ -1978,6 +1996,44 @@ mod tests {
         assert_eq!(frame_duration_ms(160, 8_000), 20);
         assert_eq!(frame_duration_ms(320, 16_000), 20);
         assert_eq!(frame_duration_ms(320, 0), 0);
+    }
+
+    #[test]
+    fn asr_gate_marks_speech_onset_after_short_pause() {
+        let mut gate = AsrGate::default();
+        let speech = SampleStats {
+            peak: 4_000,
+            rms: 4_000.0,
+            mean: 0.0,
+        };
+        let silence = SampleStats {
+            peak: 0,
+            rms: 0.0,
+            mean: 0.0,
+        };
+
+        assert_eq!(
+            gate.accept(1, "stream-1", 20, &speech),
+            AsrFrameDecision::Continue { speech_onset: true }
+        );
+        for frame_index in 2..=7 {
+            assert_eq!(
+                gate.accept(frame_index, "stream-1", 20, &silence),
+                AsrFrameDecision::Continue {
+                    speech_onset: false,
+                }
+            );
+        }
+        assert_eq!(
+            gate.accept(8, "stream-1", 20, &speech),
+            AsrFrameDecision::Continue { speech_onset: true }
+        );
+        assert_eq!(
+            gate.accept(9, "stream-1", 20, &speech),
+            AsrFrameDecision::Continue {
+                speech_onset: false,
+            }
+        );
     }
 
     #[tokio::test]

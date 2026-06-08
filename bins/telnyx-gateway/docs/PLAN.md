@@ -4,9 +4,10 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-07 18:16 PDT | @codex-366-impl | Expanded M5 #402 into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared toggle, including a 120 ms resumed-speech onset threshold, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that chunk. |
 | 2026-06-07 | @codex-366-impl | Fixed live ASR end-of-turn latency by finishing the active ASR session after the replay-sized trailing-silence pad; final transcripts no longer wait for a later utterance when Sherpa does not endpoint first. |
 | 2026-06-07 | @codex-366-impl | Added `conversation barge-in on|off|status` for TUI/socket live tests; default remains on, while off suppresses transcript-triggered TTS clear so smoke-test echo playback can finish. |
-| 2026-06-06 15:00 PDT | @codex-366-impl | Added M3 partial-ASR-triggered barge-in: meaningful unsuppressed partials on attached calls cancel active playback through the existing M2 clear/cancel path; final transcripts still drive regeneration, and frame-level VAD barge-in is deferred to M5 #402. |
+| 2026-06-06 15:00 PDT | @codex-366-impl | Added M3 partial-ASR-triggered barge-in: meaningful unsuppressed partials on attached calls cancel active playback through the existing M2 clear/cancel path; final transcripts still drive regeneration, and frame-level speech-onset barge-in was later folded into M5 #402 / PR #417. |
 | 2026-06-06 13:40 PDT | @codex-366-impl | Made M3 echo replies opt-in for testing via `--conversation-smoke-test` or `conversation smoke-test on`, and wired outbound `dial` to auto-attach conversation like inbound `answer`; default attached conversations now remain transcription-only unless a test handler is enabled. |
 | 2026-06-06 13:12 PDT | @codex-366-impl | Applied M3 manual acceptance feedback: default conversation attach/answer is auto-approved, `conversation disapprove` cancels active TTS and returns calls to transcription-only, and status listener formatting is operator-friendly. |
 | 2026-06-06 08:48 PDT | @codex-366-impl | Addressed PR #400 review round 1: removed dead sink wording, added manual proposal approval commands, clarified source/backend behavior, documented final-transcript-triggered barge-in latency, and expanded core coverage. |
@@ -69,6 +70,7 @@ Execution policy for the initial implementation:
 - milestone 2 (#365) is outbound dialing plus TTS driven through the shared command engine from either the TUI or the Unix-domain socket; selected-call detail text input is a TUI affordance over the same `speak` command path
 - milestone 3 (#366) is full-duplex conversation driven by a TUI chat interface over the selected call
 - milestone 4 (#367) is external integration: local agent socket tooling, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
+- milestone 5 (#402) is conversational realism latency hardening for the M3 duplex path: endpoint finalization, partial/frame-level barge-in with a 120 ms resumed-speech onset threshold, chunked enqueue, frame pacing validation, and live smoke-test measurements
 - `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
 - `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
 - all work needed only for those follow-on pairings belongs in phase 10 or later
@@ -542,10 +544,23 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Staged Build Strategy`, `Returning TTS Audio`
 - [x] Route `ConversationCommand::Call(action)` through the Telnyx call-control mapping. (@codex-366-impl, 2026-06-05 23:34 PDT: mapped `CallAction::Hangup`; unsupported future call actions fail closed and record conversation failure state.)
   DESIGN reference: `motlie_voice::telephony Surface`, `v1.1: DTMF and Call Control`
-- [x] Add barge-in policy only after milestone 1 and milestone 2 are independently stable. (@codex-366-impl, 2026-06-06 15:00 PDT: implemented the #366 drop-and-regenerate policy by canceling active M2 speech with Telnyx `clear` on meaningful partial ASR before final endpointing; final transcripts still regenerate through the handler. @codex-366-impl, 2026-06-07: default remains on, and `conversation barge-in off` disables transcript-triggered clear for live smoke-test echo validation; frame-level VAD-triggered barge-in is deferred to M5 #402.)
+- [x] Add barge-in policy only after milestone 1 and milestone 2 are independently stable. (@codex-366-impl, 2026-06-06 15:00 PDT: implemented the #366 drop-and-regenerate policy by canceling active M2 speech with Telnyx `clear` on meaningful partial ASR before final endpointing; final transcripts still regenerate through the handler. @codex-366-impl, 2026-06-07: default remains on, and `conversation barge-in off` disables transcript/speech-onset-triggered clear for live smoke-test echo validation. @codex-366-impl, 2026-06-07 18:16 PDT: PR #417 folds in expanded M5 #402 speech-onset barge-in; frame-level speech detection cancels active playback for attached calls without invoking the handler, while finals still regenerate.)
   DESIGN reference: `Returning TTS Audio`, `Real-Time Latency Requirements`
 
 Verification (@codex-366-impl, 2026-06-05 23:34 PDT): `cargo build -p motlie-telnyx-gateway --features "sherpa piper"`, `cargo test -p motlie-telnyx-gateway --features "sherpa piper"`, and `cargo clippy -p motlie-telnyx-gateway --features "sherpa piper" -- -D warnings` all pass. Workspace-wide `cargo fmt` is still blocked by unrelated missing `examples/vector2/app/benchmark.rs`; package-scoped `cargo fmt -p motlie-telnyx-gateway` passes.
+
+### 8.3.1 - Milestone 5 conversational realism latency improvements (#402)
+
+- [x] Finalize the active ASR session locally after the trailing-silence pad so live final transcripts do not wait for a later utterance. (@codex-366-impl, 2026-06-07: implemented in PR #417 with local endpoint finalization and regression coverage for sustained silence, short pauses, and resumed speech.)
+  DESIGN reference: `Inbound Call Handler Design`, `Real-Time Latency Requirements`
+- [x] Trigger drop-and-regenerate barge-in from meaningful partial ASR and frame-level speech onset while playback is active. (@codex-366-impl, 2026-06-07 18:16 PDT: frame-level speech onset now reuses the conversation cancel/clear path for attached calls; final transcripts still invoke the handler and regenerate responses.)
+  DESIGN reference: `Milestone 5: Conversational Realism Latency Improvements`, `Returning TTS Audio`
+- [x] Keep barge-in configurable from both TUI and socket. (@codex-366-impl, 2026-06-07: `conversation barge-in on|off|status` controls partial/final/speech-onset interruption; off leaves smoke-test playback running and stores overlapping final responses as proposals.)
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [x] Enqueue outbound TTS after each synthesized text chunk instead of waiting for the whole utterance. (@codex-366-impl, 2026-06-07 18:16 PDT: `speech::queue_speech` sends the first text chunk before later chunks finish; backend audio chunks inside one text chunk are concatenated before resampling/packetization to avoid short-chunk resampler resets.)
+  DESIGN reference: `Transport Streaming vs Incremental TTS`, `Real-Time Latency Requirements`
+- [ ] Capture live M5 validation numbers for endpoint-to-final latency, final-to-first-frame latency, outbound frame pacing, barge-in cut time, and human-reported playback smoothness.
+  DESIGN reference: `Testing Scope for PLAN`, `Real-Time Latency Requirements`
 
 ### 8.4 - Milestone 4 external integration harness (#367)
 
@@ -648,7 +663,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Inbound Call Handler Design`, `Recommended ASR/TTS Stack`
 - [ ] Verify conversational latency for the Sherpa + Piper duplex path once milestone 3 exists, and document measured numbers nearby in this PLAN or a follow-up note.
   DESIGN reference: `Real-Time Latency Requirements`
-- [ ] Document first-audio latency separately from outbound transport packet cadence, because Piper currently produces a full buffer before packetized streaming begins.
+- [ ] Document first-audio latency separately from outbound transport packet cadence, because chunked enqueue can send after the first synthesized text chunk but the selected backend may still buffer internally before returning that chunk.
   DESIGN reference: `Transport Streaming vs Incremental TTS`, `Real-Time Latency Requirements`
 - [ ] During M2 live validation, review `tts.outbound.frame.sent` intervals, queue depth, `tts.outbound.underrun`, Telnyx `mark` receipt, and human-reported smoothness before accepting outbound TTS quality.
   DESIGN reference: `M2-Safe Bidirectional Media Contract`, `Testing Scope for PLAN`

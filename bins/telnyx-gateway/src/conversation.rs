@@ -188,10 +188,37 @@ pub async fn handle_transcript_event(
     .await
 }
 
+pub async fn handle_speech_onset(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+) -> anyhow::Result<()> {
+    if !runtime.barge_in_enabled() {
+        return Ok(());
+    }
+
+    let Some(snapshot) = conversation_snapshot(state, gateway_call_id).await else {
+        return Ok(());
+    };
+    if !snapshot.attached {
+        return Ok(());
+    }
+
+    cancel_active_speech_for_barge_in(
+        state,
+        media_registry,
+        gateway_call_id,
+        BargeInTrigger::SpeechOnset,
+    )
+    .await
+}
+
 #[derive(Clone, Copy, Debug)]
 enum BargeInTrigger {
     Partial,
     Final,
+    SpeechOnset,
 }
 
 impl BargeInTrigger {
@@ -199,6 +226,7 @@ impl BargeInTrigger {
         match self {
             Self::Partial => "partial",
             Self::Final => "final",
+            Self::SpeechOnset => "speech_onset",
         }
     }
 
@@ -206,6 +234,7 @@ impl BargeInTrigger {
         match self {
             Self::Partial => "conversation partial barge-in",
             Self::Final => "conversation final barge-in",
+            Self::SpeechOnset => "conversation speech-onset barge-in",
         }
     }
 }
@@ -254,6 +283,7 @@ async fn cancel_active_speech_for_barge_in(
         playback_id,
         trigger = trigger.as_str(),
         partial_triggered = matches!(trigger, BargeInTrigger::Partial),
+        speech_onset_triggered = matches!(trigger, BargeInTrigger::SpeechOnset),
         "conversation.barge_in.cancel_requested"
     );
     Ok(())
@@ -623,6 +653,46 @@ mod tests {
             call.conversation.last_assistant_text.as_deref(),
             Some("assistant is speaking")
         );
+    }
+
+    #[tokio::test]
+    async fn speech_onset_interrupts_active_playback_without_regenerating() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        state.write().await.record_conversation_speaking(
+            &gateway_call_id,
+            "assistant is speaking".to_string(),
+            "tts_test".to_string(),
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(&gateway_call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        let runtime = test_runtime();
+
+        handle_speech_onset(&state, &media_registry, &runtime, &gateway_call_id)
+            .await
+            .expect("speech onset barge-in should cancel active speech");
+
+        assert!(cancel.is_canceled());
+        assert!(media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await
+            .is_none());
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Interrupted);
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("assistant is speaking")
+        );
+        assert!(call.conversation.last_user_text.is_none());
     }
 
     #[tokio::test]

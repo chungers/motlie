@@ -7,7 +7,7 @@ use crate::media::{
     SharedMediaRegistry, SpeechCancelToken,
 };
 use crate::operator::state::{LogLevel, SharedState};
-use crate::tts::{split_speech_text, LiveTtsBackend, SharedTtsRegistry, PIPER_SAMPLE_RATE_HZ};
+use crate::tts::{split_speech_text, LiveTtsBackend, SharedTtsRegistry, TtsAudio};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuedSpeech {
@@ -135,53 +135,69 @@ enum SpeechJobOutcome {
 
 async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcome> {
     let text_chunks = split_speech_text(&job.text);
-    let Some(synthesis) = synthesize_utterance_with_fallback(
-        &job.state,
-        &job.tts,
-        job.tts_backend,
-        &job.gateway_call_id,
-        &job.playback_id,
-        &text_chunks,
-        &job.cancel,
-    )
-    .await?
-    else {
-        return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+    let synthesis_context = SpeechSynthesisContext {
+        state: &job.state,
+        tts: &job.tts,
+        backend: job.tts_backend,
+        gateway_call_id: &job.gateway_call_id,
+        playback_id: &job.playback_id,
+        cancel: &job.cancel,
     };
-    if job.cancel.is_canceled() {
-        return Ok(SpeechJobOutcome::NoAudioOrCanceled);
-    }
+    let mut queued_frames = 0usize;
+    let mut model_chunks = 0usize;
 
-    let packets =
-        packetize_tts_samples(synthesis.samples_i16, synthesis.sample_rate_hz, job.media)?;
-    let queued_frames = packets.len();
-    if queued_frames == 0 || job.cancel.is_canceled() {
-        return Ok(SpeechJobOutcome::NoAudioOrCanceled);
-    }
-    job.state.write().await.mark_tts_frames_queued(
-        &job.gateway_call_id,
-        &job.playback_id,
-        queued_frames,
-    );
-    tracing::info!(
-        gateway_call_id = job.gateway_call_id.as_str(),
-        playback_id = job.playback_id.as_str(),
-        model_chunks = synthesis.chunk_count,
-        model_sample_rate_hz = synthesis.sample_rate_hz,
-        frames = queued_frames,
-        "tts.speak.prebuffered"
-    );
-    for payload in packets {
+    for (text_chunk_index, text_chunk) in text_chunks.iter().enumerate() {
+        let Some(audio_chunks) =
+            synthesize_text_chunk_with_fallback(&synthesis_context, text_chunk_index, text_chunk)
+                .await?
+        else {
+            return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+        };
         if job.cancel.is_canceled() {
             return Ok(SpeechJobOutcome::NoAudioOrCanceled);
         }
-        job.media_handle
-            .send(OutboundMediaCommand::Frame(OutboundMediaFrame {
-                playback_id: job.playback_id.clone(),
-                payload,
-            }))
-            .await?;
+        let Some(synthesis) = concatenate_audio_chunks(job.tts_backend, audio_chunks)? else {
+            continue;
+        };
+
+        let packets =
+            packetize_tts_samples(synthesis.samples_i16, synthesis.sample_rate_hz, job.media)?;
+        let chunk_frames = packets.len();
+        if chunk_frames == 0 {
+            continue;
+        }
+
+        job.state.write().await.mark_tts_frames_queued(
+            &job.gateway_call_id,
+            &job.playback_id,
+            chunk_frames,
+        );
+        queued_frames = queued_frames.saturating_add(chunk_frames);
+        model_chunks = model_chunks.saturating_add(synthesis.audio_chunk_count);
+        tracing::info!(
+            gateway_call_id = job.gateway_call_id.as_str(),
+            playback_id = job.playback_id.as_str(),
+            text_chunk_index,
+            audio_chunks = synthesis.audio_chunk_count,
+            model_sample_rate_hz = synthesis.sample_rate_hz,
+            frames = chunk_frames,
+            total_frames = queued_frames,
+            "tts.speak.chunk_queued"
+        );
+
+        for payload in packets {
+            if job.cancel.is_canceled() {
+                return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+            }
+            job.media_handle
+                .send(OutboundMediaCommand::Frame(OutboundMediaFrame {
+                    playback_id: job.playback_id.clone(),
+                    payload,
+                }))
+                .await?;
+        }
     }
+
     if queued_frames > 0 && !job.cancel.is_canceled() {
         job.media_handle
             .send(OutboundMediaCommand::Mark {
@@ -191,6 +207,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
         tracing::info!(
             gateway_call_id = job.gateway_call_id.as_str(),
             playback_id = job.playback_id.as_str(),
+            model_chunks,
             frames = queued_frames,
             "tts.speak.queued"
         );
@@ -199,114 +216,136 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
     Ok(SpeechJobOutcome::NoAudioOrCanceled)
 }
 
-struct SynthesizedUtterance {
+struct SynthesizedTextChunk {
     samples_i16: Vec<i16>,
     sample_rate_hz: u32,
-    chunk_count: usize,
+    audio_chunk_count: usize,
 }
 
-async fn synthesize_utterance_with_fallback(
-    state: &SharedState,
-    tts: &SharedTtsRegistry,
+fn concatenate_audio_chunks(
     backend: LiveTtsBackend,
-    gateway_call_id: &str,
-    playback_id: &str,
-    text_chunks: &[String],
-    cancel: &SpeechCancelToken,
-) -> anyhow::Result<Option<SynthesizedUtterance>> {
-    match synthesize_utterance(tts, backend, text_chunks, cancel).await {
-        Ok(synthesis) => Ok(synthesis),
+    audio_chunks: Vec<TtsAudio>,
+) -> anyhow::Result<Option<SynthesizedTextChunk>> {
+    let mut samples_i16 = Vec::new();
+    let mut sample_rate_hz = None;
+    let mut audio_chunk_count = 0usize;
+
+    for audio_chunk in audio_chunks {
+        let chunk_rate_hz = audio_chunk.sample_rate_hz();
+        match sample_rate_hz {
+            Some(existing) if existing != chunk_rate_hz => {
+                bail!(
+                    "TTS backend {} emitted mixed sample rates: {existing}Hz and {chunk_rate_hz}Hz",
+                    backend.label()
+                );
+            }
+            Some(_) => {}
+            None => sample_rate_hz = Some(chunk_rate_hz),
+        }
+        samples_i16.extend(audio_chunk.into_samples_i16());
+        audio_chunk_count = audio_chunk_count.saturating_add(1);
+    }
+
+    if samples_i16.is_empty() {
+        return Ok(None);
+    }
+    let Some(sample_rate_hz) = sample_rate_hz else {
+        return Ok(None);
+    };
+    Ok(Some(SynthesizedTextChunk {
+        samples_i16,
+        sample_rate_hz,
+        audio_chunk_count,
+    }))
+}
+
+struct SpeechSynthesisContext<'a> {
+    state: &'a SharedState,
+    tts: &'a SharedTtsRegistry,
+    backend: LiveTtsBackend,
+    gateway_call_id: &'a str,
+    playback_id: &'a str,
+    cancel: &'a SpeechCancelToken,
+}
+
+async fn synthesize_text_chunk_with_fallback(
+    context: &SpeechSynthesisContext<'_>,
+    text_chunk_index: usize,
+    text_chunk: &str,
+) -> anyhow::Result<Option<Vec<TtsAudio>>> {
+    match synthesize_text_chunk(context.tts, context.backend, text_chunk, context.cancel).await {
+        Ok(audio_chunks) => Ok(audio_chunks),
         Err(error) => {
-            let Some(fallback) = backend.fallback() else {
+            let Some(fallback) = context.backend.fallback() else {
                 return Err(error);
             };
             let error_message = format!("{error:#}");
             {
-                let mut guard = state.write().await;
+                let mut guard = context.state.write().await;
                 guard.log(
                     LogLevel::Warn,
                     format!(
-                        "TTS backend {} failed for {gateway_call_id} playback={playback_id}; re-synthesizing utterance with {}: {error_message}",
-                        backend.label(),
+                        "TTS backend {} failed for {} playback={} chunk={text_chunk_index}; synthesizing chunk with {}: {error_message}",
+                        context.backend.label(),
+                        context.gateway_call_id,
+                        context.playback_id,
                         fallback.label()
                     ),
                 );
             }
             tracing::warn!(
-                gateway_call_id,
-                playback_id,
-                backend = backend.label(),
-                backend_model = backend.model_label(),
+                gateway_call_id = context.gateway_call_id,
+                playback_id = context.playback_id,
+                text_chunk_index,
+                backend = context.backend.label(),
+                backend_model = context.backend.model_label(),
                 fallback = fallback.label(),
                 fallback_model = fallback.model_label(),
                 error = %error_message,
-                "tts.speak.fallback"
+                "tts.speak.chunk_fallback"
             );
-            synthesize_utterance(tts, fallback, text_chunks, cancel)
+            synthesize_text_chunk(context.tts, fallback, text_chunk, context.cancel)
                 .await
                 .with_context(|| {
                     format!(
-                        "fallback TTS backend {} after {} failed: {error_message}",
+                        "fallback TTS backend {} after {} failed for chunk {text_chunk_index}: {error_message}",
                         fallback.label(),
-                        backend.label()
+                        context.backend.label()
                     )
                 })
         }
     }
 }
 
-async fn synthesize_utterance(
+async fn synthesize_text_chunk(
     tts: &SharedTtsRegistry,
     backend: LiveTtsBackend,
-    text_chunks: &[String],
+    text_chunk: &str,
     cancel: &SpeechCancelToken,
-) -> anyhow::Result<Option<SynthesizedUtterance>> {
-    let factory = tts.factory(backend);
-    let mut samples_i16 = Vec::new();
-    let mut sample_rate_hz = None;
-    let mut chunk_count = 0usize;
-    for text_chunk in text_chunks {
-        if cancel.is_canceled() {
-            return Ok(None);
-        }
-        let audio_chunks = factory.synthesize_chunks(text_chunk.clone()).await?;
-        for audio_chunk in audio_chunks {
-            if cancel.is_canceled() {
-                return Ok(None);
-            }
-            let chunk_rate_hz = audio_chunk.sample_rate_hz();
-            match sample_rate_hz {
-                Some(existing) if existing != chunk_rate_hz => {
-                    bail!(
-                        "TTS backend {} emitted mixed sample rates: {existing}Hz and {chunk_rate_hz}Hz",
-                        backend.label()
-                    );
-                }
-                Some(_) => {}
-                None => sample_rate_hz = Some(chunk_rate_hz),
-            }
-            samples_i16.extend(audio_chunk.into_samples_i16());
-            chunk_count = chunk_count.saturating_add(1);
-        }
-    }
-    if samples_i16.is_empty() || cancel.is_canceled() {
+) -> anyhow::Result<Option<Vec<TtsAudio>>> {
+    if cancel.is_canceled() {
         return Ok(None);
     }
-    Ok(Some(SynthesizedUtterance {
-        samples_i16,
-        sample_rate_hz: sample_rate_hz.unwrap_or(PIPER_SAMPLE_RATE_HZ),
-        chunk_count,
-    }))
+    let audio_chunks = tts
+        .factory(backend)
+        .synthesize_chunks(text_chunk.to_string())
+        .await?;
+    if cancel.is_canceled() {
+        return Ok(None);
+    }
+    Ok(Some(audio_chunks))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operator::state::shared_state;
-    use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry};
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
+    use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use tokio::sync::{mpsc, Notify};
+    use tokio::time::{timeout, Duration};
 
     struct SequencedTtsFactory {
         sample_rate_hz: u32,
@@ -355,14 +394,61 @@ mod tests {
         }
     }
 
+    struct BlockingSecondChunkTtsFactory {
+        sample_rate_hz: u32,
+        samples_per_chunk: usize,
+        calls: AtomicUsize,
+        second_started: Notify,
+        release_second: Notify,
+    }
+
+    impl BlockingSecondChunkTtsFactory {
+        fn new(sample_rate_hz: u32, samples_per_chunk: usize) -> Self {
+            Self {
+                sample_rate_hz,
+                samples_per_chunk,
+                calls: AtomicUsize::new(0),
+                second_started: Notify::new(),
+                release_second: Notify::new(),
+            }
+        }
+
+        async fn wait_for_second_call(&self) {
+            self.second_started.notified().await;
+        }
+
+        fn release_second_call(&self) {
+            self.release_second.notify_waiters();
+        }
+    }
+
+    #[async_trait]
+    impl OutboundTtsFactory for BlockingSecondChunkTtsFactory {
+        async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 2 {
+                self.second_started.notify_waiters();
+                self.release_second.notified().await;
+            }
+            Ok(vec![TtsAudio::new(
+                vec![call as i16; self.samples_per_chunk],
+                self.sample_rate_hz,
+            )?])
+        }
+
+        fn label(&self) -> &'static str {
+            "blocking-test-tts"
+        }
+    }
+
     #[tokio::test]
-    async fn kokoro_mid_utterance_failure_restarts_whole_utterance_with_piper() {
+    async fn kokoro_chunk_failure_falls_back_to_piper_for_that_chunk() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let kokoro = Arc::new(SequencedTtsFactory::new(
             24_000,
             2_400,
             Some(2),
-            "kokoro mid utterance failure",
+            "kokoro chunk failure",
         ));
         let piper = Arc::new(SequencedTtsFactory::new(
             PIPER_SAMPLE_RATE_HZ,
@@ -372,33 +458,112 @@ mod tests {
         ));
         let tts = Arc::new(TtsRegistry::new(kokoro.clone(), piper.clone()));
         let cancel = SpeechCancelToken::default();
-        let text_chunks = vec!["hello,".to_string(), "world.".to_string()];
 
-        let synthesis = synthesize_utterance_with_fallback(
-            &state,
-            &tts,
-            LiveTtsBackend::Kokoro82m,
-            "gwc_test",
-            "tts_test",
-            &text_chunks,
-            &cancel,
-        )
-        .await
-        .expect("fallback should synthesize with Piper")
-        .expect("fallback should return audio");
+        let context = SpeechSynthesisContext {
+            state: &state,
+            tts: &tts,
+            backend: LiveTtsBackend::Kokoro82m,
+            gateway_call_id: "gwc_test",
+            playback_id: "tts_test",
+            cancel: &cancel,
+        };
+
+        let first = synthesize_text_chunk_with_fallback(&context, 0, "hello,")
+            .await
+            .expect("first chunk should synthesize")
+            .expect("first chunk should return audio");
+        let second = synthesize_text_chunk_with_fallback(&context, 1, "world.")
+            .await
+            .expect("second chunk should fall back to Piper")
+            .expect("fallback chunk should return audio");
 
         assert_eq!(kokoro.calls(), 2);
-        assert_eq!(piper.calls(), 2);
-        assert_eq!(synthesis.sample_rate_hz, PIPER_SAMPLE_RATE_HZ);
-        assert_eq!(synthesis.chunk_count, 2);
-        assert_eq!(synthesis.samples_i16.len(), 4_410);
+        assert_eq!(piper.calls(), 1);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].sample_rate_hz(), 24_000);
+        assert_eq!(second[0].sample_rate_hz(), PIPER_SAMPLE_RATE_HZ);
         let guard = state.read().await;
         assert!(guard.logs.iter().any(|entry| {
             entry.level == LogLevel::Warn
-                && entry
-                    .message
-                    .contains("re-synthesizing utterance with piper")
-                && entry.message.contains("kokoro mid utterance failure")
+                && entry.message.contains("synthesizing chunk with piper")
+                && entry.message.contains("kokoro chunk failure")
         }));
+    }
+
+    #[tokio::test]
+    async fn queue_speech_enqueues_first_chunk_before_second_chunk_finishes() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_outbound_call(
+                TelnyxIds {
+                    call_control_id: "call-control-1".to_string(),
+                    call_session_id: Some("session-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                None,
+                None,
+                CallStatus::MediaStarted,
+            )
+        };
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(8);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let kokoro = Arc::new(BlockingSecondChunkTtsFactory::new(24_000, 2_400));
+        let piper = Arc::new(SequencedTtsFactory::new(
+            PIPER_SAMPLE_RATE_HZ,
+            2_205,
+            None,
+            "unused",
+        ));
+        let tts = Arc::new(TtsRegistry::new(kokoro.clone(), piper));
+
+        let queued = queue_speech(
+            &state,
+            &media_registry,
+            &tts,
+            LiveTtsBackend::Kokoro82m,
+            gateway_call_id.clone(),
+            "Hello, world.".to_string(),
+            "test say",
+        )
+        .await
+        .expect("speech should be queued");
+
+        timeout(Duration::from_secs(1), kokoro.wait_for_second_call())
+            .await
+            .expect("second text chunk synthesis should start");
+        let first_command = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("first chunk should be queued before second chunk is released")
+            .expect("media command should be present");
+        match first_command {
+            OutboundMediaCommand::Frame(frame) => assert_eq!(frame.playback_id, queued.playback_id),
+            other => panic!("expected first queued command to be a frame, got {other:?}"),
+        }
+
+        kokoro.release_second_call();
+        let mut saw_mark = false;
+        for _ in 0..16 {
+            let Some(command) = timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .expect("speech job should finish")
+            else {
+                break;
+            };
+            if let OutboundMediaCommand::Mark { playback_id } = command {
+                assert_eq!(playback_id, queued.playback_id);
+                saw_mark = true;
+                break;
+            }
+        }
+        assert!(
+            saw_mark,
+            "speech job should enqueue a mark after all chunks"
+        );
     }
 }
