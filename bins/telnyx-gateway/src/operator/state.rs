@@ -1010,7 +1010,6 @@ mod tests {
         assert_eq!(call.current_partial.as_deref(), Some("WOR"));
     }
 
-
     #[test]
     fn stale_tts_cancel_does_not_demote_newer_active_playback() {
         let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));

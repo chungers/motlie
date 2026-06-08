@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-08 00:03 PDT | @codex-367-design: Updated the M4/M5 text-call coordination contract: `playback.finished` now carries terminal status, app-agent speech uses cancel-and-replace for latest-response-wins, replaced playback maps to `canceled`, and stale valid `agent.turn` replies map to `superseded` without hanging up. | Milestone 4: External Integration Harness, Application Text Call Protocol and Gateway Control API |
 | 2026-06-07 23:08 PDT | @codex-366-impl: Added M5 support for conversational text-agent handoff: speech enqueue can opt into cancel-and-replace instead of treating an active TTS slot as a protocol failure, and M4 text-call playback terminal frames should expose completed/canceled/failed/superseded status. | Milestone 5: Conversational Realism Latency Improvements, Milestone 4: External Integration Harness, Returning TTS Audio |
 | 2026-06-07 18:16 PDT | @codex-366-impl: Expanded M5 #402 conversational realism scope into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared `conversation barge-in` toggle, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that text chunk. | Milestone 5: Conversational Realism Latency Improvements, Milestone 3: Full-Duplex TUI Chat Conversation, Returning TTS Audio |
 | 2026-06-07 | @codex-366-impl: Fixed live ASR end-of-turn latency by replacing indefinite low-energy tail suppression with replay-sized local endpoint finalization: after the trailing silence pad, the gateway finishes the active ASR session and waits for new speech, so final transcripts do not depend on a later utterance. | Inbound Call Handler Design, Testing Scope |
@@ -1334,7 +1335,7 @@ Gateway-to-application frames:
 {"type":"session.start","protocol":"motlie.telnyx.text.v1","call_id":"call_01HZ...","direction":"inbound"}
 {"type":"caller.turn","turn_id":"turn_01HZ...","sequence":1,"text":"I need help with my account"}
 {"type":"playback.started","turn_id":"turn_01HZ...","sequence":2}
-{"type":"playback.finished","turn_id":"turn_01HZ...","sequence":3}
+{"type":"playback.finished","turn_id":"turn_01HZ...","sequence":3,"status":"completed"}
 {"type":"session.end","reason":"hangup","sequence":4}
 ```
 
@@ -1350,10 +1351,13 @@ Turn rules:
 - the gateway sends `caller.turn` only for ASR-final text by default
 - multiple caller turns may be outstanding at the same time; each `caller.turn` mints a distinct `turn_id` and opens one expected application response
 - the application responds with one `agent.turn` correlated by `turn_id`, or `agent.close` if it wants the gateway to end the call
-- the gateway removes the `turn_id` when the matching `agent.turn` is accepted and speaks `agent.turn.text` with TTS, then sends playback status frames
-- application frames that reference an unknown or completed `turn_id` should be rejected with an `invalid_turn` error frame and ignored
+- the gateway removes the `turn_id` when the matching `agent.turn` is accepted and speaks `agent.turn.text` with TTS, then sends `playback.started` followed by `playback.finished`
+- `playback.finished.status` is required and is one of `completed`, `canceled`, `failed`, or `superseded`
+- app-agent outbound speech uses the M5 cancel-and-replace primitive for latest-response-wins over the single media TTS slot; if a new playback replaces an older one, the older turn receives `playback.finished` with `status":"canceled"` and the WebSocket remains open
+- when a newer `caller.turn` supersedes an older unanswered turn, a later `agent.turn` for that stale-but-valid older `turn_id` receives `playback.finished` with `status":"superseded"`; it is not a protocol error and does not hang up
+- application frames that reference an unknown or already closed `turn_id` should be rejected with an `invalid_turn` error frame and ignored
 - session teardown clears all outstanding `active_turns`, and implementations should cap outstanding turns to a small sane bound so a non-responding appserver cannot grow memory unbounded
-- if caller barge-in cancels playback, the gateway should use the existing M3 clear/cancel path, emit a new `caller.turn` when ASR finalizes the interruption, and leave duplicate suppression to `turn_id` / sequence handling
+- if caller barge-in cancels playback, the gateway should use the existing M3/M5 clear/cancel path, emit a new `caller.turn` when ASR finalizes the interruption, and leave duplicate suppression to `turn_id` / sequence handling
 - either side may send WebSocket ping/pong; missed heartbeat should end the text stream and hang up the call
 
 Recommended error frame:

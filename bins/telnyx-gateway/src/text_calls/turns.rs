@@ -96,6 +96,15 @@ pub struct AcceptCallResponse {
     pub accept: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaybackFinishedStatus {
+    Completed,
+    Canceled,
+    Failed,
+    Superseded,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GatewayTextFrame {
@@ -114,7 +123,11 @@ pub enum GatewayTextFrame {
     #[serde(rename = "playback.started")]
     PlaybackStarted { turn_id: String, sequence: u64 },
     #[serde(rename = "playback.finished")]
-    PlaybackFinished { turn_id: String, sequence: u64 },
+    PlaybackFinished {
+        turn_id: String,
+        sequence: u64,
+        status: PlaybackFinishedStatus,
+    },
     #[serde(rename = "session.end")]
     SessionEnd { reason: String, sequence: u64 },
     #[serde(rename = "error")]
@@ -169,5 +182,19 @@ mod tests {
                 text: "reply".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn playback_finished_serializes_terminal_status() {
+        let frame = GatewayTextFrame::PlaybackFinished {
+            turn_id: "turn-test".to_string(),
+            sequence: 3,
+            status: PlaybackFinishedStatus::Canceled,
+        };
+        let encoded = serde_json::to_value(frame).expect("frame serializes");
+        assert_eq!(encoded["type"], "playback.finished");
+        assert_eq!(encoded["turn_id"], "turn-test");
+        assert_eq!(encoded["sequence"], 3);
+        assert_eq!(encoded["status"], "canceled");
     }
 }

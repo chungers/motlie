@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-08 00:03 PDT | @codex-367-design | Updated M4/M5 coordination tasks for text-call playback terminal status, cancel-and-replace latest-response-wins, replaced playback cancellation frames, and stale valid `agent.turn` replies reported as `superseded` without hanging up. |
 | 2026-06-07 23:08 PDT | @codex-366-impl | Added M5 cancel-and-replace speech enqueue support for conversational text-agent handoff: active speech can be replaced without poisoning the media/text session, stale clears no longer demote newer playback, and M4 should surface terminal playback status in `playback.finished`. |
 | 2026-06-07 18:16 PDT | @codex-366-impl | Expanded M5 #402 into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared toggle, including a 120 ms resumed-speech onset threshold, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that chunk. |
 | 2026-06-07 | @codex-366-impl | Fixed live ASR end-of-turn latency by finishing the active ASR session after the replay-sized trailing-silence pad; final transcripts no longer wait for a later utterance when Sherpa does not endpoint first. |
@@ -398,7 +399,7 @@ Phase 6.6 implements the gateway-owned callback and text stream runtime above th
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Inbound Offer Protocol`
 - [ ] Add `text_calls/websocket.rs` for gateway-as-client WebSocket connections to application `call_url` endpoints; use JSON text frames only and reject binary/audio frames.
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
-- [ ] Add `text_calls/turns.rs` with typed frame enums for `session.start`, `caller.turn`, `playback.started`, `playback.finished`, `session.end`, `agent.turn`, `agent.close`, and `error`.
+- [ ] Add `text_calls/turns.rs` with typed frame enums for `session.start`, `caller.turn`, `playback.started`, `playback.finished` with terminal `status`, `session.end`, `agent.turn`, `agent.close`, and `error`.
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
 - [ ] Route only ASR-final text to `caller.turn` by default; keep ASR partials out of the M4 appserver protocol unless a later extension is explicitly designed.
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
@@ -661,7 +662,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Auth and Common Rules`
 - [ ] Add blocking outbound dial API tests proving the HTTP request remains pending while Telnyx rings, returns success only after callback acceptance and text WebSocket setup, and returns structured rejection/timeout/callback-failure/WebSocket-failure errors.
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Outbound Blocking Dial API`
-- [ ] Add bidirectional text WebSocket contract tests for `session.start`, ASR-final-only `caller.turn`, multiple concurrently active `turn_id`s, `agent.turn` correlation/removal by `turn_id`, playback status frames, `agent.close`, `invalid_turn` for unknown or already-closed turns, outstanding-turn cap behavior, session teardown clearing `active_turns`, binary frame rejection, heartbeat timeout, and barge-in cancel/regenerate sequencing.
+- [ ] Add bidirectional text WebSocket contract tests for `session.start`, ASR-final-only `caller.turn`, multiple concurrently active `turn_id`s, `agent.turn` correlation/removal by `turn_id`, `playback.finished.status` values (`completed`, `canceled`, `failed`, `superseded`), cancel-and-replace mapping of replaced playback to `canceled`, stale valid older turns reported as `superseded` without hangup, `agent.close`, `invalid_turn` for unknown or already-closed turns, outstanding-turn cap behavior, session teardown clearing `active_turns`, binary frame rejection, heartbeat timeout, and barge-in cancel/regenerate sequencing.
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
 - [ ] Add `bins/telnyx-agent` daemon tests with a fake gateway: startup re-registers inbound subscriptions idempotently, inbound offer accept/decline callbacks work, outbound place-call socket blocks until text stream setup, and one WebSocket-to-tmux bridge implementation handles inbound and outbound calls.
   DESIGN reference: `Telnyx Agent Daemon` / `Validation Scope`

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,16 +13,108 @@ use uuid::Uuid;
 use crate::call_control::TelnyxClient;
 use crate::media::SharedMediaRegistry;
 use crate::operator::state::{CallStatus, LogLevel, SharedState, TtsPlaybackStatus};
-use crate::speech;
+use crate::speech::{self, SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
 
 use super::offers::validate_call_url;
-use super::turns::{AgentTextFrame, GatewayTextFrame, TextCallDirection, TEXT_CALL_PROTOCOL};
+use super::turns::{
+    AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_PROTOCOL,
+};
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
 const MAX_ACTIVE_TEXT_CALL_TURNS: usize = 32;
 const MEDIA_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const PLAYBACK_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TextCallTurnState {
+    Pending,
+    Superseded,
+    Playing { playback_id: String },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentTurnDisposition {
+    Accepted,
+    Superseded,
+    Invalid,
+}
+
+#[derive(Debug, Default)]
+struct TextCallTurnTracker {
+    turns: BTreeMap<String, TextCallTurnState>,
+    playback_turns: BTreeMap<String, String>,
+}
+
+impl TextCallTurnTracker {
+    fn add_caller_turn(&mut self, turn_id: String) -> anyhow::Result<()> {
+        if self.turns.len() >= MAX_ACTIVE_TEXT_CALL_TURNS {
+            anyhow::bail!("too many outstanding text-call turns");
+        }
+        for state in self.turns.values_mut() {
+            if matches!(state, TextCallTurnState::Pending) {
+                *state = TextCallTurnState::Superseded;
+            }
+        }
+        self.turns.insert(turn_id, TextCallTurnState::Pending);
+        Ok(())
+    }
+
+    fn accept_agent_turn(&mut self, turn_id: &str) -> AgentTurnDisposition {
+        match self.turns.get(turn_id) {
+            Some(TextCallTurnState::Pending) => {
+                self.turns.remove(turn_id);
+                AgentTurnDisposition::Accepted
+            }
+            Some(TextCallTurnState::Superseded) => {
+                self.turns.remove(turn_id);
+                AgentTurnDisposition::Superseded
+            }
+            Some(TextCallTurnState::Playing { .. }) | None => AgentTurnDisposition::Invalid,
+        }
+    }
+
+    fn start_playback(&mut self, turn_id: String, playback_id: String) {
+        if let Some(TextCallTurnState::Playing {
+            playback_id: previous_playback_id,
+        }) = self.turns.insert(
+            turn_id.clone(),
+            TextCallTurnState::Playing {
+                playback_id: playback_id.clone(),
+            },
+        ) {
+            self.playback_turns.remove(&previous_playback_id);
+        }
+        self.playback_turns.insert(playback_id, turn_id);
+    }
+
+    fn close_playback(&mut self, playback_id: &str) -> Option<String> {
+        let turn_id = self.playback_turns.remove(playback_id)?;
+        match self.turns.get(&turn_id) {
+            Some(TextCallTurnState::Playing {
+                playback_id: active,
+            }) if active == playback_id => {
+                self.turns.remove(&turn_id);
+                Some(turn_id)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_playback_active(&self, playback_id: &str) -> bool {
+        self.playback_turns.contains_key(playback_id)
+    }
+
+    fn clear(&mut self) {
+        self.turns.clear();
+        self.playback_turns.clear();
+    }
+
+    #[cfg(test)]
+    fn outstanding_len(&self) -> usize {
+        self.turns.len()
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct SharedTextCallRegistry {
@@ -48,13 +140,7 @@ impl SharedTextCallRegistry {
             return Ok(None);
         };
         let turn_id = format!("turn_{}", Uuid::new_v4().simple());
-        {
-            let mut active_turns = handle.active_turns.lock().await;
-            if active_turns.len() >= MAX_ACTIVE_TEXT_CALL_TURNS {
-                anyhow::bail!("too many outstanding text-call turns");
-            }
-            active_turns.insert(turn_id.clone());
-        }
+        handle.turns.lock().await.add_caller_turn(turn_id.clone())?;
         handle
             .send(GatewayTextFrame::CallerTurn {
                 turn_id: turn_id.clone(),
@@ -82,7 +168,7 @@ impl SharedTextCallRegistry {
 struct TextCallSessionHandle {
     tx: mpsc::Sender<GatewayTextFrame>,
     sequence: Arc<AtomicU64>,
-    active_turns: Arc<Mutex<BTreeSet<String>>>,
+    turns: Arc<Mutex<TextCallTurnTracker>>,
 }
 
 impl TextCallSessionHandle {
@@ -135,7 +221,7 @@ pub async fn connect_application_stream(
     let handle = TextCallSessionHandle {
         tx,
         sequence: Arc::new(AtomicU64::new(1)),
-        active_turns: Arc::new(Mutex::new(BTreeSet::new())),
+        turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
     };
     services
         .registry
@@ -216,7 +302,7 @@ async fn run_text_call_session<W, R>(
         }
     }
 
-    handle.active_turns.lock().await.clear();
+    handle.turns.lock().await.clear();
     services.registry.remove(&gateway_call_id).await;
     if !gateway_closed {
         let _ =
@@ -233,16 +319,32 @@ async fn handle_agent_message(
     let frame: AgentTextFrame = serde_json::from_str(text).context("decode app text-call frame")?;
     match frame {
         AgentTextFrame::AgentTurn { turn_id, text } => {
-            let mut active_turns = handle.active_turns.lock().await;
-            if !active_turns.remove(&turn_id) {
-                drop(active_turns);
-                send_error_frame(handle, "invalid_turn", "turn is not active").await?;
-                return Ok(());
+            let disposition = handle.turns.lock().await.accept_agent_turn(&turn_id);
+            match disposition {
+                AgentTurnDisposition::Accepted => {}
+                AgentTurnDisposition::Superseded => {
+                    send_playback_finished(handle, turn_id, PlaybackFinishedStatus::Superseded)
+                        .await?;
+                    return Ok(());
+                }
+                AgentTurnDisposition::Invalid => {
+                    send_error_frame(handle, "invalid_turn", "turn is not active").await?;
+                    return Ok(());
+                }
             }
-            drop(active_turns);
+
             let queued =
                 queue_agent_speech_with_media_wait(services, gateway_call_id.to_string(), text)
                     .await?;
+            if let Some(replaced_playback_id) = queued.replaced_playback_id.as_deref() {
+                send_replaced_playback_canceled(handle, replaced_playback_id).await?;
+            }
+
+            handle
+                .turns
+                .lock()
+                .await
+                .start_playback(turn_id.clone(), queued.playback_id.clone());
             handle
                 .send(GatewayTextFrame::PlaybackStarted {
                     turn_id: turn_id.clone(),
@@ -253,18 +355,23 @@ async fn handle_agent_message(
             let wait_handle = handle.clone();
             let wait_call_id = gateway_call_id.to_string();
             tokio::spawn(async move {
-                wait_for_playback_terminal(
+                if let Some(status) = wait_for_playback_terminal(
                     &wait_services.state,
+                    &wait_handle,
                     &wait_call_id,
                     &queued.playback_id,
                 )
-                .await;
-                let _ = wait_handle
-                    .send(GatewayTextFrame::PlaybackFinished {
-                        turn_id,
-                        sequence: wait_handle.next_sequence(),
-                    })
-                    .await;
+                .await
+                {
+                    let turn_id = wait_handle
+                        .turns
+                        .lock()
+                        .await
+                        .close_playback(&queued.playback_id);
+                    if let Some(turn_id) = turn_id {
+                        let _ = send_playback_finished(&wait_handle, turn_id, status).await;
+                    }
+                }
             });
         }
         AgentTextFrame::AgentClose { reason } => {
@@ -294,6 +401,40 @@ async fn send_error_frame(
         .await
 }
 
+async fn send_playback_finished(
+    handle: &TextCallSessionHandle,
+    turn_id: String,
+    status: PlaybackFinishedStatus,
+) -> anyhow::Result<()> {
+    handle
+        .send(GatewayTextFrame::PlaybackFinished {
+            turn_id,
+            sequence: handle.next_sequence(),
+            status,
+        })
+        .await
+}
+
+async fn send_replaced_playback_canceled(
+    handle: &TextCallSessionHandle,
+    replaced_playback_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let replaced_turn_id = handle
+        .turns
+        .lock()
+        .await
+        .close_playback(replaced_playback_id);
+    if let Some(replaced_turn_id) = replaced_turn_id.as_ref() {
+        send_playback_finished(
+            handle,
+            replaced_turn_id.clone(),
+            PlaybackFinishedStatus::Canceled,
+        )
+        .await?;
+    }
+    Ok(replaced_turn_id)
+}
+
 async fn queue_agent_speech_with_media_wait(
     services: &TextCallStreamServices,
     gateway_call_id: String,
@@ -301,14 +442,17 @@ async fn queue_agent_speech_with_media_wait(
 ) -> anyhow::Result<speech::QueuedSpeech> {
     let deadline = Instant::now() + MEDIA_READY_TIMEOUT;
     loop {
-        match speech::queue_speech(
+        match speech::queue_speech_with_request(
             &services.state,
             &services.media,
             &services.tts,
-            LiveTtsBackend::default(),
-            gateway_call_id.clone(),
-            text.clone(),
-            "text-call agent.turn",
+            SpeechQueueRequest {
+                tts_backend: LiveTtsBackend::default(),
+                gateway_call_id: gateway_call_id.clone(),
+                text: text.clone(),
+                source_label: "text-call agent.turn".to_string(),
+                conflict_policy: SpeechConflictPolicy::CancelAndReplace,
+            },
         )
         .await
         {
@@ -331,32 +475,80 @@ pub async fn queue_fallback_and_wait(
 ) -> anyhow::Result<()> {
     let queued =
         queue_agent_speech_with_media_wait(services, gateway_call_id.clone(), text).await?;
-    wait_for_playback_terminal(&services.state, &gateway_call_id, &queued.playback_id).await;
+    wait_for_playback_terminal_without_turn(&services.state, &gateway_call_id, &queued.playback_id)
+        .await;
     Ok(())
 }
 
-async fn wait_for_playback_terminal(state: &SharedState, gateway_call_id: &str, playback_id: &str) {
+async fn wait_for_playback_terminal_without_turn(
+    state: &SharedState,
+    gateway_call_id: &str,
+    playback_id: &str,
+) {
     let deadline = Instant::now() + PLAYBACK_WAIT_TIMEOUT;
     loop {
-        let terminal = {
-            let guard = state.read().await;
-            guard.calls.get(gateway_call_id).is_none_or(|call| {
-                matches!(call.status, CallStatus::Ended | CallStatus::Failed)
-                    || call.tts.as_ref().is_some_and(|tts| {
-                        tts.playback_id == playback_id
-                            && matches!(
-                                tts.status,
-                                TtsPlaybackStatus::Completed
-                                    | TtsPlaybackStatus::Canceled
-                                    | TtsPlaybackStatus::Failed
-                            )
-                    })
-            })
-        };
-        if terminal || Instant::now() >= deadline {
+        if playback_terminal_status(state, gateway_call_id, playback_id)
+            .await
+            .is_some()
+            || Instant::now() >= deadline
+        {
             return;
         }
         time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_playback_terminal(
+    state: &SharedState,
+    handle: &TextCallSessionHandle,
+    gateway_call_id: &str,
+    playback_id: &str,
+) -> Option<PlaybackFinishedStatus> {
+    let deadline = Instant::now() + PLAYBACK_WAIT_TIMEOUT;
+    loop {
+        if !handle.turns.lock().await.is_playback_active(playback_id) {
+            return None;
+        }
+        if let Some(status) = playback_terminal_status(state, gateway_call_id, playback_id).await {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return Some(PlaybackFinishedStatus::Failed);
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn playback_terminal_status(
+    state: &SharedState,
+    gateway_call_id: &str,
+    playback_id: &str,
+) -> Option<PlaybackFinishedStatus> {
+    let guard = state.read().await;
+    let Some(call) = guard.calls.get(gateway_call_id) else {
+        return Some(PlaybackFinishedStatus::Failed);
+    };
+    if matches!(call.status, CallStatus::Ended | CallStatus::Failed) {
+        return Some(PlaybackFinishedStatus::Failed);
+    }
+    call.tts.as_ref().and_then(|tts| {
+        if tts.playback_id == playback_id {
+            playback_finished_status(tts.status)
+        } else {
+            None
+        }
+    })
+}
+
+fn playback_finished_status(status: TtsPlaybackStatus) -> Option<PlaybackFinishedStatus> {
+    match status {
+        TtsPlaybackStatus::Completed => Some(PlaybackFinishedStatus::Completed),
+        TtsPlaybackStatus::Canceled => Some(PlaybackFinishedStatus::Canceled),
+        TtsPlaybackStatus::Failed => Some(PlaybackFinishedStatus::Failed),
+        TtsPlaybackStatus::Queued
+        | TtsPlaybackStatus::Playing
+        | TtsPlaybackStatus::MarkSent
+        | TtsPlaybackStatus::Canceling => None,
     }
 }
 
@@ -441,7 +633,7 @@ mod tests {
             .expect("second turn id");
 
         assert_ne!(first, second);
-        assert_eq!(handle.active_turns.lock().await.len(), 2);
+        assert_eq!(handle.turns.lock().await.outstanding_len(), 2);
         assert!(matches!(
             rx.recv().await,
             Some(GatewayTextFrame::CallerTurn { text, .. }) if text == "first"
@@ -458,9 +650,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let handle = test_handle(tx);
         {
-            let mut active_turns = handle.active_turns.lock().await;
+            let mut turns = handle.turns.lock().await;
             for index in 0..MAX_ACTIVE_TEXT_CALL_TURNS {
-                active_turns.insert(format!("turn-preexisting-{index}"));
+                turns.turns.insert(
+                    format!("turn-preexisting-{index}"),
+                    TextCallTurnState::Pending,
+                );
             }
         }
         registry
@@ -475,16 +670,108 @@ mod tests {
         assert!(format!("{error:#}").contains("too many outstanding text-call turns"));
         assert!(rx.try_recv().is_err());
         assert_eq!(
-            handle.active_turns.lock().await.len(),
+            handle.turns.lock().await.outstanding_len(),
             MAX_ACTIVE_TEXT_CALL_TURNS
         );
+    }
+
+    #[test]
+    fn turn_tracker_reports_older_pending_turns_as_superseded() {
+        let mut tracker = TextCallTurnTracker::default();
+        tracker
+            .add_caller_turn("turn-old".to_string())
+            .expect("old turn accepted");
+        tracker
+            .add_caller_turn("turn-new".to_string())
+            .expect("new turn accepted");
+
+        assert_eq!(
+            tracker.accept_agent_turn("turn-old"),
+            AgentTurnDisposition::Superseded
+        );
+        assert_eq!(tracker.outstanding_len(), 1);
+        assert_eq!(
+            tracker.accept_agent_turn("turn-old"),
+            AgentTurnDisposition::Invalid
+        );
+        assert_eq!(
+            tracker.accept_agent_turn("turn-new"),
+            AgentTurnDisposition::Accepted
+        );
+    }
+
+    #[test]
+    fn turn_tracker_closes_replaced_playback_once() {
+        let mut tracker = TextCallTurnTracker::default();
+        tracker
+            .add_caller_turn("turn-old".to_string())
+            .expect("turn accepted");
+        assert_eq!(
+            tracker.accept_agent_turn("turn-old"),
+            AgentTurnDisposition::Accepted
+        );
+        tracker.start_playback("turn-old".to_string(), "tts-old".to_string());
+
+        assert_eq!(
+            tracker.close_playback("tts-old"),
+            Some("turn-old".to_string())
+        );
+        assert!(!tracker.is_playback_active("tts-old"));
+        assert_eq!(tracker.close_playback("tts-old"), None);
+        assert_eq!(
+            tracker.accept_agent_turn("turn-old"),
+            AgentTurnDisposition::Invalid
+        );
+    }
+
+    #[test]
+    fn tts_terminal_status_maps_to_playback_finished_status() {
+        assert_eq!(
+            playback_finished_status(TtsPlaybackStatus::Completed),
+            Some(PlaybackFinishedStatus::Completed)
+        );
+        assert_eq!(
+            playback_finished_status(TtsPlaybackStatus::Canceled),
+            Some(PlaybackFinishedStatus::Canceled)
+        );
+        assert_eq!(
+            playback_finished_status(TtsPlaybackStatus::Failed),
+            Some(PlaybackFinishedStatus::Failed)
+        );
+        assert_eq!(playback_finished_status(TtsPlaybackStatus::Queued), None);
+    }
+
+    #[tokio::test]
+    async fn replaced_playback_emits_canceled_finished_frame() {
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let handle = test_handle(tx);
+        handle
+            .turns
+            .lock()
+            .await
+            .start_playback("turn-old".to_string(), "tts-old".to_string());
+
+        let closed_turn = send_replaced_playback_canceled(&handle, "tts-old")
+            .await
+            .expect("canceled frame should send");
+
+        assert_eq!(closed_turn.as_deref(), Some("turn-old"));
+        assert!(matches!(
+            rx.recv().await,
+            Some(GatewayTextFrame::PlaybackFinished {
+                turn_id,
+                status: PlaybackFinishedStatus::Canceled,
+                ..
+            }) if turn_id == "turn-old"
+        ));
+        assert!(!handle.turns.lock().await.is_playback_active("tts-old"));
     }
 
     fn test_handle(tx: mpsc::Sender<GatewayTextFrame>) -> TextCallSessionHandle {
         TextCallSessionHandle {
             tx,
             sequence: Arc::new(AtomicU64::new(1)),
-            active_turns: Arc::new(Mutex::new(BTreeSet::new())),
+            turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
         }
     }
 }

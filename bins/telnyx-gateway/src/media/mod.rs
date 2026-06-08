@@ -1038,6 +1038,7 @@ async fn ingest_frame(
                 media_state,
                 Some(gateway_call_id.as_str()),
                 Some(stream_id.to_string()),
+                text_calls,
             )
             .await?;
             media_state.asr_gate.wait_for_next_speech();
