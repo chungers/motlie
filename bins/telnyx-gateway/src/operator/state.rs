@@ -777,18 +777,26 @@ impl GatewayState {
     }
 
     pub fn mark_tts_canceled(&mut self, gateway_call_id: &str, playback_id: &str) {
+        let mut canceled = false;
         self.update_tts(gateway_call_id, playback_id, |tts| {
-            tts.status = TtsPlaybackStatus::Canceled;
+            if tts.status != TtsPlaybackStatus::Failed {
+                tts.status = TtsPlaybackStatus::Canceled;
+                canceled = true;
+            }
         });
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             if call.status == CallStatus::Speaking {
                 call.status = status_after_tts(call);
             }
-            if call.conversation.last_playback_id.as_deref() == Some(playback_id) {
+            if canceled && call.conversation.last_playback_id.as_deref() == Some(playback_id) {
                 call.conversation.status = ConversationStatus::Idle;
                 call.conversation.updated_at = Utc::now();
             }
-            call.push_timeline(format!("tts {playback_id} canceled"));
+            if canceled {
+                call.push_timeline(format!("tts {playback_id} canceled"));
+            } else {
+                call.push_timeline(format!("tts {playback_id} clear sent after failure"));
+            }
         }
     }
 
@@ -799,6 +807,9 @@ impl GatewayState {
         });
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.last_error = Some(error.clone());
+            if call.status == CallStatus::Speaking {
+                call.status = status_after_tts(call);
+            }
             if call.conversation.last_playback_id.as_deref() == Some(playback_id) {
                 call.conversation.status = ConversationStatus::Failed;
                 call.conversation.last_error = Some(error.clone());

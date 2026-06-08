@@ -1234,8 +1234,6 @@ impl AsrGate {
             let was_started = self.speech_started;
             let resumed_after_onset_pause =
                 self.low_energy_run_ms >= ASR_SPEECH_ONSET_MIN_SILENCE_MS;
-            let resumed_after_tail =
-                self.low_energy_run_ms > ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS;
             let speech_onset = !was_started || resumed_after_onset_pause;
             self.speech_started = true;
             self.low_energy_run_ms = 0;
@@ -1247,15 +1245,6 @@ impl AsrGate {
                     peak = stats.peak,
                     rms = stats.rms,
                     "media.speech.detected"
-                );
-            } else if resumed_after_tail {
-                tracing::info!(
-                    stream_id,
-                    frame_index,
-                    suppressed_tail_frames = self.suppressed_tail_frames,
-                    peak = stats.peak,
-                    rms = stats.rms,
-                    "media.speech.resumed"
                 );
             }
             return AsrFrameDecision::Continue { speech_onset };
@@ -1525,7 +1514,10 @@ mod tests {
     use crate::adapter::{
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
-    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
+    use crate::tts::{
+        LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
+    };
 
     #[test]
     fn pcma_and_pcmu_decode_to_i16_audio() {
@@ -1633,6 +1625,114 @@ mod tests {
 
         assert_eq!(packets.len(), 5);
         assert!(packets.iter().all(|packet| packet.len() == 160));
+    }
+
+    struct FailingSecondChunkTtsFactory {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl OutboundTtsFactory for FailingSecondChunkTtsFactory {
+        async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 2 {
+                bail!("second chunk failed");
+            }
+            Ok(vec![TtsAudio::new(
+                vec![1_000; 2_205],
+                PIPER_SAMPLE_RATE_HZ,
+            )?])
+        }
+
+        fn label(&self) -> &'static str {
+            "failing-second-chunk-test-tts"
+        }
+    }
+
+    #[tokio::test]
+    async fn chunked_tts_failure_requests_clear_and_drops_queued_audio() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_outbound_call(
+                TelnyxIds {
+                    call_control_id: "call-control-1".to_string(),
+                    call_session_id: Some("session-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                None,
+                None,
+                CallStatus::MediaStarted,
+            )
+        };
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, rx) = mpsc::channel(16);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
+        media_state.gateway_call_id = Some(gateway_call_id.clone());
+        media_state.outbound_rx = Some(rx);
+        let failing_tts = Arc::new(FailingSecondChunkTtsFactory {
+            calls: AtomicUsize::new(0),
+        });
+        let tts = Arc::new(TtsRegistry::new(failing_tts.clone(), failing_tts));
+
+        let queued = crate::speech::queue_speech(
+            &state,
+            &media_registry,
+            &tts,
+            LiveTtsBackend::Piper,
+            gateway_call_id.clone(),
+            "Hello, world.".to_string(),
+            "test say",
+        )
+        .await
+        .expect("speech should start");
+
+        let clear = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(command) = pending_clear_command(&mut media_state).await {
+                    return command;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed chunk should request clear");
+
+        match clear {
+            OutboundMediaCommand::Clear { playback_id } => {
+                assert_eq!(playback_id, queued.playback_id)
+            }
+            other => panic!("expected clear command, got {other:?}"),
+        }
+        assert!(next_outbound_command(&mut media_state).is_none());
+        assert!(media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await
+            .is_none());
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        let tts = call.tts.as_ref().expect("TTS state should exist");
+        assert_eq!(tts.status, TtsPlaybackStatus::Failed);
+        assert!(tts
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("second chunk failed")));
+        assert_eq!(call.status, CallStatus::MediaStarted);
+        drop(guard);
+
+        state
+            .write()
+            .await
+            .mark_tts_canceled(&gateway_call_id, &queued.playback_id);
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        let tts = call.tts.as_ref().expect("TTS state should exist");
+        assert_eq!(tts.status, TtsPlaybackStatus::Failed);
     }
 
     #[tokio::test]

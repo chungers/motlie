@@ -559,7 +559,7 @@ Verification (@codex-366-impl, 2026-06-05 23:34 PDT): `cargo build -p motlie-tel
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [x] Enqueue outbound TTS after each synthesized text chunk instead of waiting for the whole utterance. (@codex-366-impl, 2026-06-07 18:16 PDT: `speech::queue_speech` sends the first text chunk before later chunks finish; backend audio chunks inside one text chunk are concatenated before resampling/packetization to avoid short-chunk resampler resets.)
   DESIGN reference: `Transport Streaming vs Incremental TTS`, `Real-Time Latency Requirements`
-- [ ] Capture live M5 validation numbers for endpoint-to-final latency, final-to-first-frame latency, outbound frame pacing, barge-in cut time, and human-reported playback smoothness.
+- [ ] Capture live M5 validation numbers for endpoint-to-final latency, final-to-first-frame latency, outbound frame pacing, barge-in cut time, and human-reported playback smoothness. (@codex-366-impl, 2026-06-07 22:15 PDT: include chunked-enqueue boundary residuals in this validation: per-text-chunk resampler edge transients, up to about 20 ms zero-padding at each text-chunk boundary, and mid-utterance underrun risk when a later chunk synthesizes slower than playback drains.)
   DESIGN reference: `Testing Scope for PLAN`, `Real-Time Latency Requirements`
 
 ### 8.4 - Milestone 4 external integration harness (#367)

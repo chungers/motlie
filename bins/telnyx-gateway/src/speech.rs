@@ -108,21 +108,58 @@ async fn run_speech_job(job: SpeechJob) {
                 .finish_speech(&job.gateway_call_id, &job.playback_id)
                 .await;
         }
-        Err(error) => {
-            job.media_registry
-                .finish_speech(&job.gateway_call_id, &job.playback_id)
-                .await;
+        Err(failure) => {
+            if failure.queued_frames > 0 {
+                request_failed_speech_clear(&job, failure.queued_frames).await;
+            } else {
+                job.media_registry
+                    .finish_speech(&job.gateway_call_id, &job.playback_id)
+                    .await;
+            }
             let mut guard = job.state.write().await;
-            guard.mark_tts_failed(&job.gateway_call_id, &job.playback_id, format!("{error:#}"));
+            guard.mark_tts_failed(
+                &job.gateway_call_id,
+                &job.playback_id,
+                format!("{:#}", failure.error),
+            );
             guard.log(
                 LogLevel::Error,
-                format!("speak failed for {}: {error:#}", job.gateway_call_id),
+                format!(
+                    "speak failed for {}: {:#}",
+                    job.gateway_call_id, failure.error
+                ),
             );
             tracing::error!(
                 gateway_call_id = job.gateway_call_id.as_str(),
                 playback_id = job.playback_id.as_str(),
-                error = %error,
+                queued_frames = failure.queued_frames,
+                error = %failure.error,
                 "tts.speak.failed"
+            );
+        }
+    }
+}
+
+async fn request_failed_speech_clear(job: &SpeechJob, queued_frames: usize) {
+    match job.media_registry.cancel_speech(&job.gateway_call_id).await {
+        Ok(playback_id) => {
+            tracing::warn!(
+                gateway_call_id = job.gateway_call_id.as_str(),
+                playback_id,
+                queued_frames,
+                "tts.speak.failed_clear_requested"
+            );
+        }
+        Err(error) => {
+            job.media_registry
+                .finish_speech(&job.gateway_call_id, &job.playback_id)
+                .await;
+            tracing::warn!(
+                gateway_call_id = job.gateway_call_id.as_str(),
+                playback_id = job.playback_id.as_str(),
+                queued_frames,
+                error = %error,
+                "tts.speak.failed_clear_unavailable"
             );
         }
     }
@@ -133,7 +170,21 @@ enum SpeechJobOutcome {
     NoAudioOrCanceled,
 }
 
-async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcome> {
+struct SpeechJobFailure {
+    error: anyhow::Error,
+    queued_frames: usize,
+}
+
+impl SpeechJobFailure {
+    fn new(error: anyhow::Error, queued_frames: usize) -> Self {
+        Self {
+            error,
+            queued_frames,
+        }
+    }
+}
+
+async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, SpeechJobFailure> {
     let text_chunks = split_speech_text(&job.text);
     let synthesis_context = SpeechSynthesisContext {
         state: &job.state,
@@ -149,19 +200,23 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
     for (text_chunk_index, text_chunk) in text_chunks.iter().enumerate() {
         let Some(audio_chunks) =
             synthesize_text_chunk_with_fallback(&synthesis_context, text_chunk_index, text_chunk)
-                .await?
+                .await
+                .map_err(|error| SpeechJobFailure::new(error, queued_frames))?
         else {
             return Ok(SpeechJobOutcome::NoAudioOrCanceled);
         };
         if job.cancel.is_canceled() {
             return Ok(SpeechJobOutcome::NoAudioOrCanceled);
         }
-        let Some(synthesis) = concatenate_audio_chunks(job.tts_backend, audio_chunks)? else {
+        let Some(synthesis) = concatenate_audio_chunks(job.tts_backend, audio_chunks)
+            .map_err(|error| SpeechJobFailure::new(error, queued_frames))?
+        else {
             continue;
         };
 
         let packets =
-            packetize_tts_samples(synthesis.samples_i16, synthesis.sample_rate_hz, job.media)?;
+            packetize_tts_samples(synthesis.samples_i16, synthesis.sample_rate_hz, job.media)
+                .map_err(|error| SpeechJobFailure::new(error, queued_frames))?;
         let chunk_frames = packets.len();
         if chunk_frames == 0 {
             continue;
@@ -194,7 +249,8 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
                     playback_id: job.playback_id.clone(),
                     payload,
                 }))
-                .await?;
+                .await
+                .map_err(|error| SpeechJobFailure::new(error, queued_frames))?;
         }
     }
 
@@ -203,7 +259,8 @@ async fn run_speech_job_inner(job: &SpeechJob) -> anyhow::Result<SpeechJobOutcom
             .send(OutboundMediaCommand::Mark {
                 playback_id: job.playback_id.clone(),
             })
-            .await?;
+            .await
+            .map_err(|error| SpeechJobFailure::new(error, queued_frames))?;
         tracing::info!(
             gateway_call_id = job.gateway_call_id.as_str(),
             playback_id = job.playback_id.as_str(),
