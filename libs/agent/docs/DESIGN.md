@@ -1,27 +1,31 @@
-# Design: Agent Channel Managed Message Delivery
+# Design: agent::Channel Managed Message Delivery
 
 ## Changelog
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
-| 2026-06-08 22:22 PDT | @codex-421-design | Reworked the central abstraction from receiver-like inbox to per-process `AgentChannel`, explicitly scoped guarantees to one process targeting one tmux session, and made synchronous send vs asynchronous broadcast/timer semantics first-class in the API sketch. |
+| 2026-06-08 23:27 PDT | @codex-421-design | Addressed PR #423 round-1 review: renamed the API to `Channel`/`ChannelManager`/`SessionKey`/`UiProfile`, made stable resolved tmux identity required, specified the needed `motlie-tmux` writable-client activity signal, removed duplicate submit-policy sources, defined outcome/error/verification contracts, defaulted dedup with zero-or-many waiters, added channel delivery events for mstream observability, clarified M4 as crate-level reuse only, and expanded mixed sync/async test coverage. |
+| 2026-06-08 22:22 PDT | @codex-421-design | Reworked the central abstraction from receiver-like inbox to per-process channel, explicitly scoped guarantees to one process targeting one tmux session, and made synchronous send vs asynchronous broadcast/timer semantics first-class in the API sketch. |
 | 2026-06-08 22:14 PDT | @codex-421-design | Initial DESIGN for issue #421: new `libs/agent` crate with a per-agent-session managed delivery primitive that centralizes no-barge-in, dedup, attributed coalescing, composer preservation, and verified prompt submit for mstream send/broadcast, mstream timers, and the future M4 Telnyx transcript sink. |
 
 ## Status
 
 Draft for [issue #421](https://github.com/chungers/motlie/issues/421), tracked in
-[Discussion #422](https://github.com/chungers/motlie/discussions/422).
+[Discussion #422](https://github.com/chungers/motlie/discussions/422). This is a
+DESIGN-only update for PR #423; implementation starts only after reviewer
+re-accept.
 
-This is DESIGN-only. No `libs/agent` crate scaffolding or feature code should
-land until reviewers approve the design. Although issue #421 uses "inbox" in
-the title, this design recommends the crate's central type be named
-`AgentChannel` for the scope reasons below.
+Although issue #421 uses "inbox" in the title, this design recommends the
+central inbound type be `agent::Channel`. In Rust API terms, `agent::Channel`
+reads better than `agent::AgentChannel` and follows David's review direction to
+avoid C-STUTTER.
 
 Product mode is mixed:
 
 - `libs/agent` is a new product surface.
-- Its first consumers are brownfield mstream call paths and a planned M4
-  Telnyx sink, so this design includes migration paths for those integrations.
+- Its first implementation consumers are brownfield mstream call paths.
+- The future M4 Telnyx transcript sink reuses the crate API, but cross-process
+  sharing with mstream is explicitly out of scope for #421.
 
 ## Problem
 
@@ -32,17 +36,22 @@ sessions, and each path owns a different slice of delivery policy:
 |----------|--------------|-------|-------|------------|--------|
 | `mstream send` | `bins/mstream/src/state.rs:1745` -> `send_text_to_resolved` at `state.rs:3490` | none | none | none | text and Enter in one `KeySequence` |
 | `mstream broadcast` | `bins/mstream/src/state.rs:1877` -> `send_text_to_resolved` at `state.rs:3490` | none | none | none | text and Enter in one `KeySequence` |
-| `mstream timer` | `timer_fire_once_shared` at `state.rs:2452` | `evaluate_input_guard` at `state.rs:3527` using `HostHandle::session_client_activity` | implicit single timer slot | implicit single timer slot | payload send, then retry Enter helper |
-| M4 Telnyx transcript sink | future `TmuxTranscriptSink` described in `bins/telnyx-gateway/docs/DESIGN.md:432` | TBD | TBD | TBD | TBD |
+| `mstream timer` | `timer_fire_once_shared` at `state.rs:2452` | partial current guard in `state.rs:3527` | implicit single timer slot | implicit single timer slot | payload send, then retry Enter helper |
+| future M4 Telnyx transcript sink | `TmuxTranscriptSink` planned in `bins/telnyx-gateway/docs/DESIGN.md:432` | TBD | TBD | TBD | TBD |
 
-The shared low-level signal already exists in `motlie-tmux`:
+`motlie-tmux` already exposes part of the needed signal:
 `HostHandle::session_client_activity()` summarizes attached client activity
 (`libs/tmux/src/host.rs:626`) and returns `SessionClientActivity` with
-`latest_client_activity` (`libs/tmux/src/types.rs:1074`). What is missing is one
-agent-facing policy layer that all sources use before sending keys.
+`latest_client_activity` (`libs/tmux/src/types.rs:1074`). That current field is
+not sufficient for the desired no-barge-in policy because it is computed across
+all attached clients, including read-only clients. To keep layering correct,
+`motlie-tmux` must expose mechanism facts, and `libs/agent` must own the policy.
+This design therefore requires a small `motlie-tmux` extension:
+`SessionClientActivity.latest_writable_client_activity: Option<u64>` or an
+equivalent per-client activity/read-only fact usable by `libs/agent`.
 
-The broken submit behavior from #420 is part of the same problem. `mstream`
-currently builds `KeySequence::literal(payload).then_enter()` in
+The broken submit behavior from #420 is part of the same delivery problem.
+`mstream` currently builds `KeySequence::literal(payload).then_enter()` in
 `send_text_to_resolved`, so a large bracketed paste can absorb Enter into the
 composer instead of submitting it. mmux's `$$` flow avoids this by sending text,
 waiting, then sending a separate Enter (`bins/mmux/controller.rs:29-30` and
@@ -50,61 +59,55 @@ waiting, then sending a separate Enter (`bins/mmux/controller.rs:29-30` and
 
 ## Goals
 
-- Provide one managed message-delivery primitive: a per-process channel to one
-  uniquely identifiable agent tmux session.
-- Reuse it for mstream `send`/`broadcast`, mstream timer self-triggers, and the
-  future M4 `TmuxTranscriptSink`.
-- Apply no-barge-in uniformly by using the existing `motlie-tmux` quiet guard
-  signal.
-- Deduplicate identical pending messages on that channel without losing source
-  attribution.
+- Provide one managed message-delivery primitive: a process-local `Channel` to
+  one stable, resolved agent tmux session identity.
+- Reuse that primitive for mstream `send`, mstream `broadcast`, mstream timer
+  self-triggers, and future Telnyx transcript delivery at the crate level.
+- Apply no-barge-in uniformly using writable-client activity reported by
+  `motlie-tmux`.
+- Deduplicate identical pending messages on a channel by default without losing
+  source attribution or waiter notification.
 - Coalesce pending multi-source directives into one naturally readable prompt
   body with attribution.
-- Preserve already-typed, unsubmitted composer text by appending below it with
-  a separator instead of jamming onto the same line.
+- Preserve already-typed, unsubmitted composer text by appending below it with a
+  separator instead of jamming onto the same line.
 - Make prompt submit reliable by decoupling payload from Enter, adding a settle
-  delay, sending Enter separately, and retrying with verification where an
-  agent UI profile can observe composer state.
+  delay, sending Enter separately, and retrying with verification where a UI
+  profile can observe composer state.
 - Keep `motlie-tmux` focused on tmux mechanisms and keep agent interaction
   policy in `libs/agent`.
 
 ## Non-Goals
 
-- No feature implementation in this DESIGN step.
-- No cross-process global mailbox or lock. If two different processes create
-  channels to the same tmux session, this crate cannot dedup, coalesce, order,
-  or mutually exclude their writes; they can interleave at the tmux layer.
-- No durable, cross-daemon-restart queue in the first design. The channel may be
-  in-memory, matching current mstream timer state.
+- No feature implementation in this DESIGN revision.
+- No cross-process global mailbox, lock, ordering, dedup, or coalescing. If two
+  different processes create channels to the same tmux session, their final
+  keystroke streams can interleave at the tmux layer.
+- No durable, cross-daemon-restart queue in the first implementation. The
+  channel state may be in-memory, matching current mstream timer state.
 - No universal private-state introspection for arbitrary agent TUIs. Composer
-  and submit verification should be adapter/profile based, with conservative
-  fallbacks when only tmux capture is available.
-- No machine envelope prompt format. Coalesced directives must remain natural
-  text intended for an agent to read.
-- No migration of all historical mstream event schema in the first slice.
-  Existing events can be preserved while delivery metadata is added surgically.
-- No new third-party dependency is required by this design. Prefer workspace
-  `tokio`, `serde`, and `thiserror` before adding crates.
+  and submit verification are profile based, with conservative generic fallback
+  behavior.
+- No machine envelope prompt format. Coalesced directives remain natural text
+  intended for an agent to read.
+- No implementation work for the Telnyx sink in #421. The M4 path is documented
+  as future crate-level reuse.
 
 ## Recommended Design
 
-Create a new crate, `libs/agent` (`motlie-agent`), depending on `motlie-tmux`.
-Its central inbound type should be `AgentChannel`, not `AgentInbox`. The crate
-owns reusable agent interaction policy:
+Create `libs/agent` (`motlie-agent`) depending on `motlie-tmux`. The crate owns
+agent interaction policy above tmux mechanisms:
 
-- Inbound: managed prompt delivery through per-process channels to agent
-  sessions.
+- Inbound: managed prompt delivery through process-local `Channel` handles.
 - Outbound: future response extraction helpers for marker/history scraping and
   agent reply parsing.
 
-The first implemented surface should focus on inbound delivery while leaving the
-crate/module layout ready for outbound response extraction. This keeps the
-crate coherent without requiring response extraction implementation in the
-first slice.
+The first implemented surface should focus on inbound delivery while reserving
+module/API room for outbound response extraction.
 
 ### Named Decision: Channel, Not Inbox
 
-Use `AgentChannel` as the central abstraction.
+Use `Channel` as the central abstraction.
 
 David's 2026-06-08 issue comment clarifies the scope: the object is per running
 process connecting to one uniquely identifiable tmux session. Multiple threads
@@ -115,13 +118,15 @@ across all processes that might talk to the same tmux session.
 `Inbox` implies a globally singular mailbox owned by the receiving agent.
 Motlie cannot guarantee that today because tmux accepts keystrokes from any
 process with access to the session. `Channel` is more accurate: it is a
-sender-side managed conduit from one process to one agent session.
+sender-side managed conduit from one process to one resolved agent session.
 
 Scope:
 
-- Key: `(process, host/session identity)`.
-- Handled: intra-process multi-source queuing, dedup, attributed coalescing,
-  no-barge-in checks, composer preservation, and submit verification.
+- Key: `SessionKey`, derived from process-local manager identity plus stable
+  resolved tmux identity.
+- Handled: intra-process multi-source queuing, default dedup, attributed
+  coalescing, no-barge-in checks, composer preservation, submit verification,
+  and delivery events.
 - Not handled: cross-process global ordering, cross-process dedup/coalescing,
   exactly-once delivery across process restarts, or mutual exclusion against
   unrelated tmux writers.
@@ -132,21 +137,55 @@ Guarantee within one process:
 - all sources using that channel share pending-message state
 - synchronous callers can wait for submit confirmation
 - asynchronous callers can enqueue without blocking their workflow
-- channel delivery still respects observed tmux activity before it writes
+- channel delivery observes writable-client activity before it writes
+- every accepted message has observable delivery lifecycle events
 
 If multiple processes/channels target the same tmux session, each channel keeps
-its own guarantees, but final keystroke streams can interleave at tmux. That is
-out of scope for `libs/agent` unless Motlie later introduces a shared daemon or
-tmux-side lock protocol.
+its own local guarantees, but final keystroke streams can interleave at tmux.
+That remains out of scope unless Motlie later introduces a shared daemon or
+lock protocol.
+
+### Stable Identity
+
+`SessionKey` must be derived from a stable resolved tmux identity, not from a
+human-display session name alone.
+
+Recommended shape:
+
+```rust
+pub struct SessionKey {
+    pub host_alias: String,
+    pub host_connection_id: String,
+    pub tmux_session_id: Option<String>,
+    pub tmux_session_name: String,
+    pub tmux_session_created: Option<u64>,
+}
+```
+
+Rules:
+
+- Prefer tmux `session_id` plus `session_created` when available.
+- Include host identity so two hosts with the same tmux session id do not
+  collide.
+- Keep `tmux_session_name` for diagnostics and fallback only.
+- If only name fallback is available, `session_created` must participate in the
+  key and mstream freshness checks must invalidate the channel on reuse.
+- On disconnect, reclaim, quarantine, or stale-session detection, mstream must
+  remove the channel for that `SessionKey`.
+
+This matches current mstream safety patterns: resolve target, check freshness,
+then act on a stable target. A reused tmux session name must never inherit an old
+pending queue.
 
 ### Layering
 
-`motlie-tmux` stays a pure mechanism library:
+`motlie-tmux` stays a mechanism library:
 
 - discover hosts/sessions/panes
 - send literal text and special keys
 - capture pane text
-- summarize attached-client activity
+- summarize attached-client activity facts, including latest writable-client
+  activity after the required extension
 
 `libs/agent` owns policy above those mechanisms:
 
@@ -155,38 +194,39 @@ tmux-side lock protocol.
 - format attributed prompt bodies
 - preserve composer text
 - submit and verify agent prompts
+- emit delivery lifecycle events
 - later, extract agent responses from history/markers
 
-mstream and the future Telnyx agent should call `libs/agent` instead of owning
-their own tmux delivery policy.
+mstream and future Telnyx code call `libs/agent` instead of owning their own
+prompt-delivery policy.
 
 ## High-Level System Design
 
 ```text
-sources
-  mstream send
-  mstream broadcast
-  mstream timer
-  M4 TmuxTranscriptSink
+sources inside one process
+  mstream daemon process: send, broadcast, timer
+  future Telnyx process: transcript sink with its own manager
         |
         v
-AgentChannelManager
-  keyed by process-local AgentChannelKey
+ChannelManager
+  daemon/process lifetime owner
+  get-or-create by SessionKey
         |
         v
-AgentChannel
-  pending segments for one tmux session
-  delivery waiters
+Channel handle
+  cheap Clone/Arc-backed shared state
+  pending segments for one stable tmux session
+  zero-or-many waiters per segment
   coalescing window
   quiet/defer state
         |
         v
 QuietGuard
-  HostHandle::session_client_activity(session)
+  motlie-tmux latest_writable_client_activity
         |
         v
 PromptAssembler
-  dedup identical bodies
+  default dedup of identical pending bodies
   merge source attribution
   coalesce segments with newline separators
   prepend composer separator when needed
@@ -196,148 +236,162 @@ PromptSubmitter
   send literal/bracketed payload only
   settle delay
   separate Enter
-  retry + verify through AgentUiProfile where available
+  retry + verify through UiProfile
         |
         v
 motlie_tmux::Target::send_keys()
+        |
+        v
+DeliveryEvent stream/status
+  consumed by mstream for audit/timer metadata
 ```
 
 ### Core Types
 
-The exact names can change in PLAN/implementation, but the library should make
-these concepts explicit.
+The exact field names can change in PLAN/implementation, but the public
+contract should keep these concepts.
 
 ```rust
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use motlie_agent::{
-    AgentChannelManager, AgentSessionKey, AsyncDelivery, ChannelConfig, ManagedMessage,
-    MessageSource, SubmitPolicy,
+    ChannelConfig, ChannelManager, EnqueueOptions, ManagedMessage, MessageSource,
+    SendOptions, SessionKey, SubmitPolicy, UiProfile,
 };
 
-let manager = AgentChannelManager::new(ChannelConfig {
+let manager = ChannelManager::new(ChannelConfig {
     input_quiet_for: Duration::from_secs(10),
     coalesce_window: Duration::from_millis(500),
-    submit: SubmitPolicy {
+    default_submit: SubmitPolicy {
         settle: Duration::from_millis(500),
         retries: 1,
         retry_delay: Duration::from_millis(750),
         require_verification: true,
     },
-    ..ChannelConfig::default()
+    ui_profile: UiProfile::Generic,
 });
 ```
 
-```rust
-let session = AgentSessionKey::new("local", "codex-421-design");
-let channel = manager.bind(session, host_handle, target);
-
-let outcome = channel
-    .send(
-        ManagedMessage::new(
-            MessageSource::human("@ops48-orchestrator"),
-            "Please review the latest design and call out layering concerns.",
-        ),
-        SubmitPolicy::verified_default(),
-        Duration::from_secs(120),
-    )
-    .await?;
-
-assert!(outcome.submitted());
-```
+`ChannelManager::get_or_bind` derives and validates identity from a resolved
+session descriptor. It returns a cheap-clone shared handle; it does not create a
+fresh queue per request.
 
 ```rust
-let queued = channel
-    .enqueue(
-        ManagedMessage::new(
-            MessageSource::timer("issue-421-poll"),
-            "Wake up: check issue #421 and summarize only material changes.",
-        )
-        .dedup_body(),
-        AsyncDelivery::FireAndForget,
-    )
-    .await?;
+pub struct ResolvedSession {
+    pub key: SessionKey,
+    pub host: motlie_tmux::HostHandle,
+    pub target: motlie_tmux::Target,
+}
+
+impl ChannelManager {
+    pub fn get_or_bind(&self, resolved: ResolvedSession) -> Result<Channel, DeliveryError>;
+    pub fn remove(&self, key: &SessionKey);
+    pub fn subscribe(&self) -> DeliveryEvents;
+}
 ```
 
-The important ergonomic point is that callers choose the operation that matches
-their product semantics:
-
-- `AgentChannel::send(...) -> SubmissionOutcome` for synchronous mstream
-  `send`.
-- `AgentChannel::enqueue(...) -> QueuedDelivery` for asynchronous broadcast,
-  timers, and transcript sink events.
-
-`send` waits until the prompt is submitted into the agent prompt window or until
-its timeout/error path resolves. `enqueue` returns after the channel accepts the
-message; delivery happens later when quiet/coalescing rules allow it.
-
-The API should not make synchronous send look like a flag on an otherwise
-fire-and-forget post. The method names and return types should make the
-blocking behavior obvious.
+If `get_or_bind` sees an existing `SessionKey` with a different non-equivalent
+resolved target, it returns `DeliveryError::TargetIdentityMismatch` rather than
+silently reusing state. mstream must run its existing freshness checks before
+calling `get_or_bind`.
 
 ### Synchronous And Asynchronous Semantics
 
-The design uses different operations for the two product semantics:
+The API uses different operations for the two product semantics.
 
 ```rust
+pub struct SendOptions {
+    pub submit: SubmitPolicy,
+    pub timeout: Duration,
+}
+
+pub struct EnqueueOptions {
+    pub submit: SubmitPolicy,
+    pub quiet_guard: QuietGuardPolicy,
+}
+
+pub enum QuietGuardPolicy {
+    Default,
+    Disabled,
+}
+
 pub enum SubmissionOutcome {
-    SubmittedVerified,
-    SubmittedUnverified,
+    SubmittedVerified { message_id: MessageId, submitted_at: Instant },
+    SubmittedUnverified { message_id: MessageId, submitted_at: Instant },
 }
 
 pub struct QueuedDelivery {
     pub message_id: MessageId,
-    pub target: AgentSessionKey,
-    pub accepted_at: SystemTime,
+    pub target: SessionKey,
+    pub accepted_at: Instant,
 }
 
-impl AgentChannel {
+impl Channel {
     pub async fn send(
         &self,
         message: ManagedMessage,
-        submit: SubmitPolicy,
-        timeout: Duration,
+        options: SendOptions,
     ) -> Result<SubmissionOutcome, DeliveryError>;
 
     pub async fn enqueue(
         &self,
         message: ManagedMessage,
-        delivery: AsyncDelivery,
+        options: EnqueueOptions,
     ) -> Result<QueuedDelivery, DeliveryError>;
+
+    pub fn status(&self) -> ChannelStatus;
 }
 ```
 
 `send` is for direct mstream `send`: the caller is blocked until the channel has
-submitted the prompt into the agent TUI, or until it can report a timeout/error.
+submitted the prompt into the agent TUI, or until it reports a timeout/error.
 The agent TUI may still queue or process the submitted prompt internally; the
 guarantee is confirmation of prompt-window submission, not completion of the
 agent's work.
 
 `enqueue` is for mstream broadcast, self timers, and transcript sinks: the
 caller gets acceptance into this process's channel and does not wait for quiet
-guard, coalescing, or submit completion.
+guard, coalescing, or submit completion. The absence of an `AsyncDelivery` enum
+is intentional: `enqueue` already means fire-and-forget for this first slice.
 
-### Pending Message Model
+Submit policy has one home per operation: `SendOptions` or `EnqueueOptions`.
+`ManagedMessage` must not also carry submit policy. `ChannelConfig.default_submit`
+is only the value used by `SendOptions::default()` / `EnqueueOptions::default()`;
+callers that expose knobs construct explicit options before calling the channel.
+CLI conversion stays in the caller; mstream maps CLI flags into `SubmitPolicy`
+before calling `libs/agent`.
 
-Each pending channel segment stores:
+### Message And Dedup Model
 
-- source kind and display label
+`ManagedMessage` contains source, body, paste mode, and optional display
+metadata. `MessageSource` constructors should accept `impl Into<String>` so the
+callers can pass either borrowed or owned labels without API churn.
+
+Dedup is default-on for pending messages in the first implementation. There is
+no `.dedup_body()` builder in the initial API. The dedup identity is the
+normalized body plus the channel `SessionKey`; source attribution is merged
+rather than used to keep duplicate prompt text.
+
+Each pending segment stores:
+
+- message id for the segment
+- source list and display labels
 - body
-- first/last posted time
+- first/last accepted time
 - dedup identity
-- delivery waiter, if any
-- submit policy override, if any
+- zero-or-many waiters, each with its own timeout/cancellation state
+- merged submit policy for the eventual flush
 
-Default dedup should operate on normalized message body for one channel target.
-If the same pending body arrives from multiple sources in the same process,
-keep one body and merge the source list so attribution is not lost:
+If a second synchronous `send` posts a body already pending from an async timer,
+the channel attaches a new waiter to the existing segment rather than adding
+more prompt text. Both callers are notified when the coalesced prompt is
+submitted, and each waiter's timeout/cancellation applies only to that waiter.
+If all sync waiters time out, the pending segment remains if it still has async
+sources or other waiters.
 
-```text
-[from: mstream.timer:issue-421-poll, @ops48-orchestrator]
-Wake up: check issue #421 and summarize only material changes.
-```
-
-If the same source repeats the same pending body, the channel should refresh
-metadata but not duplicate the prompt text.
+When pending segments with different submit policies are coalesced, the channel
+uses a deterministic merge: maximum settle/retry delays and retry count, and
+`require_verification = true` if any waiter requires verification. This keeps a
+single prompt submit conservative without making policy precedence implicit.
 
 ### Attributed Coalescing
 
@@ -354,59 +408,98 @@ Also include whether the DESIGN.md commit is ready for the reviewers.
 
 Recommended default:
 
-- Use `[from: source]` headers for every segment when a flush contains more
-  than one distinct segment or more than one source.
+- Use `[from: source]` headers for every segment when a flush contains more than
+  one distinct segment or more than one source.
 - For a single human `send`, omit the header unless the caller opts in.
 - Separate segments with one blank line.
 - Do not wrap the whole body in JSON/YAML/XML or any other machine envelope.
 
 ### No-Barge-In
 
-Before flushing, the channel asks `HostHandle::session_client_activity(session)`.
+Before flushing, the channel asks `motlie-tmux` for writable-client activity.
+The current `SessionClientActivity.latest_client_activity` is not enough because
+it includes read-only clients. Implementation must first extend `motlie-tmux` to
+expose one of these mechanism facts:
 
-- If no attached client has recent activity, flush.
-- If the latest writable client activity is younger than `input_quiet_for`,
-  keep pending messages queued and schedule the next attempt for the remaining
-  quiet interval.
+```rust
+pub struct SessionClientActivity {
+    pub session: String,
+    pub attached_clients: usize,
+    pub writable_clients: usize,
+    pub latest_client_activity: Option<u64>,
+    pub latest_writable_client_activity: Option<u64>,
+}
+```
+
+or equivalent per-client activity/read-only data. `libs/agent` then applies
+policy:
+
+- If there is no recent writable-client activity, flush.
+- If `latest_writable_client_activity` is younger than `input_quiet_for`, keep
+  pending messages queued and schedule the next attempt for the remaining quiet
+  interval.
 - Read-only attached clients must not block delivery.
-- Default `input_quiet_for` should reuse mstream timer's current default of
-  10 seconds.
+- Default `input_quiet_for` should reuse mstream timer's current default of 10
+  seconds.
 
-The default design should not force a flush through the quiet guard. For a
+The default design does not force a flush through the quiet guard. For a
 never-quiet session:
 
-- asynchronous callers remain queued and observable as pending/deferred
-- synchronous callers wait until their configured timeout, then receive a
-  `DeliveryError::TimedOut { still_pending: true }`
+- async callers remain queued and observable as pending/deferred
+- sync callers wait until their configured timeout, then receive
+  `DeliveryError::TimedOut { message_id, still_pending: true }`
 
-An explicit future `BargeInPolicy::ForceAfter` can be added, but it should not
-be the default because it contradicts the issue's no-barge-in requirement.
+An explicit future force-through policy can be added later, but it is not part
+of the first slice.
 
 ### Composer Preservation
 
 The channel must not overwrite or concatenate onto already-typed, unsubmitted
-text. The crate should model composer state explicitly:
+text. The crate should model composer state explicitly and avoid trait-object
+async complexity in the first slice by using an enum profile:
 
 ```rust
+pub enum UiProfile {
+    Generic,
+    Codex,
+    Claude,
+}
+
 pub enum ComposerState {
     Empty,
     NonEmpty,
     Unknown,
 }
 
-pub trait AgentUiProfile {
-    fn name(&self) -> &'static str;
-    async fn composer_state(&self, target: &motlie_tmux::Target) -> Result<ComposerState>;
-    async fn verify_submitted(&self, target: &motlie_tmux::Target) -> Result<SubmitVerification>;
+pub enum SubmitVerification {
+    Submitted,
+    StillComposed,
+    Unknown,
+}
+
+impl UiProfile {
+    pub async fn composer_state(
+        &self,
+        target: &motlie_tmux::Target,
+    ) -> Result<ComposerState, DeliveryError>;
+
+    pub async fn verify_submitted(
+        &self,
+        target: &motlie_tmux::Target,
+    ) -> Result<SubmitVerification, DeliveryError>;
 }
 ```
+
+This avoids `Box<dyn ...>` and native `async fn` in trait object problems while
+leaving room to add profiles. If a future implementation needs external profile
+plugins, the DESIGN/PLAN should justify dynamic dispatch then.
 
 First-slice behavior:
 
 - If the profile reports `NonEmpty`, prefix the managed body with a separator so
   it lands below existing text.
-- If the profile reports `Unknown` and the flush was delayed by recent input,
-  use the same conservative separator.
+- If the profile reports `Unknown` and the flush was delayed by recent writable
+  input, use the same conservative separator.
 - If the profile reports `Empty`, send the body without a leading separator.
 
 Default separator:
@@ -428,11 +521,6 @@ human already typed this
 Wake up and check status.
 ```
 
-This is intentionally an agent-readable separator, not metadata. PLAN should
-decide which profiles are implemented first. A generic profile can use
-`Target::capture_with_options()` and return `Unknown` when it cannot safely
-distinguish composer text from transcript text.
-
 ### Prompt Submit
 
 Prompt submit must be a library-owned operation, not a caller-owned
@@ -445,18 +533,86 @@ Algorithm:
 3. Send only the payload with `Target::send_keys(&KeySequence::literal(...))`.
 4. Sleep `settle`.
 5. Send a separate `{Enter}` with `KeySequence::parse("{Enter}")`.
-6. Ask the active `AgentUiProfile` whether the prompt is submitted.
-7. If verification says the body is still in the composer, sleep `retry_delay`
-   and send another separate Enter, up to `retries`.
-8. Return `SubmittedVerified`, `SubmittedUnverified`, or `StillPending`.
+6. Ask `UiProfile::verify_submitted` whether the prompt is submitted.
+7. If verification returns `StillComposed`, sleep `retry_delay` and send another
+   separate Enter, up to `retries`.
+8. If verification returns `Submitted`, return
+   `SubmissionOutcome::SubmittedVerified`.
+9. If verification returns `Unknown` and `require_verification` is false, return
+   `SubmissionOutcome::SubmittedUnverified` after the retry policy completes.
+10. If verification returns `Unknown` and `require_verification` is true, return
+    `DeliveryError::VerificationUnavailable { message_id }`.
+11. If the prompt is still composed after all retries, return
+    `DeliveryError::SubmitNotConfirmed { message_id, attempts }`.
 
-`SubmittedUnverified` is acceptable only when no profile can observe composer
-state. The retry loop should still run. Known agent profiles should strive to
-return `SubmittedVerified` or `StillPending`.
+There is no successful `StillPending` state. Pending/not-submitted outcomes are
+errors for synchronous `send`; queued async work remains observable through the
+channel event/status APIs.
 
-The default settle delay should start at 500 ms because that matches mmux's
-known-good `$$` behavior. mstream may expose `--settle-ms` so smoke tests can
-tune that down later.
+### Errors
+
+`libs/agent` should use `thiserror` and expose an error enum shaped like this:
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum DeliveryError {
+    #[error("target identity mismatch for {key:?}")]
+    TargetIdentityMismatch { key: SessionKey },
+
+    #[error("target could not be resolved: {key:?}")]
+    TargetUnresolved { key: SessionKey },
+
+    #[error("target is stale or was replaced: {key:?}")]
+    TargetStale { key: SessionKey },
+
+    #[error("tmux operation failed: {operation}")]
+    Tmux { operation: &'static str, source: motlie_tmux::Error },
+
+    #[error("submit verification unavailable for {message_id:?}")]
+    VerificationUnavailable { message_id: MessageId },
+
+    #[error("submit was not confirmed for {message_id:?} after {attempts} attempts")]
+    SubmitNotConfirmed { message_id: MessageId, attempts: u8 },
+
+    #[error("delivery timed out for {message_id:?}")]
+    TimedOut { message_id: MessageId, still_pending: bool },
+
+    #[error("channel is closed for {key:?}")]
+    ChannelClosed { key: SessionKey },
+}
+```
+
+The exact variants can be refined during implementation, but DESIGN must keep
+these categories: identity/freshness, unresolved targets, tmux I/O,
+verification unavailable, submit not confirmed, timeout, and closed channel.
+
+### Delivery Observability
+
+Because async `enqueue` returns before quiet-guard deferral and prompt submit,
+mstream needs an upward observation surface. `ChannelManager::subscribe()`
+should provide a generic event stream, and `Channel::status()` should provide a
+snapshot for polling/debugging.
+
+```rust
+pub enum DeliveryEvent {
+    Accepted { message_id: MessageId, target: SessionKey, source: MessageSource },
+    Deferred {
+        message_id: MessageId,
+        target: SessionKey,
+        reason: DeferReason,
+        latest_writable_client_activity: Option<u64>,
+        retry_after: Duration,
+    },
+    Coalesced { target: SessionKey, message_ids: Vec<MessageId> },
+    Submitted { message_ids: Vec<MessageId>, outcome: SubmissionOutcome },
+    Failed { message_id: MessageId, error: DeliveryError },
+}
+```
+
+mstream consumes these events to update timer `defer_count`, `last_deferred_at`,
+`last_defer_reason`, `last_input_activity`, and durable workstream audit events.
+The event type stays generic: it contains message id, source, target, reason,
+timestamps/durations, and outcome, not mstream-specific record fields.
 
 ## Data Flow By Use Case
 
@@ -474,16 +630,22 @@ Current direct paths:
 Migration:
 
 1. Add `motlie-agent` as a dependency of `bins/mstream`.
-2. Create or retrieve an `AgentChannel` after `resolve_target`.
-3. Replace `send_text_to_resolved` in `send_shared` with
-   `channel.send(...)`, returning a submission outcome to the caller.
-4. Replace `send_text_to_resolved` in `broadcast_shared` with
-   `channel.enqueue(...)`, returning after channel acceptance.
-5. Keep mstream's workstream membership checks, state transitions, and audit
-   events in mstream.
-6. Add delivery metadata to event JSON without removing the existing event kinds
-   in the first migration slice.
-7. Rename prompt-submit flags per #420:
+2. Add one `ChannelManager` field to `DaemonState`, owned for the daemon
+   lifetime. Do not create a manager per request.
+3. Keep existing mstream target resolution and freshness checks before channel
+   lookup.
+4. Convert the resolved target/session info into `ResolvedSession` and call
+   `state.channel_manager.get_or_bind(resolved)`.
+5. `send_shared` calls `channel.send(message, SendOptions { submit, timeout })`
+   and returns the submission outcome to the client.
+6. `broadcast_shared` calls `channel.enqueue(message, EnqueueOptions { submit,
+   quiet_guard: Default })` for each resolved target and returns after channel
+   acceptance.
+7. mstream consumes `DeliveryEvent`s from `ChannelManager::subscribe()` and maps
+   them into audit/timer metadata.
+8. On disconnect, reclaim, retire/quarantine due stale-session detection, or
+   host scan invalidation, mstream removes affected channels by `SessionKey`.
+9. Rename prompt-submit flags per #420:
    - `--no-prompt-submit` is the real opt-out.
    - `--no-enter` remains a hidden deprecated alias for one release.
    - `--settle-ms`, `--submit-retries`, and `--submit-retry-delay-ms` apply to
@@ -505,7 +667,7 @@ Current path:
 
 - `timer_start_shared` stores prompt, submit retry knobs, and
   `input_quiet_for_secs` (`bins/mstream/src/state.rs:2311-2412`).
-- `timer_fire_once_shared` evaluates the quiet guard
+- `timer_fire_once_shared` evaluates the current quiet guard
   (`bins/mstream/src/state.rs:2510-2555`).
 - If quiet, it sends text and then calls `send_submit_retries_to_resolved`
   (`bins/mstream/src/state.rs:2558-2571`).
@@ -515,26 +677,25 @@ Migration:
 1. Keep timer scheduling and timer record ownership in mstream.
 2. Remove timer-owned quiet-guard and submit mechanics after the channel path is
    in place.
-3. On fire, enqueue a message with source `mstream.timer:<name>`,
-   `AsyncDelivery::FireAndForget`, and a dedup key based on target plus
-   normalized prompt body.
-4. Map channel deferrals to existing timer observability fields:
-   `defer_count`, `last_deferred_at`, `last_defer_reason`, and
-   `last_input_activity`.
-5. Keep existing `timer_deferred`/`timer_fired` JSON compatibility where
+3. On fire, resolve/freshness-check the target, retrieve the same channel from
+   the daemon-owned `ChannelManager`, and call `enqueue` with source
+   `mstream.timer:<name>`.
+4. `--no-input-guard` maps to `EnqueueOptions { quiet_guard: Disabled, .. }` for
+   that message only.
+5. Timer deferral/delivery metadata comes from `DeliveryEvent`s, not from timer
+   code reimplementing channel internals.
+6. Keep existing `timer_deferred`/`timer_fired` JSON compatibility where
    possible, but make their meaning explicit:
    - `timer_fired`: timer accepted a prompt into the channel.
-   - `timer_delivered` or delivery metadata: channel submitted it.
+   - delivery event metadata: channel deferred/submitted/failed it.
 
 Semantics:
 
 - Timers are asynchronous fire-and-forget.
-- The current implicit "one pending timer fire" behavior becomes explicit body
-  dedup in the target channel.
-- Timer `--no-input-guard` should map to a channel override only for that
-  message, not remove the default from the crate.
+- The current implicit "one pending timer fire" behavior becomes explicit
+  default body dedup in the target channel.
 
-### 3. M4 Telnyx `TmuxTranscriptSink`
+### 3. Future M4 Telnyx `TmuxTranscriptSink`
 
 Current design reference:
 
@@ -542,23 +703,27 @@ Current design reference:
   `TmuxTranscriptSink` can map final transcript text to
   `motlie_tmux::KeySequence` and call `Target::send_keys()`.
 
-Migration before implementation:
+Future migration path:
 
 1. Change the planned sink design from direct `Target::send_keys()` to
-   `AgentChannel::enqueue()`.
+   `agent::Channel::enqueue()`.
 2. Only final transcript events should enqueue by default; partial transcript
    events remain UI/log feedback unless a future product decision says
    otherwise.
 3. Use a source label that identifies the call/session without embedding
    sensitive caller data in prompts or logs, for example
    `telnyx.transcript:<provider_session_id>`.
-4. Use `AsyncDelivery::FireAndForget`, so phone transcription never blocks the
-   media path on an agent TUI.
-5. Reuse the same coalescing behavior if a human or timer message is already
-   pending for that agent.
+4. Use `enqueue`, so phone transcription never blocks the media path on an
+   agent TUI.
+5. Because Telnyx gateway/agent code is a separate process from mstream unless a
+   future topology routes it through the mstream daemon, it only gets crate-level
+   reuse in this design. It shares no pending state with mstream human sends or
+   mstream timers. It coalesces only with other sources inside the same Telnyx
+   process/channel manager.
 
-This prevents M4 from becoming a third divergent copy of barge-in, dedup,
-coalescing, composer, and submit policy.
+This prevents M4 from copying prompt-delivery policy while staying honest about
+the accepted process boundary. Telnyx implementation is out of #421; this PR
+only documents the future path.
 
 ## API Ergonomics
 
@@ -568,12 +733,17 @@ coalescing, composer, and submit policy.
 let message = ManagedMessage::new(
     MessageSource::human("@ops48-orchestrator"),
     request.text,
-)
-.paste_mode(PasteMode::Bracketed)
-.submit(SubmitPolicy::verified_default());
+).paste_mode(PasteMode::Bracketed);
+
+let submit = SubmitPolicy {
+    settle: Duration::from_millis(request.settle_ms),
+    retries: request.submit_retries,
+    retry_delay: Duration::from_millis(request.submit_retry_delay_ms),
+    require_verification: true,
+};
 
 let outcome = channel
-    .send(message, SubmitPolicy::from_cli(&request.submit), request.timeout)
+    .send(message, SendOptions { submit, timeout: request.timeout })
     .await?;
 
 state.record_delivery(&request.workstream, &stable_target, outcome)?;
@@ -587,44 +757,47 @@ finished acting on the submitted prompt.
 
 ```rust
 for target in targets {
-    let channel = channels.bind(target.key(), target.host, target.target);
+    let channel = state.channel_manager.get_or_bind(target.resolved_session())?;
     channel
         .enqueue(
             ManagedMessage::new(MessageSource::human("@ops48-orchestrator"), &request.text)
-                .paste_mode(request.paste_mode)
-                .submit(SubmitPolicy::from_cli(&request.submit)),
-            AsyncDelivery::FireAndForget,
+                .paste_mode(request.paste_mode),
+            EnqueueOptions { submit, quiet_guard: QuietGuardPolicy::Default },
         )
         .await?;
 }
 ```
 
 Broadcast returns after each target channel accepts the message. Delivery may
-happen later after quiet-guard and coalescing decisions.
+happen later after quiet-guard and coalescing decisions, with outcomes reported
+through `DeliveryEvent`s.
 
 ### Timer fire
 
 ```rust
+let channel = state.channel_manager.get_or_bind(snapshot.resolved_session())?;
 channel
     .enqueue(
-        ManagedMessage::new(
-            MessageSource::timer(&snapshot.name),
-            snapshot.prompt,
-        )
-        .dedup_body()
-        .input_quiet_for(snapshot.input_quiet_for),
-        AsyncDelivery::FireAndForget,
+        ManagedMessage::new(MessageSource::timer(&snapshot.name), snapshot.prompt),
+        EnqueueOptions {
+            submit: snapshot.submit_policy,
+            quiet_guard: snapshot.quiet_guard,
+        },
     )
     .await?;
 ```
 
 Timer fire remains fire-and-forget. A repeated timer prompt collapses through
-channel-local dedup while it is pending.
+channel-local default dedup while it is pending.
 
-### Telnyx transcript sink
+### Future Telnyx transcript sink
 
 ```rust
-async fn on_transcript(&self, event: TranscriptEvent, context: &mut CallContext) -> Result<()> {
+async fn on_transcript(
+    &self,
+    event: TranscriptEvent,
+    context: &mut CallContext,
+) -> Result<(), VoiceAppError> {
     let TranscriptEvent::Final { text, .. } = event else {
         return Ok(());
     };
@@ -639,9 +812,8 @@ async fn on_transcript(&self, event: TranscriptEvent, context: &mut CallContext)
             ManagedMessage::new(
                 MessageSource::external(format!("telnyx.transcript:{source_id}")),
                 text,
-            )
-            .dedup_body(),
-            AsyncDelivery::FireAndForget,
+            ),
+            EnqueueOptions::default(),
         )
         .await?;
 
@@ -691,24 +863,27 @@ Cons:
 - Makes testing harder because low-level tmux behavior and high-level prompt
   policy would share one crate boundary.
 
-Verdict: not recommended. Keep `motlie-tmux` a pure tmux mechanism library.
+Verdict: not recommended. Keep `motlie-tmux` a tmux mechanism library, with only
+mechanism-fact extensions such as latest writable-client activity.
 
 ### Alternative C: New `libs/agent` crate depending on `motlie-tmux`
 
 Pros:
 
 - Clean layering: tmux mechanisms stay below agent interaction policy.
-- One reusable inbound channel for all three concrete consumers.
+- One reusable inbound channel API for all three concrete use cases.
 - Natural home for future outbound response extraction, giving the crate a
   coherent inbound/outbound agent-interaction purpose.
 - Lets mstream keep workstream/event ownership while delegating prompt delivery.
-- Lets M4 start on the shared policy instead of copying mstream internals.
+- Lets future Telnyx code reuse the same crate without copying mstream internals.
 - Easier to test policy with fake tmux/session adapters before full integration.
 
 Cons:
 
 - Adds a workspace crate.
 - Requires mstream migration work instead of a local helper patch.
+- Requires one small `motlie-tmux` mechanism extension for writable-client
+  activity.
 - Needs careful API restraint so the first slice does not become a generic agent
   framework.
 
@@ -721,33 +896,51 @@ areas.
 
 ### `libs/agent`
 
+- Session identity:
+  - `SessionKey` includes stable host/session id and created generation
+  - reused tmux session names do not inherit old pending queues
+  - `get_or_bind` returns the same shared channel for the same stable target
+  - `get_or_bind` rejects same key with a non-equivalent target
 - Dedup:
   - identical pending body from same source does not duplicate text
   - identical pending body from multiple sources merges source attribution
   - distinct bodies remain distinct segments
+  - two sync sends of the same pending body both receive completion/error
+  - sync send attaches a waiter to an already-pending async/deduped segment
 - Coalescing:
   - single segment formatting
   - multi-source `[from: source]` formatting
   - blank-line separation without machine envelopes
 - Quiet guard:
   - quiet session flushes
-  - recent writable client activity defers
-  - read-only clients do not defer
+  - recent writable-client activity defers
+  - read-only client activity does not defer
   - never-quiet session leaves async messages pending and times out sync sends
 - Composer preservation:
   - `ComposerState::NonEmpty` prefixes separator
   - `ComposerState::Empty` does not
-  - `ComposerState::Unknown` follows conservative policy after recent input
+  - `ComposerState::Unknown` follows conservative policy after recent writable
+    input
 - Submit:
   - payload and Enter are separate sends
   - settle delay occurs before Enter
   - retry delay occurs before retry Enter
-  - verifier success returns `SubmittedVerified`
-  - unsupported verifier returns `SubmittedUnverified` only after retry policy
-- Delivery semantics:
-  - `send` resolves only on submitted/error/timeout
-  - `enqueue` returns after channel acceptance
-  - cancellation of a waiter does not drop the pending message unless requested
+  - `SubmitVerification::Submitted` returns `SubmittedVerified`
+  - `SubmitVerification::Unknown` with verification not required returns
+    `SubmittedUnverified`
+  - verification required but unavailable returns `DeliveryError`
+  - still composed after retries returns `DeliveryError`
+- Mixed sync/async delivery:
+  - async timer/broadcast/future Telnyx enqueue arrives while a sync send waits
+    behind the quiet guard, and one coalesced prompt eventually notifies all
+    sync waiters
+  - sync send timeout leaves the pending segment and other async messages intact
+  - cancellation of one waiter does not drop the pending message or other waiters
+  - separate manager instances targeting the same tmux session do not promise
+    cross-process coalescing
+- Events/status:
+  - accepted/deferred/coalesced/submitted/failed events are emitted with message
+    id, source, target, reason, and outcome
 
 ### `bins/mstream`
 
@@ -755,13 +948,16 @@ areas.
   - `--no-prompt-submit` is accepted
   - hidden `--no-enter` still maps to prompt-submit disabled for one release
   - send/broadcast expose submit knobs
-  - timer flags map to channel config
+  - timer flags map to channel options
 - State integration:
-  - `send_shared` waits for submission outcome
+  - `DaemonState` owns one `ChannelManager` for the daemon lifetime
+  - `send_shared`, `broadcast_shared`, and `timer_fire_once_shared` retrieve
+    channels from that shared manager after freshness checks
+  - `send_shared` waits for `SubmissionOutcome`
   - `broadcast_shared` enqueues all resolved targets
-  - timer fire enqueues to channel and preserves existing timer observability
-  - stale target freshness checks still run before channel binding
-  - workstream event records retain existing useful context
+  - timer fire enqueues to channel and observes delivery through events
+  - stale target/disconnect/reclaim paths remove affected channels
+  - workstream event records retain useful delivery context
 - Manual smoke:
   - typed composer text remains above a separator
   - large multiline prompt submits without an extra manual Enter
@@ -769,16 +965,23 @@ areas.
 
 ### `motlie-tmux`
 
-No major `motlie-tmux` changes are expected. Existing tests around
-`session_client_activity`, `Target::send_keys`, `KeySequence`, and capture APIs
-should remain the mechanism-level safety net.
+A small mechanism extension is required:
 
-### M4 Telnyx Sink
+- `SessionClientActivity` exposes `latest_writable_client_activity` or equivalent
+  per-client activity/read-only facts
+- unit tests prove read-only clients do not update writable activity
+- existing `Target::send_keys`, `KeySequence`, and capture tests remain the
+  mechanism-level safety net
 
-- Final transcript enqueues one channel message.
-- Partial transcript does not enqueue by default.
-- Transcript sink uses non-sensitive source labels.
-- Media/transcription path is not blocked by agent prompt delivery.
+### Future M4 Telnyx Sink
+
+- Final transcript enqueues one channel message in its own process-local
+  `ChannelManager`
+- Partial transcript does not enqueue by default
+- Transcript sink uses non-sensitive source labels
+- Media/transcription path is not blocked by agent prompt delivery
+- Contract test/documentation states that cross-process coalescing with mstream
+  is not promised unless a future shared daemon topology is introduced
 
 ## Open Questions
 
@@ -787,23 +990,22 @@ should remain the mechanism-level safety net.
    flushes, omitted for a single human segment. Reviewers should decide whether
    every segment should always carry a header for maximum diarization.
 
-2. Coalescing window and max wait:
+2. Coalescing window and force-through policy:
    Recommended starting point is `coalesce_window = 500 ms` and
    `input_quiet_for = 10 s`. Default should not force through the quiet guard.
-   Reviewers should decide whether any explicit forced-flush override belongs
-   in the first implementation.
+   A force-through override is intentionally deferred.
 
-3. Synchronous send block-vs-queue:
-   The issue comment resolves the product semantics: `send` should wait for
-   prompt submission, while `broadcast` and timers are async. Remaining design
-   detail: the default `send` timeout and JSONL response shape when the message
-   is still pending after timeout.
+3. Synchronous send timeout and JSON response shape:
+   `send` waits for prompt-window submission confirmation. PLAN should choose
+   the default timeout and exact mstream JSONL fields for timeout and delivery
+   outcomes.
 
-4. Agent UI profiles:
-   Which profiles should the first slice include: generic tmux-only,
-   Codex-specific, Claude-specific, or a trait plus one generic fallback?
+4. First UI profiles:
+   The design now recommends a `UiProfile` enum. PLAN should decide whether the
+   first implementation includes only `Generic` plus one known Codex/Claude
+   profile or stubs known profiles behind conservative behavior.
 
 5. Outbound response extraction:
-   The crate should reserve module/API space for outbound extraction, but the
-   first implementation should probably not build it unless M4 needs it in the
-   same phase.
+   The crate should reserve module/API space for outbound extraction, but #421
+   should not implement it unless reviewers decide it is needed to keep the API
+   coherent.
