@@ -124,6 +124,10 @@ impl FromStr for LiveTtsBackend {
 pub trait OutboundTtsFactory: Send + Sync {
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>>;
 
+    async fn warm(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn label(&self) -> &'static str;
 
     fn is_available(&self) -> bool {
@@ -165,6 +169,10 @@ impl TtsRegistry {
             LiveTtsBackend::Piper => self.piper(),
         }
     }
+
+    pub async fn warm(&self, backend: LiveTtsBackend) -> anyhow::Result<()> {
+        self.factory(backend).warm().await
+    }
 }
 
 pub struct UnavailableTtsFactory {
@@ -181,6 +189,10 @@ impl UnavailableTtsFactory {
 #[async_trait]
 impl OutboundTtsFactory for UnavailableTtsFactory {
     async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+        bail!(self.message)
+    }
+
+    async fn warm(&self) -> anyhow::Result<()> {
         bail!(self.message)
     }
 
@@ -229,6 +241,10 @@ impl KokoroTtsFactory {
 #[cfg(feature = "kokoro")]
 #[async_trait]
 impl OutboundTtsFactory for KokoroTtsFactory {
+    async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
+    }
+
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
         let handle = self.handle().await?;
         let audio = handle
@@ -285,6 +301,10 @@ impl PiperTtsFactory {
 #[cfg(feature = "piper")]
 #[async_trait]
 impl OutboundTtsFactory for PiperTtsFactory {
+    async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
+    }
+
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
         let handle = self.handle().await?;
         let mut stream = handle

@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
     let services = AppServices {
         state: state.clone(),
         telnyx: telnyx.clone(),
-        asr,
+        asr: asr.clone(),
         media: media.clone(),
         tts: tts.clone(),
         conversation: conversation.clone(),
@@ -140,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
     let context = GatewayContext::with_services(
         state.clone(),
         telnyx,
+        asr.clone(),
         media,
         tts,
         conversation,

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
-use crate::adapter::LiveAsrBackend;
+use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegistry};
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
@@ -11,8 +13,8 @@ use crate::media::{OutboundMediaCommand, SpeechCancelToken};
 use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{
-    CallStatus, ConversationMode, ConversationStatus, GatewayState, InboundMode, LogLevel,
-    SharedState,
+    asr_warm_key, tts_warm_key, CallStatus, ConversationMode, ConversationStatus, GatewayState,
+    InboundMode, LogLevel, SharedState,
 };
 use crate::quality::{QualityEventSink, QualityProfile, RedactionMode, VoiceQualityConfig};
 use crate::speech;
@@ -25,6 +27,7 @@ use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 pub struct GatewayContext {
     pub state: SharedState,
     pub telnyx: TelnyxClient,
+    pub asr: SharedAsrRegistry,
     pub media: SharedMediaRegistry,
     pub tts: SharedTtsRegistry,
     pub conversation: ConversationRuntime,
@@ -34,6 +37,8 @@ pub struct GatewayContext {
 impl GatewayContext {
     pub fn new(state: SharedState, telnyx: TelnyxClient) -> Self {
         let media = SharedMediaRegistry::default();
+        let echo = Arc::new(EchoAsrFactory);
+        let asr = Arc::new(AsrRegistry::new(echo.clone(), echo));
         let tts = unavailable_registry();
         let conversation = ConversationRuntime::new(
             telnyx.clone(),
@@ -44,6 +49,7 @@ impl GatewayContext {
         Self::with_services(
             state,
             telnyx,
+            asr,
             media,
             tts,
             conversation,
@@ -54,6 +60,7 @@ impl GatewayContext {
     pub fn with_services(
         state: SharedState,
         telnyx: TelnyxClient,
+        asr: SharedAsrRegistry,
         media: SharedMediaRegistry,
         tts: SharedTtsRegistry,
         conversation: ConversationRuntime,
@@ -62,6 +69,7 @@ impl GatewayContext {
         Self {
             state,
             telnyx,
+            asr,
             media,
             tts,
             conversation,
@@ -73,6 +81,7 @@ impl GatewayContext {
         let mut context = Self::with_services(
             self.state.clone(),
             self.telnyx.clone(),
+            self.asr.clone(),
             self.media.clone(),
             self.tts.clone(),
             self.conversation.clone(),
@@ -211,6 +220,7 @@ pub enum GatewayCommand {
     Answer(CallTarget),
     Reject(CallTarget),
     Hangup(CallTarget),
+    Warm(WarmArgs),
     Test {
         #[command(subcommand)]
         command: TestCommand,
@@ -317,6 +327,29 @@ pub enum TtsCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum WarmTarget {
+    All,
+    Asr,
+    Tts,
+}
+
+impl WarmTarget {
+    fn includes_asr(self) -> bool {
+        matches!(self, Self::All | Self::Asr)
+    }
+
+    fn includes_tts(self) -> bool {
+        matches!(self, Self::All | Self::Tts)
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct WarmArgs {
+    #[arg(value_enum, default_value_t = WarmTarget::All)]
+    pub target: WarmTarget,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ConversationModeArg {
     Manual,
@@ -362,7 +395,9 @@ impl From<ConversationModeArg> for ConversationMode {
 }
 
 #[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 pub enum ConversationCommand {
+    Help,
     Status {
         call: Option<String>,
     },
@@ -655,6 +690,7 @@ impl CommandSet<GatewayContext> for GatewayCommand {
             Self::Answer(target) => context.answer_call(target.call).await,
             Self::Reject(target) => call_control(context, target.call, CallControlOp::Reject).await,
             Self::Hangup(target) => call_control(context, target.call, CallControlOp::Hangup).await,
+            Self::Warm(args) => warm_command(context, args).await,
             Self::Test { command } => test_command(context, command).await,
             Self::Transcript { command } => transcript_command(context, command).await,
             Self::Log { command } => log_command(context, command).await,
@@ -1262,6 +1298,116 @@ fn tts_availability_label(factory: &crate::tts::SharedTtsFactory) -> &'static st
     }
 }
 
+async fn warm_command(context: &mut GatewayContext, args: WarmArgs) -> DriverResult<CommandOutput> {
+    let mut lines = Vec::new();
+    if args.target.includes_asr() {
+        lines.push(warm_asr_model(context).await);
+    }
+    if args.target.includes_tts() {
+        lines.push(warm_tts_model(context).await);
+    }
+    Ok(CommandOutput {
+        lines,
+        effects: Vec::new(),
+    })
+}
+
+async fn warm_asr_model(context: &mut GatewayContext) -> String {
+    let backend = context.session.next_asr_backend;
+    let started = Instant::now();
+    match context.asr.warm(backend).await {
+        Ok(()) => {
+            let elapsed_ms = elapsed_ms(started);
+            let mut guard = context.state.write().await;
+            guard.mark_model_warm(
+                asr_warm_key(backend),
+                backend.label(),
+                backend.model_label(),
+                elapsed_ms,
+            );
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "warmed ASR backend {} ({}) in {elapsed_ms}ms",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            format!(
+                "warm asr={} model={} status=ready elapsed_ms={elapsed_ms}",
+                backend.label(),
+                backend.model_label()
+            )
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            context.state.write().await.log(
+                LogLevel::Warn,
+                format!(
+                    "failed to warm ASR backend {} ({}): {message}",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            format!(
+                "warm asr={} model={} status=failed error={message}",
+                backend.label(),
+                backend.model_label()
+            )
+        }
+    }
+}
+
+async fn warm_tts_model(context: &mut GatewayContext) -> String {
+    let backend = context.session.next_tts_backend;
+    let started = Instant::now();
+    match context.tts.warm(backend).await {
+        Ok(()) => {
+            let elapsed_ms = elapsed_ms(started);
+            let mut guard = context.state.write().await;
+            guard.mark_model_warm(
+                tts_warm_key(backend),
+                backend.label(),
+                backend.model_label(),
+                elapsed_ms,
+            );
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "warmed TTS backend {} ({}) in {elapsed_ms}ms",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            format!(
+                "warm tts={} model={} status=ready elapsed_ms={elapsed_ms}",
+                backend.label(),
+                backend.model_label()
+            )
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            context.state.write().await.log(
+                LogLevel::Warn,
+                format!(
+                    "failed to warm TTS backend {} ({}): {message}",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            format!(
+                "warm tts={} model={} status=failed error={message}",
+                backend.label(),
+                backend.model_label()
+            )
+        }
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
 async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<CommandOutput> {
     let asr_backend = context.session.next_asr_backend;
     let (connection_id, from, stream_url, webhook_url, media) =
@@ -1672,6 +1818,7 @@ async fn conversation_command(
     command: ConversationCommand,
 ) -> DriverResult<CommandOutput> {
     match command {
+        ConversationCommand::Help => Ok(CommandOutput::text(conversation_help())),
         ConversationCommand::Status { call } => {
             let guard = context.state.read().await;
             let id = resolve_call_id(
@@ -2680,6 +2827,7 @@ fn gateway_help(topic: &[String]) -> Option<String> {
         [topic] if topic == "inbound" => Some(inbound_help()),
         [topic] if topic == "asr" => Some(asr_help()),
         [topic] if topic == "tts" => Some(tts_help()),
+        [topic] if topic == "warm" => Some(warm_help()),
         [topic] if topic == "conversation" || topic == "chat" => Some(conversation_help()),
         [topic] if topic == "calls" || topic == "call" => Some(call_help()),
         [topic] if topic == "dial" || topic == "speak" || topic == "outbound" => {
@@ -2738,6 +2886,7 @@ fn gateway_root_help() -> String {
         "  tts list",
         "  tts status",
         "  tts use kokoro-82m|piper       Select TTS backend for the next speak command",
+        "  warm [all|asr|tts]             Load selected ASR/TTS models before serving calls",
         "",
         "Calls:",
         "  calls                          List calls in operator roster order",
@@ -2875,6 +3024,19 @@ fn config_help() -> String {
     .join("\n")
 }
 
+fn warm_help() -> String {
+    [
+        "warm",
+        "warm all",
+        "warm asr",
+        "warm tts",
+        "",
+        "Load the source-local next ASR and/or TTS model handles before serving a call.",
+        "Warm status is runtime-only and appears in the TUI Runtime pane.",
+    ]
+    .join("\n")
+}
+
 fn tts_help() -> String {
     [
         "tts list",
@@ -2899,6 +3061,7 @@ fn tts_help() -> String {
         "  tts status",
         "  tts use kokoro-82m",
         "  tts use piper",
+        "  warm tts",
     ]
     .join("\n")
 }
@@ -3083,6 +3246,7 @@ fn conversation_help() -> String {
         "  only when intentionally testing the echo/repeat TTS loop.",
         "",
         "Usage:",
+        "  conversation help",
         "  conversation status [call-id]",
         "  conversation smoke-test <on|off>",
         "  conversation barge-in [on|off|status]",
@@ -3268,6 +3432,7 @@ fn socket_help() -> String {
         "  help inbound",
         "  help asr",
         "  help tts",
+        "  help warm",
         "  help conversation",
         "  help transcript",
         "  help call",
@@ -3456,6 +3621,10 @@ mod tests {
             .run_line("help conversation")
             .await
             .expect("conversation help");
+        let conversation_alias = engine
+            .run_line("conversation help")
+            .await
+            .expect("conversation help alias");
 
         assert!(asr.lines.join("\n").contains("source-local"));
         assert!(tts.lines.join("\n").contains("tts list"));
@@ -3464,12 +3633,14 @@ mod tests {
         let outbound = outbound.lines.join("\n");
         let socket = socket.lines.join("\n");
         let conversation = conversation.lines.join("\n");
+        let conversation_alias = conversation_alias.lines.join("\n");
         assert!(outbound.contains("auto-attaches conversation in auto mode"));
         assert!(outbound.contains("conversation smoke-test on"));
         assert!(socket.contains("Receive one JSON object"));
         assert!(socket.contains("Agent workflows"));
         assert!(socket.contains("smoke-test handler mode is gateway-wide"));
         assert!(conversation.contains("Default live behavior"));
+        assert!(conversation_alias.contains("Default live behavior"));
         assert!(conversation.contains("Normal inbound TUI/socket flow"));
         assert!(conversation.contains("Normal outbound TUI/socket flow"));
         assert!(conversation.contains("conversation disapprove [call-id]"));
@@ -3552,6 +3723,51 @@ mod tests {
             engine.context().session.next_tts_backend,
             LiveTtsBackend::Kokoro82m
         );
+    }
+
+    #[tokio::test]
+    async fn warm_command_records_selected_model_status() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context =
+            context_with_static_tts(state.clone(), telnyx, SharedMediaRegistry::default());
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("warm").await.expect("warm models");
+
+        assert_eq!(output.lines.len(), 2);
+        assert!(output.lines[0]
+            .starts_with("warm asr=kroko-2025 model=sherpa-zipformer-en-kroko-2025-08-06 status=ready elapsed_ms="));
+        assert!(output.lines[1]
+            .starts_with("warm tts=kokoro-82m model=kokoro/kokoro_82m status=ready elapsed_ms="));
+        let guard = state.read().await;
+        assert!(guard
+            .model_warmups
+            .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025)));
+        assert!(guard
+            .model_warmups
+            .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m)));
+    }
+
+    #[tokio::test]
+    async fn warm_tts_only_skips_asr_status() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context =
+            context_with_static_tts(state.clone(), telnyx, SharedMediaRegistry::default());
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("warm tts").await.expect("warm tts");
+
+        assert_eq!(output.lines.len(), 1);
+        assert!(output.lines[0].starts_with("warm tts=kokoro-82m"));
+        let guard = state.read().await;
+        assert!(!guard
+            .model_warmups
+            .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025)));
+        assert!(guard
+            .model_warmups
+            .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m)));
     }
 
     #[tokio::test]
@@ -4574,6 +4790,11 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn test_asr_registry() -> SharedAsrRegistry {
+        let echo = Arc::new(EchoAsrFactory);
+        Arc::new(AsrRegistry::new(echo.clone(), echo))
+    }
+
     fn context_with_static_tts(
         state: SharedState,
         telnyx: TelnyxClient,
@@ -4595,6 +4816,7 @@ mod tests {
         GatewayContext::with_services(
             state,
             telnyx,
+            test_asr_registry(),
             media,
             tts,
             conversation,

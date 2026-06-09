@@ -18,7 +18,9 @@ use ratatui::Terminal;
 use crate::operator::commands::{GatewayCommand, GatewayContext};
 use crate::operator::script::run_operator_line;
 use crate::operator::session::{ordered_call_ids, OperatorSession};
-use crate::operator::state::{CallStatus, GatewayState, LogLevel};
+use crate::operator::state::{
+    asr_warm_key, tts_warm_key, CallStatus, GatewayState, LogLevel, ModelWarmStatus,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FocusedPane {
@@ -157,15 +159,17 @@ pub async fn run_tui(
                     continue;
                 }
                 command_history.push(command.clone());
-                history.push(format!("> {command}"));
+                push_history_line(&mut history, format!("> {command}"));
                 match run_operator_line(engine, &command).await {
                     Ok(output) => {
-                        history.extend(output.lines);
+                        for line in output.lines {
+                            push_history_line(&mut history, line);
+                        }
                         if output.effects.contains(&CommandEffect::ExitShell) {
                             break;
                         }
                     }
-                    Err(error) => history.push(format!("error: {error}")),
+                    Err(error) => push_history_line(&mut history, format!("error: {error}")),
                 }
                 trim_history(&mut history);
             }
@@ -262,6 +266,15 @@ async fn attach_selected(context: &mut GatewayContext) -> String {
     }
 }
 
+fn push_history_line(history: &mut Vec<String>, line: impl AsRef<str>) {
+    let text = line.as_ref();
+    if text.is_empty() {
+        history.push(String::new());
+        return;
+    }
+    history.extend(text.split('\n').map(str::to_string));
+}
+
 fn trim_history(history: &mut Vec<String>) {
     while history.len() > 200 {
         history.remove(0);
@@ -289,8 +302,12 @@ fn draw(
         .split(outer[1]);
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
+        .constraints([Constraint::Percentage(18), Constraint::Min(1)])
         .split(root[1]);
+    let detail = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .split(right[1]);
 
     let shell_inner_height = root[0].height.saturating_sub(2) as usize;
     let shell_inner_width = root[0].width.saturating_sub(2) as usize;
@@ -357,13 +374,21 @@ fn draw(
         &mut call_list_state,
     );
 
+    let runtime_lines = selected_runtime_lines(state, session);
+    frame.render_widget(
+        Paragraph::new(runtime_lines)
+            .block(focused_block("Runtime", FocusedPane::Detail, focus))
+            .wrap(Wrap { trim: false }),
+        detail[0],
+    );
+
     let detail_lines = selected_detail_lines(state, session);
     frame.render_widget(
         Paragraph::new(detail_lines)
             .block(focused_block("Selected Call", FocusedPane::Detail, focus))
             .wrap(Wrap { trim: false })
             .scroll((session.detail_scroll, 0)),
-        right[1],
+        detail[1],
     );
 }
 
@@ -529,8 +554,10 @@ fn build_shell_view(
 
 fn display_rows(text: &str, width: usize) -> usize {
     let width = width.max(1);
-    let chars = text.chars().count().max(1);
-    chars.div_ceil(width)
+    text.split('\n')
+        .map(|line| line.chars().count().max(1).div_ceil(width))
+        .sum::<usize>()
+        .max(1)
 }
 
 fn set_shell_cursor(
@@ -548,6 +575,123 @@ fn set_shell_cursor(
     let prompt_offset = 2 + input.cursor_chars() as u16;
     let cursor_offset = prompt_offset.min(inner_width.saturating_sub(1));
     frame.set_cursor_position(Position::new(area.x + 1 + cursor_offset, prompt_y));
+}
+
+fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Vec<Line<'static>> {
+    let quality = &state.quality.config;
+    let call = session.selected_call(state);
+    let asr_backend = call
+        .and_then(|call| call.asr_backend)
+        .unwrap_or(session.next_asr_backend);
+    let tts_backend = session.next_tts_backend;
+    let asr_warm = format_warm_status(state.model_warmups.get(&asr_warm_key(asr_backend)));
+    let tts_warm = format_warm_status(state.model_warmups.get(&tts_warm_key(tts_backend)));
+
+    let mut lines = vec![
+        Line::from(format!(
+            "quality: profile={} config_id={}",
+            quality.profile.label(),
+            compact_id(&state.quality.config_id)
+        )),
+        Line::from(format!(
+            "logging: enabled={} dropped={} transcript_text={}",
+            state.quality.event_sink.is_enabled(),
+            state.quality.event_sink.dropped_count(),
+            quality.logging.include_transcript_text
+        )),
+        Line::from(format!(
+            "models: asr={} warm={} tts={} warm={}",
+            asr_backend.label(),
+            asr_warm,
+            tts_backend.label(),
+            tts_warm
+        )),
+        Line::from(format!(
+            "endpoint: trailing={}ms min_words={} min_chars={} merge={}ms max_words={} max={}ms",
+            quality.endpoint.trailing_silence_ms,
+            quality.endpoint.min_turn_words,
+            quality.endpoint.min_turn_chars,
+            quality.endpoint.merge_window_ms,
+            quality.endpoint.max_turn_words,
+            quality.endpoint.max_turn_duration_ms
+        )),
+        Line::from(format!(
+            "speech: rms={} peak={} onset_min={}ms",
+            quality.speech.rms_threshold,
+            quality.speech.peak_threshold,
+            quality.speech.onset_min_silence_ms
+        )),
+        Line::from(format!(
+            "barge-in: enabled={} onset={} partial={} final={} clear={}ms",
+            quality.barge_in.enabled,
+            quality.barge_in.speech_onset_cancel_enabled,
+            quality.barge_in.partial_asr_cancel_enabled,
+            quality.barge_in.final_asr_cancel_enabled,
+            quality.barge_in.clear_timeout_ms
+        )),
+        Line::from(format!(
+            "tts: chunking={} backend={} warm={}",
+            quality.tts.chunking_enabled,
+            tts_backend.label(),
+            tts_warm
+        )),
+        Line::from(format!(
+            "text-call: max={} media_ready={}ms playback_wait={}ms callback={}ms latest_wins={}",
+            quality.text_call.max_active_turns,
+            quality.text_call.media_ready_timeout_ms,
+            quality.text_call.playback_wait_timeout_ms,
+            quality.text_call.callback_timeout_ms,
+            quality.text_call.latest_response_wins
+        )),
+    ];
+
+    if let Some(call) = call {
+        lines.push(Line::from(format!(
+            "call: {} state={} stream={}",
+            call.gateway_call_id,
+            call.status.label(),
+            call.ids.stream_id.as_deref().unwrap_or("<none>")
+        )));
+        lines.push(Line::from(format!(
+            "media: {} {}Hz {}ch asr={}",
+            call.media.encoding.as_deref().unwrap_or("<unknown>"),
+            call.media
+                .sample_rate_hz
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            call.media
+                .channels
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            call.asr_backend
+                .map(|backend| backend.label().to_string())
+                .unwrap_or_else(|| "<unbound>".to_string())
+        )));
+        lines.push(Line::from(format!("tts: {}", selected_call_tts_status(call))));
+        lines.push(Line::from(format!(
+            "conversation: {}",
+            selected_call_conversation_status(call)
+        )));
+    } else {
+        lines.push(Line::from("call: <none selected>"));
+    }
+    lines
+}
+
+fn compact_id(value: &str) -> String {
+    if value.chars().count() <= 18 {
+        return value.to_string();
+    }
+    let prefix = value.chars().take(14).collect::<String>();
+    format!("{prefix}...")
+}
+
+fn format_warm_status(status: Option<&ModelWarmStatus>) -> String {
+    let Some(status) = status else {
+        return "cold".to_string();
+    };
+    let age = format_age(Utc::now().signed_duration_since(status.warmed_at));
+    format!("ready({}ms,{age})", status.elapsed_ms)
 }
 
 fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec<Line<'static>> {
@@ -749,6 +893,7 @@ mod tests {
         assert_eq!(display_rows("", 8), 1);
         assert_eq!(display_rows("12345678", 8), 1);
         assert_eq!(display_rows("123456789", 8), 2);
+        assert_eq!(display_rows("12345\n123456789", 8), 3);
     }
 
     #[test]
@@ -765,6 +910,16 @@ mod tests {
 
         assert_eq!(view.prompt_row, 3);
         assert_eq!(view.lines.len(), 3);
+    }
+
+    #[test]
+    fn shell_history_line_splits_embedded_newlines() {
+        let mut history = Vec::new();
+        push_history_line(&mut history, "error: first\nsecond\nthird");
+
+        assert_eq!(history, vec!["error: first", "second", "third"]);
+        let view = build_shell_view(&history, "", 4, 20);
+        assert_eq!(view.prompt_row, 3);
     }
 
     #[test]

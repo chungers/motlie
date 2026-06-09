@@ -16,6 +16,7 @@ use crate::quality::{
     ActiveAsrQualitySession, QualityEvent, QualityEventContext, QualityEventSink, RedactionMode,
     VoiceQualityConfig,
 };
+use crate::tts::LiveTtsBackend;
 
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
@@ -471,6 +472,14 @@ pub struct LogEntry {
     pub message: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelWarmStatus {
+    pub label: String,
+    pub model: String,
+    pub warmed_at: DateTime<Utc>,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogLevel {
     Info,
@@ -498,8 +507,17 @@ pub struct GatewayState {
     pub stream_index: BTreeMap<String, String>,
     pub inbound_subscriptions: BTreeMap<String, InboundSubscription>,
     pub logs: VecDeque<LogEntry>,
+    pub model_warmups: BTreeMap<String, ModelWarmStatus>,
     pub quality: QualityRuntimeState,
     pub shutdown_requested: bool,
+}
+
+pub fn asr_warm_key(backend: LiveAsrBackend) -> String {
+    format!("asr:{}", backend.label())
+}
+
+pub fn tts_warm_key(backend: LiveTtsBackend) -> String {
+    format!("tts:{}", backend.label())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -530,9 +548,28 @@ impl GatewayState {
             stream_index: BTreeMap::new(),
             inbound_subscriptions: BTreeMap::new(),
             logs: VecDeque::new(),
+            model_warmups: BTreeMap::new(),
             quality: QualityRuntimeState::default(),
             shutdown_requested: false,
         }
+    }
+
+    pub fn mark_model_warm(
+        &mut self,
+        key: String,
+        label: impl Into<String>,
+        model: impl Into<String>,
+        elapsed_ms: u64,
+    ) {
+        self.model_warmups.insert(
+            key,
+            ModelWarmStatus {
+                label: label.into(),
+                model: model.into(),
+                warmed_at: Utc::now(),
+                elapsed_ms,
+            },
+        );
     }
 
     pub fn set_quality_config(&mut self, config: VoiceQualityConfig) -> String {
