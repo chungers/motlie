@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 00:52 PDT | @codex-421-design | Reconciled code review fixes: poison-safe channel locks, pure-sync timeout cancellation, mstream delivery-event observation, channel cleanup on teardown, timer deferral ownership in `motlie-agent`, and send/broadcast submit retry wiring. |
 | 2026-06-09 00:07 PDT | @codex-421-design | Marked final implementation gates complete: package-scoped fmt check, build, tests, clippy, and focused tmux writable-client activity tests all pass. Workspace-wide `cargo fmt` remains blocked by unrelated missing `examples/vector2/app/benchmark.rs`. |
 | 2026-06-09 00:02 PDT | @codex-421-design | Added implementation PLAN for PR #423 coding phase: `motlie-tmux` writable-client activity, new `motlie-agent` Channel API, mstream send/broadcast/timer migration, docs, and verification gates. |
 
@@ -49,9 +50,10 @@ cargo clippy -p motlie-agent -- -D warnings
 - [x] Add `DaemonState.channel_manager` so send, broadcast, and timers share channel pending state for the daemon lifetime.
 - [x] Migrate `send_shared` to `Channel::send` and return channel message id / verification metadata.
 - [x] Migrate `broadcast_shared` to `Channel::enqueue` and return accepted channel message ids.
-- [x] Migrate `timer_fire_once_shared` prompt delivery to `Channel::enqueue` while preserving existing timer defer metadata and scheduled retry behavior.
+- [x] Migrate `timer_fire_once_shared` prompt delivery to `Channel::enqueue`; `motlie-agent` now owns no-barge-in deferral and mstream observes deferred/submitted/failed outcomes through `DeliveryEvent`s.
 - [x] Update the legacy direct-send helper to use separate payload and Enter for remaining onboarding/handoff paths.
-- [x] Update timer no-barge-in guard to use writable-client activity.
+- [x] Remove mstream-owned timer quiet-guard evaluation from the delivery path.
+- [x] Remove affected channels during stale-session quarantine, reclaim, and disconnect.
 
 Verify:
 

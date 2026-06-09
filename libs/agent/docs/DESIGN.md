@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 00:52 PDT | @codex-421-design | Code-review reconciliation: pure-sync timeout drops its pending segment unless async sources/other waiters keep it alive; mstream timer deferral is channel-owned and observed through `DeliveryEvent`s; teardown removes stale channels. |
 | 2026-06-09 00:02 PDT | @codex-421-design | Implementation alignment before code review: moved `UiProfile` selection to per-session `ResolvedSession` with `ChannelConfig.default_ui_profile` fallback, shaped `DeliveryEvents` as a Tokio broadcast receiver plus concrete `ChannelStatus`/`DeferReason`, added explicit `SubmitPolicy.prompt_submit`, and added `docs/PLAN.md` for the coding phase. |
 | 2026-06-08 23:27 PDT | @codex-421-design | Addressed PR #423 round-1 review: renamed the API to `Channel`/`ChannelManager`/`SessionKey`/`UiProfile`, made stable resolved tmux identity required, specified the needed `motlie-tmux` writable-client activity signal, removed duplicate submit-policy sources, defined outcome/error/verification contracts, defaulted dedup with zero-or-many waiters, added channel delivery events for mstream observability, clarified M4 as crate-level reuse only, and expanded mixed sync/async test coverage. |
 | 2026-06-08 22:22 PDT | @codex-421-design | Reworked the central abstraction from receiver-like inbox to per-process channel, explicitly scoped guarantees to one process targeting one tmux session, and made synchronous send vs asynchronous broadcast/timer semantics first-class in the API sketch. |
@@ -458,7 +459,9 @@ never-quiet session:
 
 - async callers remain queued and observable as pending/deferred
 - sync callers wait until their configured timeout, then receive
-  `DeliveryError::TimedOut { message_id, still_pending: true }`
+  `DeliveryError::TimedOut { message_id, still_pending }`; a pure-sync segment
+  is removed on timeout (`still_pending: false`), while a segment kept alive by
+  async sources or other waiters remains queued (`still_pending: true`).
 
 An explicit future force-through policy can be added later, but it is not part
 of the first slice.
@@ -692,11 +695,11 @@ Semantics:
 Current path:
 
 - `timer_start_shared` stores prompt, submit retry knobs, and
-  `input_quiet_for_secs` (`bins/mstream/src/state.rs:2311-2412`).
-- `timer_fire_once_shared` evaluates the current quiet guard
-  (`bins/mstream/src/state.rs:2510-2555`).
-- If quiet, it sends text and then calls `send_submit_retries_to_resolved`
-  (`bins/mstream/src/state.rs:2558-2571`).
+  `input_quiet_for_secs`.
+- `timer_fire_once_shared` resolves and freshness-checks the target, then
+  enqueues through the shared channel.
+- Quiet-guard deferral and submit retry mechanics live in `motlie-agent`, not in
+  mstream timer code.
 
 Migration:
 
@@ -710,10 +713,9 @@ Migration:
    that message only.
 5. Timer deferral/delivery metadata comes from `DeliveryEvent`s, not from timer
    code reimplementing channel internals.
-6. Keep existing `timer_deferred`/`timer_fired` JSON compatibility where
-   possible, but make their meaning explicit:
-   - `timer_fired`: timer accepted a prompt into the channel.
-   - delivery event metadata: channel deferred/submitted/failed it.
+6. Manual `timer fire` JSON reports channel acceptance (`timer_fire` with the
+   accepted message id). Deferred/submitted/failed delivery outcomes update timer
+   metadata and durable workstream audit events from `DeliveryEvent`s.
 
 Semantics:
 
@@ -960,8 +962,9 @@ areas.
   - async timer/broadcast/future Telnyx enqueue arrives while a sync send waits
     behind the quiet guard, and one coalesced prompt eventually notifies all
     sync waiters
-  - sync send timeout leaves the pending segment and other async messages intact
-  - cancellation of one waiter does not drop the pending message or other waiters
+  - sync-only timeout drops its pending segment and reports `still_pending: false`
+  - timeout of one waiter preserves the pending message when async sources or
+    other waiters still depend on it
   - separate manager instances targeting the same tmux session do not promise
     cross-process coalescing
 - Events/status:

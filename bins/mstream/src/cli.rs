@@ -11,9 +11,9 @@ use crate::protocol::{
     NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
     SessionMarkRequest, SessionRetagRequest, SnapshotRequest, SummaryInputRequest,
     TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
-    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS,
-    DEFAULT_TIMER_SUBMIT_RETRIES, DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS,
-    DEFAULT_WORKSTREAM_EVENT_LIMIT,
+    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_SUBMIT_RETRIES, DEFAULT_SUBMIT_RETRY_DELAY_MS,
+    DEFAULT_SUBMIT_SETTLE_MS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
+    DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -349,8 +349,12 @@ pub struct SendArgs {
     pub no_enter: bool,
     #[arg(long)]
     pub interrupt_first: bool,
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_SETTLE_MS)]
     pub settle_ms: u64,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRIES)]
+    pub submit_retries: u8,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRY_DELAY_MS)]
+    pub submit_retry_delay_ms: u64,
     #[arg(long, value_enum)]
     pub require_state: Option<AgentState>,
     #[arg(long, value_enum)]
@@ -368,6 +372,8 @@ impl SendArgs {
             enter,
             interrupt_first: self.interrupt_first,
             settle_ms: self.settle_ms,
+            submit_retries: if enter { self.submit_retries } else { 0 },
+            submit_retry_delay_ms: self.submit_retry_delay_ms,
             require_state: self.require_state,
             set_state: self.set_state,
         })
@@ -392,6 +398,12 @@ pub struct BroadcastArgs {
     pub enter: bool,
     #[arg(long)]
     pub no_enter: bool,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_SETTLE_MS)]
+    pub settle_ms: u64,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRIES)]
+    pub submit_retries: u8,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRY_DELAY_MS)]
+    pub submit_retry_delay_ms: u64,
     #[arg(long)]
     pub role: Option<String>,
     #[arg(long, value_enum)]
@@ -406,6 +418,9 @@ impl BroadcastArgs {
             text: self.text,
             paste_mode: self.paste_mode,
             enter,
+            settle_ms: self.settle_ms,
+            submit_retries: if enter { self.submit_retries } else { 0 },
+            submit_retry_delay_ms: self.submit_retry_delay_ms,
             role: self.role,
             state: self.state,
         })

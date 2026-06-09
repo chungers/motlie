@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::error::Error as StdError;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use motlie_tmux::{HostHandle, KeySequence, Target};
@@ -17,6 +18,12 @@ use tokio::time::{sleep, timeout};
 
 const DEFAULT_EVENT_CAPACITY: usize = 1024;
 const COMPOSER_SEPARATOR: &str = "\n\n---\n\n";
+
+fn lock_or_recover<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// A multi-consumer, lossy delivery event stream.
 ///
@@ -104,11 +111,7 @@ impl ChannelManager {
 
     /// Return a cheap-clone channel handle for this resolved session.
     pub fn get_or_bind(&self, resolved: ResolvedSession) -> Result<Channel, DeliveryError> {
-        let mut channels = self
-            .inner
-            .channels
-            .lock()
-            .expect("channel manager poisoned");
+        let mut channels = lock_or_recover(&self.inner.channels);
         if let Some(channel) = channels.get(&resolved.key) {
             let new_target = resolved.target.target_string();
             if channel.inner.target_string != new_target {
@@ -135,6 +138,7 @@ impl ChannelManager {
                 queue: Mutex::new(QueueState::default()),
                 status: StdMutex::new(ChannelStatus::new(key.clone())),
                 next_message_id: Arc::clone(&self.inner.next_message_id),
+                next_waiter_id: AtomicU64::new(1),
                 event_tx: self.inner.event_tx.clone(),
             }),
         };
@@ -143,11 +147,21 @@ impl ChannelManager {
     }
 
     pub fn remove(&self, key: &SessionKey) -> Option<Channel> {
-        self.inner
-            .channels
-            .lock()
-            .expect("channel manager poisoned")
-            .remove(key)
+        lock_or_recover(&self.inner.channels).remove(key)
+    }
+
+    pub fn remove_where(&self, mut predicate: impl FnMut(&SessionKey) -> bool) -> usize {
+        let mut channels = lock_or_recover(&self.inner.channels);
+        let keys = channels
+            .keys()
+            .filter(|key| predicate(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = keys.len();
+        for key in keys {
+            channels.remove(&key);
+        }
+        removed
     }
 
     pub fn subscribe(&self) -> DeliveryEvents {
@@ -201,6 +215,7 @@ struct ChannelInner {
     queue: Mutex<QueueState>,
     status: StdMutex<ChannelStatus>,
     next_message_id: Arc<AtomicU64>,
+    next_waiter_id: AtomicU64,
     event_tx: broadcast::Sender<DeliveryEvent>,
 }
 
@@ -212,12 +227,16 @@ impl Channel {
         options: SendOptions,
     ) -> Result<SubmissionOutcome, DeliveryError> {
         let (waiter_tx, waiter_rx) = oneshot::channel();
+        let waiter_id = WaiterId(self.inner.next_waiter_id.fetch_add(1, Ordering::Relaxed));
         let message_id = self
             .accept(
                 message,
                 options.submit,
                 QuietGuardPolicy::Default,
-                Some(waiter_tx),
+                Some(Waiter {
+                    id: waiter_id,
+                    tx: waiter_tx,
+                }),
             )
             .await?;
 
@@ -227,7 +246,7 @@ impl Channel {
             Err(_elapsed) => Err(DeliveryError::Timeout {
                 message_id,
                 timeout: options.timeout,
-                still_pending: self.is_pending(message_id).await,
+                still_pending: self.cancel_waiter(message_id, waiter_id).await,
             }),
         }
     }
@@ -254,11 +273,7 @@ impl Channel {
     }
 
     pub fn status(&self) -> ChannelStatus {
-        self.inner
-            .status
-            .lock()
-            .expect("channel status poisoned")
-            .clone()
+        lock_or_recover(&self.inner.status).clone()
     }
 
     async fn accept(
@@ -277,7 +292,7 @@ impl Channel {
         let source = message.source.clone();
         let dedup_key = normalize_body(&message.body);
         let mut start_worker = false;
-        let mut coalesced = false;
+        let has_async_source = waiter.is_none();
         let message_id;
         let pending_count;
         {
@@ -295,7 +310,9 @@ impl Channel {
                 if let Some(waiter) = waiter {
                     segment.waiters.push(waiter);
                 }
-                coalesced = true;
+                if has_async_source {
+                    segment.has_async_source = true;
+                }
             } else {
                 message_id = MessageId(self.inner.next_message_id.fetch_add(1, Ordering::Relaxed));
                 queue.pending.push_back(PendingSegment {
@@ -307,6 +324,7 @@ impl Channel {
                     submit,
                     quiet_guard,
                     waiters: waiter.into_iter().collect(),
+                    has_async_source,
                     deferred_once: false,
                 });
             }
@@ -329,13 +347,6 @@ impl Channel {
             source,
             accepted_at: Instant::now(),
         });
-        if coalesced {
-            self.emit(DeliveryEvent::Coalesced {
-                target: self.inner.key.clone(),
-                message_ids: vec![message_id],
-                segment_count: 1,
-            });
-        }
         if start_worker {
             let channel = self.clone();
             tokio::spawn(async move {
@@ -345,14 +356,32 @@ impl Channel {
         Ok(message_id)
     }
 
-    async fn is_pending(&self, message_id: MessageId) -> bool {
-        self.inner
-            .queue
-            .lock()
-            .await
-            .pending
-            .iter()
-            .any(|segment| segment.message_id == message_id)
+    async fn cancel_waiter(&self, message_id: MessageId, waiter_id: WaiterId) -> bool {
+        let pending_count;
+        let still_pending;
+        {
+            let mut queue = self.inner.queue.lock().await;
+            let Some(position) = queue
+                .pending
+                .iter()
+                .position(|segment| segment.message_id == message_id)
+            else {
+                return false;
+            };
+            let segment = &mut queue.pending[position];
+            segment.waiters.retain(|waiter| waiter.id != waiter_id);
+            if segment.waiters.is_empty() && !segment.has_async_source {
+                queue.pending.remove(position);
+                still_pending = false;
+            } else {
+                still_pending = true;
+            }
+            pending_count = queue.pending.len();
+        }
+        self.update_status(|status| {
+            status.pending_count = pending_count;
+        });
+        still_pending
     }
 
     async fn flush_loop(self) {
@@ -554,16 +583,19 @@ impl Channel {
                         verified: true,
                     });
                 }
-                SubmitVerification::Unknown if !submit.require_verification => {
-                    return Ok(BatchSubmitResult {
-                        submitted_at,
-                        verified: false,
-                    });
-                }
                 SubmitVerification::Unknown => {
                     if attempt == submit.retries {
-                        return Err(DeliveryError::VerificationUnavailable {
-                            message_ids: batch.iter().map(|segment| segment.message_id).collect(),
+                        if submit.require_verification {
+                            return Err(DeliveryError::VerificationUnavailable {
+                                message_ids: batch
+                                    .iter()
+                                    .map(|segment| segment.message_id)
+                                    .collect(),
+                            });
+                        }
+                        return Ok(BatchSubmitResult {
+                            submitted_at,
+                            verified: false,
                         });
                     }
                     if !submit.retry_delay.is_zero() {
@@ -632,7 +664,7 @@ impl Channel {
                 }
             };
             for waiter in segment.waiters {
-                let _ = waiter.send(Ok(outcome.clone()));
+                let _ = waiter.tx.send(Ok(outcome.clone()));
             }
         }
         self.update_status(|status| {
@@ -656,7 +688,7 @@ impl Channel {
         });
         for segment in batch {
             for waiter in segment.waiters {
-                let _ = waiter.send(Err(error.clone()));
+                let _ = waiter.tx.send(Err(error.clone()));
             }
         }
         self.update_status(|status| {
@@ -669,7 +701,7 @@ impl Channel {
     }
 
     fn update_status(&self, update: impl FnOnce(&mut ChannelStatus)) {
-        let mut status = self.inner.status.lock().expect("channel status poisoned");
+        let mut status = lock_or_recover(&self.inner.status);
         update(&mut status);
     }
 }
@@ -689,6 +721,7 @@ struct PendingSegment {
     submit: SubmitPolicy,
     quiet_guard: QuietGuardPolicy,
     waiters: Vec<Waiter>,
+    has_async_source: bool,
     deferred_once: bool,
 }
 
@@ -709,7 +742,13 @@ struct BatchSubmitResult {
     verified: bool,
 }
 
-type Waiter = oneshot::Sender<Result<SubmissionOutcome, DeliveryError>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WaiterId(u64);
+
+struct Waiter {
+    id: WaiterId,
+    tx: oneshot::Sender<Result<SubmissionOutcome, DeliveryError>>,
+}
 
 /// Message accepted by a channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -735,41 +774,58 @@ impl ManagedMessage {
 }
 
 /// Human-readable source attribution for coalesced prompt bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceKind {
+    Human,
+    Timer,
+    Broadcast,
+    External,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageSource {
     label: String,
-    omit_header_when_single: bool,
+    kind: SourceKind,
 }
 
 impl MessageSource {
     pub fn human(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            omit_header_when_single: true,
-        }
+        Self::new(label, SourceKind::Human)
     }
 
     pub fn timer(label: impl Into<String>) -> Self {
-        Self::attributed(label)
+        Self::new(label, SourceKind::Timer)
     }
 
     pub fn broadcast(label: impl Into<String>) -> Self {
-        Self::attributed(label)
+        Self::new(label, SourceKind::Broadcast)
     }
 
     pub fn external(label: impl Into<String>) -> Self {
-        Self::attributed(label)
+        Self::new(label, SourceKind::External)
     }
 
     pub fn attributed(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            omit_header_when_single: false,
-        }
+        Self::external(label)
     }
 
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    pub fn kind(&self) -> SourceKind {
+        self.kind
+    }
+
+    fn new(label: impl Into<String>, kind: SourceKind) -> Self {
+        Self {
+            label: label.into(),
+            kind,
+        }
+    }
+
+    fn omit_header_when_single(&self) -> bool {
+        self.kind == SourceKind::Human
     }
 }
 
@@ -1026,7 +1082,7 @@ pub enum DeliveryEvent {
     },
 }
 
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error)]
 pub enum DeliveryError {
     #[error("target identity mismatch for {key:?}: existing target {existing_target}, new target {new_target}")]
     TargetIdentityMismatch {
@@ -1038,10 +1094,11 @@ pub enum DeliveryError {
     TargetUnresolved { target: String },
     #[error("target stale: {target}: {reason}")]
     TargetStale { target: String, reason: String },
-    #[error("tmux {operation} failed: {message}")]
+    #[error("tmux {operation} failed: {source}")]
     Tmux {
         operation: &'static str,
-        message: String,
+        #[source]
+        source: TmuxErrorSource,
     },
     #[error("submit verification unavailable for {message_ids:?}")]
     VerificationUnavailable { message_ids: Vec<MessageId> },
@@ -1062,11 +1119,26 @@ pub enum DeliveryError {
 }
 
 impl DeliveryError {
-    pub fn tmux(operation: &'static str, error: impl fmt::Display) -> Self {
+    pub fn tmux(operation: &'static str, source: motlie_tmux::Error) -> Self {
         Self::Tmux {
             operation,
-            message: error.to_string(),
+            source: TmuxErrorSource(Arc::new(source)),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TmuxErrorSource(Arc<motlie_tmux::Error>);
+
+impl fmt::Display for TmuxErrorSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.0.as_ref(), f)
+    }
+}
+
+impl StdError for TmuxErrorSource {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.0.source()
     }
 }
 
@@ -1077,7 +1149,7 @@ fn normalize_body(body: &str) -> String {
 fn format_segments(batch: &[PendingSegment]) -> String {
     if batch.len() == 1 {
         let segment = &batch[0];
-        if segment.sources.len() == 1 && segment.sources[0].omit_header_when_single {
+        if segment.sources.len() == 1 && segment.sources[0].omit_header_when_single() {
             return segment.body.clone();
         }
     }
@@ -1152,6 +1224,7 @@ mod tests {
                 submit: SubmitPolicy::default(),
                 quiet_guard: QuietGuardPolicy::Default,
                 waiters: Vec::new(),
+                has_async_source: false,
                 deferred_once: false,
             },
             PendingSegment {
@@ -1163,6 +1236,7 @@ mod tests {
                 submit: SubmitPolicy::default(),
                 quiet_guard: QuietGuardPolicy::Default,
                 waiters: Vec::new(),
+                has_async_source: false,
                 deferred_once: false,
             },
         ];
@@ -1171,6 +1245,14 @@ mod tests {
             format_segments(&batch),
             "[from: broadcast]\nfirst\n\n[from: timer:poll]\nsecond"
         );
+    }
+
+    #[test]
+    fn source_constructors_preserve_kind() {
+        assert_eq!(MessageSource::human("h").kind(), SourceKind::Human);
+        assert_eq!(MessageSource::timer("t").kind(), SourceKind::Timer);
+        assert_eq!(MessageSource::broadcast("b").kind(), SourceKind::Broadcast);
+        assert_eq!(MessageSource::external("e").kind(), SourceKind::External);
     }
 
     #[test]
@@ -1185,6 +1267,7 @@ mod tests {
             quiet_guard: QuietGuardPolicy::Default,
             waiters: Vec::new(),
             deferred_once: false,
+            has_async_source: false,
         };
         segment.add_source(MessageSource::timer("timer:poll"));
         segment.add_source(MessageSource::timer("timer:poll"));
@@ -1229,6 +1312,42 @@ mod tests {
         assert_eq!(sends.len(), 2);
         assert!(sends[0].contains("hello"));
         assert!(sends[1].contains("Enter"));
+    }
+
+    #[tokio::test]
+    async fn generic_unknown_verification_runs_retries_before_unverified_success() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "")
+            .with_response("send-keys", "")
+            .with_response("send-keys", "")
+            .with_response("send-keys", "");
+        let (channel, log) = mock_channel(mock, config()).await;
+
+        let outcome = channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "hello"),
+                SendOptions {
+                    submit: SubmitPolicy {
+                        settle: Duration::ZERO,
+                        retries: 2,
+                        retry_delay: Duration::ZERO,
+                        require_verification: false,
+                        prompt_submit: true,
+                    },
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!outcome.verified());
+        let commands = log.lock().unwrap();
+        let enter_sends = commands
+            .iter()
+            .filter(|command| command.contains("send-keys") && command.contains("Enter"))
+            .count();
+        assert_eq!(enter_sends, 3);
     }
 
     #[tokio::test]
@@ -1305,7 +1424,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_writable_activity_times_out_sync_send_but_keeps_pending() {
+    async fn recent_writable_activity_times_out_pure_sync_send_and_drops_pending() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1330,9 +1449,165 @@ mod tests {
             .unwrap_err();
 
         match err {
+            DeliveryError::Timeout { still_pending, .. } => assert!(!still_pending),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(channel.status().pending_count, 0);
+    }
+
+    #[tokio::test]
+    async fn timed_out_sync_send_preserves_async_pending_work() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let clients = format!("200 50 build {now} 0 /dev/ttys001\n");
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("list-clients", &clients);
+        let mut cfg = config();
+        cfg.input_quiet_for = Duration::from_secs(10);
+        let (channel, _log) = mock_channel(mock, cfg).await;
+
+        let send_channel = channel.clone();
+        let send_task = tokio::spawn(async move {
+            send_channel
+                .send(
+                    ManagedMessage::new(MessageSource::human("mstream.send"), "shared"),
+                    SendOptions {
+                        submit: SubmitPolicy::default(),
+                        timeout: Duration::from_millis(50),
+                    },
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let queued = channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::timer("mstream.timer"), "shared"),
+                EnqueueOptions {
+                    submit: SubmitPolicy::default(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                },
+            )
+            .await
+            .unwrap();
+        let err = send_task.await.unwrap().unwrap_err();
+
+        match err {
             DeliveryError::Timeout { still_pending, .. } => assert!(still_pending),
             other => panic!("unexpected error: {other:?}"),
         }
+        assert_eq!(queued.message_id, MessageId(1));
         assert_eq!(channel.status().pending_count, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mixed_sync_async_collision_dedups_coalesces_and_notifies_waiter() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let old = now.saturating_sub(20);
+        let recent_clients = format!("200 50 build {now} 0 /dev/ttys001\n");
+        let old_clients = format!("200 50 build {old} 0 /dev/ttys001\n");
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("list-clients", &recent_clients)
+            .with_response("list-clients", &old_clients)
+            .with_response("send-keys", "")
+            .with_response("send-keys", "");
+        let mut cfg = config();
+        cfg.input_quiet_for = Duration::from_secs(10);
+        let (channel, log) = mock_channel(mock, cfg).await;
+        let mut events = channel.subscribe();
+
+        let send_channel = channel.clone();
+        let send_task = tokio::spawn(async move {
+            send_channel
+                .send(
+                    ManagedMessage::new(MessageSource::human("mstream.send"), "shared"),
+                    SendOptions {
+                        submit: SubmitPolicy {
+                            settle: Duration::ZERO,
+                            retries: 0,
+                            retry_delay: Duration::ZERO,
+                            require_verification: false,
+                            prompt_submit: true,
+                        },
+                        timeout: Duration::from_secs(20),
+                    },
+                )
+                .await
+        });
+
+        loop {
+            match events.recv().await.unwrap() {
+                DeliveryEvent::Deferred { message_ids, .. } => {
+                    assert_eq!(message_ids, vec![MessageId(1)]);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let deduped = channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::timer("mstream.timer"), "shared"),
+                EnqueueOptions {
+                    submit: SubmitPolicy::default(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                },
+            )
+            .await
+            .unwrap();
+        let other = channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::broadcast("mstream.broadcast"), "other"),
+                EnqueueOptions {
+                    submit: SubmitPolicy::default(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(deduped.message_id, MessageId(1));
+        assert_eq!(other.message_id, MessageId(2));
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let outcome = send_task.await.unwrap().unwrap();
+        assert_eq!(outcome.message_id(), MessageId(1));
+
+        let mut saw_coalesced = false;
+        let mut saw_submitted = false;
+        while !saw_submitted {
+            match events.recv().await.unwrap() {
+                DeliveryEvent::Coalesced {
+                    message_ids,
+                    segment_count,
+                    ..
+                } => {
+                    if message_ids == vec![MessageId(1), MessageId(2)] {
+                        assert_eq!(segment_count, 2);
+                        saw_coalesced = true;
+                    }
+                }
+                DeliveryEvent::Submitted { message_ids, .. } => {
+                    assert_eq!(message_ids, vec![MessageId(1), MessageId(2)]);
+                    saw_submitted = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_coalesced);
+
+        let commands = log.lock().unwrap();
+        let rendered = commands.join("\n");
+        assert!(rendered.contains("mstream.send, mstream.timer"));
+        assert!(rendered.contains("mstream.broadcast"));
+        assert!(rendered.contains("shared"));
+        assert!(rendered.contains("other"));
     }
 }

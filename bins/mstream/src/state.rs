@@ -20,7 +20,7 @@ use motlie_tmux::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use unicode_width::UnicodeWidthStr;
@@ -62,6 +62,7 @@ pub struct DaemonState {
     sessions: BTreeMap<SessionTarget, SessionRecord>,
     workstreams: BTreeMap<String, WorkstreamRecord>,
     timers: BTreeMap<String, TimerRecord>,
+    timer_deliveries: BTreeMap<String, Vec<TimerDeliveryRecord>>,
     channel_manager: agent::ChannelManager,
     event_store: Option<EventStore>,
     next_generation: u64,
@@ -77,6 +78,7 @@ impl Default for DaemonState {
             sessions: BTreeMap::new(),
             workstreams: BTreeMap::new(),
             timers: BTreeMap::new(),
+            timer_deliveries: BTreeMap::new(),
             channel_manager: agent::ChannelManager::default(),
             event_store: None,
             next_generation: 1,
@@ -707,26 +709,17 @@ struct TimerFireSnapshot {
     message_id: Option<String>,
 }
 
-struct TimerDeferSnapshot {
+#[derive(Debug, Clone)]
+struct TimerDeliveryRecord {
     name: String,
+    workstream: Option<String>,
     target: SessionTarget,
+    prompt: String,
     generation: u64,
-    reason: &'static str,
-    latest_client_activity: Option<u64>,
-    latest_client_activity_age_secs: Option<u64>,
-    quiet_for_secs: u64,
-    next_fire_at: Option<DateTime<Utc>>,
 }
 
 enum TimerFireOutcome {
     Sent(TimerFireSnapshot),
-    Deferred(TimerDeferSnapshot),
-}
-
-struct InputGuardDecision {
-    latest_client_activity: Option<u64>,
-    latest_client_activity_age_secs: Option<u64>,
-    retry_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -866,6 +859,72 @@ impl DaemonState {
                 Self::record_output_audit_event_shared(Arc::clone(&shared), event).await;
             }
         }))
+    }
+
+    pub async fn spawn_channel_delivery_task(
+        shared: Arc<Mutex<Self>>,
+    ) -> anyhow::Result<JoinHandle<()>> {
+        let mut events = {
+            let state = shared.lock().await;
+            state.channel_manager.subscribe()
+        };
+        Ok(tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(event) => {
+                        Self::record_channel_delivery_event_shared(Arc::clone(&shared), event)
+                            .await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("mstream channel delivery audit lagged by {skipped} event(s)");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }))
+    }
+
+    async fn record_channel_delivery_event_shared(
+        shared: Arc<Mutex<Self>>,
+        event: agent::DeliveryEvent,
+    ) {
+        if let Err(err) = Self::apply_channel_delivery_event_shared(shared, event).await {
+            eprintln!("mstream channel delivery audit failed: {err}");
+        }
+    }
+
+    async fn apply_channel_delivery_event_shared(
+        shared: Arc<Mutex<Self>>,
+        event: agent::DeliveryEvent,
+    ) -> anyhow::Result<()> {
+        let mut state = shared.lock().await;
+        match event {
+            agent::DeliveryEvent::Accepted { .. } | agent::DeliveryEvent::Coalesced { .. } => {}
+            agent::DeliveryEvent::Deferred {
+                message_ids,
+                reason,
+                retry_after,
+                ..
+            } => {
+                let message_ids = agent_message_id_keys(&message_ids);
+                state.record_timer_delivery_deferred(&message_ids, reason, retry_after)?;
+            }
+            agent::DeliveryEvent::Submitted {
+                message_ids,
+                verified,
+                ..
+            } => {
+                let message_ids = agent_message_id_keys(&message_ids);
+                state.record_timer_delivery_submitted(&message_ids, verified)?;
+            }
+            agent::DeliveryEvent::Failed {
+                message_ids, error, ..
+            } => {
+                let message_ids = agent_message_id_keys(&message_ids);
+                state.record_timer_delivery_failed(&message_ids, &error)?;
+            }
+        }
+        Ok(())
     }
 
     fn load_event_store(&mut self, path: PathBuf) -> anyhow::Result<()> {
@@ -1793,7 +1852,12 @@ impl DaemonState {
                     request.paste_mode,
                 ),
                 agent::SendOptions {
-                    submit: Self::agent_submit_policy(request.enter, request.settle_ms, 0, 0),
+                    submit: Self::agent_submit_policy(
+                        request.enter,
+                        request.settle_ms,
+                        request.submit_retries,
+                        request.submit_retry_delay_ms,
+                    ),
                     timeout: Duration::from_secs(120),
                 },
             )
@@ -1912,7 +1976,12 @@ impl DaemonState {
                         request.paste_mode,
                     ),
                     agent::EnqueueOptions {
-                        submit: Self::agent_submit_policy(request.enter, 500, 0, 0),
+                        submit: Self::agent_submit_policy(
+                            request.enter,
+                            request.settle_ms,
+                            request.submit_retries,
+                            request.submit_retry_delay_ms,
+                        ),
                         quiet_guard: agent::QuietGuardPolicy::Default,
                     },
                 )
@@ -2536,55 +2605,6 @@ impl DaemonState {
             )),
         )
         .await?;
-        let now = Utc::now();
-        if let Some(quiet_for_secs) = snapshot.input_quiet_for_secs {
-            let decision = match Self::evaluate_input_guard(&resolved, quiet_for_secs, now).await {
-                Ok(decision) => decision,
-                Err(err) => {
-                    Self::record_timer_error_shared(
-                        Arc::clone(&shared),
-                        name,
-                        snapshot.generation,
-                        scheduled,
-                        err.to_string(),
-                    )
-                    .await;
-                    return Err(err);
-                }
-            };
-            if let Some(retry_after_secs) = decision.retry_after_secs {
-                let next_fire_at = if scheduled {
-                    add_secs(now, retry_after_secs)
-                } else {
-                    None
-                };
-                let defer_snapshot = TimerDeferSnapshot {
-                    name: snapshot.name.clone(),
-                    target: snapshot.target.clone(),
-                    generation: snapshot.generation,
-                    reason: "recent_client_input",
-                    latest_client_activity: decision.latest_client_activity,
-                    latest_client_activity_age_secs: decision.latest_client_activity_age_secs,
-                    quiet_for_secs,
-                    next_fire_at,
-                };
-                let mut state = shared.lock().await;
-                if let Some(timer) = state.timers.get_mut(name) {
-                    if timer.generation == snapshot.generation {
-                        if scheduled {
-                            timer.next_fire_at = next_fire_at;
-                        }
-                        timer.defer_count += 1;
-                        timer.last_deferred_at = Some(now);
-                        timer.last_defer_reason = Some(defer_snapshot.reason.to_string());
-                        timer.last_input_activity = decision.latest_client_activity;
-                        timer.last_error = None;
-                    }
-                }
-                return Ok(TimerFireOutcome::Deferred(defer_snapshot));
-            }
-        }
-
         let result = async {
             let channel =
                 Self::agent_channel_for_resolved_shared(Arc::clone(&shared), &resolved).await?;
@@ -2617,6 +2637,7 @@ impl DaemonState {
 
         let now = Utc::now();
         let mut state = shared.lock().await;
+        let mut delivery_record = None;
         if let Some(timer) = state.timers.get_mut(name) {
             if timer.generation == snapshot.generation {
                 if scheduled {
@@ -2624,9 +2645,19 @@ impl DaemonState {
                 }
                 match &result {
                     Ok(()) => {
-                        timer.last_fired_at = Some(now);
-                        timer.fire_count += 1;
                         timer.last_error = None;
+                        delivery_record = snapshot.message_id.clone().map(|message_id| {
+                            (
+                                message_id,
+                                TimerDeliveryRecord {
+                                    name: snapshot.name.clone(),
+                                    workstream: snapshot.workstream.clone(),
+                                    target: snapshot.target.clone(),
+                                    prompt: snapshot.prompt.clone(),
+                                    generation: snapshot.generation,
+                                },
+                            )
+                        });
                     }
                     Err(err) => {
                         timer.last_error = Some(err.to_string());
@@ -2634,17 +2665,14 @@ impl DaemonState {
                 }
             }
         }
-        result?;
-        if let Some(workstream) = &snapshot.workstream {
-            state.record_event(
-                workstream,
-                EventDraft::new("timer_fired")
-                    .direction_to_agent()
-                    .target(&snapshot.target)
-                    .text(snapshot.prompt.clone())
-                    .summary(format!("timer fired: {}", snapshot.name)),
-            )?;
+        if let Some((message_id, record)) = delivery_record {
+            state
+                .timer_deliveries
+                .entry(message_id)
+                .or_default()
+                .push(record);
         }
+        result?;
         Ok(TimerFireOutcome::Sent(snapshot))
     }
 
@@ -2909,6 +2937,7 @@ impl DaemonState {
             bail!("host alias '{alias}' is not connected");
         }
         self.fleet.unregister(alias)?;
+        self.remove_agent_channels_for_host(alias);
         let removed_timers: Vec<String> = self
             .timers
             .iter()
@@ -3604,38 +3633,6 @@ impl DaemonState {
             target.target.send_keys(&enter).await?;
         }
         Ok(())
-    }
-
-    async fn evaluate_input_guard(
-        target: &ResolvedTarget,
-        quiet_for_secs: u64,
-        now: DateTime<Utc>,
-    ) -> anyhow::Result<InputGuardDecision> {
-        let activity = target
-            .host
-            .session_client_activity(target.target.session_name())
-            .await?;
-        let Some(latest_client_activity) = activity.latest_writable_client_activity else {
-            return Ok(InputGuardDecision {
-                latest_client_activity: None,
-                latest_client_activity_age_secs: None,
-                retry_after_secs: None,
-            });
-        };
-
-        let latest_client_activity_age_secs =
-            seconds_since_epoch(now, latest_client_activity).unwrap_or(0);
-        let retry_after_secs = if latest_client_activity_age_secs >= quiet_for_secs {
-            None
-        } else {
-            Some((quiet_for_secs - latest_client_activity_age_secs).max(1))
-        };
-
-        Ok(InputGuardDecision {
-            latest_client_activity: Some(latest_client_activity),
-            latest_client_activity_age_secs: Some(latest_client_activity_age_secs),
-            retry_after_secs,
-        })
     }
 
     async fn resolve_target(
@@ -4369,6 +4366,180 @@ impl DaemonState {
         Ok(cursor)
     }
 
+    fn record_timer_delivery_deferred(
+        &mut self,
+        message_ids: &[String],
+        reason: agent::DeferReason,
+        retry_after: Duration,
+    ) -> anyhow::Result<()> {
+        let records = self.clone_timer_delivery_records(message_ids);
+        if records.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now();
+        let (reason_text, latest_client_activity, latest_client_activity_age_secs) =
+            channel_defer_reason_fields(reason);
+        let retry_after_secs = retry_after.as_secs().max(1);
+        for record in records {
+            let generation_matches = if let Some(timer) = self.timers.get_mut(&record.name) {
+                if timer.generation == record.generation {
+                    timer.defer_count += 1;
+                    timer.last_deferred_at = Some(now);
+                    timer.last_defer_reason = Some(reason_text.to_string());
+                    timer.last_input_activity = latest_client_activity;
+                    timer.last_error = None;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if generation_matches {
+                if let Some(workstream) = &record.workstream {
+                    self.record_event(
+                        workstream,
+                        EventDraft::new("timer_deferred")
+                            .target(&record.target)
+                            .summary(format!(
+                            "timer deferred: {} ({reason_text}, retry after {retry_after_secs}s)",
+                            record.name
+                        )),
+                    )?;
+                }
+            }
+        }
+        let _ = latest_client_activity_age_secs;
+        Ok(())
+    }
+
+    fn record_timer_delivery_submitted(
+        &mut self,
+        message_ids: &[String],
+        verified: bool,
+    ) -> anyhow::Result<()> {
+        let records = self.take_timer_delivery_records(message_ids);
+        if records.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now();
+        for record in records {
+            let generation_matches = if let Some(timer) = self.timers.get_mut(&record.name) {
+                if timer.generation == record.generation {
+                    timer.last_fired_at = Some(now);
+                    timer.fire_count += 1;
+                    timer.last_error = None;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if generation_matches {
+                if let Some(workstream) = &record.workstream {
+                    let suffix = if verified { "verified" } else { "unverified" };
+                    self.record_event(
+                        workstream,
+                        EventDraft::new("timer_fired")
+                            .direction_to_agent()
+                            .target(&record.target)
+                            .text(record.prompt.clone())
+                            .summary(format!("timer fired: {} ({suffix})", record.name)),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn record_timer_delivery_failed(
+        &mut self,
+        message_ids: &[String],
+        error: &str,
+    ) -> anyhow::Result<()> {
+        let records = self.take_timer_delivery_records(message_ids);
+        if records.is_empty() {
+            return Ok(());
+        }
+        for record in records {
+            let generation_matches = if let Some(timer) = self.timers.get_mut(&record.name) {
+                if timer.generation == record.generation {
+                    timer.last_error = Some(error.to_string());
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if generation_matches {
+                if let Some(workstream) = &record.workstream {
+                    self.record_event(
+                        workstream,
+                        EventDraft::new("timer_failed")
+                            .target(&record.target)
+                            .summary(format!("timer failed: {}: {error}", record.name)),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn clone_timer_delivery_records(&self, message_ids: &[String]) -> Vec<TimerDeliveryRecord> {
+        message_ids
+            .iter()
+            .filter_map(|message_id| self.timer_deliveries.get(message_id))
+            .flat_map(|records| records.iter().cloned())
+            .collect()
+    }
+
+    fn take_timer_delivery_records(&mut self, message_ids: &[String]) -> Vec<TimerDeliveryRecord> {
+        let mut records = Vec::new();
+        for message_id in message_ids {
+            if let Some(mut removed) = self.timer_deliveries.remove(message_id) {
+                records.append(&mut removed);
+            }
+        }
+        records
+    }
+
+    fn remove_agent_channels_for_target(&mut self, target: &SessionTarget) -> usize {
+        let host_alias = target.host_alias().to_string();
+        let session_name = target.session_name().to_string();
+        let session_id = target
+            .session_id_selector()
+            .map(|id| id.as_str().to_string());
+        let removed = self.channel_manager.remove_where(|key| {
+            if key.host_alias != host_alias {
+                return false;
+            }
+            if let Some(session_id) = session_id.as_deref() {
+                key.tmux_session_id.as_deref() == Some(session_id)
+                    || key.tmux_session_name == session_name
+            } else {
+                key.tmux_session_name == session_name
+            }
+        });
+        self.timer_deliveries.retain(|_, records| {
+            records.retain(|record| record.target != *target);
+            !records.is_empty()
+        });
+        removed
+    }
+
+    fn remove_agent_channels_for_host(&mut self, alias: &str) -> usize {
+        let removed = self
+            .channel_manager
+            .remove_where(|key| key.host_alias == alias);
+        self.timer_deliveries.retain(|_, records| {
+            records.retain(|record| record.target.host_alias() != alias);
+            !records.is_empty()
+        });
+        removed
+    }
+
     fn host_handle(&self, alias: &str) -> anyhow::Result<HostHandle> {
         self.fleet
             .host(alias)
@@ -4405,6 +4576,7 @@ impl DaemonState {
         reason: &str,
         active_timer: Option<(&str, ActiveTimer)>,
     ) -> Vec<JoinHandle<()>> {
+        self.remove_agent_channels_for_target(target);
         self.sessions.remove(target);
         for workstream in self.workstreams.values_mut() {
             workstream.sessions.remove(target);
@@ -5233,24 +5405,6 @@ fn timer_fire_outcome_json(outcome: TimerFireOutcome) -> Value {
             "input_quiet_for_secs": option_u64_json(snapshot.input_quiet_for_secs),
             "message_id": snapshot.message_id,
         }),
-        TimerFireOutcome::Deferred(snapshot) => json!({
-            "type": "ok",
-            "op": "timer_deferred",
-            "name": snapshot.name,
-            "target": snapshot.target.to_string(),
-            "generation": snapshot.generation,
-            "reason": snapshot.reason,
-            "latest_client_activity": option_u64_json(snapshot.latest_client_activity),
-            "latest_client_activity_at": snapshot
-                .latest_client_activity
-                .map(epoch_seconds_json)
-                .unwrap_or(Value::Null),
-            "latest_client_activity_age_secs": option_u64_json(
-                snapshot.latest_client_activity_age_secs
-            ),
-            "quiet_for_secs": snapshot.quiet_for_secs,
-            "next_fire_at": datetime_option_json(snapshot.next_fire_at),
-        }),
     }
 }
 
@@ -5568,6 +5722,25 @@ fn activity_hint(last_output_secs: Option<u64>, options: StatusActivityOptions) 
     }
 }
 
+fn agent_message_id_keys(message_ids: &[agent::MessageId]) -> Vec<String> {
+    message_ids.iter().map(ToString::to_string).collect()
+}
+
+fn channel_defer_reason_fields(
+    reason: agent::DeferReason,
+) -> (&'static str, Option<u64>, Option<u64>) {
+    match reason {
+        agent::DeferReason::RecentWritableClientActivity {
+            latest_client_activity,
+            latest_client_activity_age_secs,
+        } => (
+            "recent_client_input",
+            Some(latest_client_activity),
+            Some(latest_client_activity_age_secs),
+        ),
+    }
+}
+
 fn seconds_since_epoch(now: DateTime<Utc>, epoch_seconds: u64) -> Option<u64> {
     let now_seconds = now.timestamp();
     if now_seconds < 0 {
@@ -5678,6 +5851,18 @@ mod tests {
             last_input_activity: None,
             last_error: None,
             task: None,
+        }
+    }
+
+    fn test_session_key(target: &SessionTarget) -> agent::SessionKey {
+        agent::SessionKey {
+            host_alias: target.host_alias().to_string(),
+            host_connection_id: target.host_alias().to_string(),
+            tmux_session_id: target
+                .session_id_selector()
+                .map(|id| id.as_str().to_string()),
+            tmux_session_name: target.session_name().to_string(),
+            tmux_session_created: Some(100),
         }
     }
 
@@ -6537,6 +6722,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnect_removes_agent_channels_for_host() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ worker $1 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        state.hosts.insert(
+            "local".to_string(),
+            HostRecord {
+                uri: "mock://local".to_string(),
+                labels: BTreeMap::new(),
+                capacity: BTreeMap::new(),
+                work_root: None,
+            },
+        );
+        let handle = state.host_handle("local").expect("host");
+        let resolved = DaemonState::resolve_target(handle, target.clone())
+            .await
+            .expect("resolve");
+        let session_key = DaemonState::agent_resolved_session(&resolved).key;
+        state
+            .channel_manager
+            .get_or_bind(DaemonState::agent_resolved_session(&resolved))
+            .expect("channel");
+        state.sessions.insert(
+            target.clone(),
+            SessionRecord::from_target(&target, AgentState::Busy, None),
+        );
+
+        state.disconnect("local").expect("disconnect");
+
+        assert!(state.channel_manager.remove(&session_key).is_none());
+    }
+
+    #[tokio::test]
     async fn reclaim_kills_and_deregisters_quarantined_managed_session() {
         let target = SessionTarget::session_id("local", "$1").expect("target");
         let mock = motlie_tmux::transport::MockTransport::new()
@@ -6578,6 +6799,15 @@ mod tests {
                 "h1".to_string(),
                 handoff_record("h1", target.clone(), Some(100)),
             );
+        let handle = state.host_handle("local").expect("host");
+        let resolved = DaemonState::resolve_target(handle, target.clone())
+            .await
+            .expect("resolve");
+        let session_key = DaemonState::agent_resolved_session(&resolved).key;
+        state
+            .channel_manager
+            .get_or_bind(DaemonState::agent_resolved_session(&resolved))
+            .expect("channel");
 
         let shared = Arc::new(Mutex::new(state));
         let records = DaemonState::reclaim_shared(Arc::clone(&shared), "local::$1".to_string())
@@ -6588,6 +6818,7 @@ mod tests {
         assert_eq!(records[0]["workstream"], "issue-401");
         let state = shared.lock().await;
         assert!(!state.sessions.contains_key(&target));
+        assert!(state.channel_manager.remove(&session_key).is_none());
         let workstream = state.workstream("issue-401").expect("workstream");
         assert!(!workstream.sessions.contains(&target));
         assert!(
@@ -6826,6 +7057,77 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("stale tmux session id"));
+    }
+
+    #[tokio::test]
+    async fn channel_delivery_events_update_timer_metadata_and_audit() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let message_id = agent::MessageId(1);
+        let message_key = message_id.to_string();
+        let mut state = DaemonState::default();
+        open_test_workstream(&mut state, "issue-355");
+        state.timers.insert(
+            "poll".to_string(),
+            timer_record("poll", target.clone(), Some(100)),
+        );
+        state.timer_deliveries.insert(
+            message_key,
+            vec![TimerDeliveryRecord {
+                name: "poll".to_string(),
+                workstream: Some("issue-355".to_string()),
+                target: target.clone(),
+                prompt: "Wake up.".to_string(),
+                generation: 1,
+            }],
+        );
+        let shared = Arc::new(Mutex::new(state));
+        let key = test_session_key(&target);
+
+        DaemonState::apply_channel_delivery_event_shared(
+            Arc::clone(&shared),
+            agent::DeliveryEvent::Deferred {
+                target: key.clone(),
+                message_ids: vec![message_id],
+                reason: agent::DeferReason::RecentWritableClientActivity {
+                    latest_client_activity: 995,
+                    latest_client_activity_age_secs: 5,
+                },
+                retry_after: Duration::from_secs(7),
+            },
+        )
+        .await
+        .expect("deferred event");
+        {
+            let state = shared.lock().await;
+            let timer = state.timers.get("poll").expect("timer");
+            assert_eq!(timer.defer_count, 1);
+            assert_eq!(
+                timer.last_defer_reason.as_deref(),
+                Some("recent_client_input")
+            );
+            assert_eq!(timer.last_input_activity, Some(995));
+            let events = &state.workstream("issue-355").expect("workstream").events;
+            assert_eq!(events.back().expect("event").kind, "timer_deferred");
+        }
+
+        DaemonState::apply_channel_delivery_event_shared(
+            Arc::clone(&shared),
+            agent::DeliveryEvent::Submitted {
+                target: key,
+                message_ids: vec![message_id],
+                submitted_at: std::time::Instant::now(),
+                verified: false,
+            },
+        )
+        .await
+        .expect("submitted event");
+        let state = shared.lock().await;
+        let timer = state.timers.get("poll").expect("timer");
+        assert_eq!(timer.fire_count, 1);
+        assert!(timer.last_fired_at.is_some());
+        assert!(state.timer_deliveries.is_empty());
+        let events = &state.workstream("issue-355").expect("workstream").events;
+        assert_eq!(events.back().expect("event").kind, "timer_fired");
     }
 
     #[tokio::test]
@@ -7950,29 +8252,6 @@ mod tests {
         assert!(!state.timers.contains_key("x-timer"));
         assert!(state.timers.contains_key("y-timer"));
         assert!(state.timers.contains_key("global-timer"));
-    }
-
-    #[test]
-    fn timer_deferred_json_reports_guard_decision() {
-        let target: SessionTarget = "local::worker".parse().expect("target");
-        let next_fire_at = DateTime::<Utc>::from_timestamp(1_007, 0).expect("timestamp");
-        let value = timer_fire_outcome_json(TimerFireOutcome::Deferred(TimerDeferSnapshot {
-            name: "poll".to_string(),
-            target,
-            generation: 3,
-            reason: "recent_client_input",
-            latest_client_activity: Some(995),
-            latest_client_activity_age_secs: Some(5),
-            quiet_for_secs: 10,
-            next_fire_at: Some(next_fire_at),
-        }));
-
-        assert_eq!(value["op"], "timer_deferred");
-        assert_eq!(value["reason"], "recent_client_input");
-        assert_eq!(value["latest_client_activity"], 995);
-        assert_eq!(value["latest_client_activity_age_secs"], 5);
-        assert_eq!(value["quiet_for_secs"], 10);
-        assert_eq!(value["next_fire_at"], "1970-01-01T00:16:47Z");
     }
 
     #[test]
