@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 00:02 PDT | @codex-421-design | Implementation alignment before code review: moved `UiProfile` selection to per-session `ResolvedSession` with `ChannelConfig.default_ui_profile` fallback, shaped `DeliveryEvents` as a Tokio broadcast receiver plus concrete `ChannelStatus`/`DeferReason`, added explicit `SubmitPolicy.prompt_submit`, and added `docs/PLAN.md` for the coding phase. |
 | 2026-06-08 23:27 PDT | @codex-421-design | Addressed PR #423 round-1 review: renamed the API to `Channel`/`ChannelManager`/`SessionKey`/`UiProfile`, made stable resolved tmux identity required, specified the needed `motlie-tmux` writable-client activity signal, removed duplicate submit-policy sources, defined outcome/error/verification contracts, defaulted dedup with zero-or-many waiters, added channel delivery events for mstream observability, clarified M4 as crate-level reuse only, and expanded mixed sync/async test coverage. |
 | 2026-06-08 22:22 PDT | @codex-421-design | Reworked the central abstraction from receiver-like inbox to per-process channel, explicitly scoped guarantees to one process targeting one tmux session, and made synchronous send vs asynchronous broadcast/timer semantics first-class in the API sketch. |
 | 2026-06-08 22:14 PDT | @codex-421-design | Initial DESIGN for issue #421: new `libs/agent` crate with a per-agent-session managed delivery primitive that centralizes no-barge-in, dedup, attributed coalescing, composer preservation, and verified prompt submit for mstream send/broadcast, mstream timers, and the future M4 Telnyx transcript sink. |
@@ -262,12 +263,13 @@ let manager = ChannelManager::new(ChannelConfig {
     input_quiet_for: Duration::from_secs(10),
     coalesce_window: Duration::from_millis(500),
     default_submit: SubmitPolicy {
+        prompt_submit: true,
         settle: Duration::from_millis(500),
         retries: 1,
         retry_delay: Duration::from_millis(750),
-        require_verification: true,
+        require_verification: false,
     },
-    ui_profile: UiProfile::Generic,
+    default_ui_profile: UiProfile::Generic,
 });
 ```
 
@@ -280,6 +282,7 @@ pub struct ResolvedSession {
     pub key: SessionKey,
     pub host: motlie_tmux::HostHandle,
     pub target: motlie_tmux::Target,
+    pub ui_profile: Option<UiProfile>,
 }
 
 impl ChannelManager {
@@ -293,6 +296,12 @@ If `get_or_bind` sees an existing `SessionKey` with a different non-equivalent
 resolved target, it returns `DeliveryError::TargetIdentityMismatch` rather than
 silently reusing state. mstream must run its existing freshness checks before
 calling `get_or_bind`.
+
+`ResolvedSession.ui_profile` is the per-target profile selector. If it is
+`None`, the manager's `ChannelConfig.default_ui_profile` is used. This avoids a
+manager-wide Codex/Claude choice in daemons that own mixed agent sessions while
+still allowing the first implementation to ship conservative `Generic`
+behavior.
 
 ### Synchronous And Asynchronous Semantics
 
@@ -354,7 +363,9 @@ guard, coalescing, or submit completion. The absence of an `AsyncDelivery` enum
 is intentional: `enqueue` already means fire-and-forget for this first slice.
 
 Submit policy has one home per operation: `SendOptions` or `EnqueueOptions`.
-`ManagedMessage` must not also carry submit policy. `ChannelConfig.default_submit`
+`ManagedMessage` must not also carry submit policy. `SubmitPolicy.prompt_submit`
+keeps current `--no-enter` / future `--no-prompt-submit` behavior explicit:
+`false` means type only, without sending Enter. `ChannelConfig.default_submit`
 is only the value used by `SendOptions::default()` / `EnqueueOptions::default()`;
 callers that expose knobs construct explicit options before calling the channel.
 CLI conversion stays in the caller; mstream maps CLI flags into `SubmitPolicy`
@@ -594,20 +605,35 @@ should provide a generic event stream, and `Channel::status()` should provide a
 snapshot for polling/debugging.
 
 ```rust
-pub enum DeliveryEvent {
-    Accepted { message_id: MessageId, target: SessionKey, source: MessageSource },
-    Deferred {
-        message_id: MessageId,
-        target: SessionKey,
-        reason: DeferReason,
-        latest_writable_client_activity: Option<u64>,
-        retry_after: Duration,
+pub type DeliveryEvents = tokio::sync::broadcast::Receiver<DeliveryEvent>;
+
+pub enum DeferReason {
+    RecentWritableClientActivity {
+        latest_client_activity: u64,
+        latest_client_activity_age_secs: u64,
     },
-    Coalesced { target: SessionKey, message_ids: Vec<MessageId> },
-    Submitted { message_ids: Vec<MessageId>, outcome: SubmissionOutcome },
-    Failed { message_id: MessageId, error: DeliveryError },
+}
+
+pub struct ChannelStatus {
+    pub target: SessionKey,
+    pub pending_count: usize,
+    pub flushing: bool,
+    pub last_deferred_at: Option<Instant>,
+    pub last_defer_reason: Option<DeferReason>,
+    pub last_error: Option<String>,
+}
+
+pub enum DeliveryEvent {
+    Accepted { message_id: MessageId, target: SessionKey, source: MessageSource, accepted_at: Instant },
+    Deferred { target: SessionKey, message_ids: Vec<MessageId>, reason: DeferReason, retry_after: Duration },
+    Coalesced { target: SessionKey, message_ids: Vec<MessageId>, segment_count: usize },
+    Submitted { target: SessionKey, message_ids: Vec<MessageId>, submitted_at: Instant, verified: bool },
+    Failed { target: SessionKey, message_ids: Vec<MessageId>, error: String },
 }
 ```
+
+The broadcast receiver is intentionally lossy under consumer backpressure; slow
+mstream consumers reconcile by polling `Channel::status()`.
 
 mstream consumes these events to update timer `defer_count`, `last_deferred_at`,
 `last_defer_reason`, `last_input_activity`, and durable workstream audit events.
@@ -1001,9 +1027,11 @@ A small mechanism extension is required:
    outcomes.
 
 4. First UI profiles:
-   The design now recommends a `UiProfile` enum. PLAN should decide whether the
-   first implementation includes only `Generic` plus one known Codex/Claude
-   profile or stubs known profiles behind conservative behavior.
+   Resolved for #421 implementation: the API carries a per-session
+   `ResolvedSession.ui_profile` override with `ChannelConfig.default_ui_profile`
+   fallback. The first code ships `Generic` behavior plus enum variants for
+   `Codex` and `Claude` that remain conservative until profile-specific
+   composer/verification heuristics are added.
 
 5. Outbound response extraction:
    The crate should reserve module/API space for outbound extraction, but #421

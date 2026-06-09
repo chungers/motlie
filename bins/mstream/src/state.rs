@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
+use motlie_agent as agent;
 use motlie_tmux::{
     CreateSessionOptions, Error as TmuxError, Fleet, FleetTargetSpec, HostHandle, KeySequence,
     ResolvedFleetTarget, SessionEnvVar, SessionInfo, SessionTag, SinkEvent, SshConfig, Target,
@@ -61,6 +62,7 @@ pub struct DaemonState {
     sessions: BTreeMap<SessionTarget, SessionRecord>,
     workstreams: BTreeMap<String, WorkstreamRecord>,
     timers: BTreeMap<String, TimerRecord>,
+    channel_manager: agent::ChannelManager,
     event_store: Option<EventStore>,
     next_generation: u64,
     next_handoff_id: u64,
@@ -75,6 +77,7 @@ impl Default for DaemonState {
             sessions: BTreeMap::new(),
             workstreams: BTreeMap::new(),
             timers: BTreeMap::new(),
+            channel_manager: agent::ChannelManager::default(),
             event_store: None,
             next_generation: 1,
             next_handoff_id: 1,
@@ -701,6 +704,7 @@ struct TimerFireSnapshot {
     submit_retry_delay_ms: u64,
     input_quiet_for_secs: Option<u64>,
     generation: u64,
+    message_id: Option<String>,
 }
 
 struct TimerDeferSnapshot {
@@ -1779,7 +1783,20 @@ impl DaemonState {
             Self::send_interrupt_to_resolved(&resolved, InterruptKey::Esc).await?;
             sleep(Duration::from_millis(request.settle_ms)).await;
         }
-        Self::send_text_to_resolved(&resolved, &request.text, request.paste_mode, request.enter)
+        let channel =
+            Self::agent_channel_for_resolved_shared(Arc::clone(&shared), &resolved).await?;
+        let outcome = channel
+            .send(
+                Self::agent_message(
+                    agent::MessageSource::human("mstream.send"),
+                    request.text.clone(),
+                    request.paste_mode,
+                ),
+                agent::SendOptions {
+                    submit: Self::agent_submit_policy(request.enter, request.settle_ms, 0, 0),
+                    timeout: Duration::from_secs(120),
+                },
+            )
             .await?;
         let change = if let Some(state) = request.set_state {
             Some(
@@ -1820,6 +1837,8 @@ impl DaemonState {
             "mid_generation_risk": current_state == AgentState::Busy && !request.interrupt_first,
             "paste_mode": request.paste_mode.as_str(),
             "enter": request.enter,
+            "message_id": outcome.message_id().to_string(),
+            "submit_verified": outcome.verified(),
             "cursor": cursor,
         })];
         if let Some(change) = change {
@@ -1882,13 +1901,22 @@ impl DaemonState {
         let mut records = Vec::new();
         let mut sent = 0usize;
         for target in targets {
-            Self::send_text_to_resolved(
-                &target.target,
-                &request.text,
-                request.paste_mode,
-                request.enter,
-            )
-            .await?;
+            let channel =
+                Self::agent_channel_for_resolved_shared(Arc::clone(&shared), &target.target)
+                    .await?;
+            let queued = channel
+                .enqueue(
+                    Self::agent_message(
+                        agent::MessageSource::broadcast("mstream.broadcast"),
+                        request.text.clone(),
+                        request.paste_mode,
+                    ),
+                    agent::EnqueueOptions {
+                        submit: Self::agent_submit_policy(request.enter, 500, 0, 0),
+                        quiet_guard: agent::QuietGuardPolicy::Default,
+                    },
+                )
+                .await?;
             Self::touch_resolved_session_shared(Arc::clone(&shared), &target.target).await?;
             sent += 1;
             let cursor = shared.lock().await.record_event(
@@ -1904,6 +1932,7 @@ impl DaemonState {
                 "op": "broadcast_sent",
                 "workstream": request.workstream,
                 "target": target.target.spec.to_string(),
+                "message_id": queued.message_id.to_string(),
                 "cursor": cursor,
             }));
         }
@@ -2455,7 +2484,7 @@ impl DaemonState {
         required_generation: Option<u64>,
         scheduled: bool,
     ) -> anyhow::Result<TimerFireOutcome> {
-        let snapshot = {
+        let mut snapshot = {
             let state = shared.lock().await;
             let timer = state
                 .timers
@@ -2476,6 +2505,7 @@ impl DaemonState {
                 submit_retry_delay_ms: timer.submit_retry_delay_ms,
                 input_quiet_for_secs: timer.input_quiet_for_secs,
                 generation: timer.generation,
+                message_id: None,
             }
         };
 
@@ -2556,19 +2586,32 @@ impl DaemonState {
         }
 
         let result = async {
-            Self::send_text_to_resolved(
-                &resolved,
-                &snapshot.prompt,
-                PasteMode::Bracketed,
-                snapshot.enter,
-            )
-            .await?;
-            Self::send_submit_retries_to_resolved(
-                &resolved,
-                snapshot.submit_retries,
-                snapshot.submit_retry_delay_ms,
-            )
-            .await
+            let channel =
+                Self::agent_channel_for_resolved_shared(Arc::clone(&shared), &resolved).await?;
+            let queued = channel
+                .enqueue(
+                    Self::agent_message(
+                        agent::MessageSource::timer(format!("mstream.timer:{}", snapshot.name)),
+                        snapshot.prompt.clone(),
+                        PasteMode::Bracketed,
+                    ),
+                    agent::EnqueueOptions {
+                        submit: Self::agent_submit_policy(
+                            snapshot.enter,
+                            500,
+                            snapshot.submit_retries,
+                            snapshot.submit_retry_delay_ms,
+                        ),
+                        quiet_guard: if snapshot.input_quiet_for_secs.is_some() {
+                            agent::QuietGuardPolicy::Default
+                        } else {
+                            agent::QuietGuardPolicy::Disabled
+                        },
+                    },
+                )
+                .await?;
+            snapshot.message_id = Some(queued.message_id.to_string());
+            anyhow::Ok(())
         }
         .await;
 
@@ -3475,6 +3518,58 @@ impl DaemonState {
         })
     }
 
+    async fn agent_channel_for_resolved_shared(
+        shared: Arc<Mutex<Self>>,
+        resolved: &ResolvedTarget,
+    ) -> anyhow::Result<agent::Channel> {
+        let resolved_session = Self::agent_resolved_session(resolved);
+        let state = shared.lock().await;
+        Ok(state.channel_manager.get_or_bind(resolved_session)?)
+    }
+
+    fn agent_resolved_session(resolved: &ResolvedTarget) -> agent::ResolvedSession {
+        let key = agent::SessionKey::from_target(
+            resolved.spec.host_alias(),
+            resolved.spec.host_alias(),
+            &resolved.target,
+        );
+        agent::ResolvedSession::new(key, resolved.host.clone(), resolved.target.clone())
+    }
+
+    fn agent_message(
+        source: agent::MessageSource,
+        text: impl Into<String>,
+        paste_mode: PasteMode,
+    ) -> agent::ManagedMessage {
+        agent::ManagedMessage::new(source, text).with_paste_mode(Self::agent_paste_mode(paste_mode))
+    }
+
+    fn agent_paste_mode(paste_mode: PasteMode) -> agent::PasteMode {
+        match paste_mode {
+            PasteMode::Bracketed => agent::PasteMode::Bracketed,
+            PasteMode::Literal => agent::PasteMode::Literal,
+        }
+    }
+
+    fn agent_submit_policy(
+        enter: bool,
+        settle_ms: u64,
+        submit_retries: u8,
+        submit_retry_delay_ms: u64,
+    ) -> agent::SubmitPolicy {
+        agent::SubmitPolicy {
+            prompt_submit: enter,
+            settle: if enter {
+                Duration::from_millis(settle_ms)
+            } else {
+                Duration::ZERO
+            },
+            retries: if enter { submit_retries } else { 0 },
+            retry_delay: Duration::from_millis(submit_retry_delay_ms),
+            require_verification: false,
+        }
+    }
+
     async fn send_interrupt_to_resolved(
         target: &ResolvedTarget,
         key: InterruptKey,
@@ -3499,26 +3594,13 @@ impl DaemonState {
             }
             _ => text.to_string(),
         };
-        let sequence = if enter {
-            KeySequence::literal(&payload).then_enter()
-        } else {
-            KeySequence::literal(&payload)
-        };
-        target.target.send_keys(&sequence).await?;
-        Ok(())
-    }
-
-    async fn send_submit_retries_to_resolved(
-        target: &ResolvedTarget,
-        submit_retries: u8,
-        submit_retry_delay_ms: u64,
-    ) -> anyhow::Result<()> {
-        if submit_retries == 0 {
-            return Ok(());
-        }
-        let enter = KeySequence::parse("{Enter}")?;
-        for _ in 0..submit_retries {
-            sleep(Duration::from_millis(submit_retry_delay_ms)).await;
+        target
+            .target
+            .send_keys(&KeySequence::literal(&payload))
+            .await?;
+        if enter {
+            sleep(Duration::from_millis(500)).await;
+            let enter = KeySequence::parse("{Enter}")?;
             target.target.send_keys(&enter).await?;
         }
         Ok(())
@@ -3533,7 +3615,7 @@ impl DaemonState {
             .host
             .session_client_activity(target.target.session_name())
             .await?;
-        let Some(latest_client_activity) = activity.latest_client_activity else {
+        let Some(latest_client_activity) = activity.latest_writable_client_activity else {
             return Ok(InputGuardDecision {
                 latest_client_activity: None,
                 latest_client_activity_age_secs: None,
@@ -5149,6 +5231,7 @@ fn timer_fire_outcome_json(outcome: TimerFireOutcome) -> Value {
             "target": snapshot.target.to_string(),
             "generation": snapshot.generation,
             "input_quiet_for_secs": option_u64_json(snapshot.input_quiet_for_secs),
+            "message_id": snapshot.message_id,
         }),
         TimerFireOutcome::Deferred(snapshot) => json!({
             "type": "ok",

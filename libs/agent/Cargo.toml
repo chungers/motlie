@@ -1,0 +1,17 @@
+[package]
+name = "motlie-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent interaction policy over motlie-tmux"
+
+[dependencies]
+motlie-tmux = { path = "../tmux" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
