@@ -24,7 +24,7 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: V2 Distributed Driver.
 - [x] Update DESIGN and PLAN docs with the v2 target architecture.
   DESIGN reference: PR-Based Aggregation And Reports.
-- [ ] Post the v2 DESIGN/PLAN summary to #399 and Discussion #404.
+- [x] Post the v2 DESIGN/PLAN summary to #399 and Discussion #404.
   DESIGN reference: V2 Distributed Driver.
 - [ ] Wait for all three reviewer design approvals before coding.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
