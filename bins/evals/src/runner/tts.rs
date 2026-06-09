@@ -58,6 +58,7 @@ impl ScenarioRunner for TtsRunner {
             startup_ms: Some(eval.startup_ms),
             request_latencies_ms: vec![eval.synthesis_latency_ms],
             capability_metrics: CapabilityPerformanceMetrics::Tts(tts_metrics),
+            ..Default::default()
         };
         let resources = context.metrics_sampler.finish();
         let assertions = evaluate_assertions(

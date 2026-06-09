@@ -44,6 +44,7 @@ serde.workspace = true
 serde_json = "1.0.149"
 motlie-model = { path = "../../libs/model" }
 motlie-models = { path = "../../libs/models", default-features = false }
+motlie-eval-tools = { path = "../../libs/eval-tools" }
 motlie-voice = { path = "../../libs/voice" }
 sysinfo = "0.36.1"
 tokio.workspace = true

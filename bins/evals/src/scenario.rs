@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::result::EvalDepth;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioSummary {
     pub id: String,
@@ -16,6 +18,8 @@ pub struct Scenario {
     pub schema_version: u32,
     pub id: String,
     pub summary: String,
+    #[serde(default = "default_depth")]
+    pub depth: EvalDepth,
     pub bundle_filter: BundleFilter,
     pub metrics: MetricsConfig,
     #[serde(default)]
@@ -39,6 +43,13 @@ impl Scenario {
     pub fn chat(&self) -> Option<&ChatScenario> {
         match &self.kind {
             ScenarioKind::Chat(scenario) => Some(scenario),
+            _ => None,
+        }
+    }
+
+    pub fn tool_use(&self) -> Option<&ToolUseScenario> {
+        match &self.kind {
+            ScenarioKind::ToolUse(scenario) => Some(scenario),
             _ => None,
         }
     }
@@ -76,6 +87,7 @@ impl Scenario {
 pub enum ScenarioKind {
     Embeddings(EmbeddingsScenario),
     Chat(ChatScenario),
+    ToolUse(ToolUseScenario),
     Asr(AsrScenario),
     Tts(TtsScenario),
     Perf(PerfScenario),
@@ -86,6 +98,7 @@ impl ScenarioKind {
         match self {
             Self::Embeddings(_) => CapabilityName::Embeddings,
             Self::Chat(_) => CapabilityName::Chat,
+            Self::ToolUse(_) => CapabilityName::ToolUse,
             Self::Asr(_) => CapabilityName::Asr,
             Self::Tts(_) => CapabilityName::Tts,
             Self::Perf(_) => CapabilityName::Perf,
@@ -98,6 +111,7 @@ impl ScenarioKind {
 pub enum CapabilityName {
     Embeddings,
     Chat,
+    ToolUse,
     Asr,
     Tts,
     Perf,
@@ -108,6 +122,7 @@ impl CapabilityName {
         match self {
             Self::Embeddings => "embeddings",
             Self::Chat => "chat",
+            Self::ToolUse => "tool_use",
             Self::Asr => "asr",
             Self::Tts => "tts",
             Self::Perf => "perf",
@@ -194,6 +209,48 @@ pub struct ChatAssertions {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolUseScenario {
+    pub input: ToolUseInput,
+    pub assertions: ToolUseAssertions,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolUseInput {
+    pub prompt: String,
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    pub expected_tool: Option<String>,
+    pub expected_argument_key: Option<String>,
+    pub expected_argument_value: Option<String>,
+    #[serde(default = "default_tool_rounds")]
+    pub max_rounds: u32,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+}
+
+fn default_tool_rounds() -> u32 {
+    2
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolUseAssertions {
+    pub min_tool_calls: Option<usize>,
+    #[serde(default)]
+    pub required_tools: Vec<String>,
+    #[serde(default)]
+    pub required_final_substrings: Vec<String>,
+    #[serde(default)]
+    pub cel: Vec<CelAssertionConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CelAssertionConfig {
+    pub name: String,
+    pub expression: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AsrScenario {
     pub input: AsrInput,
     pub assertions: AsrAssertions,
@@ -252,6 +309,10 @@ pub struct PerfInput {
 
 fn default_perf_iterations() -> u64 {
     5
+}
+
+fn default_depth() -> EvalDepth {
+    EvalDepth::Smoke
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -345,6 +406,7 @@ mod tests {
         let scenario = load_scenario(&repo_eval_root(), "embeddings_similarity").unwrap();
 
         assert_eq!(scenario.capability(), CapabilityName::Embeddings);
+        assert_eq!(scenario.depth, EvalDepth::Smoke);
         assert_eq!(
             scenario.bundle_filter.capability,
             CapabilityName::Embeddings
@@ -412,6 +474,52 @@ capture_request_latency = true
                 assert_eq!(chat.assertions.min_completion_chars, Some(1));
             }
             other => panic!("expected chat scenario, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_tool_use_scenario_shape() {
+        let raw = r#"
+schema_version = 1
+id = "tool_use_smoke"
+capability = "tool_use"
+depth = "smoke"
+summary = "Tool-use smoke scenario."
+
+[bundle_filter]
+capability = "tool_use"
+required_capabilities = ["chat", "tool_use"]
+
+[input]
+prompt = "Use get_weather for Seattle."
+tools = ["get_weather"]
+expected_tool = "get_weather"
+expected_argument_key = "city"
+expected_argument_value = "Seattle"
+
+[assertions]
+min_tool_calls = 1
+required_tools = ["get_weather"]
+required_final_substrings = ["Seattle"]
+[[assertions.cel]]
+name = "weather_called"
+expression = "tool_called('get_weather')"
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+"#;
+
+        let scenario = toml::from_str::<Scenario>(raw).unwrap();
+
+        assert_eq!(scenario.capability(), CapabilityName::ToolUse);
+        assert_eq!(scenario.depth, EvalDepth::Smoke);
+        match scenario.kind {
+            ScenarioKind::ToolUse(tool_use) => {
+                assert_eq!(tool_use.input.expected_tool.as_deref(), Some("get_weather"));
+                assert_eq!(tool_use.assertions.cel.len(), 1);
+            }
+            other => panic!("expected tool_use scenario, got {other:?}"),
         }
     }
 

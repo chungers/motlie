@@ -13,6 +13,8 @@ profile, performance, resources, and final acceptance status.
 evals/
   scenarios/       # TOML scenario manifests
   datasets/        # prompts, images, audio, and expected outputs
+  snapshots/       # pinned matrix manifests
+  results/         # per-host raw JSONL/logs, ignored except committed .md summaries
   reports/         # generated outputs, ignored by default
 ```
 
@@ -46,7 +48,8 @@ outside the eval suite; that broader cleanup is separate from this issue.
 - `embeddings_similarity`: embedding dimensions plus similar-vs-dissimilar cosine ordering.
 - `chat_smoke`: single-turn and follow-up chat response checks.
 - `chat_completion_smoke`: chat plus completion-path smoke for bundles that advertise `completion`.
-- `chat_tool_use_smoke`: tool-call smoke for bundles that advertise `tool_use`.
+- `chat_tool_use_smoke`: legacy chat-scoped tool-call smoke for bundles that advertise `tool_use`.
+- `tool_use_weather_cel_smoke`: first-class tool-use smoke with deterministic weather/CEL handlers.
 - `asr_short_transcription`: short WAV transcription smoke over the checked-in 16 kHz speech reference.
 - `tts_synthesis_smoke`: short speech synthesis smoke over curated TTS bundles.
 - `bench_chat_startup`: comparable chat startup and steady-state request latency benchmark.
@@ -112,5 +115,38 @@ The `model-qwen3-tts-cpp` feature depends on the native submodule checkout:
 git submodule update --init --recursive libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp
 ```
 
-Generated JSONL results should be consumed by `evals report` once the reporting
-command lands.
+## Distributed Matrix Commands
+
+The canonical v2 snapshot command is host self-selecting and feature-light:
+
+```sh
+cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml
+```
+
+Useful variants:
+
+```sh
+cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --profile dgx-spark --artifact-root ~/.cache/huggingface/hub
+cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --profile apple-metal --artifact-root ~/.cache/huggingface/hub
+cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --dry-run --results-root /tmp/motlie-evals-dry-run
+```
+
+`HF_TOKEN` is read only from the environment for gated Hugging Face artifacts.
+The runner records token presence as a boolean and never logs or serializes the
+token value.
+
+Per-host raw output lands under:
+
+```text
+evals/results/<snapshot-id>/<run-id>/
+```
+
+That directory contains `results.jsonl`, `summary.md`, `run-manifest.toml`, and
+per-cell logs. Raw result artifacts are ignored by default; committed Markdown
+coverage summaries can live in `evals/results/`.
+
+Aggregate cross-host reports are generated with:
+
+```sh
+cargo run -p evals -- report --aggregate 'evals/results/**/results.jsonl' --output evals/results/cross-platform-curated-results.md
+```

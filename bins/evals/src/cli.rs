@@ -2,9 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 
+use crate::accelerator;
 use crate::metrics::MetricsSampler;
 use crate::platform::PlatformCollector;
-use crate::report::OutputSink;
+use crate::report::{self, OutputSink};
+use crate::result::{
+    AcceleratorClass, ApplicabilityDecision, CoverageSection, EvalDepth, TerminalOutcome,
+};
 use crate::runner::asr::AsrRunner;
 use crate::runner::chat::ChatRunner;
 use crate::runner::embeddings::EmbeddingSimilarityRunner;
@@ -36,9 +40,13 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         }
         [command, subject] if command == "list" && subject == "bundles" => list_bundles(),
         [command, rest @ ..] if command == "run" => run_scenario(command_line, rest).await,
-        [command, ..] if command == "matrix" || command == "report" => {
-            bail!("`evals {command}` is planned after the embeddings runner pattern is reviewed")
+        [command, rest @ ..] if command == "matrix" => {
+            crate::driver::run_matrix(command_line, rest).await
         }
+        [command, rest @ ..] if command == "provision" => {
+            crate::driver::run_provision(command_line, rest).await
+        }
+        [command, rest @ ..] if command == "report" => report::run_report(rest),
         _ => {
             print_usage();
             bail!("unknown evals command")
@@ -52,8 +60,21 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
         .with_context(|| format!("failed to load scenario `{}`", options.scenario))?;
     let output_sink = options
         .jsonl
+        .clone()
         .map(OutputSink::JsonlFile)
         .unwrap_or(OutputSink::Stdout);
+    let platform_collector = PlatformCollector::new(options.profile_for_collector.clone());
+    let platform = platform_collector.collect();
+    let accelerator = options
+        .requested_accelerator
+        .map(|requested| accelerator::resolve(requested, &platform, None, None))
+        .or_else(|| {
+            Some(accelerator::resolve_for_profile(
+                &options.profile,
+                &platform,
+            ))
+        });
+    let coverage = options.coverage(&scenario, accelerator.as_ref(), &platform);
     let context = RunContext {
         scenario,
         bundle_selection: BundleSelection {
@@ -69,8 +90,12 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
             download_artifacts: options.download_artifacts,
             precision: options.precision,
             quiet_backend_logs: options.quiet_backend_logs,
+            run_id: options.run_id,
         },
-        platform_collector: PlatformCollector::new(options.profile_for_collector),
+        coverage,
+        accelerator,
+        child_build: None,
+        platform_collector,
         metrics_sampler: MetricsSampler::new(),
         output_sink,
     };
@@ -81,6 +106,9 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
         }
         CapabilityName::Chat => {
             ChatRunner.run(context).await?;
+        }
+        CapabilityName::ToolUse => {
+            crate::runner::tool_use::ToolUseRunner.run(context).await?;
         }
         CapabilityName::Perf => {
             PerfRunner.run(context).await?;
@@ -135,6 +163,15 @@ struct RunOptions {
     download_artifacts: bool,
     precision: Option<String>,
     quiet_backend_logs: bool,
+    run_id: Option<String>,
+    snapshot_id: Option<String>,
+    cell_id: Option<String>,
+    depth: Option<EvalDepth>,
+    checkpoint_format: Option<String>,
+    artifact_quantization: Option<String>,
+    model_family: Option<String>,
+    backend: Option<String>,
+    requested_accelerator: Option<AcceleratorClass>,
 }
 
 impl RunOptions {
@@ -149,6 +186,15 @@ impl RunOptions {
         let mut download_artifacts = false;
         let mut precision = None;
         let mut quiet_backend_logs = false;
+        let mut run_id = None;
+        let mut snapshot_id = None;
+        let mut cell_id = None;
+        let mut depth = None;
+        let mut checkpoint_format = None;
+        let mut artifact_quantization = None;
+        let mut model_family = None;
+        let mut backend = None;
+        let mut requested_accelerator = None;
 
         let mut index = 0;
         while index < args.len() {
@@ -183,6 +229,38 @@ impl RunOptions {
                 "--quiet-backend-logs" => {
                     quiet_backend_logs = true;
                 }
+                "--run-id" => {
+                    run_id = Some(take_value(args, &mut index, "--run-id")?);
+                }
+                "--snapshot-id" => {
+                    snapshot_id = Some(take_value(args, &mut index, "--snapshot-id")?);
+                }
+                "--cell-id" => {
+                    cell_id = Some(take_value(args, &mut index, "--cell-id")?);
+                }
+                "--depth" => {
+                    depth = Some(parse_depth(&take_value(args, &mut index, "--depth")?)?);
+                }
+                "--checkpoint-format" => {
+                    checkpoint_format = Some(take_value(args, &mut index, "--checkpoint-format")?);
+                }
+                "--artifact-quantization" => {
+                    artifact_quantization =
+                        Some(take_value(args, &mut index, "--artifact-quantization")?);
+                }
+                "--model-family" => {
+                    model_family = Some(take_value(args, &mut index, "--model-family")?);
+                }
+                "--backend" => {
+                    backend = Some(take_value(args, &mut index, "--backend")?);
+                }
+                "--requested-accelerator" => {
+                    requested_accelerator = Some(parse_accelerator(&take_value(
+                        args,
+                        &mut index,
+                        "--requested-accelerator",
+                    )?)?);
+                }
                 other => bail!("unknown evals run option `{other}`"),
             }
             index += 1;
@@ -201,6 +279,89 @@ impl RunOptions {
             download_artifacts,
             precision,
             quiet_backend_logs,
+            run_id,
+            snapshot_id,
+            cell_id,
+            depth,
+            checkpoint_format,
+            artifact_quantization,
+            model_family,
+            backend,
+            requested_accelerator,
+        })
+    }
+
+    fn coverage(
+        &self,
+        scenario: &scenario::Scenario,
+        accelerator: Option<&crate::result::AcceleratorSection>,
+        platform: &crate::platform::PlatformSnapshot,
+    ) -> Option<CoverageSection> {
+        let snapshot_id = self.snapshot_id.clone()?;
+        let host_id = platform
+            .host_id
+            .clone()
+            .or_else(|| platform.hostname.clone())
+            .unwrap_or_else(|| "unknown".to_owned());
+        let host_slug = platform
+            .host_slug
+            .clone()
+            .unwrap_or_else(|| crate::platform::sanitize_slug(&host_id));
+        let requested = accelerator
+            .map(|accelerator| accelerator.requested_class)
+            .unwrap_or(AcceleratorClass::Any);
+        let resolved = accelerator
+            .map(|accelerator| accelerator.resolved_class)
+            .unwrap_or(AcceleratorClass::Unavailable);
+        let depth = self.depth.unwrap_or(scenario.depth);
+        let checkpoint_format = self
+            .checkpoint_format
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
+        let artifact_quantization = self
+            .artifact_quantization
+            .clone()
+            .unwrap_or_else(|| "default".to_owned());
+        let backend = self.backend.clone().unwrap_or_else(|| "unknown".to_owned());
+        let mut grouping_keys = std::collections::BTreeMap::new();
+        grouping_keys.insert("bundle".to_owned(), self.bundle.clone());
+        grouping_keys.insert(
+            "capability".to_owned(),
+            scenario.capability().as_str().to_owned(),
+        );
+        grouping_keys.insert("depth".to_owned(), depth.as_str().to_owned());
+        grouping_keys.insert("backend".to_owned(), backend.clone());
+        grouping_keys.insert("checkpoint_format".to_owned(), checkpoint_format.clone());
+        grouping_keys.insert("quantization".to_owned(), artifact_quantization.clone());
+        grouping_keys.insert("profile".to_owned(), self.profile.clone());
+
+        Some(CoverageSection {
+            snapshot_id,
+            cell_id: self
+                .cell_id
+                .clone()
+                .unwrap_or_else(|| format!("{}__{}", self.bundle, scenario.id)),
+            depth,
+            capability: scenario.capability().as_str().to_owned(),
+            scenario_id: scenario.id.clone(),
+            bundle_id: self.bundle.clone(),
+            model_family: self
+                .model_family
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+            checkpoint_format,
+            quantization: artifact_quantization,
+            backend,
+            profile: self.profile.clone(),
+            host_id,
+            host_slug,
+            arch: std::env::consts::ARCH.to_owned(),
+            requested_accelerator: requested,
+            resolved_accelerator: resolved,
+            applicability: ApplicabilityDecision::Applicable,
+            terminal_outcome: TerminalOutcome::Blocked,
+            reason: None,
+            grouping_keys,
         })
     }
 }
@@ -222,11 +383,26 @@ fn default_eval_root() -> PathBuf {
 }
 
 fn default_profile() -> String {
-    match std::env::consts::ARCH {
-        "aarch64" if std::env::consts::OS == "macos" => "apple-metal".to_owned(),
-        "aarch64" => "local-cpu-aarch64".to_owned(),
-        "x86_64" => "local-cpu-x86_64".to_owned(),
-        other => format!("local-cpu-{other}"),
+    let platform = PlatformCollector::new("auto").collect();
+    accelerator::default_profile_for_platform(&platform)
+}
+
+fn parse_depth(raw: &str) -> Result<EvalDepth> {
+    match raw {
+        "smoke" => Ok(EvalDepth::Smoke),
+        "enriched" => Ok(EvalDepth::Enriched),
+        other => bail!("unknown eval depth `{other}`"),
+    }
+}
+
+fn parse_accelerator(raw: &str) -> Result<AcceleratorClass> {
+    match raw {
+        "cpu" => Ok(AcceleratorClass::Cpu),
+        "cuda" => Ok(AcceleratorClass::Cuda),
+        "metal" => Ok(AcceleratorClass::Metal),
+        "any" => Ok(AcceleratorClass::Any),
+        "unavailable" => Ok(AcceleratorClass::Unavailable),
+        other => bail!("unknown accelerator `{other}`"),
     }
 }
 
@@ -235,8 +411,10 @@ fn print_usage() {
     println!("  evals list scenarios [--root PATH]");
     println!("  evals list bundles");
     println!("  evals run --bundle <bundle_id> --scenario <scenario_id> [--profile NAME] [--artifact-root PATH] [--jsonl PATH]");
-    println!("  evals matrix");
+    println!("  evals matrix --snapshot <path> [--profile NAME] [--artifact-root PATH]");
+    println!("  evals provision --snapshot <path> [--artifact-root PATH]");
     println!("  evals report --input <jsonl> --format markdown");
+    println!("  evals report --aggregate <glob-or-path> --output <path>");
 }
 
 #[cfg(test)]

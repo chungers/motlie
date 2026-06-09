@@ -2,6 +2,7 @@
 members = [
     "libs/core",
     "libs/db",
+    "libs/eval-tools",
     "libs/mcp",
     "libs/model",
     "libs/voice",

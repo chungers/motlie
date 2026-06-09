@@ -1,21 +1,14 @@
-use std::collections::BTreeMap;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
-use motlie_model::{
-    ArtifactPolicy, BundleHandle, BundleId, CapabilityKind, EmbeddingModel, EmbeddingRequest,
-    QuantizationBits, StartOptions,
-};
-use motlie_models::{download_bundle_artifacts, Catalog};
+use motlie_model::{BundleHandle, CapabilityKind, EmbeddingModel, EmbeddingRequest};
 
 use crate::metrics::{
     CapabilityPerformanceMetrics, EmbeddingPerformanceMetrics, PerformanceMetrics,
 };
-use crate::result::{
-    overall_status, AcceptanceSection, AcceptanceStatus, AssertionOutcome, IdentitySection,
-    ProfileSection, ResultRecord, RuntimeSection, SelectionSection,
+use crate::result::{AcceptanceStatus, AssertionOutcome};
+use crate::runner::support::{
+    build_record, elapsed_ms, evaluate_resource_status, prepare_bundle, start_options,
+    SectionEvaluation,
 };
 use crate::runner::{RunContext, ScenarioRunner};
 use crate::scenario::{CapabilityName, EmbeddingsAssertions, SimilarityOrder};
@@ -24,7 +17,7 @@ pub struct EmbeddingSimilarityRunner;
 
 #[async_trait]
 impl ScenarioRunner for EmbeddingSimilarityRunner {
-    async fn run(&self, mut context: RunContext) -> Result<ResultRecord> {
+    async fn run(&self, mut context: RunContext) -> Result<crate::result::ResultRecord> {
         ensure!(
             context.scenario.capability() == CapabilityName::Embeddings,
             "scenario `{}` is not an embeddings scenario",
@@ -43,60 +36,15 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
         let input = embeddings_scenario.input;
         let assertions = embeddings_scenario.assertions;
 
-        let catalog = Catalog::with_defaults();
-        let bundle_id = BundleId::new(context.bundle_selection.bundle_id.clone());
-        let descriptor = catalog
-            .bundle(&bundle_id)
-            .with_context(|| format!("unknown compiled bundle `{bundle_id}`"))?
-            .clone();
-        ensure!(
-            descriptor.capabilities.supports(CapabilityKind::Embeddings),
-            "bundle `{bundle_id}` does not advertise embeddings"
-        );
-
-        if !context.scenario.bundle_filter.backend.is_empty() {
-            let backend = format!("{:?}", descriptor.backend);
-            ensure!(
-                context
-                    .scenario
-                    .bundle_filter
-                    .backend
-                    .iter()
-                    .any(|candidate| candidate == &backend),
-                "bundle `{bundle_id}` backend `{backend}` is not accepted by scenario `{}`",
-                context.scenario.id
-            );
-        }
-
-        let downloaded_artifacts = if context.runtime_flags.download_artifacts {
-            download_bundle_artifacts(&catalog, &bundle_id, &context.artifact_root)
-                .with_context(|| format!("failed to download artifacts for `{bundle_id}`"))?
-                .downloaded
-                .into_iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
-        let bundle = catalog
-            .instantiate(&bundle_id)
-            .with_context(|| format!("bundle `{bundle_id}` is not available in this build"))?;
-        let quantization = parse_quantization(context.runtime_flags.precision.as_deref())?;
-        let start_options = StartOptions {
-            artifact_policy: Some(ArtifactPolicy::LocalOnly {
-                root: context.artifact_root.clone(),
-            }),
-            quantization,
-            ..Default::default()
-        };
+        let prepared = prepare_bundle(&context, CapabilityKind::Embeddings, &[])?;
 
         context.metrics_sampler.sample();
         let startup_started_at = std::time::Instant::now();
-        let handle = bundle
-            .start(start_options)
+        let handle = prepared
+            .bundle
+            .start(start_options(&context, &prepared))
             .await
-            .with_context(|| format!("failed to start bundle `{bundle_id}`"))?;
+            .with_context(|| format!("failed to start bundle `{}`", prepared.bundle_id))?;
         let startup_ms = elapsed_ms(startup_started_at.elapsed());
         context.metrics_sampler.sample();
 
@@ -138,7 +86,7 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
         handle
             .shutdown()
             .await
-            .with_context(|| format!("failed to shut down bundle `{bundle_id}`"))?;
+            .with_context(|| format!("failed to shut down bundle `{}`", prepared.bundle_id))?;
 
         let request_latencies_ms =
             vec![custom_latency_ms, similar_latency_ms, dissimilar_latency_ms];
@@ -171,6 +119,7 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
             startup_ms: Some(startup_ms),
             request_latencies_ms,
             capability_metrics: CapabilityPerformanceMetrics::Embeddings(embedding_metrics),
+            ..Default::default()
         };
         let resources = context.metrics_sampler.finish();
 
@@ -180,81 +129,17 @@ impl ScenarioRunner for EmbeddingSimilarityRunner {
             dissimilar_cosine,
             &assertions,
         );
-        let behavior_status = assertion.status.clone();
         let performance_evaluation = evaluate_performance_status(&performance);
         let resource_evaluation = evaluate_resource_status(&resources, &context);
-        let performance_status = performance_evaluation.status.clone();
-        let resource_status = resource_evaluation.status.clone();
-        let overall_status =
-            overall_status(&behavior_status, &performance_status, &resource_status);
-        let failure_reason = failure_reason(
-            &overall_status,
-            &behavior_status,
-            &assertion,
-            &performance_evaluation,
-            &resource_evaluation,
-        );
-
-        let checkpoint = descriptor.checkpoint();
-        let record = ResultRecord {
-            schema_version: 1,
-            identity: IdentitySection {
-                run_id: run_id(),
-                git_sha: git_output(["rev-parse", "HEAD"]),
-                git_branch: git_output(["branch", "--show-current"]),
-                command_line: context.runtime_flags.command_line.clone(),
-            },
-            selection: SelectionSection {
-                bundle_id: bundle_id.as_str().to_owned(),
-                selector: context.bundle_selection.selector.clone(),
-                backend: Some(format!("{:?}", descriptor.backend)),
-                checkpoint_format: checkpoint
-                    .as_ref()
-                    .map(|checkpoint| format!("{:?}", checkpoint.format)),
-                artifact_snapshot: None,
-                artifact_patterns: checkpoint
-                    .as_ref()
-                    .map(|checkpoint| {
-                        checkpoint
-                            .include
-                            .iter()
-                            .map(|rule| format!("{rule:?}"))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
-                artifact_files: downloaded_artifacts,
-                scenario: context.scenario.id.clone(),
-                capability: context.scenario.capability().as_str().to_owned(),
-            },
-            profile: ProfileSection {
-                name: context.profile.name.clone(),
-            },
-            platform: context.platform_collector.collect(),
-            runtime: RuntimeSection {
-                cargo_features: active_features(),
-                build_profile: option_env!("PROFILE").map(str::to_owned),
-                quantization: context
-                    .runtime_flags
-                    .precision
-                    .clone()
-                    .or_else(|| Some("f32".to_owned())),
-                artifact_root: context.artifact_root.display().to_string(),
-                download_artifacts: context.runtime_flags.download_artifacts,
-                context_length: None,
-                gpu_layers: None,
-                env: runtime_env(),
-            },
+        let record = build_record(
+            &context,
+            &prepared,
             performance,
             resources,
-            acceptance: AcceptanceSection {
-                behavior_status,
-                performance_status,
-                resource_status,
-                overall_status,
-                failure_reason,
-                assertions: vec![assertion],
-            },
-        };
+            vec![assertion],
+            performance_evaluation,
+            resource_evaluation,
+        );
 
         context.output_sink.emit(&record)?;
         Ok(record)
@@ -314,12 +199,6 @@ fn evaluate_assertion(
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SectionEvaluation {
-    status: AcceptanceStatus,
-    failure_reason: Option<String>,
-}
-
 fn evaluate_performance_status(performance: &PerformanceMetrics) -> SectionEvaluation {
     let CapabilityPerformanceMetrics::Embeddings(metrics) = &performance.capability_metrics else {
         return SectionEvaluation {
@@ -344,106 +223,6 @@ fn evaluate_performance_status(performance: &PerformanceMetrics) -> SectionEvalu
                     .to_owned(),
             ),
         }
-    }
-}
-
-fn evaluate_resource_status(
-    resources: &crate::metrics::ResourceMetrics,
-    context: &RunContext,
-) -> SectionEvaluation {
-    if let Some(gates) = context.scenario.gates_for_profile(&context.profile.name) {
-        if let Some(max_process_swap_delta_bytes) = gates.max_process_swap_delta_bytes {
-            match resources.process_swap_delta_peak_bytes {
-                Some(value) if value <= max_process_swap_delta_bytes => {}
-                Some(value) => {
-                    return SectionEvaluation {
-                        status: AcceptanceStatus::Fail,
-                        failure_reason: Some(format!(
-                            "resource gate max_process_swap_delta_bytes={} exceeded: process_swap_delta_peak={} ({} bytes)",
-                            max_process_swap_delta_bytes,
-                            format_bytes(value),
-                            value
-                        )),
-                    };
-                }
-                None => {
-                    return SectionEvaluation {
-                        status: AcceptanceStatus::NotMeasured,
-                        failure_reason: Some(
-                            "resource gate max_process_swap_delta_bytes could not be evaluated: process swap delta unavailable"
-                                .to_owned(),
-                        ),
-                    };
-                }
-            }
-        }
-    }
-
-    if resources.rss_peak_bytes.is_some() {
-        SectionEvaluation {
-            status: AcceptanceStatus::Pass,
-            failure_reason: None,
-        }
-    } else {
-        SectionEvaluation {
-            status: AcceptanceStatus::NotMeasured,
-            failure_reason: Some("resource metrics missing rss_peak_bytes".to_owned()),
-        }
-    }
-}
-
-fn failure_reason(
-    overall_status: &AcceptanceStatus,
-    behavior_status: &AcceptanceStatus,
-    assertion: &AssertionOutcome,
-    performance_evaluation: &SectionEvaluation,
-    resource_evaluation: &SectionEvaluation,
-) -> Option<String> {
-    if matches!(overall_status, AcceptanceStatus::Pass) {
-        return None;
-    }
-
-    if matches!(
-        behavior_status,
-        AcceptanceStatus::Fail | AcceptanceStatus::Blocked
-    ) {
-        return Some(format!(
-            "behavior assertion `{}` failed: {}",
-            assertion.name,
-            assertion
-                .message
-                .as_deref()
-                .unwrap_or("no assertion detail")
-        ));
-    }
-
-    if matches!(
-        performance_evaluation.status,
-        AcceptanceStatus::Fail | AcceptanceStatus::Blocked | AcceptanceStatus::NotMeasured
-    ) {
-        if let Some(reason) = &performance_evaluation.failure_reason {
-            return Some(format!("performance section not accepted: {reason}"));
-        }
-    }
-
-    if matches!(
-        resource_evaluation.status,
-        AcceptanceStatus::Fail | AcceptanceStatus::Blocked | AcceptanceStatus::NotMeasured
-    ) {
-        if let Some(reason) = &resource_evaluation.failure_reason {
-            return Some(format!("resources section not accepted: {reason}"));
-        }
-    }
-
-    None
-}
-
-fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationBits>> {
-    match precision {
-        Some("q4") => Ok(Some(QuantizationBits::Four)),
-        Some("q8") => Ok(Some(QuantizationBits::Eight)),
-        Some("f32") | None => Ok(None),
-        Some(other) => bail!("unknown precision `{other}` - use q4, q8, or f32"),
     }
 }
 
@@ -480,101 +259,13 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f64> {
     Ok(dot / (left_norm * right_norm))
 }
 
-fn elapsed_ms(duration: std::time::Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-fn run_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    format!("run-{millis}")
-}
-
-fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8(output.stdout).ok()?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-fn active_features() -> Vec<String> {
-    let mut features = Vec::new();
-    if cfg!(feature = "model-google-gemma-300m") {
-        features.push("model-google-gemma-300m".to_owned());
-    }
-    if cfg!(feature = "model-qwen3-embedding-06b") {
-        features.push("model-qwen3-embedding-06b".to_owned());
-    }
-    features
-}
-
-fn runtime_env() -> BTreeMap<String, Option<String>> {
-    [
-        "MOTLIE_MODEL_FORCE_CPU",
-        "MOTLIE_MODEL_GPU_LAYERS",
-        "MOTLIE_PAGED_ATTN_CONTEXT",
-        "CUDA_VISIBLE_DEVICES",
-    ]
-    .into_iter()
-    .map(|key| (key.to_owned(), std::env::var(key).ok()))
-    .collect()
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = 1024.0 * KIB;
-    const GIB: f64 = 1024.0 * MIB;
-    let bytes = bytes as f64;
-    if bytes >= GIB {
-        format!("{:.2}GiB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{:.2}MiB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{:.2}KiB", bytes / KIB)
-    } else {
-        format!("{bytes:.0}B")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::ResourceMetrics;
-    use crate::runner::{BundleSelection, ProfileSelection, RunContext, RuntimeFlags};
-    use crate::{metrics::MetricsSampler, platform::PlatformCollector, report::OutputSink};
-
-    #[test]
-    fn resource_failure_reason_names_failing_gate() {
-        let context = test_context("local-cpu-x86_64");
-        let resources = ResourceMetrics {
-            rss_peak_bytes: Some(1),
-            process_swap_delta_peak_bytes: Some(1_677_721_600),
-            ..Default::default()
-        };
-
-        let evaluation = evaluate_resource_status(&resources, &context);
-
-        assert_eq!(evaluation.status, AcceptanceStatus::Fail);
-        assert!(evaluation
-            .failure_reason
-            .as_deref()
-            .unwrap()
-            .contains("max_process_swap_delta_bytes=0 exceeded"));
-        assert!(evaluation
-            .failure_reason
-            .as_deref()
-            .unwrap()
-            .contains("process_swap_delta_peak=1.56GiB"));
-    }
+    use crate::metrics::{MetricsSampler, ResourceMetrics};
+    use crate::platform::PlatformCollector;
+    use crate::report::OutputSink;
+    use crate::runner::{BundleSelection, ProfileSelection, RuntimeFlags};
 
     #[test]
     fn apple_profile_without_swap_gate_passes_when_rss_is_measured() {
@@ -589,37 +280,6 @@ mod tests {
 
         assert_eq!(evaluation.status, AcceptanceStatus::Pass);
         assert_eq!(evaluation.failure_reason, None);
-    }
-
-    #[test]
-    fn overall_failure_reason_prefers_resource_failure_over_passing_behavior_message() {
-        let assertion = AssertionOutcome {
-            name: "similar_gt_dissimilar".to_owned(),
-            status: AcceptanceStatus::Pass,
-            message: Some("similar=0.9 dissimilar=0.1 gap=0.8".to_owned()),
-        };
-        let performance = SectionEvaluation {
-            status: AcceptanceStatus::Pass,
-            failure_reason: None,
-        };
-        let resources = SectionEvaluation {
-            status: AcceptanceStatus::Fail,
-            failure_reason: Some("resource gate exceeded".to_owned()),
-        };
-
-        let reason = failure_reason(
-            &AcceptanceStatus::Fail,
-            &assertion.status,
-            &assertion,
-            &performance,
-            &resources,
-        )
-        .unwrap();
-
-        assert_eq!(
-            reason,
-            "resources section not accepted: resource gate exceeded"
-        );
     }
 
     fn test_context(profile_name: &str) -> RunContext {
@@ -673,10 +333,68 @@ max_process_swap_delta_bytes = 0
                 download_artifacts: false,
                 precision: None,
                 quiet_backend_logs: false,
+                run_id: None,
             },
+            coverage: None,
+            accelerator: None,
+            child_build: None,
             platform_collector: PlatformCollector::new(profile_name),
             metrics_sampler: MetricsSampler::new(),
             output_sink: OutputSink::Stdout,
         }
+    }
+
+    #[test]
+    fn resource_failure_reason_names_failing_gate() {
+        let context = test_context("local-cpu-x86_64");
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            process_swap_delta_peak_bytes: Some(1_677_721_600),
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status(&resources, &context);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Fail);
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("max_process_swap_delta_bytes=0 exceeded"));
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("process_swap_delta_peak=1.56GiB"));
+    }
+
+    #[test]
+    fn overall_failure_reason_prefers_resource_failure_over_passing_behavior_message() {
+        let assertion = AssertionOutcome {
+            name: "similar_gt_dissimilar".to_owned(),
+            status: AcceptanceStatus::Pass,
+            message: Some("similar=0.9 dissimilar=0.1 gap=0.8".to_owned()),
+        };
+        let performance = SectionEvaluation {
+            status: AcceptanceStatus::Pass,
+            failure_reason: None,
+        };
+        let resources = SectionEvaluation {
+            status: AcceptanceStatus::Fail,
+            failure_reason: Some("resource gate exceeded".to_owned()),
+        };
+
+        let reason = crate::runner::support::failure_reason(
+            &AcceptanceStatus::Fail,
+            &[assertion],
+            &performance,
+            &resources,
+        )
+        .unwrap();
+
+        assert_eq!(
+            reason,
+            "resources section not accepted: resource gate exceeded"
+        );
     }
 }

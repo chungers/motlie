@@ -187,11 +187,13 @@ impl ScenarioRunner for ChatRunner {
             tool_call_count: tool_response
                 .as_ref()
                 .map(|response| response.tool_calls.len() as u64),
+            ..Default::default()
         };
         let performance = PerformanceMetrics {
             startup_ms: Some(startup_ms),
             request_latencies_ms,
             capability_metrics: CapabilityPerformanceMetrics::Chat(chat_metrics),
+            ..Default::default()
         };
         let resources = context.metrics_sampler.finish();
         let assertions = evaluate_assertions(

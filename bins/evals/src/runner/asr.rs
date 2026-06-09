@@ -84,6 +84,7 @@ impl ScenarioRunner for AsrRunner {
             startup_ms: Some(eval.startup_ms),
             request_latencies_ms: vec![eval.transcription_latency_ms],
             capability_metrics: CapabilityPerformanceMetrics::Asr(asr_metrics),
+            ..Default::default()
         };
         let resources = context.metrics_sampler.finish();
         let assertions =

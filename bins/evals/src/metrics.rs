@@ -7,7 +7,11 @@ use sysinfo::{get_current_pid, ProcessesToUpdate, System};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
     pub startup_ms: Option<u64>,
+    #[serde(default)]
+    pub warmup_ms: Option<u64>,
     pub request_latencies_ms: Vec<u64>,
+    #[serde(default)]
+    pub unavailable: Vec<MetricUnavailable>,
     pub capability_metrics: CapabilityPerformanceMetrics,
 }
 
@@ -18,6 +22,7 @@ pub enum CapabilityPerformanceMetrics {
     NotMeasured,
     Embeddings(EmbeddingPerformanceMetrics),
     Chat(ChatPerformanceMetrics),
+    ToolUse(ToolUsePerformanceMetrics),
     Asr(AsrPerformanceMetrics),
     Tts(TtsPerformanceMetrics),
     Perf(PerfPerformanceMetrics),
@@ -41,11 +46,29 @@ pub struct EmbeddingPerformanceMetrics {
 pub struct ChatPerformanceMetrics {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub time_to_first_token_ms: Option<u64>,
+    #[serde(default)]
+    pub decode_ms: Option<u64>,
     pub tokens_per_second: Option<f64>,
     pub response_chars: Option<u64>,
     pub followup_response_chars: Option<u64>,
     pub completion_chars: Option<u64>,
     pub tool_call_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolUsePerformanceMetrics {
+    pub tool_call_count: Option<u64>,
+    pub expected_tool_count: Option<u64>,
+    pub tool_selection_precision: Option<f64>,
+    pub tool_selection_recall: Option<f64>,
+    pub argument_precision: Option<f64>,
+    pub argument_recall: Option<f64>,
+    pub repair_turns: Option<u64>,
+    pub round_trip_latency_ms: Option<u64>,
+    pub tool_execution_latency_ms: Option<u64>,
+    pub final_response_chars: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -89,7 +112,39 @@ pub struct ResourceMetrics {
     pub process_swap_final_bytes: Option<u64>,
     pub process_swap_delta_peak_bytes: Option<u64>,
     pub gpu_memory_peak_bytes: Option<u64>,
+    #[serde(default)]
+    pub gpu_utilization_peak_percent: Option<f64>,
+    #[serde(default)]
+    pub memory_peaks: Vec<MemoryPeak>,
     pub unavailable: Vec<String>,
+    #[serde(default)]
+    pub unavailable_metrics: Vec<MetricUnavailable>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MetricUnavailable {
+    pub metric: String,
+    pub reason: String,
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MemoryPeak {
+    pub kind: MemoryPeakKind,
+    pub bytes: Option<u64>,
+    pub device_id: Option<String>,
+    pub source: String,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryPeakKind {
+    ProcessRss,
+    CudaVram,
+    MetalCurrentAllocated,
+    AppleFootprint,
+    SystemUnifiedMemory,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -129,20 +184,64 @@ impl MetricsSampler {
     pub fn finish(&mut self) -> ResourceMetrics {
         self.sample();
         let mut unavailable = Vec::new();
+        let mut unavailable_metrics = Vec::new();
         if self.peak_rss_bytes.is_none() {
             unavailable.push("rss_peak_bytes".to_owned());
+            unavailable_metrics.push(metric_unavailable(
+                "rss_peak_bytes",
+                "metric_collection_failed",
+                "sysinfo",
+            ));
         }
         if self.peak_process_swap_bytes.is_none() {
             unavailable.push("process_swap_peak_bytes".to_owned());
             unavailable.push("process_swap_delta_peak_bytes".to_owned());
+            unavailable_metrics.push(metric_unavailable(
+                "process_swap_delta_peak_bytes",
+                "metric_unavailable_on_platform",
+                process_swap_source(),
+            ));
         }
         unavailable.push("gpu_memory_peak_bytes".to_owned());
+        unavailable_metrics.push(metric_unavailable(
+            "gpu_memory_peak_bytes",
+            "metric_not_instrumented",
+            "accelerator_sampler",
+        ));
 
         let process_swap_delta_peak_bytes =
             match (self.start.process_swap_bytes, self.peak_process_swap_bytes) {
                 (Some(start), Some(peak)) => Some(peak.saturating_sub(start)),
                 _ => None,
             };
+
+        let mut memory_peaks = Vec::new();
+        memory_peaks.push(MemoryPeak {
+            kind: MemoryPeakKind::ProcessRss,
+            bytes: self.peak_rss_bytes,
+            device_id: None,
+            source: "sysinfo".to_owned(),
+            unavailable_reason: self
+                .peak_rss_bytes
+                .is_none()
+                .then(|| "metric_collection_failed".to_owned()),
+        });
+        memory_peaks.push(MemoryPeak {
+            kind: MemoryPeakKind::CudaVram,
+            bytes: None,
+            device_id: None,
+            source: "unavailable".to_owned(),
+            unavailable_reason: Some("metric_not_instrumented".to_owned()),
+        });
+        if cfg!(target_os = "macos") {
+            memory_peaks.push(MemoryPeak {
+                kind: MemoryPeakKind::AppleFootprint,
+                bytes: self.peak_rss_bytes,
+                device_id: None,
+                source: "sysinfo_process_rss_proxy".to_owned(),
+                unavailable_reason: None,
+            });
+        }
 
         ResourceMetrics {
             rss_start_bytes: self.start.rss_bytes,
@@ -153,7 +252,10 @@ impl MetricsSampler {
             process_swap_final_bytes: self.last.process_swap_bytes,
             process_swap_delta_peak_bytes,
             gpu_memory_peak_bytes: None,
+            gpu_utilization_peak_percent: None,
+            memory_peaks,
             unavailable,
+            unavailable_metrics,
         }
     }
 }
@@ -213,6 +315,24 @@ fn parse_kib_value(raw: &str) -> Option<u64> {
         "mB" | "MB" => Some(value.saturating_mul(1024 * 1024)),
         "gB" | "GB" => Some(value.saturating_mul(1024 * 1024 * 1024)),
         _ => None,
+    }
+}
+
+fn metric_unavailable(metric: &str, reason: &str, source: &str) -> MetricUnavailable {
+    MetricUnavailable {
+        metric: metric.to_owned(),
+        reason: reason.to_owned(),
+        source: Some(source.to_owned()),
+    }
+}
+
+fn process_swap_source() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "procfs"
+    } else if cfg!(target_os = "macos") {
+        "mach_task_info_unimplemented"
+    } else {
+        "platform_unavailable"
     }
 }
 

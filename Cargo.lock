@@ -2627,6 +2627,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "hound",
+ "motlie-eval-tools",
  "motlie-model",
  "motlie-models",
  "motlie-voice",
@@ -5352,6 +5353,16 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "vt100",
+]
+
+[[package]]
+name = "motlie-eval-tools"
+version = "0.1.0"
+dependencies = [
+ "motlie-model",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

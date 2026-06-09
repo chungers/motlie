@@ -3,6 +3,7 @@ pub mod chat;
 pub mod embeddings;
 pub mod perf;
 pub mod support;
+pub mod tool_use;
 pub mod tts;
 
 use std::path::PathBuf;
@@ -13,7 +14,7 @@ use async_trait::async_trait;
 use crate::metrics::MetricsSampler;
 use crate::platform::PlatformCollector;
 use crate::report::OutputSink;
-use crate::result::ResultRecord;
+use crate::result::{AcceleratorSection, ChildBuildSection, CoverageSection, ResultRecord};
 use crate::scenario::Scenario;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +34,7 @@ pub struct RuntimeFlags {
     pub download_artifacts: bool,
     pub precision: Option<String>,
     pub quiet_backend_logs: bool,
+    pub run_id: Option<String>,
 }
 
 pub struct RunContext {
@@ -41,6 +43,9 @@ pub struct RunContext {
     pub profile: ProfileSelection,
     pub artifact_root: PathBuf,
     pub runtime_flags: RuntimeFlags,
+    pub coverage: Option<CoverageSection>,
+    pub accelerator: Option<AcceleratorSection>,
+    pub child_build: Option<ChildBuildSection>,
     pub platform_collector: PlatformCollector,
     pub metrics_sampler: MetricsSampler,
     pub output_sink: OutputSink,

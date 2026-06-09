@@ -99,6 +99,7 @@ impl ScenarioRunner for PerfRunner {
             startup_ms: Some(startup_ms),
             request_latencies_ms,
             capability_metrics: CapabilityPerformanceMetrics::Perf(perf_metrics),
+            ..Default::default()
         };
         let resources = context.metrics_sampler.finish();
         let assertions = evaluate_assertions(

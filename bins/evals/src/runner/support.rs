@@ -6,10 +6,13 @@ use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{ArtifactPolicy, BundleId, CapabilityKind, QuantizationBits, StartOptions};
 use motlie_models::{download_bundle_artifacts, BundleDescriptor, Catalog, CuratedBundle};
 
+use crate::accelerator;
 use crate::metrics::{PerformanceMetrics, ResourceMetrics};
 use crate::result::{
-    overall_status, AcceptanceSection, AcceptanceStatus, AssertionOutcome, IdentitySection,
-    ProfileSection, ResultRecord, RuntimeSection, SelectionSection,
+    overall_status_with_accelerator, reason_for_status, terminal_outcome, AcceptanceSection,
+    AcceptanceStatus, AssertionOutcome, CoverageSection, GateOutcome, IdentitySection,
+    OutcomeReason, ProfileSection, ResultRecord, RuntimeSection, SelectionSection,
+    RESULT_SCHEMA_VERSION,
 };
 use crate::runner::RunContext;
 use crate::scenario::{CapabilityName, ModelCapabilityName};
@@ -118,6 +121,7 @@ pub fn bundle_filter_capability_kind(capability: CapabilityName) -> CapabilityKi
     match capability {
         CapabilityName::Embeddings => CapabilityKind::Embeddings,
         CapabilityName::Chat => CapabilityKind::Chat,
+        CapabilityName::ToolUse => CapabilityKind::ToolUse,
         CapabilityName::Asr => CapabilityKind::Transcription,
         CapabilityName::Tts => CapabilityKind::Speech,
         CapabilityName::Perf => CapabilityKind::Chat,
@@ -188,9 +192,9 @@ pub fn evaluate_resource_status(
                 }
                 None => {
                     return SectionEvaluation {
-                        status: AcceptanceStatus::NotMeasured,
+                        status: AcceptanceStatus::Blocked,
                         failure_reason: Some(
-                            "resource gate max_process_swap_delta_bytes could not be evaluated: process swap delta unavailable"
+                            "resource gate max_process_swap_delta_bytes blocked: process swap delta unavailable"
                                 .to_owned(),
                         ),
                     };
@@ -271,30 +275,96 @@ pub fn build_record(
     let behavior_status = behavior_status(&assertions);
     let performance_status = performance_evaluation.status.clone();
     let resource_status = resource_evaluation.status.clone();
-    let overall_status = overall_status(&behavior_status, &performance_status, &resource_status);
+    let platform = context.platform_collector.collect();
+    let accelerator = context
+        .accelerator
+        .clone()
+        .unwrap_or_else(|| accelerator::resolve_for_profile(&context.profile.name, &platform));
+    let accelerator_status = accelerator::evaluate_use(&accelerator);
+    let overall_status = overall_status_with_accelerator(
+        &behavior_status,
+        &performance_status,
+        &resource_status,
+        &accelerator_status,
+    );
     let failure_reason = failure_reason(
         &overall_status,
         &assertions,
         &performance_evaluation,
         &resource_evaluation,
-    );
+    )
+    .or_else(|| {
+        matches!(
+            accelerator_status,
+            AcceptanceStatus::Fail | AcceptanceStatus::Blocked
+        )
+        .then(|| {
+            format!(
+                "accelerator section not accepted: requested={} resolved={} reason={}",
+                accelerator.requested_class.as_str(),
+                accelerator.resolved_class.as_str(),
+                accelerator
+                    .fallback_reason
+                    .as_ref()
+                    .map(OutcomeReason::as_str)
+                    .unwrap_or("none")
+            )
+        })
+    });
     let checkpoint = prepared.descriptor.checkpoint();
+    let checkpoint_format = checkpoint
+        .as_ref()
+        .map(|checkpoint| format!("{:?}", checkpoint.format));
+    let artifact_quantization = artifact_quantization_label(
+        checkpoint_format.as_deref(),
+        context.runtime_flags.precision.as_deref(),
+    );
+    let host_id = platform
+        .host_id
+        .clone()
+        .or_else(|| platform.hostname.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let host_slug = platform
+        .host_slug
+        .clone()
+        .unwrap_or_else(|| crate::platform::sanitize_slug(&host_id));
+    let backend = format!("{:?}", prepared.descriptor.backend);
+    let mut coverage = context.coverage.clone().unwrap_or_else(|| {
+        default_coverage(
+            context,
+            prepared,
+            &host_id,
+            &host_slug,
+            &backend,
+            checkpoint_format.as_deref().unwrap_or("unknown"),
+            &artifact_quantization,
+            accelerator.requested_class,
+            accelerator.resolved_class,
+        )
+    });
+    coverage.resolved_accelerator = accelerator.resolved_class;
+    coverage.terminal_outcome = terminal_outcome(&overall_status);
+    if coverage.reason.is_none() {
+        coverage.reason = reason_for_status(&overall_status);
+    }
 
     ResultRecord {
-        schema_version: 1,
+        schema_version: RESULT_SCHEMA_VERSION,
         identity: IdentitySection {
-            run_id: run_id(),
+            run_id: context.runtime_flags.run_id.clone().unwrap_or_else(run_id),
             git_sha: git_output(["rev-parse", "HEAD"]),
             git_branch: git_output(["branch", "--show-current"]),
             command_line: context.runtime_flags.command_line.clone(),
+            host_id: Some(host_id),
+            host_slug: Some(host_slug),
         },
+        coverage,
         selection: SelectionSection {
             bundle_id: prepared.bundle_id.as_str().to_owned(),
             selector: context.bundle_selection.selector.clone(),
-            backend: Some(format!("{:?}", prepared.descriptor.backend)),
-            checkpoint_format: checkpoint
-                .as_ref()
-                .map(|checkpoint| format!("{:?}", checkpoint.format)),
+            backend: Some(backend),
+            checkpoint_format,
+            artifact_quantization: Some(artifact_quantization),
             artifact_snapshot: None,
             artifact_patterns: checkpoint
                 .as_ref()
@@ -313,7 +383,8 @@ pub fn build_record(
         profile: ProfileSection {
             name: context.profile.name.clone(),
         },
-        platform: context.platform_collector.collect(),
+        platform,
+        accelerator,
         runtime: RuntimeSection {
             cargo_features: active_features(),
             build_profile: Some(build_profile().to_owned()),
@@ -322,10 +393,13 @@ pub fn build_record(
                 .precision
                 .clone()
                 .or_else(|| Some("backend_default".to_owned())),
+            runtime_precision: context.runtime_flags.precision.clone(),
             artifact_root: context.artifact_root.display().to_string(),
             download_artifacts: context.runtime_flags.download_artifacts,
             context_length: None,
             gpu_layers: None,
+            child_build: context.child_build.clone(),
+            budgets: Default::default(),
             env: runtime_env(),
         },
         performance,
@@ -334,10 +408,122 @@ pub fn build_record(
             behavior_status,
             performance_status,
             resource_status,
+            accelerator_status,
             overall_status,
             failure_reason,
             assertions,
+            gates: gate_outcomes(&performance_evaluation, &resource_evaluation),
         },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn default_coverage(
+    context: &RunContext,
+    prepared: &PreparedBundle,
+    host_id: &str,
+    host_slug: &str,
+    backend: &str,
+    checkpoint_format: &str,
+    artifact_quantization: &str,
+    requested_accelerator: crate::result::AcceleratorClass,
+    resolved_accelerator: crate::result::AcceleratorClass,
+) -> CoverageSection {
+    let mut grouping_keys = BTreeMap::new();
+    grouping_keys.insert("bundle".to_owned(), prepared.bundle_id.as_str().to_owned());
+    grouping_keys.insert(
+        "capability".to_owned(),
+        context.scenario.capability().as_str().to_owned(),
+    );
+    grouping_keys.insert(
+        "depth".to_owned(),
+        context.scenario.depth.as_str().to_owned(),
+    );
+    grouping_keys.insert("backend".to_owned(), backend.to_owned());
+    grouping_keys.insert("checkpoint_format".to_owned(), checkpoint_format.to_owned());
+    grouping_keys.insert("quantization".to_owned(), artifact_quantization.to_owned());
+    grouping_keys.insert("profile".to_owned(), context.profile.name.clone());
+
+    CoverageSection {
+        snapshot_id: "ad_hoc".to_owned(),
+        cell_id: format!("{}__{}", prepared.bundle_id, context.scenario.id),
+        depth: context.scenario.depth,
+        capability: context.scenario.capability().as_str().to_owned(),
+        scenario_id: context.scenario.id.clone(),
+        bundle_id: prepared.bundle_id.as_str().to_owned(),
+        model_family: format!("{:?}", prepared.descriptor.family),
+        checkpoint_format: checkpoint_format.to_owned(),
+        quantization: artifact_quantization.to_owned(),
+        backend: backend.to_owned(),
+        profile: context.profile.name.clone(),
+        host_id: host_id.to_owned(),
+        host_slug: host_slug.to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+        requested_accelerator,
+        resolved_accelerator,
+        applicability: crate::result::ApplicabilityDecision::Applicable,
+        terminal_outcome: crate::result::TerminalOutcome::Blocked,
+        reason: None,
+        grouping_keys,
+    }
+}
+
+fn artifact_quantization_label(checkpoint_format: Option<&str>, precision: Option<&str>) -> String {
+    if checkpoint_format
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("gguf")
+    {
+        precision.unwrap_or("gguf_default").to_owned()
+    } else {
+        precision.unwrap_or("default").to_owned()
+    }
+}
+
+fn gate_outcomes(
+    performance_evaluation: &SectionEvaluation,
+    resource_evaluation: &SectionEvaluation,
+) -> Vec<GateOutcome> {
+    vec![
+        GateOutcome {
+            section: "performance".to_owned(),
+            name: "performance_measured".to_owned(),
+            status: performance_evaluation.status.clone(),
+            observed: None,
+            threshold: None,
+            source: Some("runner".to_owned()),
+            reason: gate_reason(
+                &performance_evaluation.status,
+                OutcomeReason::PerformanceGateFailed,
+            ),
+            message: performance_evaluation.failure_reason.clone(),
+        },
+        GateOutcome {
+            section: "resources".to_owned(),
+            name: "resource_gates".to_owned(),
+            status: resource_evaluation.status.clone(),
+            observed: None,
+            threshold: None,
+            source: Some("metrics_sampler".to_owned()),
+            reason: gate_reason(
+                &resource_evaluation.status,
+                OutcomeReason::ResourceGateFailed,
+            ),
+            message: resource_evaluation.failure_reason.clone(),
+        },
+    ]
+}
+
+fn gate_reason(status: &AcceptanceStatus, fail_reason: OutcomeReason) -> Option<OutcomeReason> {
+    match status {
+        AcceptanceStatus::Pass => None,
+        AcceptanceStatus::Fail => Some(fail_reason),
+        AcceptanceStatus::Blocked | AcceptanceStatus::NotMeasured => {
+            Some(OutcomeReason::MetricUnavailableRequired)
+        }
+        AcceptanceStatus::Skipped | AcceptanceStatus::NotApplicable => {
+            Some(OutcomeReason::MetricUnavailableOnPlatform)
+        }
     }
 }
 
@@ -630,7 +816,11 @@ max_process_swap_delta_bytes = 0
                 download_artifacts: false,
                 precision: None,
                 quiet_backend_logs: false,
+                run_id: None,
             },
+            coverage: None,
+            accelerator: None,
+            child_build: None,
             platform_collector: PlatformCollector::new(profile_name),
             metrics_sampler: MetricsSampler::new(),
             output_sink: OutputSink::Stdout,

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-09 | @codex-399-impl | Implemented the v2 framework shape: pinned smoke snapshot, host-self-selecting matrix driver, aggregate report command, raw-result ignore policy, and first-class tool-use crate/runner. |
 | 2026-06-09 | @codex-399-impl | Tightened v2 design after R1 review: feature-light matrix driver, concrete skip/block schema, accelerator detection/use proof, portable host identity, quant grouping, metric source semantics, and cross-platform gates. |
 | 2026-06-09 | @codex-399-impl | Expanded v2 design for decentralized host-self-selecting matrix runs, PR-based aggregation, artifact provisioning, first-class tool-use evals, and eval-depth/performance dimensions. |
 | 2026-06-07 | @codex-399-impl | Addressed Metal review: process-swap resource gates, section-specific failure reasons, tagged per-capability scenarios, and nested capability metrics. |
@@ -144,7 +145,7 @@ and does not coordinate work across hosts at runtime. The canonical command is
 run independently by each recruited agent:
 
 ```sh
-cargo run -p evals -- matrix --snapshot evals/snapshots/<snapshot-id>.toml
+cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml
 ```
 
 The top-level `evals` binary must remain feature-light: it cannot require every
