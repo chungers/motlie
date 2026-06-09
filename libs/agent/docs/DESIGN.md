@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 15:22 PDT | @codex-421-design | PR #425 round-2 fix: quiet guard now merges stable-id and session-name client activity so no-enter payload delivery is guarded even when client session ids are unavailable; coalescing wait and drain are one atomic queue decision. |
 | 2026-06-09 14:27 PDT | @codex-421-design | Reopened #421 live-validation fix: channel quiet guard now queries tmux activity by stable session id when available, and coalescing waits for a quiet `coalesce_window` before draining pending messages. |
 | 2026-06-09 00:52 PDT | @codex-421-design | Code-review reconciliation: pure-sync timeout drops its pending segment unless async sources/other waiters keep it alive; mstream timer deferral is channel-owned and observed through `DeliveryEvent`s; teardown removes stale channels. |
 | 2026-06-09 00:02 PDT | @codex-421-design | Implementation alignment before code review: moved `UiProfile` selection to per-session `ResolvedSession` with `ChannelConfig.default_ui_profile` fallback, shaped `DeliveryEvents` as a Tokio broadcast receiver plus concrete `ChannelStatus`/`DeferReason`, added explicit `SubmitPolicy.prompt_submit`, and added `docs/PLAN.md` for the coding phase. |
@@ -449,7 +450,8 @@ policy:
 
 - If there is no recent writable-client activity, flush.
 - Query `session_client_activity` by stable tmux session id when a resolved
-  target has one; fall back to session name only when no id exists.
+  target has one, and merge a session-name query when the id and name differ so
+  clients from tmux builds that omit client session ids still block delivery.
 - If `latest_writable_client_activity` is younger than `input_quiet_for`, keep
   pending messages queued and schedule the next attempt for the remaining quiet
   interval.

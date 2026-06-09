@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 15:22 PDT | @codex-421-design | PR #425 round-2 plan update: add no-enter quiet-guard regression coverage with missing client session id, quiet-guard trace hook, and atomic coalescing wait/drain. |
 | 2026-06-09 14:27 PDT | @codex-421-design | Reopened #421 live-validation fix plan: stable session-id client activity matching, quiescent coalescing window, and public `libs/agent` integration coverage for concurrent same-channel senders. |
 | 2026-06-09 00:52 PDT | @codex-421-design | Reconciled code review fixes: poison-safe channel locks, pure-sync timeout cancellation, mstream delivery-event observation, channel cleanup on teardown, timer deferral ownership in `motlie-agent`, and send/broadcast submit retry wiring. |
 | 2026-06-09 00:07 PDT | @codex-421-design | Marked final implementation gates complete: package-scoped fmt check, build, tests, clippy, and focused tmux writable-client activity tests all pass. Workspace-wide `cargo fmt` remains blocked by unrelated missing `examples/vector2/app/benchmark.rs`. |
@@ -37,7 +38,9 @@ cargo test -p motlie-tmux session_client_activity --lib
 - [x] Implement default-on dedup with zero-or-many waiters per pending segment.
 - [x] Implement attributed coalescing with natural `[from: source]` headers.
 - [x] Wait for a quiet `coalesce_window` before draining pending messages so real concurrent senders coalesce.
+- [x] Close the coalescing lock gap by performing the stable-generation check and drain under one queue lock.
 - [x] Implement quiet-guard deferral using `latest_writable_client_activity`.
+- [x] Add public integration coverage proving typing-only/no-enter payloads are also gated by no-barge-in.
 - [x] Implement payload/Enter separation with settle delay, retry policy, and profile-based verification fallback.
 - [x] Expose delivery observability through a Tokio broadcast receiver and status snapshots.
 

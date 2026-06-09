@@ -18,6 +18,103 @@ fn submit_policy() -> SubmitPolicy {
 }
 
 #[tokio::test(start_paused = true)]
+async fn typing_only_send_defers_when_client_session_id_is_missing_but_name_matches() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let old = now.saturating_sub(20);
+    let recent_client = format!("200 50 smoke-codex  {now} 0 /dev/pts/48\n");
+    let old_client = format!("200 50 smoke-codex  {old} 0 /dev/pts/48\n");
+    let mock = MockTransport::new()
+        .with_response(
+            "list-sessions",
+            "__MOTLIE_S__ smoke-codex $1 100 0 1  200\n",
+        )
+        .with_response("list-clients", &recent_client)
+        .with_response("list-clients", &recent_client)
+        .with_response("list-clients", &old_client)
+        .with_response("list-clients", &old_client)
+        .with_response("send-keys", "");
+    let command_log = mock.command_log();
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host
+        .target(&TargetSpec::session_id("$1").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut config = ChannelConfig::default();
+    config.input_quiet_for = Duration::from_secs(10);
+    config.coalesce_window = Duration::from_millis(50);
+    let manager = ChannelManager::new(config);
+    let channel = manager
+        .get_or_bind(ResolvedSession::new(
+            SessionKey::from_target("local", "local", &target),
+            host,
+            target,
+        ))
+        .unwrap();
+    let mut events = manager.subscribe();
+
+    let send_channel = channel.clone();
+    let send_task = tokio::spawn(async move {
+        send_channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "typing only"),
+                SendOptions {
+                    submit: SubmitPolicy {
+                        prompt_submit: false,
+                        settle: Duration::ZERO,
+                        retries: 0,
+                        retry_delay: Duration::ZERO,
+                        require_verification: false,
+                    },
+                    timeout: Duration::from_secs(30),
+                },
+            )
+            .await
+    });
+
+    tokio::time::advance(Duration::from_millis(50)).await;
+    let mut deferred = None;
+    for _ in 0..6 {
+        match events.recv().await.unwrap() {
+            DeliveryEvent::Deferred { message_ids, .. } => {
+                deferred = Some(message_ids);
+                break;
+            }
+            DeliveryEvent::Submitted { message_ids, .. } => {
+                panic!(
+                    "typing-only payload submitted before quiet guard deferred: {message_ids:?}"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(deferred, Some(vec![MessageId(1)]));
+    assert!(!command_log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|command| command.contains("send-keys")));
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::advance(Duration::from_millis(50)).await;
+    let outcome = send_task.await.unwrap().unwrap();
+    assert_eq!(outcome.message_id(), MessageId(1));
+
+    let commands = command_log.lock().unwrap();
+    let send_keys = commands
+        .iter()
+        .filter(|command| command.contains("send-keys"))
+        .collect::<Vec<_>>();
+    assert_eq!(send_keys.len(), 1);
+    assert!(send_keys[0].contains("typing only"));
+    assert!(!send_keys[0].contains("Enter"));
+}
+
+#[tokio::test(start_paused = true)]
 async fn concurrent_senders_defer_by_stable_session_id_then_dedup_and_coalesce() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

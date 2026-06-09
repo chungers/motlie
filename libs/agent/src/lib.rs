@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use motlie_tmux::{HostHandle, KeySequence, Target};
+use motlie_tmux::{HostHandle, KeySequence, SessionClientActivity, Target};
 use thiserror::Error;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio::time::{sleep, timeout};
@@ -394,8 +394,6 @@ impl Channel {
                 return;
             }
 
-            self.wait_for_coalesce_window().await;
-
             let batch = match self.next_batch().await {
                 Some(batch) => batch,
                 None => return,
@@ -412,30 +410,6 @@ impl Channel {
             match self.submit_batch(&batch).await {
                 Ok(result) => self.complete_batch(batch, result).await,
                 Err(error) => self.fail_batch(batch, error).await,
-            }
-        }
-    }
-
-    async fn wait_for_coalesce_window(&self) {
-        if self.inner.config.coalesce_window.is_zero() {
-            return;
-        }
-
-        loop {
-            let observed_generation = {
-                let queue = self.inner.queue.lock().await;
-                if queue.pending.is_empty() {
-                    return;
-                }
-                queue.accept_generation
-            };
-            sleep(self.inner.config.coalesce_window).await;
-            let stable = {
-                let queue = self.inner.queue.lock().await;
-                queue.pending.is_empty() || queue.accept_generation == observed_generation
-            };
-            if stable {
-                return;
             }
         }
     }
@@ -459,21 +433,13 @@ impl Channel {
         }
 
         loop {
-            let activity = self
-                .inner
-                .host
-                .session_client_activity(
-                    self.inner
-                        .target
-                        .session_id()
-                        .unwrap_or_else(|| self.inner.target.session_name()),
-                )
-                .await
-                .map_err(|err| DeliveryError::tmux("session_client_activity", err))?;
+            let activity = self.quiet_guard_activity().await?;
             let Some(latest) = activity.latest_writable_client_activity else {
+                self.trace_quiet_guard_activity(&activity, None);
                 return Ok(());
             };
             let age = seconds_since_epoch(latest).unwrap_or(0);
+            self.trace_quiet_guard_activity(&activity, Some(age));
             if age >= self.inner.config.input_quiet_for.as_secs() {
                 return Ok(());
             }
@@ -503,6 +469,46 @@ impl Channel {
         }
     }
 
+    async fn quiet_guard_activity(&self) -> Result<SessionClientActivity, DeliveryError> {
+        let session_name = self.inner.target.session_name();
+        let primary_selector = self.inner.target.session_id().unwrap_or(session_name);
+        let mut activity = self
+            .inner
+            .host
+            .session_client_activity(primary_selector)
+            .await
+            .map_err(|err| DeliveryError::tmux("session_client_activity", err))?;
+
+        if primary_selector != session_name {
+            let by_name = self
+                .inner
+                .host
+                .session_client_activity(session_name)
+                .await
+                .map_err(|err| DeliveryError::tmux("session_client_activity", err))?;
+            merge_client_activity(&mut activity, by_name);
+        }
+
+        Ok(activity)
+    }
+
+    fn trace_quiet_guard_activity(&self, activity: &SessionClientActivity, age: Option<u64>) {
+        if std::env::var_os("MOTLIE_AGENT_QUIET_GUARD_TRACE").is_none() {
+            return;
+        }
+        eprintln!(
+            "motlie-agent quiet_guard target={} session={} attached={} writable={} latest={:?} latest_writable={:?} age={:?} quiet_for_secs={}",
+            self.inner.target_string,
+            activity.session,
+            activity.attached_clients,
+            activity.writable_clients,
+            activity.latest_client_activity,
+            activity.latest_writable_client_activity,
+            age,
+            self.inner.config.input_quiet_for.as_secs(),
+        );
+    }
+
     async fn mark_deferred(&self) -> Vec<MessageId> {
         let mut queue = self.inner.queue.lock().await;
         for segment in &mut queue.pending {
@@ -518,21 +524,49 @@ impl Channel {
     }
 
     async fn next_batch(&self) -> Option<Vec<PendingSegment>> {
-        let mut queue = self.inner.queue.lock().await;
-        if queue.pending.is_empty() {
-            queue.flushing = false;
+        loop {
+            let observed_generation = {
+                let mut queue = self.inner.queue.lock().await;
+                if queue.pending.is_empty() {
+                    queue.flushing = false;
+                    self.update_status(|status| {
+                        status.pending_count = 0;
+                        status.flushing = false;
+                    });
+                    return None;
+                }
+                if self.inner.config.coalesce_window.is_zero() {
+                    let batch = queue.pending.drain(..).collect::<Vec<_>>();
+                    self.update_status(|status| {
+                        status.pending_count = 0;
+                        status.flushing = true;
+                    });
+                    return Some(batch);
+                }
+                queue.accept_generation
+            };
+
+            sleep(self.inner.config.coalesce_window).await;
+
+            let mut queue = self.inner.queue.lock().await;
+            if queue.pending.is_empty() {
+                queue.flushing = false;
+                self.update_status(|status| {
+                    status.pending_count = 0;
+                    status.flushing = false;
+                });
+                return None;
+            }
+            if queue.accept_generation != observed_generation {
+                continue;
+            }
+            let batch = queue.pending.drain(..).collect::<Vec<_>>();
             self.update_status(|status| {
                 status.pending_count = 0;
-                status.flushing = false;
+                status.flushing = true;
             });
-            return None;
+            return Some(batch);
         }
-        let batch = queue.pending.drain(..).collect::<Vec<_>>();
-        self.update_status(|status| {
-            status.pending_count = 0;
-            status.flushing = true;
-        });
-        Some(batch)
     }
 
     async fn drain_pending(&self) -> Vec<PendingSegment> {
@@ -1196,6 +1230,27 @@ fn format_segments(batch: &[PendingSegment]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn merge_client_activity(activity: &mut SessionClientActivity, other: SessionClientActivity) {
+    activity.attached_clients += other.attached_clients;
+    activity.writable_clients += other.writable_clients;
+    activity.latest_client_activity = max_option(
+        activity.latest_client_activity,
+        other.latest_client_activity,
+    );
+    activity.latest_writable_client_activity = max_option(
+        activity.latest_writable_client_activity,
+        other.latest_writable_client_activity,
+    );
+}
+
+fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 fn seconds_since_epoch(ts: u64) -> Option<u64> {
