@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 15:55 PDT | @codex-421-design | Added missed #421/#420 CLI rename gate: public `--no-prompt-submit` with hidden `--no-enter` compatibility alias across send, broadcast, and timer. |
 | 2026-06-09 15:22 PDT | @codex-421-design | PR #425 round-2 plan update: add no-enter quiet-guard regression coverage with missing client session id, quiet-guard trace hook, and atomic coalescing wait/drain. |
 | 2026-06-09 14:27 PDT | @codex-421-design | Reopened #421 live-validation fix plan: stable session-id client activity matching, quiescent coalescing window, and public `libs/agent` integration coverage for concurrent same-channel senders. |
 | 2026-06-09 00:52 PDT | @codex-421-design | Reconciled code review fixes: poison-safe channel locks, pure-sync timeout cancellation, mstream delivery-event observation, channel cleanup on teardown, timer deferral ownership in `motlie-agent`, and send/broadcast submit retry wiring. |

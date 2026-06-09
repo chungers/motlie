@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 15:55 PDT | @codex-421-design | PR #425 CLI completion: mstream send, broadcast, and timer now expose `--no-prompt-submit`, keep `--no-enter` as a hidden deprecated alias for one release, and retain the same prompt-submit behavior. |
 | 2026-06-09 15:22 PDT | @codex-421-design | PR #425 round-2 fix: quiet guard now merges stable-id and session-name client activity so no-enter payload delivery is guarded even when client session ids are unavailable; coalescing wait and drain are one atomic queue decision. |
 | 2026-06-09 14:27 PDT | @codex-421-design | Reopened #421 live-validation fix: channel quiet guard now queries tmux activity by stable session id when available, and coalescing waits for a quiet `coalesce_window` before draining pending messages. |
 | 2026-06-09 00:52 PDT | @codex-421-design | Code-review reconciliation: pure-sync timeout drops its pending segment unless async sources/other waiters keep it alive; mstream timer deferral is channel-owned and observed through `DeliveryEvent`s; teardown removes stale channels. |
@@ -367,8 +368,9 @@ is intentional: `enqueue` already means fire-and-forget for this first slice.
 
 Submit policy has one home per operation: `SendOptions` or `EnqueueOptions`.
 `ManagedMessage` must not also carry submit policy. `SubmitPolicy.prompt_submit`
-keeps current `--no-enter` / future `--no-prompt-submit` behavior explicit:
-`false` means type only, without sending Enter. `ChannelConfig.default_submit`
+keeps current `--no-prompt-submit` behavior explicit while mstream accepts
+`--no-enter` as a hidden deprecated alias for one release: `false` means
+type only, without submitting the prompt. `ChannelConfig.default_submit`
 is only the value used by `SendOptions::default()` / `EnqueueOptions::default()`;
 callers that expose knobs construct explicit options before calling the channel.
 CLI conversion stays in the caller; mstream maps CLI flags into `SubmitPolicy`
