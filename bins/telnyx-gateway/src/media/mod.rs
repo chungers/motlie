@@ -1467,7 +1467,7 @@ struct TranscriptRecordContext<'a> {
 
 struct FinalTurnCandidate {
     text: String,
-    transcript_event_id: String,
+    transcript_event_id: Option<String>,
 }
 
 async fn record_transcript_events(
@@ -1492,7 +1492,6 @@ async fn record_transcript_events(
             "transcript.partial"
         };
         let text = event.event.text().to_string();
-        let transcript_event_id = format!("trn_{}", uuid::Uuid::new_v4().simple());
         let suppressed = event.is_suppressed();
         reset_requested |= event.requires_session_reset();
         if let Some(capture) = context.capture.as_deref_mut() {
@@ -1542,6 +1541,11 @@ async fn record_transcript_events(
 
         guard.add_transcript(gateway_call_id, kind.clone(), text.clone());
         if matches!(kind, TranscriptKind::Final) {
+            let transcript_event_id = guard
+                .quality
+                .event_sink
+                .is_enabled()
+                .then(|| format!("trn_{}", uuid::Uuid::new_v4().simple()));
             final_turns.push(FinalTurnCandidate {
                 text: text.clone(),
                 transcript_event_id,
@@ -1577,13 +1581,17 @@ async fn record_transcript_events(
                         gateway_call_id,
                         &turn_id,
                         &final_turn.text,
+                        context.quality_session,
                     );
-                    if let Some(session) = context.quality_session {
+                    if let (Some(session), Some(transcript_event_id)) = (
+                        context.quality_session,
+                        final_turn.transcript_event_id.as_deref(),
+                    ) {
                         guard.emit_quality_asr_turn_mapped(
                             gateway_call_id,
                             session,
                             &turn_id,
-                            &final_turn.transcript_event_id,
+                            transcript_event_id,
                             true,
                         );
                     }

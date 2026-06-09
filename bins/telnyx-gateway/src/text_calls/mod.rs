@@ -3,8 +3,6 @@ pub mod subscriber_registry;
 pub mod turns;
 pub mod websocket;
 
-use std::time::Duration;
-
 use anyhow::Context;
 
 use crate::call_control::AnswerRequest;
@@ -16,8 +14,6 @@ use turns::{TextCallDirection, TextCallInfo};
 pub use websocket::{SharedTextCallRegistry, TextCallStreamServices};
 
 pub const INBOUND_EXHAUSTED_FALLBACK: &str = "Sorry no one is here to handle your call. bye!";
-
-const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run_inbound_text_call_flow(
     services: TextCallStreamServices,
@@ -58,10 +54,14 @@ async fn run_inbound_text_call_flow_inner(
         from: trigger.from.clone(),
         to: trigger.to.clone(),
     };
+    let callback_timeout = {
+        let guard = services.state.read().await;
+        guard.quality.config.text_call.callback_timeout()
+    };
 
     for subscription in subscribers {
         let attempt =
-            offers::send_inbound_offer(&client, &subscription, call.clone(), CALLBACK_TIMEOUT)
+            offers::send_inbound_offer(&client, &subscription, call.clone(), callback_timeout)
                 .await;
         match attempt.decision {
             CallbackDecision::Accept { call_url } => {

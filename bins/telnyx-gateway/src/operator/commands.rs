@@ -454,6 +454,10 @@ pub enum LogCommand {
 #[derive(Debug, Subcommand)]
 pub enum QualityCommand {
     Status,
+    #[command(hide = true)]
+    RestoreConfig {
+        encoded: String,
+    },
     Profile {
         profile: QualityProfileArg,
     },
@@ -556,7 +560,10 @@ pub enum QualitySpeechCommand {
 pub enum QualityTextCallCommand {
     Status,
     MaxActiveTurns { n: usize },
+    MediaReadyTimeoutMs { ms: u64 },
+    PlaybackWaitTimeoutMs { ms: u64 },
     LatestResponseWins { state: OnOffArg },
+    CallbackTimeoutMs { ms: u64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -671,10 +678,7 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
             "conversation-handler: {}",
             context.conversation.handler_label()
         ),
-        format!(
-            "conversation-barge-in: {}",
-            context.conversation.barge_in_label()
-        ),
+        format!("conversation-barge-in: {}", quality_barge_in_label(&guard)),
         format!(
             "webhook-url: {}",
             guard
@@ -1669,7 +1673,7 @@ async fn conversation_command(
                 lines: conversation_status_lines(
                     call,
                     context.conversation.handler_label(),
-                    context.conversation.barge_in_label(),
+                    quality_barge_in_label(&guard),
                 ),
                 effects: Vec::new(),
             })
@@ -1689,17 +1693,12 @@ async fn conversation_command(
         }
         ConversationCommand::BargeIn { state } => {
             if let Some(enabled) = state.and_then(ConversationBargeInArg::enabled) {
-                context.conversation.set_barge_in_enabled(enabled);
-                let label = if enabled { "on" } else { "off" };
-                context
-                    .state
-                    .write()
-                    .await
-                    .log(LogLevel::Info, format!("conversation barge-in {label}"));
+                set_barge_in_enabled(context, enabled, "conversation").await?;
             }
+            let guard = context.state.read().await;
             Ok(CommandOutput::line(format!(
                 "conversation barge-in: {}",
-                context.conversation.barge_in_label()
+                quality_barge_in_label(&guard)
             )))
         }
         ConversationCommand::Attach { call } => {
@@ -2053,6 +2052,7 @@ async fn quality_command(
 ) -> DriverResult<CommandOutput> {
     match command {
         QualityCommand::Status => quality_status(context).await,
+        QualityCommand::RestoreConfig { encoded } => restore_quality_config(context, encoded).await,
         QualityCommand::Profile { profile } => {
             mutate_quality_config(context, |config| Ok(config.set_profile(profile.into()))).await
         }
@@ -2221,9 +2221,27 @@ async fn quality_text_call_command(
             })
             .await
         }
+        QualityTextCallCommand::MediaReadyTimeoutMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_media_ready_timeout_ms(ms))
+            })
+            .await
+        }
+        QualityTextCallCommand::PlaybackWaitTimeoutMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_playback_wait_timeout_ms(ms))
+            })
+            .await
+        }
         QualityTextCallCommand::LatestResponseWins { state } => {
             mutate_quality_config(context, |config| {
                 Ok(config.set_text_call_latest_response_wins(state.enabled()))
+            })
+            .await
+        }
+        QualityTextCallCommand::CallbackTimeoutMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_callback_timeout_ms(ms))
             })
             .await
         }
@@ -2383,13 +2401,48 @@ async fn quality_barge_in_command(
                 barge_in.clear_timeout_ms
             )))
         }
-        QualityBargeInCommand::On => {
-            mutate_quality_config(context, |config| Ok(config.set_barge_in_enabled(true))).await
-        }
-        QualityBargeInCommand::Off => {
-            mutate_quality_config(context, |config| Ok(config.set_barge_in_enabled(false))).await
-        }
+        QualityBargeInCommand::On => set_barge_in_enabled(context, true, "quality").await,
+        QualityBargeInCommand::Off => set_barge_in_enabled(context, false, "quality").await,
     }
+}
+
+async fn restore_quality_config(
+    context: &mut GatewayContext,
+    encoded: String,
+) -> DriverResult<CommandOutput> {
+    let config = VoiceQualityConfig::from_replay_hex(&encoded)
+        .map_err(|error| DriverError::invalid_argument("encoded", format!("{error:#}")))?;
+    context
+        .conversation
+        .set_barge_in_enabled(config.barge_in.enabled);
+    let mut guard = context.state.write().await;
+    guard.set_quality_config(config);
+    if !guard.quality.config.logging.enabled {
+        guard.set_quality_event_sink(QualityEventSink::disabled(), None);
+    }
+    emit_quality_snapshots_for_active_calls(&mut guard, "restore_config", "restored", None);
+    guard.log(LogLevel::Info, "quality config restored");
+    Ok(CommandOutput::line(format!(
+        "quality restored config_id={}",
+        guard.quality.config_id
+    )))
+}
+
+async fn set_barge_in_enabled(
+    context: &mut GatewayContext,
+    enabled: bool,
+    source: &'static str,
+) -> DriverResult<CommandOutput> {
+    let output =
+        mutate_quality_config(context, |config| Ok(config.set_barge_in_enabled(enabled))).await?;
+    context.conversation.set_barge_in_enabled(enabled);
+    let label = if enabled { "on" } else { "off" };
+    context
+        .state
+        .write()
+        .await
+        .log(LogLevel::Info, format!("{source} barge-in {label}"));
+    Ok(output)
 }
 
 async fn mutate_quality_config(
@@ -2401,6 +2454,9 @@ async fn mutate_quality_config(
     let mut guard = context.state.write().await;
     let outcome = mutate(&mut guard.quality.config)?;
     guard.quality.config_id = guard.quality.config.config_id();
+    context
+        .conversation
+        .set_barge_in_enabled(guard.quality.config.barge_in.enabled);
     emit_quality_snapshots_for_active_calls(
         &mut guard,
         "live_change",
@@ -2412,6 +2468,14 @@ async fn mutate_quality_config(
         format!("quality {} {}", outcome.key, outcome.value),
     );
     Ok(CommandOutput::line(render_quality_mutation(&outcome)))
+}
+
+fn quality_barge_in_label(state: &GatewayState) -> &'static str {
+    if state.quality.config.barge_in.enabled {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 fn emit_quality_snapshots_for_active_calls(
@@ -2657,7 +2721,10 @@ fn quality_help() -> String {
         "quality speech peak-threshold <value>",
         "quality text-call status",
         "quality text-call max-active-turns <n>",
+        "quality text-call media-ready-timeout-ms <ms>",
+        "quality text-call playback-wait-timeout-ms <ms>",
         "quality text-call latest-response-wins on|off",
+        "quality text-call callback-timeout-ms <ms>",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off",
@@ -3195,7 +3262,7 @@ mod tests {
     async fn inbound_is_disabled_by_default() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
-        let context = GatewayContext::new(state, telnyx);
+        let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine.run_line("inbound status").await.expect("status");
@@ -3909,10 +3976,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_barge_in_command_toggles_runtime_setting() {
+    async fn conversation_barge_in_command_updates_quality_config_and_runtime_bridge() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
-        let context = GatewayContext::new(state, telnyx);
+        let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let status = engine
@@ -3921,6 +3988,7 @@ mod tests {
             .expect("barge-in status");
         assert_eq!(status.lines, vec!["conversation barge-in: on"]);
         assert!(engine.context().conversation.barge_in_enabled());
+        assert!(state.read().await.quality.config.barge_in.enabled);
 
         let disabled = engine
             .run_line("conversation barge-in off")
@@ -3928,6 +3996,7 @@ mod tests {
             .expect("disable barge-in");
         assert_eq!(disabled.lines, vec!["conversation barge-in: off"]);
         assert!(!engine.context().conversation.barge_in_enabled());
+        assert!(!state.read().await.quality.config.barge_in.enabled);
 
         let enabled = engine
             .run_line("conversation barge-in on")
@@ -3935,6 +4004,7 @@ mod tests {
             .expect("enable barge-in");
         assert_eq!(enabled.lines, vec!["conversation barge-in: on"]);
         assert!(engine.context().conversation.barge_in_enabled());
+        assert!(state.read().await.quality.config.barge_in.enabled);
     }
 
     #[tokio::test]
@@ -4294,31 +4364,119 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quality_state_dump_replays_to_same_config_id() {
+    async fn quality_text_call_commands_update_live_config_knobs() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.example.test", None, true);
         let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         engine
-            .run_line("quality profile noisy")
+            .run_line("quality text-call media-ready-timeout-ms 2345")
             .await
-            .expect("set quality profile");
+            .expect("set media-ready timeout");
         engine
-            .run_line("quality endpoint trailing-silence-ms 950")
+            .run_line("quality text-call playback-wait-timeout-ms 3456")
             .await
-            .expect("set endpoint knob");
+            .expect("set playback-wait timeout");
         engine
-            .run_line("quality logging include-transcript-text off")
+            .run_line("quality text-call latest-response-wins off")
             .await
-            .expect("set privacy knob");
-        let expected_config_id = state.read().await.quality.config_id.clone();
+            .expect("set latest policy");
+        engine
+            .run_line("quality text-call callback-timeout-ms 4567")
+            .await
+            .expect("set callback timeout");
+
+        let status = engine
+            .run_line("quality text-call status")
+            .await
+            .expect("text-call status");
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "media_ready_timeout_ms=2345"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "playback_wait_timeout_ms=3456"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "latest_response_wins=false"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "callback_timeout_ms=4567"));
+
+        let guard = state.read().await;
+        assert_eq!(guard.quality.config.text_call.media_ready_timeout_ms, 2_345);
+        assert_eq!(
+            guard.quality.config.text_call.playback_wait_timeout_ms,
+            3_456
+        );
+        assert!(!guard.quality.config.text_call.latest_response_wins);
+        assert_eq!(guard.quality.config.text_call.callback_timeout_ms, 4_567);
+    }
+
+    #[tokio::test]
+    async fn quality_state_dump_replays_exact_resolved_config() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        {
+            let mut guard = state.write().await;
+            let config = &mut guard.quality.config;
+            config.set_profile(QualityProfile::Noisy);
+            config.set_speech_rms_threshold(321.0).expect("finite RMS");
+            config.set_speech_peak_threshold(1_234);
+            config.set_speech_onset_min_silence_ms(333);
+            config.set_endpoint_trailing_silence_ms(777);
+            config.set_endpoint_min_turn_words(4);
+            config.set_endpoint_min_turn_chars(12);
+            config.set_endpoint_merge_window_ms(444);
+            config.set_endpoint_max_turn_words(123);
+            config.set_endpoint_max_turn_duration_ms(7_654);
+            config.set_asr_repeated_token_run_threshold(42);
+            config.set_asr_repeated_q_run_threshold(12);
+            config.set_text_call_max_active_turns(9);
+            config.set_text_call_media_ready_timeout_ms(12_345);
+            config.set_text_call_playback_wait_timeout_ms(54_321);
+            config.set_text_call_latest_response_wins(false);
+            config.set_text_call_callback_timeout_ms(1_234);
+            config.set_barge_in_enabled(false);
+            config.barge_in.speech_onset_cancel_enabled = false;
+            config.barge_in.partial_asr_cancel_enabled = false;
+            config.barge_in.final_asr_cancel_enabled = true;
+            config.set_barge_in_clear_timeout_ms(2_222);
+            config.set_logging_enabled(true);
+            config.set_logging_queue_capacity(8_192);
+            config
+                .set_logging_per_frame_sample_rate(0.25)
+                .expect("valid sample rate");
+            config.set_logging_include_transcript_text(false);
+            config.set_logging_redaction_mode(RedactionMode::HashedText);
+            config.set_quality_judge_enabled(true);
+            config
+                .set_quality_judge_sample_rate(0.5)
+                .expect("valid judge sample rate");
+            config.quality_judge.model = "judge-model-test".to_string();
+            config.set_quality_judge_batch_size(7);
+            config.set_quality_judge_timeout_ms(22_000);
+            config.targets.p50_endpoint_trailing_silence_ms = 801;
+            config.targets.p95_endpoint_trailing_silence_ms = 1_401;
+            config.targets.p50_turn_to_playback_started_ms = 1_101;
+            config.targets.p95_turn_to_playback_started_ms = 2_901;
+            config.targets.max_incomplete_turn_rate = 0.11;
+            config.targets.max_overmerged_turn_rate = 0.12;
+            config.targets.max_garbled_turn_rate = 0.13;
+            config.targets.max_inappropriate_cancel_rate = 0.14;
+            guard.quality.config_id = config.config_id();
+        }
+        let expected_config = state.read().await.quality.config.clone();
+        let expected_config_id = expected_config.config_id();
         let dump = {
             let guard = state.read().await;
             crate::operator::persistence::render_state_dump(&guard)
         };
-        assert!(dump.contains("quality endpoint trailing-silence-ms 950"));
-        assert!(dump.contains("quality logging include-transcript-text off"));
+        assert!(dump.contains("quality restore-config "));
 
         let path = std::env::temp_dir().join(format!(
             "motlie-quality-state-{}.repl",
@@ -4335,19 +4493,9 @@ mod tests {
             .await
             .expect("replay quality state dump");
 
-        assert_eq!(
-            replay_state.read().await.quality.config_id,
-            expected_config_id
-        );
-        assert!(
-            !replay_state
-                .read()
-                .await
-                .quality
-                .config
-                .logging
-                .include_transcript_text
-        );
+        let replay_guard = replay_state.read().await;
+        assert_eq!(replay_guard.quality.config, expected_config);
+        assert_eq!(replay_guard.quality.config_id, expected_config_id);
         let _ = std::fs::remove_file(path);
     }
 

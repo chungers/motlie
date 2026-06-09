@@ -540,12 +540,25 @@ impl GatewayState {
         gateway_call_id: Option<String>,
         config_id: String,
     ) -> QualityEventContext {
+        self.quality_event_context_with_config_and_redaction(
+            gateway_call_id,
+            config_id,
+            self.quality.config.logging.redaction_mode,
+        )
+    }
+
+    fn quality_event_context_with_config_and_redaction(
+        &mut self,
+        gateway_call_id: Option<String>,
+        config_id: String,
+        redaction_mode: crate::quality::RedactionMode,
+    ) -> QualityEventContext {
         QualityEventContext::new(
             self.quality.next_sequence(),
             self.quality.run_id.clone(),
             gateway_call_id,
             config_id,
-            self.quality.config.logging.redaction_mode,
+            redaction_mode,
         )
     }
 
@@ -556,6 +569,9 @@ impl GatewayState {
         effective_scope: &'static str,
         effective_after_asr_session_id: Option<String>,
     ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
         let event = QualityEvent::config_snapshot(
             self.quality_event_context(Some(gateway_call_id.to_string())),
             &self.quality.config,
@@ -572,14 +588,20 @@ impl GatewayState {
         stream_id: Option<&str>,
         reason: &'static str,
     ) -> ActiveAsrQualitySession {
-        let session = ActiveAsrQualitySession::new(self.quality.config_id.clone());
-        let event = QualityEvent::asr_session_started(
-            self.quality_event_context(Some(gateway_call_id.to_string())),
-            &session,
-            stream_id,
-            reason,
-        );
-        self.quality.event_sink.emit(event);
+        let session = ActiveAsrQualitySession::new(&self.quality.config);
+        if self.quality.event_sink.is_enabled() {
+            let event = QualityEvent::asr_session_started(
+                self.quality_event_context_with_config_and_redaction(
+                    Some(gateway_call_id.to_string()),
+                    session.config_id.clone(),
+                    session.redaction_mode,
+                ),
+                &session,
+                stream_id,
+                reason,
+            );
+            self.quality.event_sink.emit(event);
+        }
         session
     }
 
@@ -591,10 +613,14 @@ impl GatewayState {
         final_transcript_event_id: &str,
         caller_turn_sent: bool,
     ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
         let event = QualityEvent::asr_turn_mapped(
-            self.quality_event_context_with_config(
+            self.quality_event_context_with_config_and_redaction(
                 Some(gateway_call_id.to_string()),
                 session.config_id.clone(),
+                session.redaction_mode,
             ),
             session,
             turn_id.to_string(),
@@ -609,12 +635,31 @@ impl GatewayState {
         gateway_call_id: &str,
         turn_id: &str,
         text: &str,
+        session: Option<&ActiveAsrQualitySession>,
     ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let (context, include_transcript_text) = if let Some(session) = session {
+            (
+                self.quality_event_context_with_config_and_redaction(
+                    Some(gateway_call_id.to_string()),
+                    session.config_id.clone(),
+                    session.redaction_mode,
+                ),
+                session.include_transcript_text,
+            )
+        } else {
+            (
+                self.quality_event_context(Some(gateway_call_id.to_string())),
+                self.quality.config.logging.include_transcript_text,
+            )
+        };
         let event = QualityEvent::caller_turn_sent(
-            self.quality_event_context(Some(gateway_call_id.to_string())),
+            context,
             turn_id.to_string(),
             text,
-            self.quality.config.logging.include_transcript_text,
+            include_transcript_text,
         );
         self.quality.event_sink.emit(event);
     }

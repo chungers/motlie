@@ -12,6 +12,7 @@ use motlie_voice::telephony::CallAction;
 use crate::call_control::TelnyxClient;
 use crate::media::SharedMediaRegistry;
 use crate::operator::state::{ConversationMode, LogLevel, SharedState};
+use crate::quality::BargeInQualityConfig;
 use crate::speech;
 use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
@@ -125,7 +126,9 @@ pub async fn handle_transcript_event(
     }
 
     if !event.is_final() {
-        if runtime.barge_in_enabled() && is_meaningful_partial_barge_in(&transcript_text) {
+        if barge_in_allows(&snapshot.barge_in, BargeInTrigger::Partial)
+            && is_meaningful_partial_barge_in(&transcript_text)
+        {
             cancel_active_speech_for_barge_in(
                 state,
                 media_registry,
@@ -142,7 +145,7 @@ pub async fn handle_transcript_event(
         .await
         .record_conversation_user_turn(gateway_call_id, transcript_text);
 
-    if runtime.barge_in_enabled() {
+    if barge_in_allows(&snapshot.barge_in, BargeInTrigger::Final) {
         cancel_active_speech_for_barge_in(
             state,
             media_registry,
@@ -182,8 +185,11 @@ pub async fn handle_transcript_event(
         media_registry,
         runtime,
         gateway_call_id,
-        snapshot.mode,
-        snapshot.call_control_id,
+        ConversationCommandTarget {
+            mode: snapshot.mode,
+            call_control_id: snapshot.call_control_id,
+            barge_in: snapshot.barge_in,
+        },
         command,
     )
     .await
@@ -192,17 +198,13 @@ pub async fn handle_transcript_event(
 pub async fn handle_speech_onset(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
-    runtime: &ConversationRuntime,
+    _runtime: &ConversationRuntime,
     gateway_call_id: &str,
 ) -> anyhow::Result<()> {
-    if !runtime.barge_in_enabled() {
-        return Ok(());
-    }
-
     let Some(snapshot) = conversation_snapshot(state, gateway_call_id).await else {
         return Ok(());
     };
-    if !snapshot.attached {
+    if !snapshot.attached || !barge_in_allows(&snapshot.barge_in, BargeInTrigger::SpeechOnset) {
         return Ok(());
     }
 
@@ -238,6 +240,15 @@ impl BargeInTrigger {
             Self::SpeechOnset => "conversation speech-onset barge-in",
         }
     }
+}
+
+fn barge_in_allows(config: &BargeInQualityConfig, trigger: BargeInTrigger) -> bool {
+    config.enabled
+        && match trigger {
+            BargeInTrigger::Partial => config.partial_asr_cancel_enabled,
+            BargeInTrigger::Final => config.final_asr_cancel_enabled,
+            BargeInTrigger::SpeechOnset => config.speech_onset_cancel_enabled,
+        }
 }
 
 fn is_meaningful_partial_barge_in(text: &str) -> bool {
@@ -294,7 +305,15 @@ struct ConversationSnapshot {
     attached: bool,
     mode: ConversationMode,
     call_control_id: String,
+    barge_in: BargeInQualityConfig,
     context: CallContext,
+}
+
+#[derive(Clone, Debug)]
+struct ConversationCommandTarget {
+    mode: ConversationMode,
+    call_control_id: String,
+    barge_in: BargeInQualityConfig,
 }
 
 async fn conversation_snapshot(
@@ -316,6 +335,7 @@ async fn conversation_snapshot(
         attached: call.conversation.attached,
         mode: call.conversation.mode,
         call_control_id: call.ids.call_control_id.clone(),
+        barge_in: guard.quality.config.barge_in.clone(),
         context: CallContext {
             ids: Some(CallIds {
                 provider_call_id: call.ids.call_control_id.clone(),
@@ -332,8 +352,7 @@ async fn apply_conversation_command(
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
-    mode: ConversationMode,
-    call_control_id: String,
+    target: ConversationCommandTarget,
     command: ConversationCommand,
 ) -> anyhow::Result<()> {
     match command {
@@ -353,7 +372,7 @@ async fn apply_conversation_command(
                     .record_conversation_idle(gateway_call_id);
                 return Ok(());
             }
-            match mode {
+            match target.mode {
                 ConversationMode::Manual => {
                     state
                         .write()
@@ -362,7 +381,7 @@ async fn apply_conversation_command(
                     Ok(())
                 }
                 ConversationMode::Auto => {
-                    if !runtime.barge_in_enabled()
+                    if !target.barge_in.enabled
                         && media_registry
                             .active_speech_playback_id(gateway_call_id)
                             .await
@@ -433,7 +452,7 @@ async fn apply_conversation_command(
             CallAction::Hangup => {
                 runtime
                     .telnyx
-                    .hangup_call(&call_control_id)
+                    .hangup_call(&target.call_control_id)
                     .await
                     .with_context(|| format!("hang up call {gateway_call_id}"))?;
                 let mut guard = state.write().await;
@@ -602,8 +621,11 @@ mod tests {
             &SharedMediaRegistry::default(),
             &runtime,
             &gateway_call_id,
-            ConversationMode::Manual,
-            "call-control-1".to_string(),
+            ConversationCommandTarget {
+                mode: ConversationMode::Manual,
+                call_control_id: "call-control-1".to_string(),
+                barge_in: BargeInQualityConfig::default(),
+            },
             ConversationCommand::Say {
                 text: "  assistant response  ".to_string(),
             },
@@ -730,7 +752,11 @@ mod tests {
             .await
             .expect("register active speech");
         let runtime = test_runtime();
-        runtime.set_barge_in_enabled(false);
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_barge_in_enabled(false);
+            guard.quality.config_id = guard.quality.config.config_id();
+        }
 
         handle_transcript_event(
             &state,
@@ -778,7 +804,11 @@ mod tests {
             .await
             .expect("register active speech");
         let runtime = test_runtime();
-        runtime.set_barge_in_enabled(false);
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_barge_in_enabled(false);
+            guard.quality.config_id = guard.quality.config.config_id();
+        }
 
         handle_transcript_event(
             &state,
@@ -965,8 +995,11 @@ mod tests {
             &SharedMediaRegistry::default(),
             &runtime,
             &gateway_call_id,
-            ConversationMode::Manual,
-            "call-control-1".to_string(),
+            ConversationCommandTarget {
+                mode: ConversationMode::Manual,
+                call_control_id: "call-control-1".to_string(),
+                barge_in: BargeInQualityConfig::default(),
+            },
             ConversationCommand::Noop,
         )
         .await
@@ -988,8 +1021,11 @@ mod tests {
             &SharedMediaRegistry::default(),
             &runtime,
             &gateway_call_id,
-            ConversationMode::Auto,
-            "call-control-1".to_string(),
+            ConversationCommandTarget {
+                mode: ConversationMode::Auto,
+                call_control_id: "call-control-1".to_string(),
+                barge_in: BargeInQualityConfig::default(),
+            },
             ConversationCommand::Call(CallAction::Transfer {
                 destination: "sip:agent@example.test".to_string(),
             }),

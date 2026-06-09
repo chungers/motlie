@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::call_control::TelnyxClient;
 use crate::media::SharedMediaRegistry;
 use crate::operator::state::{CallStatus, LogLevel, SharedState, TtsPlaybackStatus};
+use crate::quality::TextCallQualityConfig;
 use crate::speech::{self, SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
 
@@ -23,8 +24,6 @@ use super::turns::{
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
 const DEFAULT_MAX_ACTIVE_TEXT_CALL_TURNS: usize = 32;
-const MEDIA_READY_TIMEOUT: Duration = Duration::from_secs(20);
-const PLAYBACK_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TextCallTurnState {
@@ -38,6 +37,25 @@ enum AgentTurnDisposition {
     Accepted,
     Superseded,
     Invalid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TextCallSessionConfig {
+    max_active_turns: usize,
+    media_ready_timeout: Duration,
+    playback_wait_timeout: Duration,
+    latest_response_wins: bool,
+}
+
+impl From<&TextCallQualityConfig> for TextCallSessionConfig {
+    fn from(config: &TextCallQualityConfig) -> Self {
+        Self {
+            max_active_turns: config.max_active_turns,
+            media_ready_timeout: config.media_ready_timeout(),
+            playback_wait_timeout: config.playback_wait_timeout(),
+            latest_response_wins: config.latest_response_wins,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -184,6 +202,7 @@ struct TextCallSessionHandle {
     tx: mpsc::Sender<GatewayTextFrame>,
     sequence: Arc<AtomicU64>,
     turns: Arc<Mutex<TextCallTurnTracker>>,
+    config: TextCallSessionConfig,
 }
 
 impl TextCallSessionHandle {
@@ -232,19 +251,18 @@ pub async fn connect_application_stream(
     };
     send_json_frame(&mut write, &start).await?;
 
-    let max_active_turns = services
-        .state
-        .read()
-        .await
-        .quality
-        .config
-        .text_call
-        .max_active_turns;
+    let session_config = {
+        let guard = services.state.read().await;
+        TextCallSessionConfig::from(&guard.quality.config.text_call)
+    };
     let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
     let handle = TextCallSessionHandle {
         tx,
         sequence: Arc::new(AtomicU64::new(1)),
-        turns: Arc::new(Mutex::new(TextCallTurnTracker::new(max_active_turns))),
+        turns: Arc::new(Mutex::new(TextCallTurnTracker::new(
+            session_config.max_active_turns,
+        ))),
+        config: session_config,
     };
     services
         .registry
@@ -356,9 +374,13 @@ async fn handle_agent_message(
                 }
             }
 
-            let queued =
-                queue_agent_speech_with_media_wait(services, gateway_call_id.to_string(), text)
-                    .await?;
+            let queued = queue_agent_speech_with_media_wait(
+                services,
+                gateway_call_id.to_string(),
+                text,
+                handle.config,
+            )
+            .await?;
             if let Some(replaced_playback_id) = queued.replaced_playback_id.as_deref() {
                 send_replaced_playback_canceled(handle, replaced_playback_id).await?;
             }
@@ -383,6 +405,7 @@ async fn handle_agent_message(
                     &wait_handle,
                     &wait_call_id,
                     &queued.playback_id,
+                    wait_handle.config.playback_wait_timeout,
                 )
                 .await
                 {
@@ -462,8 +485,15 @@ async fn queue_agent_speech_with_media_wait(
     services: &TextCallStreamServices,
     gateway_call_id: String,
     text: String,
+    config: TextCallSessionConfig,
 ) -> anyhow::Result<speech::QueuedSpeech> {
-    let deadline = Instant::now() + MEDIA_READY_TIMEOUT;
+    let media_ready_deadline = Instant::now() + config.media_ready_timeout;
+    let playback_ready_deadline = Instant::now() + config.playback_wait_timeout;
+    let conflict_policy = if config.latest_response_wins {
+        SpeechConflictPolicy::CancelAndReplace
+    } else {
+        SpeechConflictPolicy::Reject
+    };
     loop {
         match speech::queue_speech_with_request(
             &services.state,
@@ -474,19 +504,29 @@ async fn queue_agent_speech_with_media_wait(
                 gateway_call_id: gateway_call_id.clone(),
                 text: text.clone(),
                 source_label: "text-call agent.turn".to_string(),
-                conflict_policy: SpeechConflictPolicy::CancelAndReplace,
+                conflict_policy,
             },
         )
         .await
         {
             Ok(queued) => return Ok(queued),
-            Err(error)
-                if Instant::now() < deadline
-                    && format!("{error:#}").contains("media stream is not ready") =>
-            {
-                time::sleep(Duration::from_millis(250)).await;
+            Err(error) => {
+                let detail = format!("{error:#}");
+                if detail.contains("media stream is not ready")
+                    && Instant::now() < media_ready_deadline
+                {
+                    time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                if !config.latest_response_wins
+                    && detail.contains("active speech job")
+                    && Instant::now() < playback_ready_deadline
+                {
+                    time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                return Err(error);
             }
-            Err(error) => return Err(error),
         }
     }
 }
@@ -496,10 +536,19 @@ pub async fn queue_fallback_and_wait(
     gateway_call_id: String,
     text: String,
 ) -> anyhow::Result<()> {
+    let config = {
+        let guard = services.state.read().await;
+        TextCallSessionConfig::from(&guard.quality.config.text_call)
+    };
     let queued =
-        queue_agent_speech_with_media_wait(services, gateway_call_id.clone(), text).await?;
-    wait_for_playback_terminal_without_turn(&services.state, &gateway_call_id, &queued.playback_id)
-        .await;
+        queue_agent_speech_with_media_wait(services, gateway_call_id.clone(), text, config).await?;
+    wait_for_playback_terminal_without_turn(
+        &services.state,
+        &gateway_call_id,
+        &queued.playback_id,
+        config.playback_wait_timeout,
+    )
+    .await;
     Ok(())
 }
 
@@ -507,8 +556,9 @@ async fn wait_for_playback_terminal_without_turn(
     state: &SharedState,
     gateway_call_id: &str,
     playback_id: &str,
+    playback_wait_timeout: Duration,
 ) {
-    let deadline = Instant::now() + PLAYBACK_WAIT_TIMEOUT;
+    let deadline = Instant::now() + playback_wait_timeout;
     loop {
         if playback_terminal_status(state, gateway_call_id, playback_id)
             .await
@@ -526,8 +576,9 @@ async fn wait_for_playback_terminal(
     handle: &TextCallSessionHandle,
     gateway_call_id: &str,
     playback_id: &str,
+    playback_wait_timeout: Duration,
 ) -> Option<PlaybackFinishedStatus> {
-    let deadline = Instant::now() + PLAYBACK_WAIT_TIMEOUT;
+    let deadline = Instant::now() + playback_wait_timeout;
     loop {
         if !handle.turns.lock().await.is_playback_active(playback_id) {
             return None;
@@ -795,6 +846,7 @@ mod tests {
             tx,
             sequence: Arc::new(AtomicU64::new(1)),
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
+            config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
         }
     }
 }

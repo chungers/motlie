@@ -371,6 +371,175 @@ impl VoiceQualityConfig {
         format!("cfg_{}", hex::encode(digest))
     }
 
+    pub fn to_replay_hex(&self) -> String {
+        hex::encode(serde_json::to_vec(self).expect("voice quality config serializes"))
+    }
+
+    pub fn from_replay_hex(encoded: &str) -> Result<Self> {
+        let bytes = hex::decode(encoded.trim()).context("decode replay quality config hex")?;
+        let config: Self =
+            serde_json::from_slice(&bytes).context("decode replay quality config json")?;
+        config.validate_resolved()?;
+        Ok(config)
+    }
+
+    pub fn validate_resolved(&self) -> Result<()> {
+        ensure_f32(
+            "speech.rms_threshold",
+            self.speech.rms_threshold,
+            1.0,
+            10_000.0,
+        )?;
+        ensure_i32(
+            "speech.peak_threshold",
+            self.speech.peak_threshold,
+            1,
+            32_767,
+        )?;
+        ensure_u64(
+            "speech.onset_min_silence_ms",
+            self.speech.onset_min_silence_ms,
+            0,
+            5_000,
+        )?;
+        ensure_u64(
+            "endpoint.trailing_silence_ms",
+            self.endpoint.trailing_silence_ms,
+            100,
+            2_500,
+        )?;
+        ensure_usize(
+            "endpoint.min_turn_words",
+            self.endpoint.min_turn_words,
+            0,
+            50,
+        )?;
+        ensure_usize(
+            "endpoint.min_turn_chars",
+            self.endpoint.min_turn_chars,
+            0,
+            200,
+        )?;
+        ensure_u64(
+            "endpoint.merge_window_ms",
+            self.endpoint.merge_window_ms,
+            0,
+            5_000,
+        )?;
+        ensure_usize(
+            "endpoint.max_turn_words",
+            self.endpoint.max_turn_words,
+            1,
+            500,
+        )?;
+        ensure_u64(
+            "endpoint.max_turn_duration_ms",
+            self.endpoint.max_turn_duration_ms,
+            1_000,
+            120_000,
+        )?;
+        ensure_usize(
+            "asr.repeated_token_run_threshold",
+            self.asr.repeated_token_run_threshold,
+            2,
+            128,
+        )?;
+        ensure_usize(
+            "asr.repeated_q_run_threshold",
+            self.asr.repeated_q_run_threshold,
+            2,
+            64,
+        )?;
+        ensure_usize(
+            "text_call.max_active_turns",
+            self.text_call.max_active_turns,
+            1,
+            1_024,
+        )?;
+        ensure_u64(
+            "text_call.media_ready_timeout_ms",
+            self.text_call.media_ready_timeout_ms,
+            1_000,
+            120_000,
+        )?;
+        ensure_u64(
+            "text_call.playback_wait_timeout_ms",
+            self.text_call.playback_wait_timeout_ms,
+            1_000,
+            600_000,
+        )?;
+        ensure_u64(
+            "text_call.callback_timeout_ms",
+            self.text_call.callback_timeout_ms,
+            100,
+            60_000,
+        )?;
+        ensure_u64(
+            "barge_in.clear_timeout_ms",
+            self.barge_in.clear_timeout_ms,
+            100,
+            10_000,
+        )?;
+        ensure_usize(
+            "logging.queue_capacity",
+            self.logging.queue_capacity,
+            1_024,
+            1_048_576,
+        )?;
+        ensure_f32(
+            "logging.per_frame_sample_rate",
+            self.logging.per_frame_sample_rate,
+            0.0,
+            1.0,
+        )?;
+        ensure_f32(
+            "quality_judge.sample_rate",
+            self.quality_judge.sample_rate,
+            0.0,
+            1.0,
+        )?;
+        ensure_usize(
+            "quality_judge.batch_size",
+            self.quality_judge.batch_size,
+            1,
+            1_000,
+        )?;
+        ensure_u64(
+            "quality_judge.timeout_ms",
+            self.quality_judge.timeout_ms,
+            1_000,
+            120_000,
+        )?;
+        if self.quality_judge.model.trim().is_empty() {
+            anyhow::bail!("quality_judge.model must be non-empty");
+        }
+        ensure_f32(
+            "targets.max_incomplete_turn_rate",
+            self.targets.max_incomplete_turn_rate,
+            0.0,
+            1.0,
+        )?;
+        ensure_f32(
+            "targets.max_overmerged_turn_rate",
+            self.targets.max_overmerged_turn_rate,
+            0.0,
+            1.0,
+        )?;
+        ensure_f32(
+            "targets.max_garbled_turn_rate",
+            self.targets.max_garbled_turn_rate,
+            0.0,
+            1.0,
+        )?;
+        ensure_f32(
+            "targets.max_inappropriate_cancel_rate",
+            self.targets.max_inappropriate_cancel_rate,
+            0.0,
+            1.0,
+        )?;
+        Ok(())
+    }
+
     pub fn load_toml(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("read quality config {}", path.display()))?;
@@ -923,6 +1092,37 @@ fn format_float(value: f32) -> String {
     }
 }
 
+fn ensure_u64(name: &'static str, value: u64, min: u64, max: u64) -> Result<()> {
+    if !(min..=max).contains(&value) {
+        anyhow::bail!("{name} must be in {min}..={max}");
+    }
+    Ok(())
+}
+
+fn ensure_usize(name: &'static str, value: usize, min: usize, max: usize) -> Result<()> {
+    if !(min..=max).contains(&value) {
+        anyhow::bail!("{name} must be in {min}..={max}");
+    }
+    Ok(())
+}
+
+fn ensure_i32(name: &'static str, value: i32, min: i32, max: i32) -> Result<()> {
+    if !(min..=max).contains(&value) {
+        anyhow::bail!("{name} must be in {min}..={max}");
+    }
+    Ok(())
+}
+
+fn ensure_f32(name: &'static str, value: f32, min: f32, max: f32) -> Result<()> {
+    if !value.is_finite() {
+        anyhow::bail!("{name} must be finite");
+    }
+    if value < min || value > max {
+        anyhow::bail!("{name} must be in {min}..={max}");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct QualityConfigDocument {
     #[serde(default)]
@@ -1040,6 +1240,40 @@ mod tests {
         let left = VoiceQualityConfig::default();
         let right = VoiceQualityConfig::for_profile(QualityProfile::Balanced);
         assert_eq!(left.config_id(), right.config_id());
+    }
+
+    #[test]
+    fn replay_hex_round_trips_full_resolved_config() {
+        let mut config = VoiceQualityConfig::for_profile(QualityProfile::Noisy);
+        config.set_asr_repeated_token_run_threshold(63);
+        config.set_text_call_media_ready_timeout_ms(12_345);
+        config.set_text_call_playback_wait_timeout_ms(54_321);
+        config.set_text_call_callback_timeout_ms(1_234);
+        config.set_barge_in_enabled(false);
+        config.barge_in.partial_asr_cancel_enabled = false;
+        config.set_logging_enabled(true);
+        config.set_logging_queue_capacity(7_777);
+        config.set_quality_judge_enabled(true);
+        config.set_quality_judge_batch_size(17);
+        config.targets.max_garbled_turn_rate = 0.2;
+
+        let restored = VoiceQualityConfig::from_replay_hex(&config.to_replay_hex())
+            .expect("replay hex restores");
+
+        assert_eq!(restored, config);
+        assert_eq!(restored.config_id(), config.config_id());
+    }
+
+    #[test]
+    fn replay_hex_rejects_out_of_domain_config() {
+        let mut config = VoiceQualityConfig::default();
+        config.text_call.max_active_turns = 0;
+        let encoded = config.to_replay_hex();
+
+        let error = VoiceQualityConfig::from_replay_hex(&encoded)
+            .expect_err("invalid replay config should be rejected");
+
+        assert!(error.to_string().contains("text_call.max_active_turns"));
     }
 
     #[test]

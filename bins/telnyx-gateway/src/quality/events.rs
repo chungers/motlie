@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -187,15 +187,19 @@ pub struct ActiveAsrQualitySession {
     pub asr_session_id: String,
     pub utterance_id: String,
     pub config_id: String,
+    pub redaction_mode: RedactionMode,
+    pub include_transcript_text: bool,
     pub opened_at: Instant,
 }
 
 impl ActiveAsrQualitySession {
-    pub fn new(config_id: String) -> Self {
+    pub fn new(config: &VoiceQualityConfig) -> Self {
         Self {
             asr_session_id: format!("asr_{}", Uuid::new_v4().simple()),
             utterance_id: format!("utt_{}", Uuid::new_v4().simple()),
-            config_id,
+            config_id: config.config_id(),
+            redaction_mode: config.logging.redaction_mode,
+            include_transcript_text: config.logging.include_transcript_text,
             opened_at: Instant::now(),
         }
     }
@@ -303,14 +307,22 @@ fn map_from_value(value: Value) -> Map<String, Value> {
 }
 
 fn host_id() -> String {
-    std::env::var("HOSTNAME").unwrap_or_else(|_| "host_unknown".to_string())
+    static HOST_ID: OnceLock<String> = OnceLock::new();
+    HOST_ID
+        .get_or_init(|| std::env::var("HOSTNAME").unwrap_or_else(|_| "host_unknown".to_string()))
+        .clone()
 }
 
 fn git_sha() -> String {
-    option_env!("GIT_SHA")
-        .or(option_env!("VERGEN_GIT_SHA"))
-        .unwrap_or("git_unknown")
-        .to_string()
+    static GIT_SHA: OnceLock<String> = OnceLock::new();
+    GIT_SHA
+        .get_or_init(|| {
+            option_env!("GIT_SHA")
+                .or(option_env!("VERGEN_GIT_SHA"))
+                .unwrap_or("git_unknown")
+                .to_string()
+        })
+        .clone()
 }
 
 #[cfg(test)]
@@ -328,6 +340,14 @@ mod tests {
         assert_eq!(sink.dropped_count(), 1);
         let event = rx.recv().await.expect("first event should remain queued");
         assert_eq!(event.event, "quality.test");
+    }
+
+    #[test]
+    fn quality_events_include_build_git_sha() {
+        let event = QualityEvent::test_event();
+
+        assert_ne!(event.git_sha, "git_unknown");
+        assert!(!event.git_sha.trim().is_empty());
     }
 
     #[test]
