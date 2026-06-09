@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 16:22 PDT | @codex-421-design | PR #425 api-rv hardening: `ChannelConfig.coalesce_max_wait` caps sustained debounce, and the channel re-checks no-barge-in after coalescing immediately before payload delivery, requeueing/deferring if typing appears during the coalesce window. |
 | 2026-06-09 15:55 PDT | @codex-421-design | PR #425 CLI completion: mstream send, broadcast, and timer now expose `--no-prompt-submit`, keep `--no-enter` as a hidden deprecated alias for one release, and retain the same prompt-submit behavior. |
 | 2026-06-09 15:22 PDT | @codex-421-design | PR #425 round-2 fix: quiet guard now merges stable-id and session-name client activity so no-enter payload delivery is guarded even when client session ids are unavailable; coalescing wait and drain are one atomic queue decision. |
 | 2026-06-09 14:27 PDT | @codex-421-design | Reopened #421 live-validation fix: channel quiet guard now queries tmux activity by stable session id when available, and coalescing waits for a quiet `coalesce_window` before draining pending messages. |
@@ -266,6 +267,7 @@ use motlie_agent::{
 let manager = ChannelManager::new(ChannelConfig {
     input_quiet_for: Duration::from_secs(10),
     coalesce_window: Duration::from_millis(500),
+    coalesce_max_wait: Duration::from_millis(1500),
     default_submit: SubmitPolicy {
         prompt_submit: true,
         settle: Duration::from_millis(500),
@@ -457,6 +459,9 @@ policy:
 - If `latest_writable_client_activity` is younger than `input_quiet_for`, keep
   pending messages queued and schedule the next attempt for the remaining quiet
   interval.
+- Re-check the quiet guard after coalescing and immediately before payload
+  delivery; if a writable client became active during the debounce window,
+  requeue the batch and defer instead of injecting keystrokes.
 - Read-only attached clients must not block delivery.
 - Default `input_quiet_for` should reuse mstream timer's current default of 10
   seconds.
@@ -1026,10 +1031,11 @@ A small mechanism extension is required:
    flushes, omitted for a single human segment. Reviewers should decide whether
    every segment should always carry a header for maximum diarization.
 
-2. Coalescing window and force-through policy:
-   Recommended starting point is `coalesce_window = 500 ms` and
-   `input_quiet_for = 10 s`. Default should not force through the quiet guard.
-   A force-through override is intentionally deferred.
+2. Coalescing window, max wait, and force-through policy:
+   Recommended starting point is `coalesce_window = 500 ms`,
+   `coalesce_max_wait = 1500 ms`, and `input_quiet_for = 10 s`. The max wait
+   caps sustained sub-window input without forcing through the quiet guard. A
+   force-through override remains intentionally deferred.
 
 3. Synchronous send timeout and JSON response shape:
    `send` waits for prompt-window submission confirmation. PLAN should choose

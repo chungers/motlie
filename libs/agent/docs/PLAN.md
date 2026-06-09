@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 16:22 PDT | @codex-421-design | Added api-rv hardening: capped total coalesce wait and final pre-send quiet-guard re-check with integration coverage for sustained input and typing during debounce. |
 | 2026-06-09 15:55 PDT | @codex-421-design | Added missed #421/#420 CLI rename gate: public `--no-prompt-submit` with hidden `--no-enter` compatibility alias across send, broadcast, and timer. |
 | 2026-06-09 15:22 PDT | @codex-421-design | PR #425 round-2 plan update: add no-enter quiet-guard regression coverage with missing client session id, quiet-guard trace hook, and atomic coalescing wait/drain. |
 | 2026-06-09 14:27 PDT | @codex-421-design | Reopened #421 live-validation fix plan: stable session-id client activity matching, quiescent coalescing window, and public `libs/agent` integration coverage for concurrent same-channel senders. |
@@ -39,8 +40,10 @@ cargo test -p motlie-tmux session_client_activity --lib
 - [x] Implement default-on dedup with zero-or-many waiters per pending segment.
 - [x] Implement attributed coalescing with natural `[from: source]` headers.
 - [x] Wait for a quiet `coalesce_window` before draining pending messages so real concurrent senders coalesce.
+- [x] Cap total coalesce debounce with `ChannelConfig.coalesce_max_wait` so sustained sub-window input eventually drains.
 - [x] Close the coalescing lock gap by performing the stable-generation check and drain under one queue lock.
 - [x] Implement quiet-guard deferral using `latest_writable_client_activity`.
+- [x] Re-check quiet guard after coalescing, before payload delivery, and requeue/defer if writable activity appeared during debounce.
 - [x] Add public integration coverage proving typing-only/no-enter payloads are also gated by no-barge-in.
 - [x] Implement payload/Enter separation with settle delay, retry policy, and profile-based verification fallback.
 - [x] Expose delivery observability through a Tokio broadcast receiver and status snapshots.

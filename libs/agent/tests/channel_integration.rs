@@ -1,8 +1,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use motlie_agent::{
-    ChannelConfig, ChannelManager, DeliveryEvent, ManagedMessage, MessageId, MessageSource,
-    QuietGuardPolicy, ResolvedSession, SendOptions, SessionKey, SubmitPolicy, UiProfile,
+    ChannelConfig, ChannelManager, DeliveryEvent, EnqueueOptions, ManagedMessage, MessageId,
+    MessageSource, QuietGuardPolicy, ResolvedSession, SendOptions, SessionKey, SubmitPolicy,
+    UiProfile,
 };
 use motlie_tmux::transport::MockTransport;
 use motlie_tmux::{HostHandle, TargetSpec, TransportKind};
@@ -15,6 +16,218 @@ fn submit_policy() -> SubmitPolicy {
         retry_delay: Duration::ZERO,
         require_verification: false,
     }
+}
+
+fn typing_only_policy() -> SubmitPolicy {
+    SubmitPolicy {
+        prompt_submit: false,
+        settle: Duration::ZERO,
+        retries: 0,
+        retry_delay: Duration::ZERO,
+        require_verification: false,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn coalesce_max_wait_forces_drain_under_sustained_input() {
+    let mock = MockTransport::new()
+        .with_response(
+            "list-sessions",
+            "__MOTLIE_S__ coalesce-cap $1 100 0 1  200\n",
+        )
+        .with_response("send-keys", "");
+    let command_log = mock.command_log();
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host
+        .target(&TargetSpec::session("coalesce-cap"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut config = ChannelConfig::default();
+    config.input_quiet_for = Duration::ZERO;
+    config.coalesce_window = Duration::from_millis(50);
+    config.coalesce_max_wait = Duration::from_millis(120);
+    config.default_ui_profile = UiProfile::Generic;
+    let manager = ChannelManager::new(config);
+    let channel = manager
+        .get_or_bind(ResolvedSession::new(
+            SessionKey::from_target("local", "local", &target),
+            host,
+            target,
+        ))
+        .unwrap();
+    let mut events = manager.subscribe();
+    let options = EnqueueOptions {
+        submit: typing_only_policy(),
+        quiet_guard: QuietGuardPolicy::Default,
+    };
+
+    channel
+        .enqueue(
+            ManagedMessage::new(MessageSource::broadcast("sender.one"), "first"),
+            options,
+        )
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+
+    for (source, body) in [
+        ("sender.two", "second"),
+        ("sender.three", "third"),
+        ("sender.four", "fourth"),
+    ] {
+        tokio::time::advance(Duration::from_millis(30)).await;
+        channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::broadcast(source), body),
+                options,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert!(!command_log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|command| command.contains("send-keys")));
+
+    tokio::time::advance(Duration::from_millis(31)).await;
+
+    let mut saw_coalesced = false;
+    let mut saw_submitted = false;
+    for _ in 0..10 {
+        match events.recv().await.unwrap() {
+            DeliveryEvent::Coalesced {
+                message_ids,
+                segment_count,
+                ..
+            } => {
+                assert_eq!(
+                    message_ids,
+                    vec![MessageId(1), MessageId(2), MessageId(3), MessageId(4)]
+                );
+                assert_eq!(segment_count, 4);
+                saw_coalesced = true;
+            }
+            DeliveryEvent::Submitted { message_ids, .. } => {
+                assert_eq!(
+                    message_ids,
+                    vec![MessageId(1), MessageId(2), MessageId(3), MessageId(4)]
+                );
+                saw_submitted = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_coalesced);
+    assert!(saw_submitted);
+
+    let commands = command_log.lock().unwrap();
+    let send_keys = commands
+        .iter()
+        .filter(|command| command.contains("send-keys"))
+        .collect::<Vec<_>>();
+    assert_eq!(send_keys.len(), 1);
+    let rendered = send_keys[0];
+    assert!(rendered.contains("first"));
+    assert!(rendered.contains("second"));
+    assert!(rendered.contains("third"));
+    assert!(rendered.contains("fourth"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn writable_activity_during_coalesce_redefers_before_payload_delivery() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let old = now.saturating_sub(20);
+    let old_client = format!("200 50 final-guard $1 {old} 0 /dev/pts/48\n");
+    let recent_client = format!("200 50 final-guard $1 {now} 0 /dev/pts/48\n");
+    let mock = MockTransport::new()
+        .with_response(
+            "list-sessions",
+            "__MOTLIE_S__ final-guard $1 100 0 1  200\n",
+        )
+        .with_response("list-clients", &old_client)
+        .with_response("list-clients", &recent_client)
+        .with_response("list-clients", &old_client)
+        .with_response("list-clients", &old_client)
+        .with_response("send-keys", "");
+    let command_log = mock.command_log();
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host
+        .target(&TargetSpec::session("final-guard"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut config = ChannelConfig::default();
+    config.input_quiet_for = Duration::from_secs(10);
+    config.coalesce_window = Duration::from_millis(50);
+    config.coalesce_max_wait = Duration::from_millis(150);
+    config.default_ui_profile = UiProfile::Generic;
+    let manager = ChannelManager::new(config);
+    let channel = manager
+        .get_or_bind(ResolvedSession::new(
+            SessionKey::from_target("local", "local", &target),
+            host,
+            target,
+        ))
+        .unwrap();
+    let mut events = manager.subscribe();
+
+    let send_channel = channel.clone();
+    let send_task = tokio::spawn(async move {
+        send_channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "do not interleave"),
+                SendOptions {
+                    submit: typing_only_policy(),
+                    timeout: Duration::from_secs(30),
+                },
+            )
+            .await
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(50)).await;
+
+    let mut deferred = None;
+    for _ in 0..6 {
+        match events.recv().await.unwrap() {
+            DeliveryEvent::Deferred { message_ids, .. } => {
+                deferred = Some(message_ids);
+                break;
+            }
+            DeliveryEvent::Submitted { message_ids, .. } => {
+                panic!("submitted instead of re-deferring after coalesce: {message_ids:?}");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(deferred, Some(vec![MessageId(1)]));
+    assert!(!command_log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|command| command.contains("send-keys")));
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::advance(Duration::from_millis(50)).await;
+    let outcome = send_task.await.unwrap().unwrap();
+    assert_eq!(outcome.message_id(), MessageId(1));
+
+    let commands = command_log.lock().unwrap();
+    let send_keys = commands
+        .iter()
+        .filter(|command| command.contains("send-keys"))
+        .collect::<Vec<_>>();
+    assert_eq!(send_keys.len(), 1);
+    assert!(send_keys[0].contains("do not interleave"));
 }
 
 #[tokio::test(start_paused = true)]
