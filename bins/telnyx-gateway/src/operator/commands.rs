@@ -2120,7 +2120,10 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             "text_call.max_active_turns={}",
             quality.config.text_call.max_active_turns
         ),
-        format!("tts.chunking_enabled={}", quality.config.tts.chunking_enabled),
+        format!(
+            "tts.chunking_enabled={}",
+            quality.config.tts.chunking_enabled
+        ),
     ];
     Ok(CommandOutput {
         lines,
@@ -2460,8 +2463,10 @@ async fn quality_barge_in_command(
             .await
         }
         QualityBargeInCommand::ClearTimeoutMs { ms } => {
-            mutate_quality_config(context, |config| Ok(config.set_barge_in_clear_timeout_ms(ms)))
-                .await
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_clear_timeout_ms(ms))
+            })
+            .await
         }
     }
 }
@@ -2770,36 +2775,40 @@ fn gateway_root_help() -> String {
 fn quality_help() -> String {
     [
         "quality status",
-        "quality profile fast|balanced|complete|noisy",
+        "quality profile fast|balanced|complete|noisy  default=balanced applies=next_asr_session",
         "quality endpoint status",
-        "quality endpoint trailing-silence-ms <ms>",
-        "quality endpoint min-turn-words <n>",
-        "quality endpoint min-turn-chars <n>",
-        "quality endpoint merge-window-ms <ms>",
+        "quality endpoint trailing-silence-ms <ms>      range=100..5000 default=800ms applies=next_asr_session",
+        "quality endpoint min-turn-words <n>            range=0..50 default=2 report_only",
+        "quality endpoint min-turn-chars <n>            range=0..200 default=6 report_only",
+        "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms report_only",
+        "quality endpoint max-turn-words <n>            range=1..500 default=80 report_only",
+        "quality endpoint max-turn-duration-ms <ms>     range=1000..120000 default=12000ms report_only",
         "quality speech status",
-        "quality speech rms-threshold <value>",
-        "quality speech peak-threshold <value>",
+        "quality speech rms-threshold <value>           range=0.0..20000.0 default=180.0 applies=next_asr_session",
+        "quality speech peak-threshold <value>          range=0..32767 default=900 applies=next_asr_session",
+        "quality speech onset-min-silence-ms <ms>       range=0..2000 default=120ms applies=next_asr_session",
         "quality text-call status",
-        "quality text-call max-active-turns <n>",
-        "quality text-call media-ready-timeout-ms <ms>",
-        "quality text-call playback-wait-timeout-ms <ms>",
-        "quality text-call latest-response-wins on|off",
-        "quality text-call callback-timeout-ms <ms>",
+        "quality text-call max-active-turns <n>         range=1..1024 default=32 applies=new_text_call_session",
+        "quality text-call media-ready-timeout-ms <ms>  range=1000..120000 default=20000ms applies=new_playback_request",
+        "quality text-call playback-wait-timeout-ms <ms> range=1000..600000 default=180000ms applies=new_playback_request",
+        "quality text-call latest-response-wins on|off  bool default=true applies=new_turn",
+        "quality text-call callback-timeout-ms <ms>     range=100..60000 default=5000ms applies=new_turn",
         "quality tts status",
-        "quality tts chunking on|off        bool default=true applies=new_playback_request",
+        "quality tts chunking on|off                    bool default=true applies=new_playback_request",
         "quality logging on <path>",
         "quality logging off",
-        "quality logging include-transcript-text on|off",
-        "quality logging redaction-mode metrics-only|hashed-text|redacted-text|sensitive-plaintext",
+        "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
+        "quality logging redaction-mode metrics-only|hashed-text|redacted-text|sensitive-plaintext default=metrics-only applies=immediate",
         "quality judge status|on|off",
-        "quality barge-in status|on|off     bool default=true applies=next_asr_session",
-        "quality barge-in speech-onset on|off  bool default=true applies=next_asr_session",
-        "quality barge-in partial-asr on|off   bool default=true applies=next_asr_session",
-        "quality barge-in final-asr on|off     bool default=true applies=next_asr_session",
-        "quality barge-in clear-timeout-ms <ms> range=100..10000 default=1000 applies=new_turn",
+        "quality barge-in status|on|off                 bool default=true applies=next_asr_session",
+        "quality barge-in speech-onset on|off           bool default=true applies=next_asr_session",
+        "quality barge-in partial-asr on|off            bool default=true applies=next_asr_session",
+        "quality barge-in final-asr on|off              bool default=true applies=next_asr_session",
+        "quality barge-in clear-timeout-ms <ms>         range=100..10000 default=1000ms applies=new_turn",
         "",
         "M6 quality commands use the existing line-oriented operator dispatcher.",
         "Transcript text remains disabled unless explicitly enabled.",
+        "Operator TUI Up/Down recalls submitted commands through motlie-driver HistoryBuffer.",
     ]
     .join("\n")
 }

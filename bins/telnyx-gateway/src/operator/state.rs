@@ -62,6 +62,17 @@ impl Default for QualityRuntimeState {
     }
 }
 
+pub struct QualitySpanEmission {
+    pub config_id: String,
+    pub redaction_mode: RedactionMode,
+    pub span_name: &'static str,
+    pub category: &'static str,
+    pub duration: Duration,
+    pub critical_path: bool,
+    pub concurrent: bool,
+    pub payload: Map<String, Value>,
+}
+
 impl QualityRuntimeState {
     pub fn set_config(&mut self, config: VoiceQualityConfig) -> String {
         self.config = config;
@@ -666,33 +677,22 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
-    pub fn emit_quality_span_finished(
-        &mut self,
-        gateway_call_id: &str,
-        config_id: String,
-        redaction_mode: RedactionMode,
-        span_name: &'static str,
-        category: &'static str,
-        duration: Duration,
-        critical_path: bool,
-        concurrent: bool,
-        payload: Map<String, Value>,
-    ) {
+    pub fn emit_quality_span_finished(&mut self, gateway_call_id: &str, span: QualitySpanEmission) {
         if !self.quality.event_sink.is_enabled() {
             return;
         }
         let event = QualityEvent::span_finished(
             self.quality_event_context_with_config_and_redaction(
                 Some(gateway_call_id.to_string()),
-                config_id,
-                redaction_mode,
+                span.config_id,
+                span.redaction_mode,
             ),
-            span_name,
-            category,
-            duration,
-            critical_path,
-            concurrent,
-            payload,
+            span.span_name,
+            span.category,
+            span.duration,
+            span.critical_path,
+            span.concurrent,
+            span.payload,
         );
         self.quality.event_sink.emit(event);
     }

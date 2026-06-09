@@ -12,7 +12,7 @@ use motlie_voice::telephony::CallAction;
 
 use crate::call_control::TelnyxClient;
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
-use crate::operator::state::{ConversationMode, LogLevel, SharedState};
+use crate::operator::state::{ConversationMode, LogLevel, QualitySpanEmission, SharedState};
 use crate::quality::{BargeInQualityConfig, RedactionMode, VoiceQualityConfig};
 use crate::speech;
 use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
@@ -318,14 +318,16 @@ async fn cancel_active_speech_for_barge_in(
         };
         state.write().await.emit_quality_span_finished(
             gateway_call_id,
-            config_id,
-            redaction_mode,
-            trigger.cancel_span_name(),
-            "barge_in",
-            cancel_started_at.elapsed(),
-            false,
-            true,
-            payload,
+            QualitySpanEmission {
+                config_id,
+                redaction_mode,
+                span_name: trigger.cancel_span_name(),
+                category: "barge_in",
+                duration: cancel_started_at.elapsed(),
+                critical_path: false,
+                concurrent: true,
+                payload,
+            },
         );
     }
     state

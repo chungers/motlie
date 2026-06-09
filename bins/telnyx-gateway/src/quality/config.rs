@@ -968,10 +968,7 @@ impl VoiceQualityConfig {
         )
     }
 
-    pub fn set_barge_in_final_asr_cancel_enabled(
-        &mut self,
-        value: bool,
-    ) -> QualityMutationOutcome {
+    pub fn set_barge_in_final_asr_cancel_enabled(&mut self, value: bool) -> QualityMutationOutcome {
         self.barge_in.final_asr_cancel_enabled = value;
         self.outcome(
             "barge_in.final_asr_cancel_enabled",

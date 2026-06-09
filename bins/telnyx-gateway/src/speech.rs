@@ -7,7 +7,7 @@ use crate::media::{
     packetize_tts_samples, CallMediaHandle, OutboundFrameQualityContext, OutboundMediaCommand,
     OutboundMediaFrame, SharedMediaRegistry, SpeechCancelToken, SpeechClearReason,
 };
-use crate::operator::state::{LogLevel, SharedState};
+use crate::operator::state::{LogLevel, QualitySpanEmission, SharedState};
 use crate::quality::RedactionMode;
 use crate::tts::{split_speech_text, LiveTtsBackend, SharedTtsRegistry, TtsAudio};
 
@@ -472,14 +472,16 @@ async fn emit_speech_span(
     };
     job.state.write().await.emit_quality_span_finished(
         &job.gateway_call_id,
-        job.quality_config_id.clone(),
-        job.quality_redaction_mode,
-        span_name,
-        category,
-        duration,
-        critical_path,
-        concurrent,
-        payload,
+        QualitySpanEmission {
+            config_id: job.quality_config_id.clone(),
+            redaction_mode: job.quality_redaction_mode,
+            span_name,
+            category,
+            duration,
+            critical_path,
+            concurrent,
+            payload,
+        },
     );
 }
 

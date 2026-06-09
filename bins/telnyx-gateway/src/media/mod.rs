@@ -26,9 +26,12 @@ use crate::adapter::{
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::{self, ConversationRuntime};
 use crate::operator::state::{
-    CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
+    CallStatus, LogLevel, MediaMetadata, QualitySpanEmission, SharedState, StreamAttachOutcome,
+    TranscriptKind,
 };
-use crate::quality::{ActiveAsrQualitySession, RedactionMode, SpeechQualityConfig, VoiceQualityConfig};
+use crate::quality::{
+    ActiveAsrQualitySession, RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
+};
 use crate::text_calls::SharedTextCallRegistry;
 use crate::tts::PIPER_SAMPLE_RATE_HZ;
 
@@ -167,7 +170,9 @@ pub enum OutboundMediaCommand {
         requested_at: Instant,
         reason: SpeechClearReason,
     },
-    Mark { playback_id: String },
+    Mark {
+        playback_id: String,
+    },
 }
 
 impl OutboundMediaCommand {
@@ -759,7 +764,12 @@ async fn send_outbound_command(
                 .write()
                 .await
                 .mark_tts_canceled(&call_id, &playback_id);
-            tracing::info!(gateway_call_id = call_id, playback_id, reason = reason.label(), "tts.clear.sent");
+            tracing::info!(
+                gateway_call_id = call_id,
+                playback_id,
+                reason = reason.label(),
+                "tts.clear.sent"
+            );
             Ok(())
         }
         OutboundMediaCommand::Mark { playback_id } => {
@@ -805,14 +815,16 @@ async fn maybe_emit_first_frame_span(
     }));
     state.write().await.emit_quality_span_finished(
         call_id,
-        quality.config_id.clone(),
-        quality.redaction_mode,
-        "media.first_frame_send",
-        "playback_transport",
-        quality.queued_at.elapsed(),
-        true,
-        false,
-        payload,
+        QualitySpanEmission {
+            config_id: quality.config_id.clone(),
+            redaction_mode: quality.redaction_mode,
+            span_name: "media.first_frame_send",
+            category: "playback_transport",
+            duration: quality.queued_at.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload,
+        },
     );
 }
 
@@ -824,7 +836,10 @@ async fn emit_playback_terminal_spans(
     status: &'static str,
     clear: Option<(Instant, SpeechClearReason)>,
 ) {
-    let quality = media_state.playback_quality_contexts.get(playback_id).cloned();
+    let quality = media_state
+        .playback_quality_contexts
+        .get(playback_id)
+        .cloned();
     let (config_id, redaction_mode) = quality
         .as_ref()
         .map(|quality| (quality.config_id.clone(), quality.redaction_mode))
@@ -841,14 +856,16 @@ async fn emit_playback_terminal_spans(
         }));
         state.write().await.emit_quality_span_finished(
             call_id,
-            config_id.clone(),
-            redaction_mode,
-            "media.playback_terminal",
-            "playback_transport",
-            started_at.elapsed(),
-            false,
-            true,
-            payload,
+            QualitySpanEmission {
+                config_id: config_id.clone(),
+                redaction_mode,
+                span_name: "media.playback_terminal",
+                category: "playback_transport",
+                duration: started_at.elapsed(),
+                critical_path: false,
+                concurrent: true,
+                payload,
+            },
         );
     }
     if let Some((requested_at, reason)) = clear {
@@ -860,14 +877,16 @@ async fn emit_playback_terminal_spans(
             }));
             state.write().await.emit_quality_span_finished(
                 call_id,
-                config_id,
-                redaction_mode,
-                "barge_in.cancel_request_to_terminal",
-                "playback_transport",
-                requested_at.elapsed(),
-                false,
-                true,
-                payload,
+                QualitySpanEmission {
+                    config_id,
+                    redaction_mode,
+                    span_name: "barge_in.cancel_request_to_terminal",
+                    category: "playback_transport",
+                    duration: requested_at.elapsed(),
+                    critical_path: false,
+                    concurrent: true,
+                    payload,
+                },
             );
         }
     }
@@ -1156,10 +1175,9 @@ async fn handle_text_with_text_calls(
         }
         "mark" => {
             let event: MarkEvent = serde_json::from_str(text).context("parse mark event")?;
-            if let (Some(call_id), Some(name)) = (
-                media_state.gateway_call_id.clone(),
-                event.mark.name.clone(),
-            ) {
+            if let (Some(call_id), Some(name)) =
+                (media_state.gateway_call_id.clone(), event.mark.name.clone())
+            {
                 emit_playback_terminal_spans(
                     state,
                     media_state,
@@ -1517,7 +1535,11 @@ async fn emit_quality_transport_rollups(state: &SharedState, media_state: &mut M
     let inbound_payload = media_state
         .inbound_transport
         .rollup_payload(session, media_state.media_format.as_ref());
-    let playback_id = media_state.playback_started_at.keys().next().map(String::as_str);
+    let playback_id = media_state
+        .playback_started_at
+        .keys()
+        .next()
+        .map(String::as_str);
     let outbound_payload = media_state.outbound_pacing.rollup_payload(playback_id);
     let mut guard = state.write().await;
     guard.emit_quality_inbound_transport_rollup(
@@ -1660,7 +1682,9 @@ struct AsrGate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AsrFrameDecision {
     Suppress,
-    Continue { speech_onset: bool },
+    Continue {
+        speech_onset: bool,
+    },
     Finalize {
         trailing_silence_ms: u64,
         endpoint_wait_started_at: Option<Instant>,
@@ -1814,14 +1838,16 @@ async fn emit_asr_endpoint_spans(
         }));
         state.write().await.emit_quality_span_finished(
             gateway_call_id,
-            session.config_id.clone(),
-            session.redaction_mode,
-            "utterance.speech_to_low_energy",
-            "caller_speech",
-            duration,
-            true,
-            false,
-            payload,
+            QualitySpanEmission {
+                config_id: session.config_id.clone(),
+                redaction_mode: session.redaction_mode,
+                span_name: "utterance.speech_to_low_energy",
+                category: "caller_speech",
+                duration,
+                critical_path: true,
+                concurrent: false,
+                payload,
+            },
         );
     }
     if let Some(started_at) = endpoint_wait_started_at {
@@ -1833,14 +1859,16 @@ async fn emit_asr_endpoint_spans(
         }));
         state.write().await.emit_quality_span_finished(
             gateway_call_id,
-            session.config_id.clone(),
-            session.redaction_mode,
-            "asr.endpoint_wait",
-            "endpointing",
-            started_at.elapsed(),
-            true,
-            false,
-            payload,
+            QualitySpanEmission {
+                config_id: session.config_id.clone(),
+                redaction_mode: session.redaction_mode,
+                span_name: "asr.endpoint_wait",
+                category: "endpointing",
+                duration: started_at.elapsed(),
+                critical_path: true,
+                concurrent: false,
+                payload,
+            },
         );
     }
 }
@@ -1865,14 +1893,16 @@ async fn finish_asr_session(
             }));
             state.write().await.emit_quality_span_finished(
                 call_id,
-                session.config_id.clone(),
-                session.redaction_mode,
-                "asr.local_finish",
-                "asr_generation",
-                finish_started_at.elapsed(),
-                true,
-                false,
-                payload,
+                QualitySpanEmission {
+                    config_id: session.config_id.clone(),
+                    redaction_mode: session.redaction_mode,
+                    span_name: "asr.local_finish",
+                    category: "asr_generation",
+                    duration: finish_started_at.elapsed(),
+                    critical_path: true,
+                    concurrent: false,
+                    payload,
+                },
             );
             media_state.last_quality_asr = Some(session.clone());
         }
@@ -2375,13 +2405,22 @@ mod tests {
         let mut media_state = MediaSocketState::with_media_registry(media_registry.clone());
         media_state.gateway_call_id = Some("gwc_test".to_string());
         media_state.outbound_rx = Some(rx);
-        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame::new("tts_test", vec![1; 160])))
+        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame::new(
+            "tts_test",
+            vec![1; 160],
+        )))
         .await
         .expect("queue first frame");
-        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame::new("tts_test", vec![2; 160])))
+        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame::new(
+            "tts_test",
+            vec![2; 160],
+        )))
         .await
         .expect("queue second frame");
-        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame::new("tts_test", vec![3; 160])))
+        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame::new(
+            "tts_test",
+            vec![3; 160],
+        )))
         .await
         .expect("queue post-clear frame");
         media_registry
@@ -2449,7 +2488,9 @@ mod tests {
             .await
             .expect("second clear should be queued")
         {
-            OutboundMediaCommand::Clear { playback_id, .. } => assert_eq!(playback_id, "tts_second"),
+            OutboundMediaCommand::Clear { playback_id, .. } => {
+                assert_eq!(playback_id, "tts_second")
+            }
             other => panic!("expected second clear, got {other:?}"),
         }
     }
@@ -2471,7 +2512,10 @@ mod tests {
         .expect("start event should open ASR session");
         let (tx, rx) = mpsc::channel(4);
         media_state.outbound_rx = Some(rx);
-        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame::new("tts_test", vec![PCMU_SILENCE_BYTE; 160])))
+        tx.send(OutboundMediaCommand::Frame(OutboundMediaFrame::new(
+            "tts_test",
+            vec![PCMU_SILENCE_BYTE; 160],
+        )))
         .await
         .expect("queue outbound TTS frame");
 

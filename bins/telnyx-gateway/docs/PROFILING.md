@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-09 | @codex-367-design | Added M6 gap implementation notes: deferred ASR/TTS/media/barge-in spans, inbound/outbound transport rollups, live call-bound tuning commands, and operator TUI command-history recall through `motlie-driver::HistoryBuffer`. |
 | 2026-06-08 | @codex-367-design | Revised after the first M6 review pass: added call-level config snapshots, monotonic/non-blocking span emission, critical-path latency accounting, pre-turn ASR join keys, privacy defaults, typed config validation, existing line-oriented socket reuse, normalized artifacts, and judge reproducibility requirements. |
 | 2026-06-08 | @codex-367-design | Added the M6 profiling specification: span boundaries, deterministic `I heard` harnesses, structured turn logs, latency categories, LLM judge inputs/outputs, tunable config surfaces, and acceptance criteria. |
 
@@ -845,7 +846,7 @@ Prompt requirements:
 | Agent bridge | trailing Enter delay | CLI implemented | `750 ms` | prompt submission reliability |
 | Agent bridge | trailing Enter enabled | CLI implemented | default on | prompt submission reliability |
 | ASR suppression | repeated-token thresholds | hard-coded | run `16`, q-run `8` | hallucination suppression |
-| TTS chunking | punctuation split | hard-coded | sentence/clause punctuation | first-audio latency vs smoothness |
+| TTS chunking | `quality tts chunking on|off` | REPL/socket/TUI implemented | default on | first-audio latency vs smoothness |
 
 ### Gateway-Owned `VoiceQualityConfig` Knobs
 
@@ -870,6 +871,7 @@ Prompt requirements:
 | `text_call.playback_wait_timeout_ms` | `DurationMs` | `1000..600000` | `180000` | clamp to range | new playback request | Hung playback detection. |
 | `text_call.latest_response_wins` | `bool` | `true,false` | `true` | reject non-bool | new agent turn | Cancel-and-replace policy. |
 | `text_call.callback_timeout_ms` | `DurationMs` | `100..60000` | `5000` | clamp to range | new callback attempt | Subscriber responsiveness. |
+| `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence/clause text splitting before TTS; off synthesizes the full response as one chunk. |
 | `barge_in.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables barge-in path. |
 | `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. |
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
@@ -1121,7 +1123,12 @@ quality speech peak-threshold <value>
 quality speech onset-min-silence-ms <ms>
 quality text-call status
 quality text-call max-active-turns <n>
+quality text-call media-ready-timeout-ms <ms>
+quality text-call playback-wait-timeout-ms <ms>
 quality text-call latest-response-wins on|off
+quality text-call callback-timeout-ms <ms>
+quality tts status
+quality tts chunking on|off
 quality logging status
 quality logging on <path>
 quality logging off
@@ -1151,6 +1158,29 @@ quality barge-in on|off
 quality barge-in speech-onset on|off
 quality barge-in partial-asr on|off
 quality barge-in final-asr on|off
+quality barge-in clear-timeout-ms <ms>
+```
+
+## Operator TUI Command History
+
+Live M6 tuning is iterative: operators often adjust one parameter, place another call, then adjust the same command again. The operator TUI shell must support command-input recall for this workflow.
+
+Implementation requirements:
+
+- Reuse `motlie-driver::HistoryBuffer` for command storage and recall cursor behavior.
+- Bind `KeyCode::Up` and `KeyCode::Down` in the gateway TUI shell input to `HistoryBuffer::prev()` and `HistoryBuffer::next()`.
+- Do not maintain a parallel history cursor or bespoke recall buffer in `operator/tui.rs`.
+- Record only submitted non-empty command lines.
+- Reset recall when the operator edits the input after recalling a command.
+- Leave REPL and socket command dispatch line-oriented and unchanged.
+
+This supports call-to-call tuning loops such as:
+
+```text
+quality endpoint trailing-silence-ms 650
+quality speech rms-threshold 220
+quality barge-in clear-timeout-ms 750
+quality tts chunking off
 ```
 
 ## Proposed Socket Commands
@@ -1163,6 +1193,8 @@ Gateway socket input examples:
 quality status
 quality endpoint trailing-silence-ms 950
 quality speech rms-threshold 220
+quality barge-in clear-timeout-ms 750
+quality tts chunking off
 quality logging on /tmp/motlie-turns.jsonl
 quality report /tmp/motlie-quality-report.json
 quality recommendations /tmp/motlie-tuning.json
@@ -1353,6 +1385,7 @@ M6 profiling is complete when:
 - [ ] Caller speaking time is reported as `caller_speech`, not endpointing, and is not treated as a tunable endpoint delay.
 - [ ] Inbound RTP loss/stale/reorder/jitter and outbound pacing/underrun rollups are emitted and surfaced as confounders/exclusions.
 - [ ] `gateway-echo` profiling separates caller speech, endpointing, ASR final flush, TTS first chunk, packetization, and first media frame timings.
+- [ ] Operator TUI command input supports Up/Down recall through `motlie-driver::HistoryBuffer`, so live tuning commands can be repeated without retyping.
 - [ ] `text-call-echo` profiling separates M4 WebSocket/app protocol overhead from deterministic harness work.
 - [ ] `agent-tmux-echo` profiling separates activity quiet-window wait, backoff, trailing Enter delay, tmux injection, reply wait, and scrape latency.
 - [ ] `real-agent` profiling attributes incremental latency using fixed/replayed audio or per-category paired deltas, not noisy live whole-call subtraction.

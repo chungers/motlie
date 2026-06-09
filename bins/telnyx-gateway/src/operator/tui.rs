@@ -7,7 +7,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use motlie_driver::{CommandEffect, CommandEngine};
+use motlie_driver::{CommandEffect, CommandEngine, HistoryBuffer};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -51,6 +51,11 @@ impl ShellInput {
     fn clear(&mut self) {
         self.text.clear();
         self.cursor_chars = 0;
+    }
+
+    fn replace(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor_chars = self.text.chars().count();
     }
 
     fn insert(&mut self, ch: char) {
@@ -115,6 +120,8 @@ pub async fn run_tui(
     let mut terminal = TerminalGuard::enter()?;
     let host = host_label();
     let mut input = ShellInput::default();
+    let mut command_history = HistoryBuffer::try_with_capacity(200)
+        .expect("operator command history capacity is non-zero");
     let mut history = vec!["telnyx-gateway TUI ready".to_string()];
     let mut focus = FocusedPane::Shell;
 
@@ -149,6 +156,7 @@ pub async fn run_tui(
                 if command.is_empty() {
                     continue;
                 }
+                command_history.push(command.clone());
                 history.push(format!("> {command}"));
                 match run_operator_line(engine, &command).await {
                     Ok(output) => {
@@ -167,6 +175,7 @@ pub async fn run_tui(
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
+                    command_history.reset_recall();
                     input.insert(ch);
                 }
                 FocusedPane::Calls if ch == 'a' => {
@@ -179,9 +188,11 @@ pub async fn run_tui(
                 _ => {}
             },
             KeyCode::Backspace if focus == FocusedPane::Shell => {
+                command_history.reset_recall();
                 input.backspace();
             }
             KeyCode::Delete if focus == FocusedPane::Shell => {
+                command_history.reset_recall();
                 input.delete();
             }
             KeyCode::Left if focus == FocusedPane::Shell => {
@@ -199,12 +210,12 @@ pub async fn run_tui(
             KeyCode::Up => match focus {
                 FocusedPane::Calls => select_relative(engine.context_mut(), -1).await,
                 FocusedPane::Detail => engine.context_mut().session.scroll_detail(-1),
-                FocusedPane::Shell => {}
+                FocusedPane::Shell => recall_previous_command(&mut input, &mut command_history),
             },
             KeyCode::Down => match focus {
                 FocusedPane::Calls => select_relative(engine.context_mut(), 1).await,
                 FocusedPane::Detail => engine.context_mut().session.scroll_detail(1),
-                FocusedPane::Shell => {}
+                FocusedPane::Shell => recall_next_command(&mut input, &mut command_history),
             },
             KeyCode::PageUp if focus == FocusedPane::Detail => {
                 engine.context_mut().session.scroll_detail(-8);
@@ -218,6 +229,20 @@ pub async fn run_tui(
     }
 
     Ok(())
+}
+
+fn recall_previous_command(input: &mut ShellInput, history: &mut HistoryBuffer<String>) {
+    if let Some(record) = history.prev() {
+        input.replace(record.item.clone());
+    }
+}
+
+fn recall_next_command(input: &mut ShellInput, history: &mut HistoryBuffer<String>) {
+    if let Some(record) = history.next() {
+        input.replace(record.item.clone());
+    } else {
+        input.clear();
+    }
 }
 
 async fn select_relative(context: &mut GatewayContext, delta: isize) {
@@ -764,6 +789,31 @@ mod tests {
 
         assert_eq!(input.as_str(), "abXcd");
         assert_eq!(input.cursor_chars(), 3);
+    }
+
+    #[test]
+    fn shell_history_recall_uses_driver_history_buffer() {
+        let mut input = ShellInput::default();
+        let mut history = HistoryBuffer::try_with_capacity(8).expect("non-zero history");
+        history.push("quality endpoint trailing-silence-ms 900".to_string());
+        history.push("quality tts chunking off".to_string());
+
+        recall_previous_command(&mut input, &mut history);
+        assert_eq!(input.as_str(), "quality tts chunking off");
+        assert_eq!(
+            input.cursor_chars(),
+            "quality tts chunking off".chars().count()
+        );
+
+        recall_previous_command(&mut input, &mut history);
+        assert_eq!(input.as_str(), "quality endpoint trailing-silence-ms 900");
+
+        recall_next_command(&mut input, &mut history);
+        assert_eq!(input.as_str(), "quality tts chunking off");
+
+        recall_next_command(&mut input, &mut history);
+        assert_eq!(input.as_str(), "");
+        assert_eq!(input.cursor_chars(), 0);
     }
 
     #[test]
