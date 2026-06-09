@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 14:27 PDT | @codex-421-design | Reopened #421 live-validation fix plan: stable session-id client activity matching, quiescent coalescing window, and public `libs/agent` integration coverage for concurrent same-channel senders. |
 | 2026-06-09 00:52 PDT | @codex-421-design | Reconciled code review fixes: poison-safe channel locks, pure-sync timeout cancellation, mstream delivery-event observation, channel cleanup on teardown, timer deferral ownership in `motlie-agent`, and send/broadcast submit retry wiring. |
 | 2026-06-09 00:07 PDT | @codex-421-design | Marked final implementation gates complete: package-scoped fmt check, build, tests, clippy, and focused tmux writable-client activity tests all pass. Workspace-wide `cargo fmt` remains blocked by unrelated missing `examples/vector2/app/benchmark.rs`. |
 | 2026-06-09 00:02 PDT | @codex-421-design | Added implementation PLAN for PR #423 coding phase: `motlie-tmux` writable-client activity, new `motlie-agent` Channel API, mstream send/broadcast/timer migration, docs, and verification gates. |
@@ -19,6 +20,7 @@ Implement [DESIGN.md](./DESIGN.md) for issue #421 in the same PR as the accepted
 - [x] Add `SessionClientActivity.latest_writable_client_activity: Option<u64>` without changing the meaning of `latest_client_activity`.
 - [x] Compute writable activity only from clients where `readonly == false`.
 - [x] Add/adjust tests proving read-only client activity does not affect writable activity.
+- [x] Carry tmux `session_id` through client activity parsing and match activity by stable id when available.
 
 Verify:
 
@@ -34,6 +36,7 @@ cargo test -p motlie-tmux session_client_activity --lib
 - [x] Implement synchronous `send` and asynchronous `enqueue`.
 - [x] Implement default-on dedup with zero-or-many waiters per pending segment.
 - [x] Implement attributed coalescing with natural `[from: source]` headers.
+- [x] Wait for a quiet `coalesce_window` before draining pending messages so real concurrent senders coalesce.
 - [x] Implement quiet-guard deferral using `latest_writable_client_activity`.
 - [x] Implement payload/Enter separation with settle delay, retry policy, and profile-based verification fallback.
 - [x] Expose delivery observability through a Tokio broadcast receiver and status snapshots.

@@ -330,6 +330,7 @@ impl Channel {
             }
 
             pending_count = queue.pending.len();
+            queue.accept_generation = queue.accept_generation.wrapping_add(1);
             if !queue.flushing {
                 queue.flushing = true;
                 start_worker = true;
@@ -386,16 +387,14 @@ impl Channel {
 
     async fn flush_loop(self) {
         loop {
-            if !self.inner.config.coalesce_window.is_zero() {
-                sleep(self.inner.config.coalesce_window).await;
-            }
-
             if let Err(error) = self.apply_quiet_guard().await {
                 let batch = self.drain_pending().await;
                 self.fail_batch(batch, error).await;
                 self.finish_if_empty().await;
                 return;
             }
+
+            self.wait_for_coalesce_window().await;
 
             let batch = match self.next_batch().await {
                 Some(batch) => batch,
@@ -413,6 +412,30 @@ impl Channel {
             match self.submit_batch(&batch).await {
                 Ok(result) => self.complete_batch(batch, result).await,
                 Err(error) => self.fail_batch(batch, error).await,
+            }
+        }
+    }
+
+    async fn wait_for_coalesce_window(&self) {
+        if self.inner.config.coalesce_window.is_zero() {
+            return;
+        }
+
+        loop {
+            let observed_generation = {
+                let queue = self.inner.queue.lock().await;
+                if queue.pending.is_empty() {
+                    return;
+                }
+                queue.accept_generation
+            };
+            sleep(self.inner.config.coalesce_window).await;
+            let stable = {
+                let queue = self.inner.queue.lock().await;
+                queue.pending.is_empty() || queue.accept_generation == observed_generation
+            };
+            if stable {
+                return;
             }
         }
     }
@@ -439,7 +462,12 @@ impl Channel {
             let activity = self
                 .inner
                 .host
-                .session_client_activity(self.inner.target.session_name())
+                .session_client_activity(
+                    self.inner
+                        .target
+                        .session_id()
+                        .unwrap_or_else(|| self.inner.target.session_name()),
+                )
                 .await
                 .map_err(|err| DeliveryError::tmux("session_client_activity", err))?;
             let Some(latest) = activity.latest_writable_client_activity else {
@@ -710,6 +738,7 @@ impl Channel {
 struct QueueState {
     pending: VecDeque<PendingSegment>,
     flushing: bool,
+    accept_generation: u64,
 }
 
 struct PendingSegment {
@@ -1393,7 +1422,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let clients = format!("200 50 build {now} 1 /dev/ttys001\n");
+        let clients = format!("200 50 build $0 {now} 1 /dev/ttys001\n");
         let mock = MockTransport::new()
             .with_response("list-sessions", session_response())
             .with_response("list-clients", &clients)
@@ -1429,7 +1458,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let clients = format!("200 50 build {now} 0 /dev/ttys001\n");
+        let clients = format!("200 50 build $0 {now} 0 /dev/ttys001\n");
         let mock = MockTransport::new()
             .with_response("list-sessions", session_response())
             .with_response("list-clients", &clients);
@@ -1461,7 +1490,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let clients = format!("200 50 build {now} 0 /dev/ttys001\n");
+        let clients = format!("200 50 build $0 {now} 0 /dev/ttys001\n");
         let mock = MockTransport::new()
             .with_response("list-sessions", session_response())
             .with_response("list-clients", &clients);
@@ -1510,8 +1539,8 @@ mod tests {
             .unwrap()
             .as_secs();
         let old = now.saturating_sub(20);
-        let recent_clients = format!("200 50 build {now} 0 /dev/ttys001\n");
-        let old_clients = format!("200 50 build {old} 0 /dev/ttys001\n");
+        let recent_clients = format!("200 50 build $0 {now} 0 /dev/ttys001\n");
+        let old_clients = format!("200 50 build $0 {old} 0 /dev/ttys001\n");
         let mock = MockTransport::new()
             .with_response("list-sessions", session_response())
             .with_response("list-clients", &recent_clients)

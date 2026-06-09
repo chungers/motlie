@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-09 14:27 PDT | @codex-421-design | Reopened #421 live-validation fix: channel quiet guard now queries tmux activity by stable session id when available, and coalescing waits for a quiet `coalesce_window` before draining pending messages. |
 | 2026-06-09 00:52 PDT | @codex-421-design | Code-review reconciliation: pure-sync timeout drops its pending segment unless async sources/other waiters keep it alive; mstream timer deferral is channel-owned and observed through `DeliveryEvent`s; teardown removes stale channels. |
 | 2026-06-09 00:02 PDT | @codex-421-design | Implementation alignment before code review: moved `UiProfile` selection to per-session `ResolvedSession` with `ChannelConfig.default_ui_profile` fallback, shaped `DeliveryEvents` as a Tokio broadcast receiver plus concrete `ChannelStatus`/`DeferReason`, added explicit `SubmitPolicy.prompt_submit`, and added `docs/PLAN.md` for the coding phase. |
 | 2026-06-08 23:27 PDT | @codex-421-design | Addressed PR #423 round-1 review: renamed the API to `Channel`/`ChannelManager`/`SessionKey`/`UiProfile`, made stable resolved tmux identity required, specified the needed `motlie-tmux` writable-client activity signal, removed duplicate submit-policy sources, defined outcome/error/verification contracts, defaulted dedup with zero-or-many waiters, added channel delivery events for mstream observability, clarified M4 as crate-level reuse only, and expanded mixed sync/async test coverage. |
@@ -12,10 +13,10 @@
 
 ## Status
 
-Draft for [issue #421](https://github.com/chungers/motlie/issues/421), tracked in
-[Discussion #422](https://github.com/chungers/motlie/discussions/422). This is a
-DESIGN-only update for PR #423; implementation starts only after reviewer
-re-accept.
+Accepted design for [issue #421](https://github.com/chungers/motlie/issues/421), tracked in
+[Discussion #422](https://github.com/chungers/motlie/discussions/422). The reopened
+2026-06-09 PDT live-validation pass keeps the same design but tightens the tmux
+activity identity signal and real-traffic coalescing behavior.
 
 Although issue #421 uses "inbox" in the title, this design recommends the
 central inbound type be `agent::Channel`. In Rust API terms, `agent::Channel`
@@ -447,6 +448,8 @@ or equivalent per-client activity/read-only data. `libs/agent` then applies
 policy:
 
 - If there is no recent writable-client activity, flush.
+- Query `session_client_activity` by stable tmux session id when a resolved
+  target has one; fall back to session name only when no id exists.
 - If `latest_writable_client_activity` is younger than `input_quiet_for`, keep
   pending messages queued and schedule the next attempt for the remaining quiet
   interval.
