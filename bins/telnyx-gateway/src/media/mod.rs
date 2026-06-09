@@ -556,6 +556,14 @@ pub async fn handle_socket(
 
     loop {
         tokio::select! {
+            biased;
+
+            _ = silence_keepalive.tick(), if media_state.silence_keepalive => {
+                if let Err(error) = send_outbound_or_silence(&mut socket, &state, &mut media_state).await {
+                    log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
+                    break;
+                }
+            }
             message = socket.next() => {
                 let Some(message) = message else {
                     break;
@@ -579,12 +587,6 @@ pub async fn handle_socket(
                         .await;
                         break;
                     }
-                }
-            }
-            _ = silence_keepalive.tick(), if media_state.silence_keepalive => {
-                if let Err(error) = send_outbound_or_silence(&mut socket, &state, &mut media_state).await {
-                    log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
-                    break;
                 }
             }
         }
@@ -1880,16 +1882,34 @@ async fn finish_asr_session(
     stream_id: Option<String>,
     text_calls: Option<&SharedTextCallRegistry>,
 ) -> anyhow::Result<()> {
-    if let (Some(call_id), Some(asr_session)) = (gateway_call_id, media_state.session.take()) {
+    if let (Some(call_id), Some(mut asr_session)) = (gateway_call_id, media_state.session.take()) {
         let quality_session = media_state.active_quality_asr.take();
+        let finish_pad_ms = media_state.quality_config.endpoint.trailing_silence_ms;
         let finish_started_at = Instant::now();
+        let pad_events = ingest_asr_finish_silence(asr_session.as_mut(), finish_pad_ms).await?;
+        let pad_event_count = pad_events.len();
+        record_and_forward_asr_events(
+            state,
+            media_state,
+            call_id,
+            stream_id.as_deref(),
+            text_calls,
+            quality_session.as_ref(),
+            pad_events,
+        )
+        .await;
+
         let events = asr_session.finish().await?;
+        let finish_event_count = events.len();
         if let Some(session) = quality_session.as_ref() {
             let payload = map_from_value(json!({
                 "asr_session_id": session.asr_session_id.as_str(),
                 "utterance_id": session.utterance_id.as_str(),
                 "stream_id": stream_id.as_deref(),
-                "transcript_events": events.len(),
+                "finish_pad_ms": finish_pad_ms,
+                "pad_transcript_events": pad_event_count,
+                "finish_transcript_events": finish_event_count,
+                "transcript_events": pad_event_count.saturating_add(finish_event_count),
             }));
             state.write().await.emit_quality_span_finished(
                 call_id,
@@ -1906,31 +1926,74 @@ async fn finish_asr_session(
             );
             media_state.last_quality_asr = Some(session.clone());
         }
-        let conversation_events = conversation_events_from_transcripts(&events);
-        let _ = record_transcript_events(
+        record_and_forward_asr_events(
             state,
+            media_state,
             call_id,
+            stream_id.as_deref(),
+            text_calls,
+            quality_session.as_ref(),
             events,
-            TranscriptRecordContext {
-                stream_id: stream_id.as_deref(),
-                media_format: media_state.media_format.as_ref(),
-                capture: media_state.capture.as_mut(),
-                text_calls,
-                quality_session: quality_session.as_ref(),
-            },
-        )
-        .await;
-        forward_conversation_events(
-            state,
-            &media_state.media_registry,
-            media_state.conversation.as_ref(),
-            call_id,
-            conversation_events,
-            Some(&media_state.quality_config),
         )
         .await;
     }
     Ok(())
+}
+
+async fn ingest_asr_finish_silence(
+    asr_session: &mut dyn InboundAsrSession,
+    pad_ms: u64,
+) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+    const ASR_SAMPLE_RATE_HZ: u64 = 16_000;
+    const PAD_CHUNK_MS: u64 = 20;
+
+    let mut remaining_samples = ((ASR_SAMPLE_RATE_HZ * pad_ms) / 1_000) as usize;
+    let chunk_samples = ((ASR_SAMPLE_RATE_HZ * PAD_CHUNK_MS) / 1_000) as usize;
+    let mut events = Vec::new();
+    while remaining_samples > 0 {
+        let samples = remaining_samples.min(chunk_samples);
+        remaining_samples -= samples;
+        events.extend(
+            asr_session
+                .ingest(AudioBuf::<i16, 16_000, Mono>::new(vec![0; samples]))
+                .await?,
+        );
+    }
+    Ok(events)
+}
+
+async fn record_and_forward_asr_events(
+    state: &SharedState,
+    media_state: &mut MediaSocketState,
+    call_id: &str,
+    stream_id: Option<&str>,
+    text_calls: Option<&SharedTextCallRegistry>,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    events: Vec<AsrTranscriptEvent>,
+) {
+    let conversation_events = conversation_events_from_transcripts(&events);
+    let _ = record_transcript_events(
+        state,
+        call_id,
+        events,
+        TranscriptRecordContext {
+            stream_id,
+            media_format: media_state.media_format.as_ref(),
+            capture: media_state.capture.as_mut(),
+            text_calls,
+            quality_session,
+        },
+    )
+    .await;
+    forward_conversation_events(
+        state,
+        &media_state.media_registry,
+        media_state.conversation.as_ref(),
+        call_id,
+        conversation_events,
+        Some(&media_state.quality_config),
+    )
+    .await;
 }
 
 fn conversation_events_from_transcripts(events: &[AsrTranscriptEvent]) -> Vec<TranscriptEvent> {
@@ -2343,23 +2406,21 @@ mod tests {
         .await
         .expect("speech should start");
 
-        let clear = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
-                if let Some(command) = pending_clear_command(&mut media_state).await {
-                    return command;
+                if media_registry
+                    .active_speech_playback_id(&gateway_call_id)
+                    .await
+                    .is_none()
+                {
+                    break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("failed chunk should request clear");
+        .expect("failed prebuffered chunk should release active playback");
 
-        match clear {
-            OutboundMediaCommand::Clear { playback_id, .. } => {
-                assert_eq!(playback_id, queued.playback_id)
-            }
-            other => panic!("expected clear command, got {other:?}"),
-        }
         assert!(next_outbound_command(&mut media_state).is_none());
         assert!(media_registry
             .active_speech_playback_id(&gateway_call_id)
@@ -2671,9 +2732,12 @@ mod tests {
         assert_eq!(call.ids.stream_id.as_deref(), Some("stream-1"));
         assert_eq!(call.media.encoding.as_deref(), Some("L16"));
         assert_eq!(call.media.sample_rate_hz, Some(16_000));
-        assert_eq!(call.transcripts.len(), 2);
+        assert_eq!(call.transcripts.len(), 2 + finish_pad_silence_frames());
         assert_eq!(call.transcripts[0].text, "received 16000 samples");
-        assert_eq!(call.transcripts[1].text, "received 16000 samples");
+        assert_eq!(
+            call.transcripts.last().map(|event| event.text.as_str()),
+            Some("received 28800 samples")
+        );
     }
 
     #[tokio::test]
@@ -2950,7 +3014,10 @@ mod tests {
             .expect("silence should be accepted by transport");
         }
 
-        assert_eq!(counting_asr.ingests(), 1 + endpoint_frames);
+        assert_eq!(
+            counting_asr.ingests(),
+            1 + endpoint_frames + finish_pad_silence_frames()
+        );
         assert_eq!(counting_asr.finishes(), 1);
     }
 
@@ -3061,7 +3128,10 @@ mod tests {
         .expect("resumed speech should open a fresh ASR session");
 
         assert_eq!(counting_asr.opens(), 2);
-        assert_eq!(counting_asr.ingests(), 2 + endpoint_frames);
+        assert_eq!(
+            counting_asr.ingests(),
+            2 + endpoint_frames + finish_pad_silence_frames()
+        );
 
         let guard = state.read().await;
         let call = guard.calls.get(&_gateway_call_id).expect("call exists");
@@ -3354,6 +3424,10 @@ mod tests {
     fn local_endpoint_silence_frames() -> usize {
         let frame_ms = SILENCE_KEEPALIVE_INTERVAL.as_millis() as u64;
         (VoiceQualityConfig::default().endpoint.trailing_silence_ms / frame_ms) as usize
+    }
+
+    fn finish_pad_silence_frames() -> usize {
+        local_endpoint_silence_frames()
     }
 
     #[derive(Default)]

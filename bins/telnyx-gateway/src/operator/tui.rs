@@ -667,7 +667,10 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
                 .map(|backend| backend.label().to_string())
                 .unwrap_or_else(|| "<unbound>".to_string())
         )));
-        lines.push(Line::from(format!("tts: {}", selected_call_tts_status(call))));
+        lines.push(Line::from(format!(
+            "tts: {}",
+            selected_call_tts_status(call)
+        )));
         lines.push(Line::from(format!(
             "conversation: {}",
             selected_call_conversation_status(call)

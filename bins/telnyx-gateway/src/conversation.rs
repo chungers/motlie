@@ -9,6 +9,7 @@ use motlie_voice::app::{
     CallContext, CallIds, ConversationCommand, ConversationHandler, TranscriptEvent, VoiceAppError,
 };
 use motlie_voice::telephony::CallAction;
+use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
@@ -454,61 +455,30 @@ async fn apply_conversation_command(
                         state
                             .write()
                             .await
-                            .record_conversation_proposal(gateway_call_id, response_text);
+                            .record_conversation_proposal(gateway_call_id, response_text.clone());
                         tracing::info!(
                             gateway_call_id,
                             "conversation.say.deferred_barge_in_disabled"
                         );
+                        spawn_deferred_conversation_say(
+                            state,
+                            media_registry,
+                            runtime,
+                            gateway_call_id,
+                            response_text,
+                        );
                         return Ok(());
                     }
-                    let queued = speech::queue_speech_with_request(
+                    queue_conversation_speech(
                         state,
                         media_registry,
-                        &runtime.tts,
-                        SpeechQueueRequest {
-                            tts_backend: LiveTtsBackend::default(),
-                            gateway_call_id: gateway_call_id.to_string(),
-                            text: response_text.clone(),
-                            source_label: "conversation say".to_string(),
-                            conflict_policy: SpeechConflictPolicy::CancelAndReplace,
-                        },
+                        runtime,
+                        gateway_call_id,
+                        response_text,
+                        SpeechConflictPolicy::CancelAndReplace,
                     )
-                    .await
-                    .with_context(|| format!("queue conversation response for {gateway_call_id}"));
-                    match queued {
-                        Ok(queued) => {
-                            {
-                                let mut guard = state.write().await;
-                                if let Some(replaced_playback_id) = &queued.replaced_playback_id {
-                                    guard.record_conversation_interrupted(
-                                        gateway_call_id,
-                                        replaced_playback_id,
-                                    );
-                                }
-                                guard.record_conversation_speaking(
-                                    gateway_call_id,
-                                    response_text,
-                                    queued.playback_id.clone(),
-                                );
-                            }
-                            tracing::info!(
-                                gateway_call_id,
-                                playback_id = queued.playback_id,
-                                replaced_playback_id = queued.replaced_playback_id.as_deref(),
-                                "conversation.say.queued"
-                            );
-                            Ok(())
-                        }
-                        Err(error) => {
-                            let error = format!("{error:#}");
-                            state
-                                .write()
-                                .await
-                                .record_conversation_failed(gateway_call_id, error.clone());
-                            tracing::warn!(gateway_call_id, error, "conversation.say.failed");
-                            Ok(())
-                        }
-                    }
+                    .await;
+                    Ok(())
                 }
             }
         }
@@ -539,12 +509,135 @@ async fn apply_conversation_command(
     }
 }
 
+fn spawn_deferred_conversation_say(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    response_text: String,
+) {
+    let state = state.clone();
+    let media_registry = media_registry.clone();
+    let runtime = runtime.clone();
+    let gateway_call_id = gateway_call_id.to_string();
+    tokio::spawn(async move {
+        wait_and_queue_deferred_conversation_say(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            response_text,
+        )
+        .await;
+    });
+}
+
+async fn wait_and_queue_deferred_conversation_say(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    response_text: String,
+) {
+    let timeout_ms = state
+        .read()
+        .await
+        .quality
+        .config
+        .text_call
+        .playback_wait_timeout_ms;
+    let started = Instant::now();
+    while media_registry
+        .active_speech_playback_id(gateway_call_id)
+        .await
+        .is_some()
+    {
+        if started.elapsed() >= Duration::from_millis(timeout_ms) {
+            let error = format!(
+                "deferred conversation response timed out after {timeout_ms}ms waiting for active playback"
+            );
+            state
+                .write()
+                .await
+                .record_conversation_failed(gateway_call_id, error.clone());
+            tracing::warn!(gateway_call_id, error, "conversation.say.deferred_timeout");
+            return;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    queue_conversation_speech(
+        state,
+        media_registry,
+        runtime,
+        gateway_call_id,
+        response_text,
+        SpeechConflictPolicy::Reject,
+    )
+    .await;
+}
+
+async fn queue_conversation_speech(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    response_text: String,
+    conflict_policy: SpeechConflictPolicy,
+) {
+    let queued = speech::queue_speech_with_request(
+        state,
+        media_registry,
+        &runtime.tts,
+        SpeechQueueRequest {
+            tts_backend: LiveTtsBackend::default(),
+            gateway_call_id: gateway_call_id.to_string(),
+            text: response_text.clone(),
+            source_label: "conversation say".to_string(),
+            conflict_policy,
+        },
+    )
+    .await
+    .with_context(|| format!("queue conversation response for {gateway_call_id}"));
+    match queued {
+        Ok(queued) => {
+            {
+                let mut guard = state.write().await;
+                if let Some(replaced_playback_id) = &queued.replaced_playback_id {
+                    guard.record_conversation_interrupted(gateway_call_id, replaced_playback_id);
+                }
+                guard.record_conversation_speaking(
+                    gateway_call_id,
+                    response_text,
+                    queued.playback_id.clone(),
+                );
+            }
+            tracing::info!(
+                gateway_call_id,
+                playback_id = queued.playback_id,
+                replaced_playback_id = queued.replaced_playback_id.as_deref(),
+                "conversation.say.queued"
+            );
+        }
+        Err(error) => {
+            let error = format!("{error:#}");
+            state
+                .write()
+                .await
+                .record_conversation_failed(gateway_call_id, error.clone());
+            tracing::warn!(gateway_call_id, error, "conversation.say.failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::media::SpeechCancelToken;
     use crate::operator::state::{shared_state, CallStatus, ConversationStatus, TelnyxIds};
+    use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
     use tokio::sync::mpsc;
+    use tokio::time::timeout;
 
     fn test_runtime() -> ConversationRuntime {
         ConversationRuntime::new(
@@ -553,6 +646,36 @@ mod tests {
             default_conversation_handler(),
             true,
         )
+    }
+
+    fn test_runtime_with_tts() -> ConversationRuntime {
+        let tts = Arc::new(TtsRegistry::new(
+            Arc::new(StaticTtsFactory),
+            Arc::new(StaticTtsFactory),
+        ));
+        ConversationRuntime::new(
+            TelnyxClient::new("https://api.example.test", None, true),
+            tts,
+            default_conversation_handler(),
+            true,
+        )
+    }
+
+    #[derive(Clone, Debug)]
+    struct StaticTtsFactory;
+
+    #[async_trait]
+    impl OutboundTtsFactory for StaticTtsFactory {
+        async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+            Ok(vec![TtsAudio::new(
+                vec![1_000; 2_205],
+                PIPER_SAMPLE_RATE_HZ,
+            )?])
+        }
+
+        fn label(&self) -> &'static str {
+            "static-test-tts"
+        }
     }
 
     fn failing_runtime() -> ConversationRuntime {
@@ -861,7 +984,7 @@ mod tests {
             "tts_test".to_string(),
         );
         let media_registry = SharedMediaRegistry::default();
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(16);
         media_registry
             .register_call(gateway_call_id.clone(), tx)
             .await;
@@ -870,7 +993,7 @@ mod tests {
             .start_speech(&gateway_call_id, "tts_test".to_string(), cancel.clone())
             .await
             .expect("register active speech");
-        let runtime = test_runtime();
+        let runtime = test_runtime_with_tts();
         {
             let mut guard = state.write().await;
             guard.quality.config.set_barge_in_enabled(false);
@@ -907,6 +1030,24 @@ mod tests {
             call.conversation.last_assistant_text.as_deref(),
             Some("I heard: hello")
         );
+        drop(guard);
+
+        media_registry
+            .finish_speech(&gateway_call_id, "tts_test")
+            .await;
+        let command = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("deferred speech should enqueue after prior playback finishes")
+            .expect("deferred speech should emit a media command");
+        match command {
+            crate::media::OutboundMediaCommand::Frame(frame) => {
+                assert_ne!(frame.playback_id, "tts_test");
+            }
+            other => panic!("expected deferred frame, got {other:?}"),
+        }
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Speaking);
     }
 
     #[tokio::test]

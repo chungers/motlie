@@ -309,7 +309,8 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
         playback_id: &job.playback_id,
         cancel: &job.cancel,
     };
-    let mut queued_frames = 0usize;
+    let mut prepared_chunks = Vec::new();
+    let mut total_frames = 0usize;
     let mut model_chunks = 0usize;
     let synthesis_started_at = Instant::now();
     let mut emitted_first_synthesis = false;
@@ -320,7 +321,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
         let Some(audio_chunks) =
             synthesize_text_chunk_with_fallback(&synthesis_context, text_chunk_index, text_chunk)
                 .await
-                .map_err(|error| SpeechJobFailure::new(error, queued_frames))?
+                .map_err(|error| SpeechJobFailure::new(error, 0))?
         else {
             return Ok(SpeechJobOutcome::NoAudioOrCanceled);
         };
@@ -348,20 +349,18 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
             return Ok(SpeechJobOutcome::NoAudioOrCanceled);
         }
         let Some(synthesis) = concatenate_audio_chunks(job.tts_backend, audio_chunks)
-            .map_err(|error| SpeechJobFailure::new(error, queued_frames))?
+            .map_err(|error| SpeechJobFailure::new(error, 0))?
         else {
             continue;
         };
 
         let packetize_started_at = Instant::now();
-        let packets =
+        let frames =
             packetize_tts_samples(synthesis.samples_i16, synthesis.sample_rate_hz, job.media)
-                .map_err(|error| SpeechJobFailure::new(error, queued_frames))?;
-        let chunk_frames = packets.len();
-        if chunk_frames == 0 {
+                .map_err(|error| SpeechJobFailure::new(error, 0))?;
+        if frames.is_empty() {
             continue;
         }
-
         if !emitted_first_packetize {
             emitted_first_packetize = true;
             emit_speech_span(
@@ -375,11 +374,28 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                     "playback_id": job.playback_id.as_str(),
                     "tts_backend": job.tts_backend.label(),
                     "text_chunk_index": text_chunk_index,
-                    "frames": chunk_frames,
+                    "frames": frames.len(),
                 }),
             )
             .await;
         }
+        total_frames = total_frames.saturating_add(frames.len());
+        model_chunks = model_chunks.saturating_add(synthesis.audio_chunk_count);
+        prepared_chunks.push(PreparedSpeechChunk {
+            text_chunk_index,
+            audio_chunk_count: synthesis.audio_chunk_count,
+            sample_rate_hz: synthesis.sample_rate_hz,
+            frames,
+        });
+    }
+
+    if total_frames == 0 || job.cancel.is_canceled() {
+        return Ok(SpeechJobOutcome::NoAudioOrCanceled);
+    }
+
+    let mut queued_frames = 0usize;
+    for chunk in prepared_chunks {
+        let chunk_frames = chunk.frames.len();
         let mut first_packet_for_playback = queued_frames == 0;
         job.state.write().await.mark_tts_frames_queued(
             &job.gateway_call_id,
@@ -387,19 +403,18 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
             chunk_frames,
         );
         queued_frames = queued_frames.saturating_add(chunk_frames);
-        model_chunks = model_chunks.saturating_add(synthesis.audio_chunk_count);
         tracing::info!(
             gateway_call_id = job.gateway_call_id.as_str(),
             playback_id = job.playback_id.as_str(),
-            text_chunk_index,
-            audio_chunks = synthesis.audio_chunk_count,
-            model_sample_rate_hz = synthesis.sample_rate_hz,
+            text_chunk_index = chunk.text_chunk_index,
+            audio_chunks = chunk.audio_chunk_count,
+            model_sample_rate_hz = chunk.sample_rate_hz,
             frames = chunk_frames,
             total_frames = queued_frames,
             "tts.speak.chunk_queued"
         );
 
-        for payload in packets {
+        for payload in chunk.frames {
             if job.cancel.is_canceled() {
                 return Ok(SpeechJobOutcome::NoAudioOrCanceled);
             }
@@ -421,7 +436,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
         }
     }
 
-    if queued_frames > 0 && !job.cancel.is_canceled() {
+    if !job.cancel.is_canceled() {
         emit_speech_span(
             job,
             "tts.synthesis_full",
@@ -455,6 +470,13 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
         return Ok(SpeechJobOutcome::MarkQueued);
     }
     Ok(SpeechJobOutcome::NoAudioOrCanceled)
+}
+
+struct PreparedSpeechChunk {
+    text_chunk_index: usize,
+    audio_chunk_count: usize,
+    sample_rate_hz: u32,
+    frames: Vec<Vec<u8>>,
 }
 
 async fn emit_speech_span(
@@ -761,7 +783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queue_speech_enqueues_first_chunk_before_second_chunk_finishes() {
+    async fn queue_speech_waits_for_all_chunks_before_enqueuing_frames() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = {
             let mut guard = state.write().await;
@@ -778,7 +800,7 @@ mod tests {
             )
         };
         let media_registry = SharedMediaRegistry::default();
-        let (tx, mut rx) = mpsc::channel(8);
+        let (tx, mut rx) = mpsc::channel(16);
         media_registry
             .register_call(gateway_call_id.clone(), tx)
             .await;
@@ -806,16 +828,15 @@ mod tests {
         timeout(Duration::from_secs(1), kokoro.wait_for_second_call())
             .await
             .expect("second text chunk synthesis should start");
-        let first_command = timeout(Duration::from_millis(200), rx.recv())
-            .await
-            .expect("first chunk should be queued before second chunk is released")
-            .expect("media command should be present");
-        match first_command {
-            OutboundMediaCommand::Frame(frame) => assert_eq!(frame.playback_id, queued.playback_id),
-            other => panic!("expected first queued command to be a frame, got {other:?}"),
-        }
+        assert!(
+            timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "no frame should be queued until all chunks are synthesized"
+        );
 
         kokoro.release_second_call();
+        let mut frame_count = 0usize;
         let mut saw_mark = false;
         for _ in 0..16 {
             let Some(command) = timeout(Duration::from_secs(1), rx.recv())
@@ -824,12 +845,20 @@ mod tests {
             else {
                 break;
             };
-            if let OutboundMediaCommand::Mark { playback_id } = command {
-                assert_eq!(playback_id, queued.playback_id);
-                saw_mark = true;
-                break;
+            match command {
+                OutboundMediaCommand::Frame(frame) => {
+                    assert_eq!(frame.playback_id, queued.playback_id);
+                    frame_count += 1;
+                }
+                OutboundMediaCommand::Mark { playback_id } => {
+                    assert_eq!(playback_id, queued.playback_id);
+                    saw_mark = true;
+                    break;
+                }
+                other => panic!("unexpected command: {other:?}"),
             }
         }
+        assert_eq!(frame_count, 10);
         assert!(
             saw_mark,
             "speech job should enqueue a mark after all chunks"
