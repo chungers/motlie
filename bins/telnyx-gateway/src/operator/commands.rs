@@ -473,6 +473,10 @@ pub enum QualityCommand {
         #[command(subcommand)]
         command: QualityTextCallCommand,
     },
+    Tts {
+        #[command(subcommand)]
+        command: QualityTtsCommand,
+    },
     Logging {
         #[command(subcommand)]
         command: QualityLoggingCommand,
@@ -567,6 +571,12 @@ pub enum QualityTextCallCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum QualityTtsCommand {
+    Status,
+    Chunking { state: OnOffArg },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum QualityLoggingCommand {
     Status,
     On { path: PathBuf },
@@ -592,6 +602,10 @@ pub enum QualityBargeInCommand {
     Status,
     On,
     Off,
+    SpeechOnset { state: OnOffArg },
+    PartialAsr { state: OnOffArg },
+    FinalAsr { state: OnOffArg },
+    ClearTimeoutMs { ms: u64 },
 }
 
 #[async_trait]
@@ -2059,6 +2073,7 @@ async fn quality_command(
         QualityCommand::Endpoint { command } => quality_endpoint_command(context, command).await,
         QualityCommand::Speech { command } => quality_speech_command(context, command).await,
         QualityCommand::TextCall { command } => quality_text_call_command(context, command).await,
+        QualityCommand::Tts { command } => quality_tts_command(context, command).await,
         QualityCommand::Logging { command } => quality_logging_command(context, command).await,
         QualityCommand::Judge { command } => quality_judge_command(context, command).await,
         QualityCommand::BargeIn { command } => quality_barge_in_command(context, command).await,
@@ -2105,6 +2120,7 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             "text_call.max_active_turns={}",
             quality.config.text_call.max_active_turns
         ),
+        format!("tts.chunking_enabled={}", quality.config.tts.chunking_enabled),
     ];
     Ok(CommandOutput {
         lines,
@@ -2242,6 +2258,28 @@ async fn quality_text_call_command(
         QualityTextCallCommand::CallbackTimeoutMs { ms } => {
             mutate_quality_config(context, |config| {
                 Ok(config.set_text_call_callback_timeout_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_tts_command(
+    context: &mut GatewayContext,
+    command: QualityTtsCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityTtsCommand::Status => {
+            let guard = context.state.read().await;
+            let tts = &guard.quality.config.tts;
+            Ok(CommandOutput::text(format!(
+                "chunking_enabled={}",
+                tts.chunking_enabled
+            )))
+        }
+        QualityTtsCommand::Chunking { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_tts_chunking_enabled(state.enabled()))
             })
             .await
         }
@@ -2403,6 +2441,28 @@ async fn quality_barge_in_command(
         }
         QualityBargeInCommand::On => set_barge_in_enabled(context, true, "quality").await,
         QualityBargeInCommand::Off => set_barge_in_enabled(context, false, "quality").await,
+        QualityBargeInCommand::SpeechOnset { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_speech_onset_cancel_enabled(state.enabled()))
+            })
+            .await
+        }
+        QualityBargeInCommand::PartialAsr { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_partial_asr_cancel_enabled(state.enabled()))
+            })
+            .await
+        }
+        QualityBargeInCommand::FinalAsr { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_final_asr_cancel_enabled(state.enabled()))
+            })
+            .await
+        }
+        QualityBargeInCommand::ClearTimeoutMs { ms } => {
+            mutate_quality_config(context, |config| Ok(config.set_barge_in_clear_timeout_ms(ms)))
+                .await
+        }
     }
 }
 
@@ -2725,12 +2785,18 @@ fn quality_help() -> String {
         "quality text-call playback-wait-timeout-ms <ms>",
         "quality text-call latest-response-wins on|off",
         "quality text-call callback-timeout-ms <ms>",
+        "quality tts status",
+        "quality tts chunking on|off        bool default=true applies=new_playback_request",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off",
         "quality logging redaction-mode metrics-only|hashed-text|redacted-text|sensitive-plaintext",
         "quality judge status|on|off",
-        "quality barge-in status|on|off",
+        "quality barge-in status|on|off     bool default=true applies=next_asr_session",
+        "quality barge-in speech-onset on|off  bool default=true applies=next_asr_session",
+        "quality barge-in partial-asr on|off   bool default=true applies=next_asr_session",
+        "quality barge-in final-asr on|off     bool default=true applies=next_asr_session",
+        "quality barge-in clear-timeout-ms <ms> range=100..10000 default=1000 applies=new_turn",
         "",
         "M6 quality commands use the existing line-oriented operator dispatcher.",
         "Transcript text remains disabled unless explicitly enabled.",

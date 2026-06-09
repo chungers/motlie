@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
@@ -10,9 +11,9 @@ use motlie_voice::app::{
 use motlie_voice::telephony::CallAction;
 
 use crate::call_control::TelnyxClient;
-use crate::media::SharedMediaRegistry;
+use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{ConversationMode, LogLevel, SharedState};
-use crate::quality::BargeInQualityConfig;
+use crate::quality::{BargeInQualityConfig, RedactionMode, VoiceQualityConfig};
 use crate::speech;
 use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
@@ -112,13 +113,14 @@ pub async fn handle_transcript_event(
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
     event: TranscriptEvent,
+    quality_config: Option<&VoiceQualityConfig>,
 ) -> anyhow::Result<()> {
     let transcript_text = event.text().trim().to_string();
     if transcript_text.is_empty() {
         return Ok(());
     }
 
-    let Some(snapshot) = conversation_snapshot(state, gateway_call_id).await else {
+    let Some(snapshot) = conversation_snapshot(state, gateway_call_id, quality_config).await else {
         return Ok(());
     };
     if !snapshot.attached {
@@ -134,6 +136,8 @@ pub async fn handle_transcript_event(
                 media_registry,
                 gateway_call_id,
                 BargeInTrigger::Partial,
+                snapshot.config_id.clone(),
+                snapshot.redaction_mode,
             )
             .await?;
         }
@@ -151,6 +155,8 @@ pub async fn handle_transcript_event(
             media_registry,
             gateway_call_id,
             BargeInTrigger::Final,
+            snapshot.config_id.clone(),
+            snapshot.redaction_mode,
         )
         .await?;
     }
@@ -200,8 +206,9 @@ pub async fn handle_speech_onset(
     media_registry: &SharedMediaRegistry,
     _runtime: &ConversationRuntime,
     gateway_call_id: &str,
+    quality_config: Option<&VoiceQualityConfig>,
 ) -> anyhow::Result<()> {
-    let Some(snapshot) = conversation_snapshot(state, gateway_call_id).await else {
+    let Some(snapshot) = conversation_snapshot(state, gateway_call_id, quality_config).await else {
         return Ok(());
     };
     if !snapshot.attached || !barge_in_allows(&snapshot.barge_in, BargeInTrigger::SpeechOnset) {
@@ -213,6 +220,8 @@ pub async fn handle_speech_onset(
         media_registry,
         gateway_call_id,
         BargeInTrigger::SpeechOnset,
+        snapshot.config_id.clone(),
+        snapshot.redaction_mode,
     )
     .await
 }
@@ -240,6 +249,14 @@ impl BargeInTrigger {
             Self::SpeechOnset => "conversation speech-onset barge-in",
         }
     }
+
+    fn cancel_span_name(self) -> &'static str {
+        match self {
+            Self::Partial => "barge_in.partial_to_cancel_request",
+            Self::Final => "barge_in.final_to_cancel_request",
+            Self::SpeechOnset => "barge_in.speech_onset_to_cancel_request",
+        }
+    }
 }
 
 fn barge_in_allows(config: &BargeInQualityConfig, trigger: BargeInTrigger) -> bool {
@@ -264,6 +281,8 @@ async fn cancel_active_speech_for_barge_in(
     media_registry: &SharedMediaRegistry,
     gateway_call_id: &str,
     trigger: BargeInTrigger,
+    config_id: String,
+    redaction_mode: RedactionMode,
 ) -> anyhow::Result<()> {
     if media_registry
         .active_speech_playback_id(gateway_call_id)
@@ -273,11 +292,13 @@ async fn cancel_active_speech_for_barge_in(
         return Ok(());
     }
 
-    let playback_id = match speech::cancel_speech(
+    let cancel_started_at = Instant::now();
+    let playback_id = match speech::cancel_speech_with_reason(
         state,
         media_registry,
         gateway_call_id,
         trigger.source_label(),
+        SpeechClearReason::BargeIn,
     )
     .await
     {
@@ -286,6 +307,27 @@ async fn cancel_active_speech_for_barge_in(
         Err(error) => return Err(error),
     };
 
+    {
+        let payload = serde_json::json!({
+            "playback_id": playback_id,
+            "trigger": trigger.as_str(),
+        });
+        let payload = match payload {
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        state.write().await.emit_quality_span_finished(
+            gateway_call_id,
+            config_id,
+            redaction_mode,
+            trigger.cancel_span_name(),
+            "barge_in",
+            cancel_started_at.elapsed(),
+            false,
+            true,
+            payload,
+        );
+    }
     state
         .write()
         .await
@@ -306,6 +348,8 @@ struct ConversationSnapshot {
     mode: ConversationMode,
     call_control_id: String,
     barge_in: BargeInQualityConfig,
+    config_id: String,
+    redaction_mode: RedactionMode,
     context: CallContext,
 }
 
@@ -319,6 +363,7 @@ struct ConversationCommandTarget {
 async fn conversation_snapshot(
     state: &SharedState,
     gateway_call_id: &str,
+    quality_config: Option<&VoiceQualityConfig>,
 ) -> Option<ConversationSnapshot> {
     let guard = state.read().await;
     let call = guard.calls.get(gateway_call_id)?;
@@ -331,11 +376,28 @@ async fn conversation_snapshot(
     if let Some(text) = &call.conversation.last_assistant_text {
         custom_state.insert("last_assistant_text".to_string(), text.clone());
     }
+    let (barge_in, config_id, redaction_mode) = quality_config
+        .map(|quality_config| {
+            (
+                quality_config.barge_in.clone(),
+                quality_config.config_id(),
+                quality_config.logging.redaction_mode,
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                guard.quality.config.barge_in.clone(),
+                guard.quality.config_id.clone(),
+                guard.quality.config.logging.redaction_mode,
+            )
+        });
     Some(ConversationSnapshot {
         attached: call.conversation.attached,
         mode: call.conversation.mode,
         call_control_id: call.ids.call_control_id.clone(),
-        barge_in: guard.quality.config.barge_in.clone(),
+        barge_in,
+        config_id,
+        redaction_mode,
         context: CallContext {
             ids: Some(CallIds {
                 provider_call_id: call.ids.call_control_id.clone(),
@@ -599,6 +661,7 @@ mod tests {
                 text: "hello".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
+            None,
         )
         .await
         .expect("disabled handler should not fail media");
@@ -674,6 +737,7 @@ mod tests {
                 text: "hello".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
+            None,
         )
         .await
         .expect("partial barge-in should cancel active speech");
@@ -713,7 +777,7 @@ mod tests {
             .expect("register active speech");
         let runtime = test_runtime();
 
-        handle_speech_onset(&state, &media_registry, &runtime, &gateway_call_id)
+        handle_speech_onset(&state, &media_registry, &runtime, &gateway_call_id, None)
             .await
             .expect("speech onset barge-in should cancel active speech");
 
@@ -767,6 +831,7 @@ mod tests {
                 text: "hello".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
+            None,
         )
         .await
         .expect("disabled barge-in should not cancel active speech");
@@ -819,6 +884,7 @@ mod tests {
                 text: "hello".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
+            None,
         )
         .await
         .expect("disabled barge-in should not fail overlapping final turn");
@@ -872,6 +938,7 @@ mod tests {
                     text: text.to_string(),
                     update: motlie_model::TranscriptionUpdate::default(),
                 },
+                None,
             )
             .await
             .expect("non-meaningful partial should not cut speech");
@@ -920,6 +987,7 @@ mod tests {
                 text: "hello".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
+            None,
         )
         .await
         .expect("partial should interrupt active speech");
@@ -932,6 +1000,7 @@ mod tests {
                 text: "hello there".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
+            None,
         )
         .await
         .expect("final should still regenerate through handler");
@@ -965,6 +1034,7 @@ mod tests {
                 text: "hello".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
+            None,
         )
         .await
         .expect("handler error should remain conversation-scoped");

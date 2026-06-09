@@ -216,6 +216,19 @@ impl TextCallQualityConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TtsQualityConfig {
+    pub chunking_enabled: bool,
+}
+
+impl Default for TtsQualityConfig {
+    fn default() -> Self {
+        Self {
+            chunking_enabled: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BargeInQualityConfig {
     pub enabled: bool,
     pub speech_onset_cancel_enabled: bool,
@@ -314,6 +327,7 @@ pub struct VoiceQualityConfig {
     pub endpoint: EndpointQualityConfig,
     pub asr: AsrQualityConfig,
     pub text_call: TextCallQualityConfig,
+    pub tts: TtsQualityConfig,
     pub barge_in: BargeInQualityConfig,
     pub logging: LoggingQualityConfig,
     pub quality_judge: QualityJudgeConfig,
@@ -343,6 +357,7 @@ impl VoiceQualityConfig {
             endpoint: EndpointQualityConfig::default(),
             asr: AsrQualityConfig::default(),
             text_call: TextCallQualityConfig::default(),
+            tts: TtsQualityConfig::default(),
             barge_in: BargeInQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
             quality_judge: QualityJudgeConfig::default(),
@@ -622,24 +637,29 @@ impl VoiceQualityConfig {
                 self.set_text_call_playback_wait_timeout_ms(value);
             }
             if let Some(value) = text_call.latest_response_wins {
-                self.text_call.latest_response_wins = value;
+                self.set_text_call_latest_response_wins(value);
             }
             if let Some(value) = text_call.callback_timeout_ms {
                 self.set_text_call_callback_timeout_ms(value);
             }
         }
+        if let Some(tts) = patch.tts {
+            if let Some(value) = tts.chunking_enabled {
+                self.set_tts_chunking_enabled(value);
+            }
+        }
         if let Some(barge_in) = patch.barge_in {
             if let Some(value) = barge_in.enabled {
-                self.barge_in.enabled = value;
+                self.set_barge_in_enabled(value);
             }
             if let Some(value) = barge_in.speech_onset_cancel_enabled {
-                self.barge_in.speech_onset_cancel_enabled = value;
+                self.set_barge_in_speech_onset_cancel_enabled(value);
             }
             if let Some(value) = barge_in.partial_asr_cancel_enabled {
-                self.barge_in.partial_asr_cancel_enabled = value;
+                self.set_barge_in_partial_asr_cancel_enabled(value);
             }
             if let Some(value) = barge_in.final_asr_cancel_enabled {
-                self.barge_in.final_asr_cancel_enabled = value;
+                self.set_barge_in_final_asr_cancel_enabled(value);
             }
             if let Some(value) = barge_in.clear_timeout_ms {
                 self.set_barge_in_clear_timeout_ms(value);
@@ -902,10 +922,59 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_tts_chunking_enabled(&mut self, value: bool) -> QualityMutationOutcome {
+        self.tts.chunking_enabled = value;
+        self.outcome(
+            "tts.chunking_enabled",
+            value,
+            ApplyBoundary::NewPlaybackRequest,
+            false,
+        )
+    }
+
     pub fn set_barge_in_enabled(&mut self, value: bool) -> QualityMutationOutcome {
         self.barge_in.enabled = value;
         self.outcome(
             "barge_in.enabled",
+            value,
+            ApplyBoundary::NextAsrSession,
+            false,
+        )
+    }
+
+    pub fn set_barge_in_speech_onset_cancel_enabled(
+        &mut self,
+        value: bool,
+    ) -> QualityMutationOutcome {
+        self.barge_in.speech_onset_cancel_enabled = value;
+        self.outcome(
+            "barge_in.speech_onset_cancel_enabled",
+            value,
+            ApplyBoundary::NextAsrSession,
+            false,
+        )
+    }
+
+    pub fn set_barge_in_partial_asr_cancel_enabled(
+        &mut self,
+        value: bool,
+    ) -> QualityMutationOutcome {
+        self.barge_in.partial_asr_cancel_enabled = value;
+        self.outcome(
+            "barge_in.partial_asr_cancel_enabled",
+            value,
+            ApplyBoundary::NextAsrSession,
+            false,
+        )
+    }
+
+    pub fn set_barge_in_final_asr_cancel_enabled(
+        &mut self,
+        value: bool,
+    ) -> QualityMutationOutcome {
+        self.barge_in.final_asr_cancel_enabled = value;
+        self.outcome(
+            "barge_in.final_asr_cancel_enabled",
             value,
             ApplyBoundary::NextAsrSession,
             false,
@@ -1141,6 +1210,8 @@ pub struct QualityConfigPatch {
     #[serde(default)]
     pub text_call: Option<TextCallQualityConfigPatch>,
     #[serde(default)]
+    pub tts: Option<TtsQualityConfigPatch>,
+    #[serde(default)]
     pub barge_in: Option<BargeInQualityConfigPatch>,
     #[serde(default)]
     pub logging: Option<LoggingQualityConfigPatch>,
@@ -1182,6 +1253,11 @@ pub struct TextCallQualityConfigPatch {
     pub playback_wait_timeout_ms: Option<u64>,
     pub latest_response_wins: Option<bool>,
     pub callback_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct TtsQualityConfigPatch {
+    pub chunking_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
