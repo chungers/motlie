@@ -63,6 +63,8 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
     let event_store_path = DaemonState::event_store_path_for_socket(&socket);
     let state = Arc::new(Mutex::new(DaemonState::with_event_store(event_store_path)?));
     let output_audit_task = DaemonState::spawn_output_audit_task(Arc::clone(&state)).await?;
+    let channel_delivery_task =
+        DaemonState::spawn_channel_delivery_task(Arc::clone(&state)).await?;
     let (stop_tx, mut stop_rx) = watch::channel(false);
 
     loop {
@@ -87,6 +89,8 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
 
     output_audit_task.abort();
     let _ = output_audit_task.await;
+    channel_delivery_task.abort();
+    let _ = channel_delivery_task.await;
     shutdown_state(&state).await;
     let _ = fs::remove_file(&socket);
     Ok(())

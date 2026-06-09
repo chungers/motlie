@@ -628,6 +628,7 @@ impl HostHandle {
         let mut attached_clients = 0usize;
         let mut writable_clients = 0usize;
         let mut latest_client_activity = None;
+        let mut latest_writable_client_activity = None;
 
         for client in clients
             .into_iter()
@@ -636,6 +637,11 @@ impl HostHandle {
             attached_clients += 1;
             if !client.readonly {
                 writable_clients += 1;
+                latest_writable_client_activity = Some(
+                    latest_writable_client_activity
+                        .unwrap_or(client.activity)
+                        .max(client.activity),
+                );
             }
             latest_client_activity = Some(
                 latest_client_activity
@@ -649,6 +655,7 @@ impl HostHandle {
             attached_clients,
             writable_clients,
             latest_client_activity,
+            latest_writable_client_activity,
         })
     }
 
@@ -3465,6 +3472,7 @@ mod tests {
         assert_eq!(activity.attached_clients, 2);
         assert_eq!(activity.writable_clients, 1);
         assert_eq!(activity.latest_client_activity, Some(120));
+        assert_eq!(activity.latest_writable_client_activity, Some(100));
     }
 
     #[tokio::test]
@@ -3479,6 +3487,7 @@ mod tests {
         assert_eq!(activity.attached_clients, 0);
         assert_eq!(activity.writable_clients, 0);
         assert_eq!(activity.latest_client_activity, None);
+        assert_eq!(activity.latest_writable_client_activity, None);
     }
 
     #[tokio::test]

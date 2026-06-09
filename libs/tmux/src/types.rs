@@ -1072,6 +1072,7 @@ pub struct SessionClientActivity {
     pub attached_clients: usize,
     pub writable_clients: usize,
     pub latest_client_activity: Option<u64>,
+    pub latest_writable_client_activity: Option<u64>,
 }
 
 /// Pane geometry and scrollback state for reflow detection (DC20, Phase 1.9b).
