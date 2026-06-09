@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -164,6 +164,40 @@ impl QualityEvent {
             payload.insert("text".to_string(), Value::String(text.to_string()));
         }
         Self::new(context, "text_call.caller_turn.sent", payload)
+    }
+
+    pub fn span_finished(
+        context: QualityEventContext,
+        span_name: impl Into<String>,
+        category: impl Into<String>,
+        duration: Duration,
+        critical_path: bool,
+        concurrent: bool,
+        mut payload: Map<String, Value>,
+    ) -> Self {
+        payload.insert("span".to_string(), Value::String(span_name.into()));
+        payload.insert("category".to_string(), Value::String(category.into()));
+        payload.insert(
+            "duration_ms".to_string(),
+            Value::Number(serde_json::Number::from(duration.as_millis() as u64)),
+        );
+        payload.insert("critical_path".to_string(), Value::Bool(critical_path));
+        payload.insert("concurrent".to_string(), Value::Bool(concurrent));
+        Self::new(context, "voice.span.finished", payload)
+    }
+
+    pub fn inbound_transport_rollup(
+        context: QualityEventContext,
+        payload: Map<String, Value>,
+    ) -> Self {
+        Self::new(context, "media.inbound_transport.rollup", payload)
+    }
+
+    pub fn outbound_pacing_rollup(
+        context: QualityEventContext,
+        payload: Map<String, Value>,
+    ) -> Self {
+        Self::new(context, "media.outbound_pacing.rollup", payload)
     }
 
     #[cfg(test)]
@@ -367,6 +401,46 @@ mod tests {
         assert_eq!(event.payload["text_words"], 3);
         assert_eq!(event.payload["transcript_text_included"], false);
         assert!(!event.payload.contains_key("text"));
+    }
+
+    #[test]
+    fn span_and_rollup_events_use_normalized_payloads() {
+        let context = QualityEventContext::new(
+            2,
+            "run_test",
+            Some("gwc_test".to_string()),
+            "cfg_test",
+            RedactionMode::MetricsOnly,
+        );
+        let span = QualityEvent::span_finished(
+            context.clone(),
+            "asr.endpoint_wait",
+            "endpointing",
+            Duration::from_millis(123),
+            true,
+            false,
+            map_from_value(json!({ "asr_session_id": "asr_test" })),
+        );
+        assert_eq!(span.event, "voice.span.finished");
+        assert_eq!(span.payload["span"], "asr.endpoint_wait");
+        assert_eq!(span.payload["category"], "endpointing");
+        assert_eq!(span.payload["duration_ms"], 123);
+        assert_eq!(span.payload["critical_path"], true);
+        assert_eq!(span.payload["concurrent"], false);
+
+        let inbound = QualityEvent::inbound_transport_rollup(
+            context.clone(),
+            map_from_value(json!({ "packets_total": 12 })),
+        );
+        assert_eq!(inbound.event, "media.inbound_transport.rollup");
+        assert_eq!(inbound.payload["packets_total"], 12);
+
+        let outbound = QualityEvent::outbound_pacing_rollup(
+            context,
+            map_from_value(json!({ "underrun_count": 1 })),
+        );
+        assert_eq!(outbound.event, "media.outbound_pacing.rollup");
+        assert_eq!(outbound.payload["underrun_count"], 1);
     }
 
     #[test]

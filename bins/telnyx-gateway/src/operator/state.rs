@@ -2,16 +2,18 @@ use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
 use crate::quality::{
-    ActiveAsrQualitySession, QualityEvent, QualityEventContext, QualityEventSink,
+    ActiveAsrQualitySession, QualityEvent, QualityEventContext, QualityEventSink, RedactionMode,
     VoiceQualityConfig,
 };
 
@@ -58,6 +60,17 @@ impl Default for QualityRuntimeState {
             event_sequence: 0,
         }
     }
+}
+
+pub struct QualitySpanEmission {
+    pub config_id: String,
+    pub redaction_mode: RedactionMode,
+    pub span_name: &'static str,
+    pub category: &'static str,
+    pub duration: Duration,
+    pub critical_path: bool,
+    pub concurrent: bool,
+    pub payload: Map<String, Value>,
 }
 
 impl QualityRuntimeState {
@@ -660,6 +673,68 @@ impl GatewayState {
             turn_id.to_string(),
             text,
             include_transcript_text,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn emit_quality_span_finished(&mut self, gateway_call_id: &str, span: QualitySpanEmission) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::span_finished(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                span.config_id,
+                span.redaction_mode,
+            ),
+            span.span_name,
+            span.category,
+            span.duration,
+            span.critical_path,
+            span.concurrent,
+            span.payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn emit_quality_inbound_transport_rollup(
+        &mut self,
+        gateway_call_id: &str,
+        config_id: String,
+        redaction_mode: RedactionMode,
+        payload: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::inbound_transport_rollup(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                config_id,
+                redaction_mode,
+            ),
+            payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn emit_quality_outbound_pacing_rollup(
+        &mut self,
+        gateway_call_id: &str,
+        config_id: String,
+        redaction_mode: RedactionMode,
+        payload: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::outbound_pacing_rollup(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                config_id,
+                redaction_mode,
+            ),
+            payload,
         );
         self.quality.event_sink.emit(event);
     }
