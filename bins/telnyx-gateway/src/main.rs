@@ -98,7 +98,10 @@ async fn main() -> anyhow::Result<()> {
 
     let state = shared_state(cli.bind);
     {
-        let quality_config = initial_quality_config(&cli)?;
+        let mut quality_config = initial_quality_config(&cli)?;
+        if cli.conversation_smoke_test {
+            quality_config.set_barge_in_enabled(false);
+        }
         let mut guard = state.write().await;
         guard.set_quality_config(quality_config);
         guard.log(

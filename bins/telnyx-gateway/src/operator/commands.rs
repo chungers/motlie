@@ -1842,6 +1842,9 @@ async fn conversation_command(
         ConversationCommand::SmokeTest { state } => {
             let enabled = state.enabled();
             context.conversation.set_smoke_test_enabled(enabled);
+            if enabled {
+                set_barge_in_enabled(context, false, "conversation smoke-test").await?;
+            }
             let label = if enabled { "on" } else { "off" };
             context
                 .state
@@ -4242,7 +4245,7 @@ mod tests {
     async fn conversation_smoke_test_command_toggles_echo_handler() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
-        let context = GatewayContext::new(state, telnyx);
+        let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let status = engine.run_line("status").await.expect("status");
@@ -4257,6 +4260,8 @@ mod tests {
             .expect("enable smoke test");
         assert_eq!(enabled.lines, vec!["conversation smoke-test: on"]);
         assert!(engine.context().conversation.smoke_test_enabled());
+        assert!(!engine.context().conversation.barge_in_enabled());
+        assert!(!state.read().await.quality.config.barge_in.enabled);
 
         let disabled = engine
             .run_line("conversation smoke-test off")
