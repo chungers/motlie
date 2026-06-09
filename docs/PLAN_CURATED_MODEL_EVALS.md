@@ -4,8 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-09 | @codex-399-impl | Addressed v2 R1 design review with tasks for feature-light per-cell builds, accelerator probes/use proof, concrete coverage schema, quant grouping, portable metrics/gates, host identity, and Metal GGUF verification. |
 | 2026-06-09 | @codex-399-impl | Added v2 review-first plan for decentralized full-matrix distributed evals, result PR aggregation, artifact provisioning, GGUF toolchain repair, first-class tool-use, and smoke/enriched depth. |
-| 2026-06-07 | @codex-399-impl | Fixed Metal review items A-C and recorded the Metal platform population fast-follow decision. |
+| 2026-06-07 | @codex-399-impl | Fixed Metal review items A-C and recorded the then-current Metal platform population decision. |
 | 2026-06-06 | @codex-399-impl | Added durable GB10 Linux/AArch64 build flags, NVIDIA platform inventory, and dgx-spark/cuda-workstation profile gates. |
 | 2026-06-06 | @codex-399-impl | Incorporated early pattern review: sectioned result schema, explicit runner context, runnable embeddings path, support namespace, canonical TOML capability values, and platform blocker tracking. |
 | 2026-06-06 | @codex-399-impl | Updated plan for the single `bins/evals` binary crate and marked the exemplar module scaffolding now added. |
@@ -26,6 +27,8 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: PR-Based Aggregation And Reports.
 - [x] Post the v2 DESIGN/PLAN summary to #399 and Discussion #404.
   DESIGN reference: V2 Distributed Driver.
+- [x] Incorporate R1 needs-work review from AMD, CUDA, and Metal reviewers.
+  DESIGN reference: Accelerator Detection And Use Proof.
 - [ ] Wait for all three reviewer design approvals before coding.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
 
@@ -71,6 +74,8 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: Decision.
 - [ ] Implement `report --aggregate 'evals/results/**/results.jsonl' --output <path>` for consolidated cross-host coverage.
   DESIGN reference: PR-Based Aggregation And Reports.
+- [ ] Validate aggregate input records against the non-optional coverage schema before reporting.
+  DESIGN reference: Skip/Block And Coverage Schema.
 
 ## Phase 4: Batch Example Migration
 
@@ -94,33 +99,49 @@ usability across x86 CPU, GB10/CUDA, and Metal.
 - [ ] targeted example checks for each migrated compatibility target
 - [x] targeted `evals` checks after the CLI exists
 
-## Platform Follow-Up
+## Platform Requirements
 
 - GB10/Linux AArch64 now uses repo-wired `+fp16,+fhm` target features through
   `.cargo/config.toml`, so default `cargo build -p evals --features ...` and
   `cargo run -p evals --features ...` commands no longer require manual
   `RUSTFLAGS`.
-- CUDA-class profiles now have initial scenario gates and `PlatformCollector`
-  records NVIDIA identity through `nvidia-smi` when available. Future profile
-  hardening can add GPU memory/utilization acceptance gates once result policy
-  requires them.
-- D decision: Metal device population stays in `PlatformCollector` and can land
-  as a focused fast-follow before batch migration; A-C are fixed in the
-  exemplar first so the schema and resource acceptance semantics are stable.
+- CUDA and Metal accelerator detection, inventory, and per-cell use proof are
+  first-class v2 deliverables, not follow-up work. The driver must not rely on
+  arch/OS heuristics alone for accelerator profile selection.
+  DESIGN reference: Accelerator Detection And Use Proof.
+- Cross-platform resource gates must report `passed`, `failed`, `skipped`, or
+  `blocked`; unavailable platform metrics cannot silently pass.
+  DESIGN reference: Eval Depth And Metrics.
 
 ## Phase 6: V2 Snapshot And Host-Self-Selecting Driver
 
-- [ ] Add a pinned eval snapshot manifest under `evals/snapshots/` for the curated bundle x scenario x depth matrix.
+- [ ] Add a pinned eval snapshot manifest under `evals/snapshots/` for the curated bundle x scenario x depth x checkpoint-format x quantization matrix.
   DESIGN reference: Pinned Eval Snapshot.
-- [ ] Add `bins/evals/src/snapshot.rs` to parse and validate snapshot id, git SHA, bundles, scenarios, depth, feature groups, artifact requirements, and platform constraints.
+- [ ] Add `bins/evals/src/snapshot.rs` to parse and validate snapshot id, git SHA, bundles, scenarios, depth, feature groups, checkpoint format, artifact quantization, artifact requirements, platform constraints, accelerator requirements, fallback policy, and runtime/resource budgets.
   DESIGN reference: Pinned Eval Snapshot.
-- [ ] Add `bins/evals/src/driver.rs` for `evals matrix --snapshot ...`.
+- [ ] Add `bins/evals/src/driver.rs` for `evals matrix --snapshot ...` as a feature-light outer driver that can start without compiling all model features.
   DESIGN reference: V2 Distributed Driver.
-- [ ] Detect host architecture and accelerator class, then map to `local-cpu-x86_64`, `local-cpu-aarch64`, `apple-metal`, `cuda-workstation`, or `dgx-spark`.
+- [ ] Spawn per-cell or per-feature child `cargo` invocations so compile/build failures become structured blocked records instead of preventing the top-level matrix command from running.
   DESIGN reference: V2 Distributed Driver.
-- [ ] For every snapshot cell, emit a record for run, pass, fail, block, or skip; no silent missing cells.
+- [ ] Capture child build failures with reason enums such as `feature_build_failed`, `native_toolchain_missing`, or `gguf_toolchain_failed`.
+  DESIGN reference: Skip/Block And Coverage Schema.
+- [ ] Detect portable host identity with `sysinfo::System::host_name()` or `gethostname(2)` plus platform fallbacks; do not depend on `$HOSTNAME`.
   DESIGN reference: V2 Distributed Driver.
-- [ ] Write collision-free local result directories under `evals/results/<snapshot-id>/<run-id>-<host>-<arch>-<accelerator>/` with `results.jsonl`, `summary.md`, `run-manifest.toml`, and logs.
+- [ ] Detect host architecture and accelerator class by probe, then map to `local-cpu-x86_64`, `local-cpu-aarch64`, `apple-metal`, `cuda-workstation`, or `dgx-spark` only when the required accelerator is usable.
+  DESIGN reference: Accelerator Detection And Use Proof.
+- [ ] Implement CUDA inventory through NVML or `nvidia-smi`, including driver/runtime versions, device ids, names, and memory/utilization source where available.
+  DESIGN reference: Accelerator Detection And Use Proof.
+- [ ] Implement Metal inventory through a Metal API probe with `system_profiler` or IOKit fallback, including device identity, unified-memory attributes, and recommended working-set size where available.
+  DESIGN reference: Accelerator Detection And Use Proof.
+- [ ] Add a non-optional per-cell accelerator section with requested vs resolved accelerator, selected device ids, backend mode, offload settings (`gpu_layers` or device map), driver/runtime versions, use-proof source, and fallback reason.
+  DESIGN reference: Accelerator Detection And Use Proof.
+- [ ] Enforce snapshot budgets: max wall time, max artifact/model size, max RSS or footprint, CPU depth limits, and accelerator-required flags.
+  DESIGN reference: V2 Distributed Driver.
+- [ ] Emit blocked/skipped records for practical CPU cutoffs such as `cpu_profile_not_practical` or `runtime_budget_exceeded`; no cell may stall a result PR without JSONL.
+  DESIGN reference: V2 Distributed Driver.
+- [ ] For every snapshot cell, emit exactly one record with non-optional coverage metadata, terminal outcome, reason enum, and grouping keys.
+  DESIGN reference: Skip/Block And Coverage Schema.
+- [ ] Write collision-free local result directories under `evals/results/<snapshot-id>/<run-id>/` with `results.jsonl`, `summary.md`, `run-manifest.toml`, and logs.
   DESIGN reference: V2 Distributed Driver.
 - [ ] Keep local raw results gitignored until a platform agent intentionally opens a result PR.
   DESIGN reference: PR-Based Aggregation And Reports.
@@ -135,9 +156,15 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [ ] Produce structured blocked/skipped records for missing artifacts, unauthorized artifacts, incomplete submodules, and native runtime setup.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
+- [ ] Promote checkpoint format and artifact quantization label to snapshot/result/report grouping keys, independent from runtime precision flags.
+  DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [ ] Fix or document a durable repo-wired GGUF toolchain path for the `llama-cpp-sys` `stdbool.h` bindgen failure on Linux x86 and GB10.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
-- [ ] Re-run GGUF feature builds on amd1, dgx/GB10, amd2, and mac/Metal after the toolchain fix.
+- [ ] Add an explicit macOS/Metal GGUF build+verify task covering Apple clang, Metal backend feature flags, shader compilation, and runtime loading.
+  DESIGN reference: Artifact Provisioning And Native Toolchains.
+- [ ] If GGUF-on-Metal is unsupported for a snapshot, emit blocked Metal GGUF cells with `gguf_metal_unverified` or `native_toolchain_missing` instead of leaving the quant x platform row empty.
+  DESIGN reference: Artifact Provisioning And Native Toolchains.
+- [ ] Re-run GGUF feature builds on amd1, dgx/GB10, amd2, and mac/Metal after the platform-specific toolchain checks.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
 
 ## Phase 8: First-Class Tool-Use Capability
@@ -159,7 +186,15 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: Eval Depth And Metrics.
 - [ ] Add enriched datasets under `evals/datasets/enriched/<capability>/` for chat, tool-use, ASR, embeddings, and TTS.
   DESIGN reference: Eval Depth And Metrics.
-- [ ] Extend chat/LLM metrics with warm-up time, time-to-first-token where available, tokens/sec, output tokens, context length, and peak memory.
+- [ ] Extend chat/LLM metrics with warm-up time, time-to-first-token, tokens/sec, output tokens, context length, accelerator use, and peak memory.
+  DESIGN reference: Eval Depth And Metrics.
+- [ ] Add runner/backend observation adapters for streaming token callbacks or backend timing hooks, usage/token counts, decode intervals, and explicit unavailable reasons.
+  DESIGN reference: Runner Boundary.
+- [ ] Collect CUDA start/peak/final VRAM and utilization for the selected device through NVML or `nvidia-smi` sampling where available.
+  DESIGN reference: Eval Depth And Metrics.
+- [ ] Define source-tagged peak-memory resources for process RSS, CUDA VRAM, Metal current allocation, Apple footprint, and system unified memory.
+  DESIGN reference: Eval Depth And Metrics.
+- [ ] Implement cross-platform resource-gate statuses `passed`, `failed`, `skipped`, and `blocked`; unavailable metrics must produce gate records with reasons.
   DESIGN reference: Eval Depth And Metrics.
 - [ ] Extend ASR metrics with WER and RTF, embeddings with vectors/sec and similarity gap, TTS with RTF/audio metrics, and tool-use with precision/recall plus round-trip latency.
   DESIGN reference: Eval Depth And Metrics.
@@ -174,7 +209,7 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: PR-Based Aggregation And Reports.
 - [ ] After result PRs merge, run `evals report --aggregate` and open a separate report PR with the consolidated coverage report.
   DESIGN reference: PR-Based Aggregation And Reports.
-- [ ] Ensure the consolidated report contains per-cell status, model x capability slice, capability x platform slice, depth coverage, blocker rollups, and metric-gap rollups.
+- [ ] Ensure the consolidated report contains per-cell status, model x capability, model x quantization x backend/platform/depth, capability x platform, requested x resolved accelerator, depth coverage, blocker rollups, and metric-gap rollups.
   DESIGN reference: PR-Based Aggregation And Reports.
 - [ ] Treat the committed consolidated report as the final human merge gate for #399.
   DESIGN reference: PR-Based Aggregation And Reports.
