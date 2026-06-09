@@ -13,7 +13,8 @@ use motlie_telnyx_gateway::conversation::{default_conversation_handler, Conversa
 use motlie_telnyx_gateway::media::SharedMediaRegistry;
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
 use motlie_telnyx_gateway::operator::script::run_repl_file;
-use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
+use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel, SharedState};
+use motlie_telnyx_gateway::quality::{QualityEventSink, VoiceQualityConfig};
 use motlie_telnyx_gateway::replay::ReplayBackend;
 use motlie_telnyx_gateway::serve::{serve, AppServices};
 use motlie_telnyx_gateway::text_calls::SharedTextCallRegistry;
@@ -97,7 +98,9 @@ async fn main() -> anyhow::Result<()> {
 
     let state = shared_state(cli.bind);
     {
+        let quality_config = initial_quality_config(&cli)?;
         let mut guard = state.write().await;
+        guard.set_quality_config(quality_config);
         guard.log(
             LogLevel::Info,
             format!("listener configured on {}", cli.bind),
@@ -147,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(path) = &cli.load {
         let _ = run_repl_file(&mut replay_engine, path).await?;
     }
+    apply_quality_cli_overrides(&cli, &state).await?;
     let socket_task = if let Some(path) = cli.socket.clone() {
         let socket_context = Arc::new(context.for_new_source());
         {
@@ -187,6 +191,50 @@ async fn main() -> anyhow::Result<()> {
     }
 
     server.abort();
+    Ok(())
+}
+
+fn initial_quality_config(cli: &Cli) -> anyhow::Result<VoiceQualityConfig> {
+    let mut config = cli
+        .quality_profile
+        .map(VoiceQualityConfig::for_profile)
+        .unwrap_or_default();
+    if let Some(path) = &cli.quality_config {
+        config.apply_toml_file(path)?;
+    }
+    Ok(config)
+}
+
+async fn apply_quality_cli_overrides(cli: &Cli, state: &SharedState) -> anyhow::Result<()> {
+    {
+        let mut guard = state.write().await;
+        if let Some(value) = cli.endpoint_trailing_silence_ms {
+            guard.quality.config.set_endpoint_trailing_silence_ms(value);
+        }
+        if let Some(value) = cli.speech_rms_threshold {
+            guard.quality.config.set_speech_rms_threshold(value)?;
+        }
+        if let Some(value) = cli.speech_peak_threshold {
+            guard.quality.config.set_speech_peak_threshold(value);
+        }
+        if let Some(value) = cli.speech_onset_min_silence_ms {
+            guard.quality.config.set_speech_onset_min_silence_ms(value);
+        }
+        guard.quality.config_id = guard.quality.config.config_id();
+    }
+
+    if let Some(path) = &cli.turn_log_jsonl {
+        let capacity = state.read().await.quality.config.logging.queue_capacity;
+        let sink = QualityEventSink::start_jsonl_writer(path, capacity)?;
+        let mut guard = state.write().await;
+        guard.quality.config.set_logging_enabled(true);
+        guard.quality.config_id = guard.quality.config.config_id();
+        guard.set_quality_event_sink(sink, Some(path.clone()));
+        guard.log(
+            LogLevel::Info,
+            format!("quality logging on {}", path.display()),
+        );
+    }
     Ok(())
 }
 

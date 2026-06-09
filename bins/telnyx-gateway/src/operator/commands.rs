@@ -14,6 +14,7 @@ use crate::operator::state::{
     CallStatus, ConversationMode, ConversationStatus, GatewayState, InboundMode, LogLevel,
     SharedState,
 };
+use crate::quality::{QualityEventSink, QualityProfile, RedactionMode, VoiceQualityConfig};
 use crate::speech;
 use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
 use async_trait::async_trait;
@@ -221,6 +222,10 @@ pub enum GatewayCommand {
     Log {
         #[command(subcommand)]
         command: LogCommand,
+    },
+    Quality {
+        #[command(subcommand)]
+        command: QualityCommand,
     },
 }
 
@@ -446,6 +451,142 @@ pub enum LogCommand {
     Clear,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum QualityCommand {
+    Status,
+    Profile {
+        profile: QualityProfileArg,
+    },
+    Endpoint {
+        #[command(subcommand)]
+        command: QualityEndpointCommand,
+    },
+    Speech {
+        #[command(subcommand)]
+        command: QualitySpeechCommand,
+    },
+    TextCall {
+        #[command(subcommand)]
+        command: QualityTextCallCommand,
+    },
+    Logging {
+        #[command(subcommand)]
+        command: QualityLoggingCommand,
+    },
+    Judge {
+        #[command(subcommand)]
+        command: QualityJudgeCommand,
+    },
+    BargeIn {
+        #[command(subcommand)]
+        command: QualityBargeInCommand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum QualityProfileArg {
+    Fast,
+    Balanced,
+    Complete,
+    Noisy,
+}
+
+impl From<QualityProfileArg> for QualityProfile {
+    fn from(value: QualityProfileArg) -> Self {
+        match value {
+            QualityProfileArg::Fast => Self::Fast,
+            QualityProfileArg::Balanced => Self::Balanced,
+            QualityProfileArg::Complete => Self::Complete,
+            QualityProfileArg::Noisy => Self::Noisy,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum OnOffArg {
+    On,
+    Off,
+}
+
+impl OnOffArg {
+    fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum RedactionModeArg {
+    MetricsOnly,
+    HashedText,
+    RedactedText,
+    SensitivePlaintext,
+}
+
+impl From<RedactionModeArg> for RedactionMode {
+    fn from(value: RedactionModeArg) -> Self {
+        match value {
+            RedactionModeArg::MetricsOnly => Self::MetricsOnly,
+            RedactionModeArg::HashedText => Self::HashedText,
+            RedactionModeArg::RedactedText => Self::RedactedText,
+            RedactionModeArg::SensitivePlaintext => Self::SensitivePlaintext,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityEndpointCommand {
+    Status,
+    TrailingSilenceMs { ms: u64 },
+    MinTurnWords { n: usize },
+    MinTurnChars { n: usize },
+    MergeWindowMs { ms: u64 },
+    MaxTurnWords { n: usize },
+    MaxTurnDurationMs { ms: u64 },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualitySpeechCommand {
+    Status,
+    RmsThreshold { value: f32 },
+    PeakThreshold { value: i32 },
+    OnsetMinSilenceMs { ms: u64 },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityTextCallCommand {
+    Status,
+    MaxActiveTurns { n: usize },
+    LatestResponseWins { state: OnOffArg },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityLoggingCommand {
+    Status,
+    On { path: PathBuf },
+    Off,
+    IncludeTranscriptText { state: OnOffArg },
+    RedactionMode { mode: RedactionModeArg },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityJudgeCommand {
+    Status,
+    On {
+        #[arg(long)]
+        sample_rate: Option<f32>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    Off,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityBargeInCommand {
+    Status,
+    On,
+    Off,
+}
+
 #[async_trait]
 impl CommandSet<GatewayContext> for GatewayCommand {
     type CompletionContext = ();
@@ -496,6 +637,7 @@ impl CommandSet<GatewayContext> for GatewayCommand {
             Self::Test { command } => test_command(context, command).await,
             Self::Transcript { command } => transcript_command(context, command).await,
             Self::Log { command } => log_command(context, command).await,
+            Self::Quality { command } => quality_command(context, command).await,
         }
     }
 }
@@ -1905,6 +2047,414 @@ async fn transcript_command(
     }
 }
 
+async fn quality_command(
+    context: &mut GatewayContext,
+    command: QualityCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityCommand::Status => quality_status(context).await,
+        QualityCommand::Profile { profile } => {
+            mutate_quality_config(context, |config| Ok(config.set_profile(profile.into()))).await
+        }
+        QualityCommand::Endpoint { command } => quality_endpoint_command(context, command).await,
+        QualityCommand::Speech { command } => quality_speech_command(context, command).await,
+        QualityCommand::TextCall { command } => quality_text_call_command(context, command).await,
+        QualityCommand::Logging { command } => quality_logging_command(context, command).await,
+        QualityCommand::Judge { command } => quality_judge_command(context, command).await,
+        QualityCommand::BargeIn { command } => quality_barge_in_command(context, command).await,
+    }
+}
+
+async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput> {
+    let guard = context.state.read().await;
+    let quality = &guard.quality;
+    let lines = vec![
+        format!("profile={}", quality.config.profile.label()),
+        format!("config_id={}", quality.config_id),
+        format!("logging_enabled={}", quality.event_sink.is_enabled()),
+        format!(
+            "logging_path={}",
+            quality
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unset>".to_string())
+        ),
+        format!("dropped_events={}", quality.event_sink.dropped_count()),
+        format!(
+            "include_transcript_text={}",
+            quality.config.logging.include_transcript_text
+        ),
+        format!(
+            "redaction_mode={}",
+            quality.config.logging.redaction_mode.label()
+        ),
+        format!(
+            "endpoint.trailing_silence_ms={}",
+            quality.config.endpoint.trailing_silence_ms
+        ),
+        format!(
+            "speech.rms_threshold={}",
+            quality.config.speech.rms_threshold
+        ),
+        format!(
+            "speech.peak_threshold={}",
+            quality.config.speech.peak_threshold
+        ),
+        format!(
+            "text_call.max_active_turns={}",
+            quality.config.text_call.max_active_turns
+        ),
+    ];
+    Ok(CommandOutput {
+        lines,
+        effects: Vec::new(),
+    })
+}
+
+async fn quality_endpoint_command(
+    context: &mut GatewayContext,
+    command: QualityEndpointCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityEndpointCommand::Status => {
+            let guard = context.state.read().await;
+            let endpoint = &guard.quality.config.endpoint;
+            Ok(CommandOutput::text(format!(
+                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
+                endpoint.trailing_silence_ms,
+                endpoint.min_turn_words,
+                endpoint.min_turn_chars,
+                endpoint.merge_window_ms,
+                endpoint.max_turn_words,
+                endpoint.max_turn_duration_ms
+            )))
+        }
+        QualityEndpointCommand::TrailingSilenceMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_trailing_silence_ms(ms))
+            })
+            .await
+        }
+        QualityEndpointCommand::MinTurnWords { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_endpoint_min_turn_words(n))).await
+        }
+        QualityEndpointCommand::MinTurnChars { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_endpoint_min_turn_chars(n))).await
+        }
+        QualityEndpointCommand::MergeWindowMs { ms } => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_endpoint_merge_window_ms(ms)),
+            )
+            .await
+        }
+        QualityEndpointCommand::MaxTurnWords { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_endpoint_max_turn_words(n))).await
+        }
+        QualityEndpointCommand::MaxTurnDurationMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_max_turn_duration_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_speech_command(
+    context: &mut GatewayContext,
+    command: QualitySpeechCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualitySpeechCommand::Status => {
+            let guard = context.state.read().await;
+            let speech = &guard.quality.config.speech;
+            Ok(CommandOutput::text(format!(
+                "rms_threshold={}\npeak_threshold={}\nonset_min_silence_ms={}",
+                speech.rms_threshold, speech.peak_threshold, speech.onset_min_silence_ms
+            )))
+        }
+        QualitySpeechCommand::RmsThreshold { value } => {
+            mutate_quality_config(context, |config| {
+                config
+                    .set_speech_rms_threshold(value)
+                    .map_err(|error| DriverError::invalid_argument("value", error.to_string()))
+            })
+            .await
+        }
+        QualitySpeechCommand::PeakThreshold { value } => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_speech_peak_threshold(value)),
+            )
+            .await
+        }
+        QualitySpeechCommand::OnsetMinSilenceMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_speech_onset_min_silence_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_text_call_command(
+    context: &mut GatewayContext,
+    command: QualityTextCallCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityTextCallCommand::Status => {
+            let guard = context.state.read().await;
+            let text_call = &guard.quality.config.text_call;
+            Ok(CommandOutput::text(format!(
+                "max_active_turns={}\nmedia_ready_timeout_ms={}\nplayback_wait_timeout_ms={}\nlatest_response_wins={}\ncallback_timeout_ms={}",
+                text_call.max_active_turns,
+                text_call.media_ready_timeout_ms,
+                text_call.playback_wait_timeout_ms,
+                text_call.latest_response_wins,
+                text_call.callback_timeout_ms
+            )))
+        }
+        QualityTextCallCommand::MaxActiveTurns { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_max_active_turns(n))
+            })
+            .await
+        }
+        QualityTextCallCommand::LatestResponseWins { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_latest_response_wins(state.enabled()))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_logging_command(
+    context: &mut GatewayContext,
+    command: QualityLoggingCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityLoggingCommand::Status => {
+            let guard = context.state.read().await;
+            let logging = &guard.quality.config.logging;
+            Ok(CommandOutput::text(format!(
+                "enabled={}\npath={}\nqueue_capacity={}\nper_frame_sample_rate={}\ninclude_transcript_text={}\nredaction_mode={}\ndropped_events={}",
+                guard.quality.event_sink.is_enabled(),
+                guard
+                    .quality
+                    .log_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unset>".to_string()),
+                logging.queue_capacity,
+                logging.per_frame_sample_rate,
+                logging.include_transcript_text,
+                logging.redaction_mode.label(),
+                guard.quality.event_sink.dropped_count()
+            )))
+        }
+        QualityLoggingCommand::On { path } => {
+            let capacity = context
+                .state
+                .read()
+                .await
+                .quality
+                .config
+                .logging
+                .queue_capacity;
+            let sink =
+                QualityEventSink::start_jsonl_writer(&path, capacity).map_err(driver_anyhow)?;
+            let mut guard = context.state.write().await;
+            let outcome = guard.quality.config.set_logging_enabled(true);
+            guard.quality.config_id = guard.quality.config.config_id();
+            guard.set_quality_event_sink(sink, Some(path.clone()));
+            emit_quality_snapshots_for_active_calls(
+                &mut guard,
+                "live_change",
+                outcome.apply_boundary.label(),
+                None,
+            );
+            guard.log(
+                LogLevel::Info,
+                format!("quality logging on {}", path.display()),
+            );
+            Ok(CommandOutput::line(format!(
+                "quality logging on path={} config_id={} applies={}",
+                path.display(),
+                guard.quality.config_id,
+                outcome.apply_boundary.label()
+            )))
+        }
+        QualityLoggingCommand::Off => {
+            let mut guard = context.state.write().await;
+            let outcome = guard.quality.config.set_logging_enabled(false);
+            guard.quality.config_id = guard.quality.config.config_id();
+            guard.set_quality_event_sink(QualityEventSink::disabled(), None);
+            guard.log(LogLevel::Info, "quality logging off");
+            Ok(CommandOutput::line(format!(
+                "quality logging off config_id={} applies={}",
+                guard.quality.config_id,
+                outcome.apply_boundary.label()
+            )))
+        }
+        QualityLoggingCommand::IncludeTranscriptText { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_logging_include_transcript_text(state.enabled()))
+            })
+            .await
+        }
+        QualityLoggingCommand::RedactionMode { mode } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_logging_redaction_mode(mode.into()))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_judge_command(
+    context: &mut GatewayContext,
+    command: QualityJudgeCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityJudgeCommand::Status => {
+            let guard = context.state.read().await;
+            let judge = &guard.quality.config.quality_judge;
+            Ok(CommandOutput::text(format!(
+                "enabled={}\nmode={:?}\nsample_rate={}\nmodel={}\nbatch_size={}\ntimeout_ms={}",
+                judge.enabled,
+                judge.mode,
+                judge.sample_rate,
+                judge.model,
+                judge.batch_size,
+                judge.timeout_ms
+            )))
+        }
+        QualityJudgeCommand::On { sample_rate, model } => {
+            mutate_quality_config(context, |config| {
+                let mut outcome = config.set_quality_judge_enabled(true);
+                if let Some(sample_rate) = sample_rate {
+                    outcome =
+                        config
+                            .set_quality_judge_sample_rate(sample_rate)
+                            .map_err(|error| {
+                                DriverError::invalid_argument("sample_rate", error.to_string())
+                            })?;
+                }
+                if let Some(model) = model {
+                    if model.trim().is_empty() {
+                        return Err(DriverError::invalid_argument(
+                            "model",
+                            "model must be non-empty",
+                        ));
+                    }
+                    config.quality_judge.model = model;
+                    outcome = config.set_quality_judge_enabled(true);
+                }
+                Ok(outcome)
+            })
+            .await
+        }
+        QualityJudgeCommand::Off => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_quality_judge_enabled(false)),
+            )
+            .await
+        }
+    }
+}
+
+async fn quality_barge_in_command(
+    context: &mut GatewayContext,
+    command: QualityBargeInCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityBargeInCommand::Status => {
+            let guard = context.state.read().await;
+            let barge_in = &guard.quality.config.barge_in;
+            Ok(CommandOutput::text(format!(
+                "enabled={}\nspeech_onset_cancel_enabled={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\nclear_timeout_ms={}",
+                barge_in.enabled,
+                barge_in.speech_onset_cancel_enabled,
+                barge_in.partial_asr_cancel_enabled,
+                barge_in.final_asr_cancel_enabled,
+                barge_in.clear_timeout_ms
+            )))
+        }
+        QualityBargeInCommand::On => {
+            mutate_quality_config(context, |config| Ok(config.set_barge_in_enabled(true))).await
+        }
+        QualityBargeInCommand::Off => {
+            mutate_quality_config(context, |config| Ok(config.set_barge_in_enabled(false))).await
+        }
+    }
+}
+
+async fn mutate_quality_config(
+    context: &mut GatewayContext,
+    mutate: impl FnOnce(
+        &mut VoiceQualityConfig,
+    ) -> DriverResult<crate::quality::config::QualityMutationOutcome>,
+) -> DriverResult<CommandOutput> {
+    let mut guard = context.state.write().await;
+    let outcome = mutate(&mut guard.quality.config)?;
+    guard.quality.config_id = guard.quality.config.config_id();
+    emit_quality_snapshots_for_active_calls(
+        &mut guard,
+        "live_change",
+        outcome.apply_boundary.label(),
+        None,
+    );
+    guard.log(
+        LogLevel::Info,
+        format!("quality {} {}", outcome.key, outcome.value),
+    );
+    Ok(CommandOutput::line(render_quality_mutation(&outcome)))
+}
+
+fn emit_quality_snapshots_for_active_calls(
+    state: &mut GatewayState,
+    snapshot_reason: &'static str,
+    effective_scope: &'static str,
+    effective_after_asr_session_id: Option<String>,
+) {
+    let call_ids = state
+        .calls
+        .values()
+        .filter(|call| {
+            !matches!(
+                call.status,
+                CallStatus::Ended | CallStatus::Failed | CallStatus::IgnoredInbound
+            )
+        })
+        .map(|call| call.gateway_call_id.clone())
+        .collect::<Vec<_>>();
+    for call_id in call_ids {
+        state.emit_quality_config_snapshot(
+            &call_id,
+            snapshot_reason,
+            effective_scope,
+            effective_after_asr_session_id.clone(),
+        );
+    }
+}
+
+fn render_quality_mutation(outcome: &crate::quality::config::QualityMutationOutcome) -> String {
+    let mut line = format!(
+        "quality changed key={} value={} config_id={} applies={}",
+        outcome.key,
+        outcome.value,
+        outcome.config_id,
+        outcome.apply_boundary.label()
+    );
+    if outcome.clamped {
+        line.push_str(" clamped=true");
+    }
+    line
+}
+
 async fn log_command(
     context: &mut GatewayContext,
     command: LogCommand,
@@ -2015,6 +2565,7 @@ fn gateway_help(topic: &[String]) -> Option<String> {
         }
         [topic] if topic == "transcript" => Some(transcript_help()),
         [topic] if topic == "log" => Some(log_help()),
+        [topic] if topic == "quality" => Some(quality_help()),
         [topic] if topic == "socket" || topic == "agent" => Some(socket_help()),
         _ => None,
     }
@@ -2077,6 +2628,8 @@ fn gateway_root_help() -> String {
         "  transcript follow [call-id]",
         "  transcript clear [call-id]",
         "  log clear",
+        "  quality status                  Show M6 quality config/logging status",
+        "  quality endpoint trailing-silence-ms <ms>",
         "",
         "Testing:",
         "  conversation smoke-test on    Enable test-only echo reply handler for M3 smoke tests",
@@ -2086,6 +2639,34 @@ fn gateway_root_help() -> String {
         "  help config       help telnyx       help inbound      help asr",
         "  help tts          help call         help outbound     help socket",
         "  help transcript   help test",
+    ]
+    .join("\n")
+}
+
+fn quality_help() -> String {
+    [
+        "quality status",
+        "quality profile fast|balanced|complete|noisy",
+        "quality endpoint status",
+        "quality endpoint trailing-silence-ms <ms>",
+        "quality endpoint min-turn-words <n>",
+        "quality endpoint min-turn-chars <n>",
+        "quality endpoint merge-window-ms <ms>",
+        "quality speech status",
+        "quality speech rms-threshold <value>",
+        "quality speech peak-threshold <value>",
+        "quality text-call status",
+        "quality text-call max-active-turns <n>",
+        "quality text-call latest-response-wins on|off",
+        "quality logging on <path>",
+        "quality logging off",
+        "quality logging include-transcript-text on|off",
+        "quality logging redaction-mode metrics-only|hashed-text|redacted-text|sensitive-plaintext",
+        "quality judge status|on|off",
+        "quality barge-in status|on|off",
+        "",
+        "M6 quality commands use the existing line-oriented operator dispatcher.",
+        "Transcript text remains disabled unless explicitly enabled.",
     ]
     .join("\n")
 }
@@ -2248,7 +2829,7 @@ fn telnyx_help() -> String {
         "  config set webhook-url https://your-host/telnyx/webhooks",
         "  config set media-url wss://your-host/telnyx/media",
         "  telnyx app create motlie-test",
-        "  telnyx number bind +15551234567 <connection-id>",
+        "  telnyx number bind <phone-number> <connection-id>",
     ]
     .join("\n")
 }
@@ -2293,8 +2874,8 @@ fn telnyx_number_help() -> String {
         "",
         "Examples:",
         "  telnyx number list",
-        "  telnyx number use +15551234567",
-        "  telnyx number bind +15551234567 1234567890",
+        "  telnyx number use <phone-number>",
+        "  telnyx number bind <phone-number> <connection-id>",
     ]
     .join("\n")
 }
@@ -2483,7 +3064,7 @@ fn test_help() -> String {
         "This is for ASR quality testing; outbound TTS is not part of this command.",
         "",
         "Example:",
-        "  test dial-transcribe +15551234567 --from +15557654321",
+        "  test dial-transcribe <to-phone-number> --from <from-phone-number>",
     ]
     .join("\n")
 }
@@ -3019,7 +3600,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.config.selected_connection_id = Some("conn-1".to_string());
-            guard.config.selected_phone_number = Some("+15550000001".to_string());
+            guard.config.selected_phone_number = Some("<from-phone-number>".to_string());
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
             guard.config.public_webhook_url =
                 Some("https://example.test/telnyx/webhooks".to_string());
@@ -3035,7 +3616,7 @@ mod tests {
             .await
             .expect("asr use");
         let output = engine
-            .run_line("test dial-transcribe +15550000002")
+            .run_line("test dial-transcribe <to-phone-number>")
             .await
             .expect("dial-transcribe");
 
@@ -3053,8 +3634,8 @@ mod tests {
             crate::operator::state::CallDirection::Outbound
         );
         assert_eq!(call.status, CallStatus::Dialing);
-        assert_eq!(call.from.as_deref(), Some("+15550000001"));
-        assert_eq!(call.to.as_deref(), Some("+15550000002"));
+        assert_eq!(call.from.as_deref(), Some("<from-phone-number>"));
+        assert_eq!(call.to.as_deref(), Some("<to-phone-number>"));
         assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
         assert!(call.conversation.attached);
@@ -3067,7 +3648,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.config.selected_connection_id = Some("conn-1".to_string());
-            guard.config.default_from_number = Some("+15550000001".to_string());
+            guard.config.default_from_number = Some("<from-phone-number>".to_string());
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
             guard.config.public_webhook_url =
                 Some("https://example.test/telnyx/webhooks".to_string());
@@ -3077,7 +3658,7 @@ mod tests {
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine
-            .run_line("dial +15550000002")
+            .run_line("dial <to-phone-number>")
             .await
             .expect("dial should create dry-run outbound call");
 
@@ -3108,8 +3689,8 @@ mod tests {
             crate::operator::state::CallDirection::Outbound
         );
         assert_eq!(call.status, CallStatus::Dialing);
-        assert_eq!(call.from.as_deref(), Some("+15550000001"));
-        assert_eq!(call.to.as_deref(), Some("+15550000002"));
+        assert_eq!(call.from.as_deref(), Some("<from-phone-number>"));
+        assert_eq!(call.to.as_deref(), Some("<to-phone-number>"));
         assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
     }
@@ -3524,8 +4105,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: Some("stream-1".to_string()),
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("<from-phone-number>".to_string()),
+                Some("<to-phone-number>".to_string()),
                 CallStatus::Answered,
             );
             guard.add_transcript(
@@ -3634,8 +4215,8 @@ mod tests {
                 call_leg_id: Some(format!("leg-{call_control_id}")),
                 stream_id: Some(stream_id.to_string()),
             },
-            Some("+15550000001".to_string()),
-            Some("+15550000002".to_string()),
+            Some("<from-phone-number>".to_string()),
+            Some("<to-phone-number>".to_string()),
             CallStatus::MediaStarted,
         );
         let call = state
@@ -3651,6 +4232,123 @@ mod tests {
         };
         call.asr_backend = Some(LiveAsrBackend::Kroko2025);
         call_id
+    }
+
+    #[tokio::test]
+    async fn quality_status_defaults_to_transcript_text_disabled() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine
+            .run_line("quality status")
+            .await
+            .expect("quality status");
+
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "include_transcript_text=false"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "redaction_mode=metrics-only"));
+    }
+
+    #[tokio::test]
+    async fn quality_endpoint_command_clamps_and_marks_report_only_knobs() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let live_output = engine
+            .run_line("quality endpoint trailing-silence-ms 10")
+            .await
+            .expect("set trailing silence");
+        assert!(live_output.lines[0].contains("key=endpoint.trailing_silence_ms"));
+        assert!(live_output.lines[0].contains("applies=next_asr_session"));
+        assert!(live_output.lines[0].contains("clamped=true"));
+        assert_eq!(
+            state
+                .read()
+                .await
+                .quality
+                .config
+                .endpoint
+                .trailing_silence_ms,
+            100
+        );
+
+        let report_output = engine
+            .run_line("quality endpoint merge-window-ms 9999")
+            .await
+            .expect("set report-only merge window");
+        assert!(report_output.lines[0].contains("key=endpoint.merge_window_ms"));
+        assert!(report_output.lines[0].contains("applies=report_only"));
+        assert_eq!(
+            state.read().await.quality.config.endpoint.merge_window_ms,
+            5_000
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_state_dump_replays_to_same_config_id() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line("quality profile noisy")
+            .await
+            .expect("set quality profile");
+        engine
+            .run_line("quality endpoint trailing-silence-ms 950")
+            .await
+            .expect("set endpoint knob");
+        engine
+            .run_line("quality logging include-transcript-text off")
+            .await
+            .expect("set privacy knob");
+        let expected_config_id = state.read().await.quality.config_id.clone();
+        let dump = {
+            let guard = state.read().await;
+            crate::operator::persistence::render_state_dump(&guard)
+        };
+        assert!(dump.contains("quality endpoint trailing-silence-ms 950"));
+        assert!(dump.contains("quality logging include-transcript-text off"));
+
+        let path = std::env::temp_dir().join(format!(
+            "motlie-quality-state-{}.repl",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, dump).expect("write quality state dump");
+
+        let replay_state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let replay_telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let replay_context = GatewayContext::new(replay_state.clone(), replay_telnyx);
+        let mut replay_engine =
+            CommandEngine::<GatewayContext, GatewayCommand>::new(replay_context);
+        crate::operator::script::run_repl_file(&mut replay_engine, &path)
+            .await
+            .expect("replay quality state dump");
+
+        assert_eq!(
+            replay_state.read().await.quality.config_id,
+            expected_config_id
+        );
+        assert!(
+            !replay_state
+                .read()
+                .await
+                .quality
+                .config
+                .logging
+                .include_transcript_text
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     fn context_with_static_tts(

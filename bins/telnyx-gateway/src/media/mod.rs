@@ -27,6 +27,7 @@ use crate::conversation::{self, ConversationRuntime};
 use crate::operator::state::{
     CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
 };
+use crate::quality::{ActiveAsrQualitySession, SpeechQualityConfig, VoiceQualityConfig};
 use crate::text_calls::SharedTextCallRegistry;
 use crate::tts::PIPER_SAMPLE_RATE_HZ;
 
@@ -34,11 +35,6 @@ mod capture;
 
 use capture::MediaCapture;
 
-const SPEECH_RMS_THRESHOLD: f32 = 180.0;
-const SPEECH_PEAK_THRESHOLD: i16 = 900;
-const ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS: u64 =
-    crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS as u64;
-const ASR_SPEECH_ONSET_MIN_SILENCE_MS: u64 = 120;
 const PCMU_SILENCE_BYTE: u8 = 0xff;
 const PCMA_SILENCE_BYTE: u8 = 0xd5;
 const SILENCE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(20);
@@ -303,6 +299,8 @@ struct MediaSocketState {
     gateway_call_id: Option<String>,
     asr_backend: Option<LiveAsrBackend>,
     media_format: Option<MediaFormat>,
+    active_quality_asr: Option<ActiveAsrQualitySession>,
+    quality_config: VoiceQualityConfig,
     reorder: SequencedFrameReorder<EncodedMediaFrame>,
     decoded_frame_count: usize,
     asr_gate: AsrGate,
@@ -331,6 +329,8 @@ impl MediaSocketState {
             gateway_call_id: None,
             asr_backend: None,
             media_format: None,
+            active_quality_asr: None,
+            quality_config: VoiceQualityConfig::default(),
             reorder: SequencedFrameReorder::new_lazily(32),
             decoded_frame_count: 0,
             asr_gate: AsrGate::default(),
@@ -406,36 +406,20 @@ pub async fn handle_socket(
         }
     }
 
-    if let (Some(call_id), Some(asr_session)) = (
-        media_state.gateway_call_id.as_deref(),
-        media_state.session.take(),
-    ) {
-        match asr_session.finish().await {
-            Ok(events) => {
-                let conversation_events = conversation_events_from_transcripts(&events);
-                let _ = record_transcript_events(
-                    &state,
-                    call_id,
-                    None,
-                    media_state.media_format.as_ref(),
-                    media_state.capture.as_mut(),
-                    events,
-                    Some(&text_calls),
-                )
-                .await;
-                forward_conversation_events(
-                    &state,
-                    &media_state.media_registry,
-                    media_state.conversation.as_ref(),
-                    call_id,
-                    conversation_events,
-                )
-                .await;
-            }
-            Err(error) => log_media_error(&state, Some(call_id), error).await,
+    if let Some(call_id) = media_state.gateway_call_id.clone() {
+        if let Err(error) = finish_asr_session(
+            &state,
+            &mut media_state,
+            Some(call_id.as_str()),
+            None,
+            Some(&text_calls),
+        )
+        .await
+        {
+            log_media_error(&state, Some(&call_id), error).await;
         }
         let mut guard = state.write().await;
-        if let Some(call) = guard.calls.get_mut(call_id) {
+        if let Some(call) = guard.calls.get_mut(&call_id) {
             call.status = CallStatus::Ended;
             call.push_timeline("media websocket closed");
         }
@@ -803,7 +787,15 @@ async fn handle_text_with_text_calls(
             media_state.media_format = Some(format);
             media_state.gateway_call_id = Some(call_id.clone());
             media_state.asr_backend = Some(registered.asr_backend);
-            open_asr_session(asr, media_state, &call_id, &event.stream_id, "media_start").await?;
+            open_asr_session(
+                state,
+                asr,
+                media_state,
+                &call_id,
+                &event.stream_id,
+                "media_start",
+            )
+            .await?;
             media_state.silence_keepalive = true;
             tracing::info!(
                 gateway_call_id = media_state.gateway_call_id.as_deref(),
@@ -920,6 +912,12 @@ async fn register_start(
                     asr_backend.label()
                 ),
             );
+            guard.emit_quality_config_snapshot(
+                &gateway_call_id,
+                "stream_start",
+                "new_asr_sessions",
+                None,
+            );
             tracing::info!(
                 gateway_call_id,
                 call_control_id = event.start.call_control_id,
@@ -1009,6 +1007,7 @@ async fn ingest_frame(
         stream_id,
         frame_duration_ms,
         &stats,
+        &media_state.quality_config,
     ) {
         AsrFrameDecision::Suppress => return Ok(()),
         AsrFrameDecision::Continue { speech_onset } => {
@@ -1047,6 +1046,7 @@ async fn ingest_frame(
     }
     if media_state.session.is_none() {
         open_asr_session(
+            state,
             asr,
             media_state,
             &gateway_call_id,
@@ -1075,11 +1075,14 @@ async fn ingest_frame(
     let needs_reset = record_transcript_events(
         state,
         &gateway_call_id,
-        Some(stream_id),
-        Some(&format),
-        media_state.capture.as_mut(),
         events,
-        text_calls,
+        TranscriptRecordContext {
+            stream_id: Some(stream_id),
+            media_format: Some(&format),
+            capture: media_state.capture.as_mut(),
+            text_calls,
+            quality_session: media_state.active_quality_asr.as_ref(),
+        },
     )
     .await;
     forward_conversation_events(
@@ -1094,6 +1097,7 @@ async fn ingest_frame(
         media_state.session = None;
         media_state.asr_gate.wait_for_next_speech();
         open_asr_session(
+            state,
             asr,
             media_state,
             &gateway_call_id,
@@ -1106,6 +1110,7 @@ async fn ingest_frame(
 }
 
 async fn open_asr_session(
+    state: &SharedState,
     asr: &SharedAsrRegistry,
     media_state: &mut MediaSocketState,
     gateway_call_id: &str,
@@ -1115,6 +1120,13 @@ async fn open_asr_session(
     let asr_backend = media_state
         .asr_backend
         .context("ASR backend was not bound to media stream")?;
+    let (quality_session, quality_config) = {
+        let mut guard = state.write().await;
+        let session = guard.start_quality_asr_session(gateway_call_id, Some(stream_id), reason);
+        (session, guard.quality.config.clone())
+    };
+    media_state.quality_config = quality_config;
+    media_state.active_quality_asr = Some(quality_session);
     media_state.session = Some(asr.open_session(asr_backend).await?);
     tracing::info!(
         gateway_call_id,
@@ -1211,8 +1223,8 @@ struct SampleStats {
 }
 
 impl SampleStats {
-    fn has_speech_energy(&self) -> bool {
-        self.rms >= SPEECH_RMS_THRESHOLD || self.peak >= SPEECH_PEAK_THRESHOLD
+    fn has_speech_energy(&self, speech: &SpeechQualityConfig) -> bool {
+        self.rms >= speech.rms_threshold || i32::from(self.peak) >= speech.peak_threshold
     }
 }
 
@@ -1274,11 +1286,12 @@ impl AsrGate {
         stream_id: &str,
         frame_duration_ms: u64,
         stats: &SampleStats,
+        quality: &VoiceQualityConfig,
     ) -> AsrFrameDecision {
-        if stats.has_speech_energy() {
+        if stats.has_speech_energy(&quality.speech) {
             let was_started = self.speech_started;
             let resumed_after_onset_pause =
-                self.low_energy_run_ms >= ASR_SPEECH_ONSET_MIN_SILENCE_MS;
+                self.low_energy_run_ms >= quality.speech.onset_min_silence_ms;
             let speech_onset = !was_started || resumed_after_onset_pause;
             self.speech_started = true;
             self.low_energy_run_ms = 0;
@@ -1297,7 +1310,7 @@ impl AsrGate {
 
         if self.speech_started {
             self.low_energy_run_ms = self.low_energy_run_ms.saturating_add(frame_duration_ms);
-            if self.low_energy_run_ms <= ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS {
+            if self.low_energy_run_ms <= quality.endpoint.trailing_silence_ms {
                 return AsrFrameDecision::Continue {
                     speech_onset: false,
                 };
@@ -1383,16 +1396,20 @@ async fn finish_asr_session(
     text_calls: Option<&SharedTextCallRegistry>,
 ) -> anyhow::Result<()> {
     if let (Some(call_id), Some(asr_session)) = (gateway_call_id, media_state.session.take()) {
+        let quality_session = media_state.active_quality_asr.take();
         let events = asr_session.finish().await?;
         let conversation_events = conversation_events_from_transcripts(&events);
         let _ = record_transcript_events(
             state,
             call_id,
-            stream_id.as_deref(),
-            media_state.media_format.as_ref(),
-            media_state.capture.as_mut(),
             events,
-            text_calls,
+            TranscriptRecordContext {
+                stream_id: stream_id.as_deref(),
+                media_format: media_state.media_format.as_ref(),
+                capture: media_state.capture.as_mut(),
+                text_calls,
+                quality_session: quality_session.as_ref(),
+            },
         )
         .await;
         forward_conversation_events(
@@ -1440,16 +1457,27 @@ async fn forward_conversation_events(
     }
 }
 
+struct TranscriptRecordContext<'a> {
+    stream_id: Option<&'a str>,
+    media_format: Option<&'a MediaFormat>,
+    capture: Option<&'a mut MediaCapture>,
+    text_calls: Option<&'a SharedTextCallRegistry>,
+    quality_session: Option<&'a ActiveAsrQualitySession>,
+}
+
+struct FinalTurnCandidate {
+    text: String,
+    transcript_event_id: String,
+}
+
 async fn record_transcript_events(
     state: &SharedState,
     gateway_call_id: &str,
-    stream_id: Option<&str>,
-    media_format: Option<&MediaFormat>,
-    mut capture: Option<&mut MediaCapture>,
     events: Vec<AsrTranscriptEvent>,
-    text_calls: Option<&SharedTextCallRegistry>,
+    mut context: TranscriptRecordContext<'_>,
 ) -> bool {
     let mut guard = state.write().await;
+    let include_transcript_text = guard.quality.config.logging.include_transcript_text;
     let mut reset_requested = false;
     let mut final_turns = Vec::new();
     for event in events {
@@ -1464,22 +1492,26 @@ async fn record_transcript_events(
             "transcript.partial"
         };
         let text = event.event.text().to_string();
+        let transcript_event_id = format!("trn_{}", uuid::Uuid::new_v4().simple());
         let suppressed = event.is_suppressed();
         reset_requested |= event.requires_session_reset();
-        if let Some(capture) = capture.as_deref_mut() {
+        if let Some(capture) = context.capture.as_deref_mut() {
             record_transcript_capture(capture, kind_label, &text, suppressed);
         }
         let call = guard.calls.get(gateway_call_id);
         let call_control_id = call.map(|call| call.ids.call_control_id.clone());
         let call_session_id = call.and_then(|call| call.ids.call_session_id.clone());
         let call_leg_id = call.and_then(|call| call.ids.call_leg_id.clone());
-        let effective_stream_id = stream_id
+        let effective_stream_id = context
+            .stream_id
             .map(str::to_string)
             .or_else(|| call.and_then(|call| call.ids.stream_id.clone()));
-        let codec = media_format
+        let codec = context
+            .media_format
             .map(|format| format.encoding.clone())
             .or_else(|| call.and_then(|call| call.media.encoding.clone()));
-        let sample_rate_hz = media_format
+        let sample_rate_hz = context
+            .media_format
             .map(|format| format.sample_rate_hz)
             .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
         let asr_backend = call.and_then(|call| call.asr_backend);
@@ -1488,6 +1520,7 @@ async fn record_transcript_events(
             let suppression_reason = event
                 .suppression_reason()
                 .map(AsrTranscriptSuppressionReason::label);
+            let transcript_preview = include_transcript_text.then(|| transcript_preview(&text));
             tracing::warn!(
                 gateway_call_id,
                 call_control_id = call_control_id.as_deref(),
@@ -1501,7 +1534,7 @@ async fn record_transcript_events(
                 transcript_kind = kind_label,
                 suppression_reason,
                 transcript_chars = text.chars().count(),
-                transcript_preview = transcript_preview(&text),
+                transcript_preview = transcript_preview.as_deref(),
                 "transcript.suppressed_repeated_token"
             );
             continue;
@@ -1509,8 +1542,12 @@ async fn record_transcript_events(
 
         guard.add_transcript(gateway_call_id, kind.clone(), text.clone());
         if matches!(kind, TranscriptKind::Final) {
-            final_turns.push(text.clone());
+            final_turns.push(FinalTurnCandidate {
+                text: text.clone(),
+                transcript_event_id,
+            });
         }
+        let transcript_text = include_transcript_text.then_some(text.as_str());
         tracing::info!(
             gateway_call_id,
             call_control_id = call_control_id.as_deref(),
@@ -1522,19 +1559,43 @@ async fn record_transcript_events(
             asr_backend = asr_backend.map(LiveAsrBackend::label),
             asr_model = asr_backend.map(LiveAsrBackend::model_label),
             transcript_kind = kind_label,
-            transcript_text = text,
+            transcript_chars = text.chars().count(),
+            transcript_text,
             "{kind_label}"
         );
     }
     drop(guard);
-    if let Some(text_calls) = text_calls {
-        for text in final_turns {
-            if let Err(error) = text_calls.send_caller_turn(gateway_call_id, text).await {
-                tracing::warn!(
-                    gateway_call_id,
-                    error = %error,
-                    "text_call.caller_turn.forward_failed"
-                );
+    if let Some(text_calls) = context.text_calls {
+        for final_turn in final_turns {
+            match text_calls
+                .send_caller_turn(gateway_call_id, final_turn.text.clone())
+                .await
+            {
+                Ok(Some(turn_id)) => {
+                    let mut guard = state.write().await;
+                    guard.emit_quality_caller_turn_sent(
+                        gateway_call_id,
+                        &turn_id,
+                        &final_turn.text,
+                    );
+                    if let Some(session) = context.quality_session {
+                        guard.emit_quality_asr_turn_mapped(
+                            gateway_call_id,
+                            session,
+                            &turn_id,
+                            &final_turn.transcript_event_id,
+                            true,
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        gateway_call_id,
+                        error = %error,
+                        "text_call.caller_turn.forward_failed"
+                    );
+                }
             }
         }
     }
@@ -2025,8 +2086,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: None,
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("<from-phone-number>".to_string()),
+                Some("<to-phone-number>".to_string()),
                 CallStatus::Answering,
             )
         };
@@ -2111,8 +2172,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: None,
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("<from-phone-number>".to_string()),
+                Some("<to-phone-number>".to_string()),
                 CallStatus::Answering,
             )
         };
@@ -2228,6 +2289,7 @@ mod tests {
     #[test]
     fn asr_gate_marks_speech_onset_after_short_pause() {
         let mut gate = AsrGate::default();
+        let quality = VoiceQualityConfig::default();
         let speech = SampleStats {
             peak: 4_000,
             rms: 4_000.0,
@@ -2240,23 +2302,23 @@ mod tests {
         };
 
         assert_eq!(
-            gate.accept(1, "stream-1", 20, &speech),
+            gate.accept(1, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue { speech_onset: true }
         );
         for frame_index in 2..=7 {
             assert_eq!(
-                gate.accept(frame_index, "stream-1", 20, &silence),
+                gate.accept(frame_index, "stream-1", 20, &silence, &quality),
                 AsrFrameDecision::Continue {
                     speech_onset: false,
                 }
             );
         }
         assert_eq!(
-            gate.accept(8, "stream-1", 20, &speech),
+            gate.accept(8, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue { speech_onset: true }
         );
         assert_eq!(
-            gate.accept(9, "stream-1", 20, &speech),
+            gate.accept(9, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue {
                 speech_onset: false,
             }
@@ -2434,9 +2496,6 @@ mod tests {
         let needs_reset = record_transcript_events(
             &state,
             &gateway_call_id,
-            Some("stream-1"),
-            Some(&format),
-            None,
             vec![
                 AsrTranscriptEvent::suppress(
                     TranscriptEvent::Partial {
@@ -2451,7 +2510,13 @@ mod tests {
                     update: motlie_model::TranscriptionUpdate::default(),
                 }),
             ],
-            None,
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: None,
+                quality_session: None,
+            },
         )
         .await;
         assert!(needs_reset);
@@ -2469,14 +2534,6 @@ mod tests {
                 text: "partial".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             }),
-            AsrTranscriptEvent::suppress(
-                TranscriptEvent::Final {
-                    text: "suppressed final".to_string(),
-                    update: motlie_model::TranscriptionUpdate::default(),
-                },
-                AsrTranscriptSuppressionReason::RepeatedTokenHallucination,
-                true,
-            ),
             AsrTranscriptEvent::emit(TranscriptEvent::Final {
                 text: "forward final".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
@@ -2506,14 +2563,17 @@ mod tests {
         let needs_reset = record_transcript_events(
             &state,
             &gateway_call_id,
-            Some("stream-1"),
-            Some(&format),
-            None,
             vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
                 text: repeated_text.to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             })],
-            None,
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: None,
+                quality_session: None,
+            },
         )
         .await;
         assert!(!needs_reset);
@@ -2620,8 +2680,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: None,
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("<from-phone-number>".to_string()),
+                Some("<to-phone-number>".to_string()),
                 CallStatus::Answering,
             );
             let call = guard
@@ -2700,15 +2760,15 @@ mod tests {
                 call_leg_id: Some("leg-1".to_string()),
                 stream_id: None,
             },
-            Some("+15550000001".to_string()),
-            Some("+15550000002".to_string()),
+            Some("<from-phone-number>".to_string()),
+            Some("<to-phone-number>".to_string()),
             status,
         )
     }
 
     fn local_endpoint_silence_frames() -> usize {
         let frame_ms = SILENCE_KEEPALIVE_INTERVAL.as_millis() as u64;
-        (ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS / frame_ms) as usize
+        (VoiceQualityConfig::default().endpoint.trailing_silence_ms / frame_ms) as usize
     }
 
     #[derive(Default)]

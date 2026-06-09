@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
+use crate::quality::{
+    ActiveAsrQualitySession, QualityEvent, QualityEventContext, QualityEventSink,
+    VoiceQualityConfig,
+};
 
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
@@ -28,6 +32,44 @@ impl InboundMode {
             Self::Manual => "manual",
             Self::AutoTranscribe => "auto-transcribe",
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct QualityRuntimeState {
+    pub run_id: String,
+    pub config: VoiceQualityConfig,
+    pub config_id: String,
+    pub event_sink: QualityEventSink,
+    pub log_path: Option<PathBuf>,
+    pub event_sequence: u64,
+}
+
+impl Default for QualityRuntimeState {
+    fn default() -> Self {
+        let config = VoiceQualityConfig::default();
+        let config_id = config.config_id();
+        Self {
+            run_id: format!("run_{}", Uuid::new_v4().simple()),
+            config,
+            config_id,
+            event_sink: QualityEventSink::disabled(),
+            log_path: None,
+            event_sequence: 0,
+        }
+    }
+}
+
+impl QualityRuntimeState {
+    pub fn set_config(&mut self, config: VoiceQualityConfig) -> String {
+        self.config = config;
+        self.config_id = self.config.config_id();
+        self.config_id.clone()
+    }
+
+    fn next_sequence(&mut self) -> u64 {
+        self.event_sequence = self.event_sequence.saturating_add(1);
+        self.event_sequence
     }
 }
 
@@ -443,6 +485,7 @@ pub struct GatewayState {
     pub stream_index: BTreeMap<String, String>,
     pub inbound_subscriptions: BTreeMap<String, InboundSubscription>,
     pub logs: VecDeque<LogEntry>,
+    pub quality: QualityRuntimeState,
     pub shutdown_requested: bool,
 }
 
@@ -474,8 +517,106 @@ impl GatewayState {
             stream_index: BTreeMap::new(),
             inbound_subscriptions: BTreeMap::new(),
             logs: VecDeque::new(),
+            quality: QualityRuntimeState::default(),
             shutdown_requested: false,
         }
+    }
+
+    pub fn set_quality_config(&mut self, config: VoiceQualityConfig) -> String {
+        self.quality.set_config(config)
+    }
+
+    pub fn set_quality_event_sink(&mut self, sink: QualityEventSink, log_path: Option<PathBuf>) {
+        self.quality.event_sink = sink;
+        self.quality.log_path = log_path;
+    }
+
+    fn quality_event_context(&mut self, gateway_call_id: Option<String>) -> QualityEventContext {
+        self.quality_event_context_with_config(gateway_call_id, self.quality.config_id.clone())
+    }
+
+    fn quality_event_context_with_config(
+        &mut self,
+        gateway_call_id: Option<String>,
+        config_id: String,
+    ) -> QualityEventContext {
+        QualityEventContext::new(
+            self.quality.next_sequence(),
+            self.quality.run_id.clone(),
+            gateway_call_id,
+            config_id,
+            self.quality.config.logging.redaction_mode,
+        )
+    }
+
+    pub fn emit_quality_config_snapshot(
+        &mut self,
+        gateway_call_id: &str,
+        snapshot_reason: &'static str,
+        effective_scope: &'static str,
+        effective_after_asr_session_id: Option<String>,
+    ) {
+        let event = QualityEvent::config_snapshot(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            &self.quality.config,
+            snapshot_reason,
+            effective_scope,
+            effective_after_asr_session_id,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn start_quality_asr_session(
+        &mut self,
+        gateway_call_id: &str,
+        stream_id: Option<&str>,
+        reason: &'static str,
+    ) -> ActiveAsrQualitySession {
+        let session = ActiveAsrQualitySession::new(self.quality.config_id.clone());
+        let event = QualityEvent::asr_session_started(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            &session,
+            stream_id,
+            reason,
+        );
+        self.quality.event_sink.emit(event);
+        session
+    }
+
+    pub fn emit_quality_asr_turn_mapped(
+        &mut self,
+        gateway_call_id: &str,
+        session: &ActiveAsrQualitySession,
+        turn_id: &str,
+        final_transcript_event_id: &str,
+        caller_turn_sent: bool,
+    ) {
+        let event = QualityEvent::asr_turn_mapped(
+            self.quality_event_context_with_config(
+                Some(gateway_call_id.to_string()),
+                session.config_id.clone(),
+            ),
+            session,
+            turn_id.to_string(),
+            final_transcript_event_id.to_string(),
+            caller_turn_sent,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn emit_quality_caller_turn_sent(
+        &mut self,
+        gateway_call_id: &str,
+        turn_id: &str,
+        text: &str,
+    ) {
+        let event = QualityEvent::caller_turn_sent(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            turn_id.to_string(),
+            text,
+            self.quality.config.logging.include_transcript_text,
+        );
+        self.quality.event_sink.emit(event);
     }
 
     pub fn log(&mut self, level: LogLevel, message: impl Into<String>) {

@@ -46,6 +46,7 @@ pub fn render_state_dump(state: &GatewayState) -> String {
         lines.push(format!("telnyx number use {number}"));
         lines.push(format!("telnyx number bind {number} {connection_id}"));
     }
+    lines.extend(render_quality_dump(state));
     match state.inbound_mode {
         InboundMode::Disabled => lines.push("inbound disable".to_string()),
         InboundMode::Manual => lines.push("inbound enable --manual".to_string()),
@@ -55,6 +56,81 @@ pub fn render_state_dump(state: &GatewayState) -> String {
     }
     lines.push(String::new());
     lines.join("\n")
+}
+
+fn render_quality_dump(state: &GatewayState) -> Vec<String> {
+    let config = &state.quality.config;
+    vec![
+        format!("quality profile {}", config.profile.label()),
+        format!(
+            "quality speech rms-threshold {}",
+            config.speech.rms_threshold
+        ),
+        format!(
+            "quality speech peak-threshold {}",
+            config.speech.peak_threshold
+        ),
+        format!(
+            "quality speech onset-min-silence-ms {}",
+            config.speech.onset_min_silence_ms
+        ),
+        format!(
+            "quality endpoint trailing-silence-ms {}",
+            config.endpoint.trailing_silence_ms
+        ),
+        format!(
+            "quality endpoint min-turn-words {}",
+            config.endpoint.min_turn_words
+        ),
+        format!(
+            "quality endpoint min-turn-chars {}",
+            config.endpoint.min_turn_chars
+        ),
+        format!(
+            "quality endpoint merge-window-ms {}",
+            config.endpoint.merge_window_ms
+        ),
+        format!(
+            "quality endpoint max-turn-words {}",
+            config.endpoint.max_turn_words
+        ),
+        format!(
+            "quality endpoint max-turn-duration-ms {}",
+            config.endpoint.max_turn_duration_ms
+        ),
+        format!(
+            "quality text-call max-active-turns {}",
+            config.text_call.max_active_turns
+        ),
+        format!(
+            "quality text-call latest-response-wins {}",
+            if config.text_call.latest_response_wins {
+                "on"
+            } else {
+                "off"
+            }
+        ),
+        format!(
+            "quality logging include-transcript-text {}",
+            if config.logging.include_transcript_text {
+                "on"
+            } else {
+                "off"
+            }
+        ),
+        format!(
+            "quality logging redaction-mode {}",
+            config.logging.redaction_mode.label()
+        ),
+        if config.quality_judge.enabled {
+            format!(
+                "quality judge on --sample-rate {} --model {}",
+                config.quality_judge.sample_rate, config.quality_judge.model
+            )
+        } else {
+            "quality judge off".to_string()
+        },
+    ]
 }
 
 pub fn write_state_dump(path: &Path, state: &GatewayState) -> anyhow::Result<()> {

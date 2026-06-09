@@ -22,7 +22,7 @@ use super::turns::{
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
-const MAX_ACTIVE_TEXT_CALL_TURNS: usize = 32;
+const DEFAULT_MAX_ACTIVE_TEXT_CALL_TURNS: usize = 32;
 const MEDIA_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const PLAYBACK_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -40,15 +40,30 @@ enum AgentTurnDisposition {
     Invalid,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TextCallTurnTracker {
     turns: BTreeMap<String, TextCallTurnState>,
     playback_turns: BTreeMap<String, String>,
+    max_active_turns: usize,
+}
+
+impl Default for TextCallTurnTracker {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_ACTIVE_TEXT_CALL_TURNS)
+    }
 }
 
 impl TextCallTurnTracker {
+    fn new(max_active_turns: usize) -> Self {
+        Self {
+            turns: BTreeMap::new(),
+            playback_turns: BTreeMap::new(),
+            max_active_turns: max_active_turns.max(1),
+        }
+    }
+
     fn add_caller_turn(&mut self, turn_id: String) -> anyhow::Result<()> {
-        if self.turns.len() >= MAX_ACTIVE_TEXT_CALL_TURNS {
+        if self.turns.len() >= self.max_active_turns {
             anyhow::bail!("too many outstanding text-call turns");
         }
         for state in self.turns.values_mut() {
@@ -217,11 +232,19 @@ pub async fn connect_application_stream(
     };
     send_json_frame(&mut write, &start).await?;
 
+    let max_active_turns = services
+        .state
+        .read()
+        .await
+        .quality
+        .config
+        .text_call
+        .max_active_turns;
     let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
     let handle = TextCallSessionHandle {
         tx,
         sequence: Arc::new(AtomicU64::new(1)),
-        turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
+        turns: Arc::new(Mutex::new(TextCallTurnTracker::new(max_active_turns))),
     };
     services
         .registry
@@ -651,7 +674,7 @@ mod tests {
         let handle = test_handle(tx);
         {
             let mut turns = handle.turns.lock().await;
-            for index in 0..MAX_ACTIVE_TEXT_CALL_TURNS {
+            for index in 0..DEFAULT_MAX_ACTIVE_TEXT_CALL_TURNS {
                 turns.turns.insert(
                     format!("turn-preexisting-{index}"),
                     TextCallTurnState::Pending,
@@ -671,7 +694,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(
             handle.turns.lock().await.outstanding_len(),
-            MAX_ACTIVE_TEXT_CALL_TURNS
+            DEFAULT_MAX_ACTIVE_TEXT_CALL_TURNS
         );
     }
 

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::quality::QualityProfile;
 use crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS;
 
 #[derive(Clone, Debug, Parser)]
@@ -44,6 +45,27 @@ pub struct Cli {
 
     #[arg(long)]
     pub capture_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    pub quality_config: Option<PathBuf>,
+
+    #[arg(long)]
+    pub quality_profile: Option<QualityProfile>,
+
+    #[arg(long)]
+    pub endpoint_trailing_silence_ms: Option<u64>,
+
+    #[arg(long)]
+    pub speech_rms_threshold: Option<f32>,
+
+    #[arg(long)]
+    pub speech_peak_threshold: Option<i32>,
+
+    #[arg(long)]
+    pub speech_onset_min_silence_ms: Option<u64>,
+
+    #[arg(long)]
+    pub turn_log_jsonl: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<CliCommand>,

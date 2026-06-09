@@ -154,6 +154,11 @@ fn structured_data(command: &str, lines: &[String]) -> Option<Value> {
                 "lines": lines,
             }))
         }
+        "quality" => Some(json!({
+            "kind": "quality",
+            "fields": fields_from_lines(lines),
+            "lines": lines,
+        })),
         _ => None,
     }
 }
@@ -326,6 +331,32 @@ mod tests {
         assert_eq!(response["data"]["kind"], "calls");
         assert_eq!(response["data"]["calls"][0]["call"], call_id);
         assert_eq!(response["data"]["calls"][0]["status"], "waiting");
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn command_socket_returns_structured_quality_status() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let context = Arc::new(GatewayContext::new(state, telnyx));
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), context));
+
+        let mut client = SocketTestClient::connect(&path).await;
+        let response = client.command("quality status").await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["kind"], "quality");
+        assert_eq!(
+            response["data"]["fields"]["include_transcript_text"],
+            "false"
+        );
+        assert_eq!(response["data"]["fields"]["redaction_mode"], "metrics-only");
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);
