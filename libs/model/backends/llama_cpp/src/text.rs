@@ -19,12 +19,11 @@ use motlie_model::{
     ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
     ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
-    TextMetricState,
+    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
+    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -130,7 +129,7 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-E4B-it",
             file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
-            thinking: ThinkingMode::Auto,
+            thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support_with_recommended(QuantizationBits::Eight),
             default_context_length: 32768,
@@ -150,7 +149,7 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-12b-it",
             file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
-            thinking: ThinkingMode::Auto,
+            thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             // @gemma4-cdx 2026-06-04 22:49 PDT: GGUF is the
             // local fallback for the official 12B safetensors path; prefer
@@ -173,7 +172,7 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-12b-it-qat-q4_0",
             file_layout: GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
             arch: LlamaCppTextArch::Gemma4,
-            thinking: ThinkingMode::Auto,
+            thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             // @gemma4-cdx 2026-06-05 17:45 PDT: Google publishes the QAT
             // checkpoint as a single GGUF Q4_0 artifact, so expose only Q4
@@ -1436,7 +1435,7 @@ mod tests {
         assert_eq!(spec.display_name, "Gemma 4 E4B-it (GGUF)");
         assert_eq!(spec.model_prefix, "gemma-4-E4B-it");
         assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
-        assert_eq!(spec.thinking, ThinkingMode::Auto);
+        assert_eq!(spec.thinking, ThinkingMode::Disabled);
         assert_eq!(
             spec.quantization.recommended(),
             Some(QuantizationBits::Eight)
@@ -1451,6 +1450,18 @@ mod tests {
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
         assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
+    }
+
+    #[test]
+    fn gemma4_12b_specs_default_to_answer_first_chat() {
+        for spec in [
+            LlamaCppTextSpec::gemma4_12b(),
+            LlamaCppTextSpec::gemma4_12b_qat_q4_0(),
+        ] {
+            assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
+            assert_eq!(spec.thinking, ThinkingMode::Disabled);
+            assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
+        }
     }
 
     #[test]

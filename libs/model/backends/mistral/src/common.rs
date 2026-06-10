@@ -418,11 +418,9 @@ fn enable_thinking_for_request(request: &ChatRequest) -> Option<bool> {
         Some(motlie_model::ThinkingMode::Disabled) => Some(false),
         Some(motlie_model::ThinkingMode::Auto) => Some(true),
         // Qwen3/Gemma safetensors templates default to thinking when the
-        // variable is omitted. Tool loops need structured calls inside the
-        // request token budget, so default tool-bearing requests to no thinking
-        // unless the caller explicitly opts in.
-        None if request.requires_tool_use() => Some(false),
-        None => None,
+        // variable is omitted. Keep Motlie's default chat surface answer-first;
+        // callers that need reasoning traces can opt in per request.
+        None => Some(false),
     }
 }
 
@@ -586,7 +584,15 @@ pub(crate) fn mistral_response_to_chat_response(
         .collect::<Result<Vec<_>, _>>()?;
 
     let content = message.content.unwrap_or_default();
-    if content.is_empty() && tool_calls.is_empty() {
+    let reasoning = message.reasoning_content;
+    if content.is_empty()
+        && tool_calls.is_empty()
+        && reasoning
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
         return Err(ModelError::BackendExecution {
             backend: "mistralrs",
             operation: "send_chat_request",
@@ -604,7 +610,7 @@ pub(crate) fn mistral_response_to_chat_response(
         content,
         tool_calls,
         finish_reason,
-        reasoning: message.reasoning_content,
+        reasoning,
         usage: Some(GenerationUsage {
             prompt_tokens: Some(usage_count_to_u32(usage.prompt_tokens)),
             completion_tokens: Some(usage_count_to_u32(usage.completion_tokens)),
@@ -986,6 +992,66 @@ mod tests {
         assert_eq!(
             enable_thinking_for_request(&explicit_thinking_request),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn plain_chat_request_defaults_to_answer_first_thinking() {
+        let request = ChatRequest {
+            messages: vec![ChatMessage::text(ChatRole::User, "Hello")],
+            ..Default::default()
+        };
+
+        assert_eq!(enable_thinking_for_request(&request), Some(false));
+        let builder =
+            chat_request_to_builder(&request, text_only_message_parts).expect("request should map");
+        let mut request_like = builder.clone();
+        let RequestMessage::Chat {
+            enable_thinking, ..
+        } = request_like.take_messages()
+        else {
+            panic!("text-only chat request should remain a chat request");
+        };
+        assert_eq!(enable_thinking, Some(false));
+
+        let explicit_disabled_request = ChatRequest {
+            thinking: Some(motlie_model::ThinkingMode::Disabled),
+            ..request.clone()
+        };
+        assert_eq!(
+            enable_thinking_for_request(&explicit_disabled_request),
+            Some(false)
+        );
+
+        let explicit_thinking_request = ChatRequest {
+            thinking: Some(motlie_model::ThinkingMode::Auto),
+            ..request
+        };
+        assert_eq!(
+            enable_thinking_for_request(&explicit_thinking_request),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn response_with_reasoning_only_maps_to_chat_response() {
+        let message = ResponseMessage {
+            content: None,
+            role: "assistant".to_string(),
+            tool_calls: None,
+            reasoning_content: Some("thinking".to_string()),
+        };
+
+        let response = mistral_response_to_chat_response(message, "length".to_string(), &usage())
+            .expect("reasoning-only response should map");
+
+        assert_eq!(response.content, "");
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(response.finish_reason, Some(ChatFinishReason::Length));
+        assert_eq!(
+            response.usage.as_ref().and_then(|usage| usage.total_tokens),
+            Some(18)
         );
     }
 
