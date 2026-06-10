@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-09 | @codex-m6-ds-rv | Updated live-call tuned defaults and TTS chunking guidance after M6 smoke-call trials: 650 ms endpoint tail, stricter speech gate, 90-char sentence-packed TTS chunks, and one-chunk prebuffer. |
 | 2026-06-09 | @codex-367-design | Added M6 gap implementation notes: deferred ASR/TTS/media/barge-in spans, inbound/outbound transport rollups, live call-bound tuning commands, and operator TUI command-history recall through `motlie-driver::HistoryBuffer`. |
 | 2026-06-08 | @codex-367-design | Revised after the first M6 review pass: added call-level config snapshots, monotonic/non-blocking span emission, critical-path latency accounting, pre-turn ASR join keys, privacy defaults, typed config validation, existing line-oriented socket reuse, normalized artifacts, and judge reproducibility requirements. |
 | 2026-06-08 | @codex-367-design | Added the M6 profiling specification: span boundaries, deterministic `I heard` harnesses, structured turn logs, latency categories, LLM judge inputs/outputs, tunable config surfaces, and acceptance criteria. |
@@ -166,12 +167,12 @@ Spans must not inline `config { ... }`. Instead, the gateway emits one `call.con
   "resolved_config": {
     "profile": "balanced",
     "speech": {
-      "rms_threshold": 180.0,
-      "peak_threshold": 900,
-      "onset_min_silence_ms": 120
+      "rms_threshold": 220.0,
+      "peak_threshold": 1100,
+      "onset_min_silence_ms": 180
     },
     "endpoint": {
-      "trailing_silence_ms": 800,
+      "trailing_silence_ms": 650,
       "min_turn_words": 2,
       "min_turn_chars": 6,
       "merge_window_ms": 350,
@@ -826,10 +827,10 @@ Prompt requirements:
 
 | Area | Knob | Current status | Default/current value | What logs optimize |
 |---|---|---:|---:|---|
-| Speech detection | `SPEECH_RMS_THRESHOLD` | hard-coded | `180.0` | false starts, missed speech |
-| Speech detection | `SPEECH_PEAK_THRESHOLD` | hard-coded | `900` | noise vs speech distinction |
-| Endpointing | `ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS` | hard-coded live, replay default | `800 ms` | premature vs late endpointing |
-| Barge-in onset | `ASR_SPEECH_ONSET_MIN_SILENCE_MS` | hard-coded | `120 ms` | barge-in sensitivity |
+| Speech detection | `SPEECH_RMS_THRESHOLD` | hard-coded | `220.0` | false starts, missed speech |
+| Speech detection | `SPEECH_PEAK_THRESHOLD` | hard-coded | `1100` | noise vs speech distinction |
+| Endpointing | `ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS` | hard-coded live, replay default | `650 ms` | premature vs late endpointing |
+| Barge-in onset | `ASR_SPEECH_ONSET_MIN_SILENCE_MS` | hard-coded | `180 ms` | barge-in sensitivity |
 | Replay ASR | `--chunk-ms` | CLI implemented | `20` | streaming stability |
 | Replay ASR | `--trailing-silence-pad-ms` | CLI implemented | `800` | finalization behavior |
 | ASR backend | `--backend`, `asr use` | CLI/REPL implemented | selected backend | backend comparison |
@@ -855,10 +856,10 @@ Prompt requirements:
 | Key | Domain type | Min / max or values | Live-safe default | Validation | Live apply boundary | Effect |
 |---|---|---|---:|---|---|---|
 | `profile` | `QualityProfile` enum | `fast`, `balanced`, `complete`, `noisy` | `balanced` | reject unknown | next ASR session for derived ASR values | Selects defaults. |
-| `speech.rms_threshold` | `RmsThreshold(f32)` | `0.0..20000.0` | `180.0` | reject NaN, clamp to range with warning | next ASR session | Live speech gate. |
-| `speech.peak_threshold` | `PeakThreshold(i32)` | `0..32767` | `900` | clamp to range | next ASR session | Live speech gate. |
-| `speech.onset_min_silence_ms` | `DurationMs` | `0..2000` | `120` | clamp to range | next ASR session | Barge-in onset sensitivity. |
-| `endpoint.trailing_silence_ms` | `DurationMs` | `100..5000` | `800` | clamp to range | next ASR session | Live endpointing. |
+| `speech.rms_threshold` | `RmsThreshold(f32)` | `0.0..20000.0` | `220.0` | reject NaN, clamp to range with warning | next ASR session | Live speech gate. |
+| `speech.peak_threshold` | `PeakThreshold(i32)` | `0..32767` | `1100` | clamp to range | next ASR session | Live speech gate. |
+| `speech.onset_min_silence_ms` | `DurationMs` | `0..2000` | `180` | clamp to range | next ASR session | Barge-in onset sensitivity. |
+| `endpoint.trailing_silence_ms` | `DurationMs` | `100..5000` | `650` | clamp to range | next ASR session | Live endpointing. |
 | `endpoint.min_turn_words` | `ReportOnlyCount` | `0..50` | `2` | clamp to range | report only | Short-turn label threshold only. |
 | `endpoint.min_turn_chars` | `ReportOnlyCount` | `0..200` | `6` | clamp to range | report only | Tiny-turn label threshold only. |
 | `endpoint.merge_window_ms` | `ReportOnlyDurationMs` | `0..5000` | `350` | clamp to range | report only | Adjacent-turn recommendation only. |
@@ -871,7 +872,9 @@ Prompt requirements:
 | `text_call.playback_wait_timeout_ms` | `DurationMs` | `1000..600000` | `180000` | clamp to range | new playback request | Hung playback detection. |
 | `text_call.latest_response_wins` | `bool` | `true,false` | `true` | reject non-bool | new agent turn | Cancel-and-replace policy. |
 | `text_call.callback_timeout_ms` | `DurationMs` | `100..60000` | `5000` | clamp to range | new callback attempt | Subscriber responsiveness. |
-| `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence/clause text splitting before TTS; off synthesizes the full response as one chunk. |
+| `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. |
+| `tts.max_text_chunk_chars` | `Count` | `40..500` | `90` | clamp to range | new playback request | Packs complete sentence segments up to this size before falling back to word splits for oversized segments. |
+| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Number of prepared text chunks required before playback starts. |
 | `barge_in.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables barge-in path. |
 | `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. |
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
@@ -913,12 +916,12 @@ Proposed TOML:
 profile = "balanced"
 
 [voice_quality.speech]
-rms_threshold = 180.0
-peak_threshold = 900
-onset_min_silence_ms = 120
+rms_threshold = 220.0
+peak_threshold = 1100
+onset_min_silence_ms = 180
 
 [voice_quality.endpoint]
-trailing_silence_ms = 800
+trailing_silence_ms = 650
 min_turn_words = 2
 min_turn_chars = 6
 merge_window_ms = 350
@@ -999,10 +1002,10 @@ Example dump lines:
 
 ```text
 quality profile balanced
-quality speech rms-threshold 180
-quality speech peak-threshold 900
-quality speech onset-min-silence-ms 120
-quality endpoint trailing-silence-ms 800
+quality speech rms-threshold 220
+quality speech peak-threshold 1100
+quality speech onset-min-silence-ms 180
+quality endpoint trailing-silence-ms 650
 quality endpoint min-turn-words 2
 quality endpoint min-turn-chars 6
 quality endpoint merge-window-ms 350
@@ -1034,10 +1037,10 @@ Gateway startup:
 telnyx-gateway \
   --quality-config ./telnyx-quality.toml \
   --quality-profile balanced \
-  --endpoint-trailing-silence-ms 800 \
-  --speech-rms-threshold 180 \
-  --speech-peak-threshold 900 \
-  --speech-onset-min-silence-ms 120 \
+  --endpoint-trailing-silence-ms 650 \
+  --speech-rms-threshold 220 \
+  --speech-peak-threshold 1100 \
+  --speech-onset-min-silence-ms 180 \
   --turn-log-jsonl ./turns.jsonl \
   --quality-report-json ./quality-report.json
 ```

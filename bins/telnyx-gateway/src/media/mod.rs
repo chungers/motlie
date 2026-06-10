@@ -1,22 +1,22 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use axum::extract::ws::{Message, WebSocket};
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
+use motlie_voice::VoiceError;
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
-use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
-use motlie_voice::VoiceError;
+use motlie_voice::pipeline::resample::{WindowedSincResampler, resample_i16_mono};
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
-use tokio::sync::{mpsc, Mutex};
+use serde_json::{Map, Value, json};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{
@@ -2252,8 +2252,8 @@ fn validate_media_format(format: &MediaFormat) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use motlie_model::typed::{AudioBuf, Mono};
@@ -2262,9 +2262,9 @@ mod tests {
     use crate::adapter::{
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
-    use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
+    use crate::operator::state::{CallStatus, TelnyxIds, TtsPlaybackStatus, shared_state};
     use crate::tts::{
-        LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
+        LiveTtsBackend, OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry,
     };
 
     #[test]
@@ -2414,6 +2414,13 @@ mod tests {
                 CallStatus::MediaStarted,
             )
         };
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_tts_max_text_chunk_chars(40);
+            guard.quality.config.set_tts_prebuffer_chunks(2);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
+        }
         let media_registry = SharedMediaRegistry::default();
         let (tx, rx) = mpsc::channel(16);
         media_registry
@@ -2433,7 +2440,7 @@ mod tests {
             &tts,
             LiveTtsBackend::Piper,
             gateway_call_id.clone(),
-            "Hello, world.".to_string(),
+            "Hello world. Second sentence blocks here.".to_string(),
             "test say",
         )
         .await
@@ -2455,19 +2462,22 @@ mod tests {
         .expect("failed prebuffered chunk should release active playback");
 
         assert!(next_outbound_command(&mut media_state).is_none());
-        assert!(media_registry
-            .active_speech_playback_id(&gateway_call_id)
-            .await
-            .is_none());
+        assert!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .is_none()
+        );
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         let tts = call.tts.as_ref().expect("TTS state should exist");
         assert_eq!(tts.status, TtsPlaybackStatus::Failed);
-        assert!(tts
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("second chunk failed")));
+        assert!(
+            tts.error
+                .as_deref()
+                .is_some_and(|error| error.contains("second chunk failed"))
+        );
         assert_eq!(call.status, CallStatus::MediaStarted);
         drop(guard);
 
@@ -2732,14 +2742,16 @@ mod tests {
         handle_text(&media_one, &state, &asr, &mut media_state)
             .await
             .expect("first non-one media chunk should establish reorder base");
-        assert!(state
-            .read()
-            .await
-            .calls
-            .get(&gateway_call_id)
-            .expect("call exists")
-            .transcripts
-            .is_empty());
+        assert!(
+            state
+                .read()
+                .await
+                .calls
+                .get(&gateway_call_id)
+                .expect("call exists")
+                .transcripts
+                .is_empty()
+        );
 
         let media_two = media_event("stream-1", "8", &chunk);
         handle_text(&media_two, &state, &asr, &mut media_state)
@@ -2769,7 +2781,7 @@ mod tests {
         assert_eq!(call.transcripts[0].text, "received 16000 samples");
         assert_eq!(
             call.transcripts.last().map(|event| event.text.as_str()),
-            Some("received 28800 samples")
+            Some("received 26400 samples")
         );
     }
 
@@ -2872,14 +2884,16 @@ mod tests {
         )
         .await
         .expect("silence should be accepted by transport");
-        assert!(state
-            .read()
-            .await
-            .calls
-            .get(&gateway_call_id)
-            .expect("call exists")
-            .transcripts
-            .is_empty());
+        assert!(
+            state
+                .read()
+                .await
+                .calls
+                .get(&gateway_call_id)
+                .expect("call exists")
+                .transcripts
+                .is_empty()
+        );
 
         let speech = STANDARD.encode(l16_samples(16_000, 4_000));
         handle_text(
@@ -2990,7 +3004,7 @@ mod tests {
             gate.accept(1, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue { speech_onset: true }
         );
-        for frame_index in 2..=7 {
+        for frame_index in 2..=10 {
             assert_eq!(
                 gate.accept(frame_index, "stream-1", 20, &silence, &quality),
                 AsrFrameDecision::Continue {
@@ -2999,11 +3013,11 @@ mod tests {
             );
         }
         assert_eq!(
-            gate.accept(8, "stream-1", 20, &speech, &quality),
+            gate.accept(11, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue { speech_onset: true }
         );
         assert_eq!(
-            gate.accept(9, "stream-1", 20, &speech, &quality),
+            gate.accept(12, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue {
                 speech_onset: false,
             }
@@ -3345,9 +3359,11 @@ mod tests {
         .await
         .expect_err("unsupported codec should fail at start");
 
-        assert!(error
-            .to_string()
-            .contains("unsupported inbound media encoding"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported inbound media encoding")
+        );
         assert!(media_state.session.is_none());
         assert!(media_state.gateway_call_id.is_none());
         assert!(media_state.media_format.is_none());
@@ -3463,7 +3479,9 @@ mod tests {
     }
 
     fn finish_pad_silence_frames() -> usize {
-        local_endpoint_silence_frames()
+        let frame_ms = SILENCE_KEEPALIVE_INTERVAL.as_millis() as u64;
+        let trailing_ms = VoiceQualityConfig::default().endpoint.trailing_silence_ms;
+        trailing_ms.saturating_add(frame_ms - 1) as usize / frame_ms as usize
     }
 
     #[derive(Default)]

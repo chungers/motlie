@@ -1,15 +1,15 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::call_control::TelnyxMediaConfig;
 use crate::media::{
-    packetize_tts_samples, CallMediaHandle, OutboundFrameQualityContext, OutboundMediaCommand,
-    OutboundMediaFrame, SharedMediaRegistry, SpeechCancelToken, SpeechClearReason,
+    CallMediaHandle, OutboundFrameQualityContext, OutboundMediaCommand, OutboundMediaFrame,
+    SharedMediaRegistry, SpeechCancelToken, SpeechClearReason, packetize_tts_samples,
 };
 use crate::operator::state::{LogLevel, QualitySpanEmission, SharedState};
 use crate::quality::RedactionMode;
-use crate::tts::{split_speech_text_with_max_chars, LiveTtsBackend, SharedTtsRegistry, TtsAudio};
+use crate::tts::{LiveTtsBackend, SharedTtsRegistry, TtsAudio, split_speech_text_with_max_chars};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuedSpeech {
@@ -754,13 +754,13 @@ async fn synthesize_text_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
-    use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
+    use crate::operator::state::{CallStatus, TelnyxIds, shared_state};
+    use crate::tts::{OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry};
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Notify};
-    use tokio::time::{timeout, Duration};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{Notify, mpsc};
+    use tokio::time::{Duration, timeout};
 
     struct SequencedTtsFactory {
         sample_rate_hz: u32,
@@ -923,6 +923,13 @@ mod tests {
                 CallStatus::MediaStarted,
             )
         };
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_tts_max_text_chunk_chars(40);
+            guard.quality.config.set_tts_prebuffer_chunks(2);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
+        }
         let media_registry = SharedMediaRegistry::default();
         let (tx, mut rx) = mpsc::channel(16);
         media_registry
@@ -943,7 +950,7 @@ mod tests {
             &tts,
             LiveTtsBackend::Kokoro82m,
             gateway_call_id.clone(),
-            "Hello, world.".to_string(),
+            "Hello world. Second sentence blocks here.".to_string(),
             "test say",
         )
         .await

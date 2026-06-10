@@ -135,9 +135,9 @@ pub struct SpeechQualityConfig {
 impl Default for SpeechQualityConfig {
     fn default() -> Self {
         Self {
-            rms_threshold: 180.0,
-            peak_threshold: 900,
-            onset_min_silence_ms: 120,
+            rms_threshold: 220.0,
+            peak_threshold: 1_100,
+            onset_min_silence_ms: 180,
         }
     }
 }
@@ -155,7 +155,7 @@ pub struct EndpointQualityConfig {
 impl Default for EndpointQualityConfig {
     fn default() -> Self {
         Self {
-            trailing_silence_ms: 800,
+            trailing_silence_ms: 650,
             min_turn_words: 2,
             min_turn_chars: 6,
             merge_window_ms: 350,
@@ -226,8 +226,8 @@ impl Default for TtsQualityConfig {
     fn default() -> Self {
         Self {
             chunking_enabled: true,
-            max_text_chunk_chars: 140,
-            prebuffer_chunks: 2,
+            max_text_chunk_chars: 90,
+            prebuffer_chunks: 1,
         }
     }
 }
@@ -377,7 +377,7 @@ impl VoiceQualityConfig {
             }
             QualityProfile::Noisy => {
                 config.endpoint.trailing_silence_ms = 950;
-                config.speech.rms_threshold = 220.0;
+                config.speech.rms_threshold = 260.0;
                 config.speech.peak_threshold = 1_200;
             }
         }
@@ -1350,6 +1350,19 @@ mod tests {
     }
 
     #[test]
+    fn balanced_defaults_match_live_call_tuned_values() {
+        let config = VoiceQualityConfig::default();
+        assert_eq!(config.profile, QualityProfile::Balanced);
+        assert_eq!(config.endpoint.trailing_silence_ms, 650);
+        assert_eq!(config.speech.rms_threshold, 220.0);
+        assert_eq!(config.speech.peak_threshold, 1_100);
+        assert_eq!(config.speech.onset_min_silence_ms, 180);
+        assert!(config.tts.chunking_enabled);
+        assert_eq!(config.tts.max_text_chunk_chars, 90);
+        assert_eq!(config.tts.prebuffer_chunks, 1);
+    }
+
+    #[test]
     fn config_id_is_stable_for_same_resolved_config() {
         let left = VoiceQualityConfig::default();
         let right = VoiceQualityConfig::for_profile(QualityProfile::Balanced);
@@ -1434,7 +1447,7 @@ mod tests {
         .expect("quality config parses");
 
         assert_eq!(config.profile, QualityProfile::Noisy);
-        assert_eq!(config.speech.rms_threshold, 220.0);
+        assert_eq!(config.speech.rms_threshold, 260.0);
         assert_eq!(config.endpoint.trailing_silence_ms, 100);
         assert!(!config.logging.include_transcript_text);
     }
@@ -1451,7 +1464,7 @@ mod tests {
             )
             .expect("toml overlay parses");
         assert_eq!(config.profile, QualityProfile::Noisy);
-        assert_eq!(config.speech.rms_threshold, 220.0);
+        assert_eq!(config.speech.rms_threshold, 260.0);
         assert_eq!(config.endpoint.trailing_silence_ms, 700);
     }
 }
