@@ -726,6 +726,25 @@ fn apply_child_env(
     } else if is_gguf_cell(cell) {
         command.env("MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED", "false");
     }
+
+    if is_ort_backed_cell(cell) {
+        apply_static_ort_child_env(command);
+    }
+}
+
+fn apply_static_ort_child_env(command: &mut Command) {
+    for var in [
+        "ORT_LIB_PATH",
+        "ORT_LIB_LOCATION",
+        "ORT_PREFER_DYNAMIC_LINK",
+        "ORT_SKIP_DOWNLOAD",
+        "ORT_OFFLINE",
+        "CARGO_NET_OFFLINE",
+    ] {
+        command.env_remove(var);
+    }
+    command.env("MOTLIE_ORT_SOURCE", "sherpa-onnx");
+    command.env("MOTLIE_ORT_LINK_POLICY", "static");
 }
 
 fn terminate_child(child: &mut std::process::Child) {
@@ -955,6 +974,9 @@ fn classify_child_failure(
         .unwrap_or_default()
         .to_ascii_lowercase();
 
+    if is_native_link_failure_log(&log) {
+        return OutcomeReason::NativeLinkFailed;
+    }
     if log.contains("401")
         || log.contains("unauthorized")
         || log.contains("gated repo")
@@ -989,7 +1011,9 @@ fn classify_child_failure(
         return OutcomeReason::GgufMetalUnverified;
     }
     if log.contains("could not compile") || log.contains("failed to run custom build command") {
-        if log.contains("stdbool.h") || log.contains("llama") || log.contains("gguf") {
+        if is_native_link_failure_log(&log) {
+            OutcomeReason::NativeLinkFailed
+        } else if log.contains("stdbool.h") || log.contains("llama") || log.contains("gguf") {
             OutcomeReason::GgufToolchainFailed
         } else {
             OutcomeReason::FeatureBuildFailed
@@ -999,6 +1023,18 @@ fn classify_child_failure(
     } else {
         OutcomeReason::ChildRunFailed
     }
+}
+
+fn is_native_link_failure_log(log: &str) -> bool {
+    log.contains("ortgetapibase")
+        || log.contains("_ortgetapibase")
+        || log.contains("undefined symbols")
+        || log.contains("undefined reference")
+        || log.contains("symbol(s) not found")
+        || log.contains("linking with `cc` failed")
+        || log.contains("linking with `clang` failed")
+        || log.contains("linker command failed")
+        || log.contains("ld returned 1 exit status")
 }
 
 fn is_unverified_metal_gguf_cell(
@@ -1044,6 +1080,18 @@ fn build_gguf_bindgen_env(
     let args = merge_bindgen_args(existing, compiler_includes.into_iter().chain(repo_include));
 
     (!args.is_empty()).then_some(GgufBindgenEnv { args, repo_wired })
+}
+
+fn is_ort_backed_cell(cell: &SnapshotCell) -> bool {
+    cell.checkpoint_format.eq_ignore_ascii_case("onnx")
+        || cell.backend.contains("ort")
+        || cell.backend.contains("piper")
+        || cell.backend.contains("sherpa")
+        || cell.features_for_profile("").iter().any(|feature| {
+            feature.contains("piper")
+                || feature.contains("sherpa-onnx")
+                || feature.contains("moonshine")
+        })
 }
 
 fn is_gguf_cell(cell: &SnapshotCell) -> bool {
@@ -1426,6 +1474,64 @@ mod tests {
 
         let _ = std::fs::remove_file(log_path);
         assert_eq!(reason, OutcomeReason::RuntimeBudgetExceeded);
+    }
+
+    #[test]
+    fn ort_link_error_is_native_link_failure_before_auth_heuristics() {
+        let cell = test_snapshot_cell();
+        let log_path = std::env::temp_dir().join(format!(
+            "motlie-evals-ort-link-test-{}.log",
+            std::process::id()
+        ));
+        std::fs::write(
+            &log_path,
+            r#"Undefined symbols for architecture arm64:
+  "_OrtGetApiBase", referenced from:
+unauthorized access to model cache"#,
+        )
+        .unwrap();
+
+        let reason = classify_child_failure(&cell, AcceleratorClass::Cpu, &log_path);
+
+        let _ = std::fs::remove_file(log_path);
+        assert_eq!(reason, OutcomeReason::NativeLinkFailed);
+    }
+
+    #[test]
+    fn onnx_cells_are_ort_backed_for_static_child_policy() {
+        let mut cell = test_snapshot_cell();
+        cell.checkpoint_format = "onnx".to_owned();
+        cell.backend = "piper".to_owned();
+        cell.features = vec!["model-piper-en-us-ljspeech-medium".to_owned()];
+
+        assert!(is_ort_backed_cell(&cell));
+    }
+
+    #[test]
+    fn ort_child_env_scrubs_dynamic_overrides_and_selects_static_source() {
+        let mut cell = test_snapshot_cell();
+        cell.checkpoint_format = "onnx".to_owned();
+        cell.backend = "sherpa_onnx".to_owned();
+        let mut command = Command::new("cargo");
+        command.env("ORT_LIB_PATH", "/tmp/host-ort");
+        command.env("ORT_PREFER_DYNAMIC_LINK", "1");
+
+        apply_child_env(&mut command, &cell, None);
+
+        let env = command.get_envs().collect::<BTreeMap<_, _>>();
+        assert_eq!(env.get(std::ffi::OsStr::new("ORT_LIB_PATH")), Some(&None));
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("ORT_PREFER_DYNAMIC_LINK")),
+            Some(&None)
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("MOTLIE_ORT_SOURCE")),
+            Some(&Some(std::ffi::OsStr::new("sherpa-onnx")))
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("MOTLIE_ORT_LINK_POLICY")),
+            Some(&Some(std::ffi::OsStr::new("static")))
+        );
     }
 
     #[test]
