@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,6 +9,7 @@ use motlie_voice::app::{
     CallContext, CallIds, ConversationCommand, ConversationHandler, TranscriptEvent, VoiceAppError,
 };
 use motlie_voice::telephony::CallAction;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
@@ -20,6 +21,10 @@ use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
 
 const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
+#[cfg(not(test))]
+const SMOKE_TEST_FINAL_DEBOUNCE: Duration = Duration::from_millis(700);
+#[cfg(test)]
+const SMOKE_TEST_FINAL_DEBOUNCE: Duration = Duration::from_millis(20);
 
 pub type SharedConversationHandler = Arc<dyn ConversationHandler>;
 
@@ -30,6 +35,7 @@ pub struct ConversationRuntime {
     handler: SharedConversationHandler,
     smoke_test_enabled: Arc<AtomicBool>,
     barge_in_enabled: Arc<AtomicBool>,
+    smoke_test_pending_finals: Arc<Mutex<HashMap<String, PendingSmokeTestFinal>>>,
 }
 
 impl ConversationRuntime {
@@ -45,6 +51,7 @@ impl ConversationRuntime {
             handler,
             smoke_test_enabled: Arc::new(AtomicBool::new(smoke_test_enabled)),
             barge_in_enabled: Arc::new(AtomicBool::new(true)),
+            smoke_test_pending_finals: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -79,6 +86,12 @@ impl ConversationRuntime {
             "disabled"
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct PendingSmokeTestFinal {
+    text: String,
+    generation: u64,
 }
 
 pub fn default_conversation_handler() -> SharedConversationHandler {
@@ -148,7 +161,7 @@ pub async fn handle_transcript_event(
     state
         .write()
         .await
-        .record_conversation_user_turn(gateway_call_id, transcript_text);
+        .record_conversation_user_turn(gateway_call_id, transcript_text.clone());
 
     if barge_in_allows(&snapshot.barge_in, BargeInTrigger::Final) {
         cancel_active_speech_for_barge_in(
@@ -174,7 +187,112 @@ pub async fn handle_transcript_event(
         return Ok(());
     }
 
+    schedule_smoke_test_final(
+        state,
+        media_registry,
+        runtime,
+        gateway_call_id,
+        transcript_text,
+    )
+    .await;
+    Ok(())
+}
+
+async fn schedule_smoke_test_final(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    transcript_text: String,
+) {
+    let generation = {
+        let mut pending = runtime.smoke_test_pending_finals.lock().await;
+        let entry = pending
+            .entry(gateway_call_id.to_string())
+            .or_insert_with(|| PendingSmokeTestFinal {
+                text: String::new(),
+                generation: 0,
+            });
+        entry.text = merge_smoke_test_finals(&entry.text, &transcript_text);
+        entry.generation = entry.generation.saturating_add(1);
+        entry.generation
+    };
+
+    let state = state.clone();
+    let media_registry = media_registry.clone();
+    let runtime = runtime.clone();
+    let gateway_call_id = gateway_call_id.to_string();
+    tokio::spawn(async move {
+        sleep(SMOKE_TEST_FINAL_DEBOUNCE).await;
+        let Some(text) = take_ready_smoke_test_final(&runtime, &gateway_call_id, generation).await
+        else {
+            return;
+        };
+        if let Err(error) =
+            apply_smoke_test_final(&state, &media_registry, &runtime, &gateway_call_id, text).await
+        {
+            let error = format!("{error:#}");
+            state
+                .write()
+                .await
+                .record_conversation_failed(&gateway_call_id, error.clone());
+            tracing::warn!(
+                gateway_call_id,
+                error,
+                "conversation.smoke_test.debounce_failed"
+            );
+        }
+    });
+}
+
+async fn take_ready_smoke_test_final(
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    generation: u64,
+) -> Option<String> {
+    let mut pending = runtime.smoke_test_pending_finals.lock().await;
+    match pending.get(gateway_call_id) {
+        Some(entry) if entry.generation == generation => {
+            pending.remove(gateway_call_id).map(|entry| entry.text)
+        }
+        _ => None,
+    }
+}
+
+fn merge_smoke_test_finals(existing: &str, next: &str) -> String {
+    let existing = existing.trim();
+    let next = next.trim();
+    match (existing.is_empty(), next.is_empty()) {
+        (_, true) => existing.to_string(),
+        (true, false) => next.to_string(),
+        (false, false) => format!("{existing} {next}"),
+    }
+}
+
+async fn apply_smoke_test_final(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    transcript_text: String,
+) -> anyhow::Result<()> {
+    let Some(snapshot) = conversation_snapshot(state, gateway_call_id, None).await else {
+        return Ok(());
+    };
+    if !snapshot.attached || !runtime.smoke_test_enabled() {
+        return Ok(());
+    }
+
+    state
+        .write()
+        .await
+        .record_conversation_user_turn(gateway_call_id, transcript_text.clone());
+
     let mut context = snapshot.context;
+    let event = TranscriptEvent::Final {
+        text: transcript_text,
+        update: motlie_model::TranscriptionUpdate::default(),
+    };
     let command = match runtime.handler.on_transcript(event, &mut context).await {
         Ok(command) => command,
         Err(error) => {
@@ -718,6 +836,10 @@ mod tests {
         call_id
     }
 
+    async fn wait_for_smoke_test_final() {
+        sleep(SMOKE_TEST_FINAL_DEBOUNCE + Duration::from_millis(30)).await;
+    }
+
     #[tokio::test]
     async fn smoke_test_handler_turns_final_transcript_into_say() {
         let handler = SmokeTestConversationHandler;
@@ -1013,6 +1135,7 @@ mod tests {
         )
         .await
         .expect("disabled barge-in should not fail overlapping final turn");
+        wait_for_smoke_test_final().await;
 
         assert!(!cancel.is_canceled());
         assert_eq!(
@@ -1101,6 +1224,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn smoke_test_debounce_merges_adjacent_final_fragments() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        let runtime = test_runtime();
+        let media_registry = SharedMediaRegistry::default();
+
+        for text in [
+            "Yeah, this is not",
+            "the last fragment or frame didn't come through still.",
+        ] {
+            handle_transcript_event(
+                &state,
+                &media_registry,
+                &runtime,
+                &gateway_call_id,
+                TranscriptEvent::Final {
+                    text: text.to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                },
+                None,
+            )
+            .await
+            .expect("final fragment should be accepted");
+        }
+        wait_for_smoke_test_final().await;
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Proposed);
+        assert_eq!(
+            call.conversation.last_user_text.as_deref(),
+            Some("Yeah, this is not the last fragment or frame didn't come through still.")
+        );
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some(
+                "I heard: Yeah, this is not the last fragment or frame didn't come through still."
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn final_transcript_still_regenerates_after_partial_barge_in() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
@@ -1147,6 +1312,7 @@ mod tests {
         )
         .await
         .expect("final should still regenerate through handler");
+        wait_for_smoke_test_final().await;
 
         assert!(cancel.is_canceled());
         let guard = state.read().await;
@@ -1181,6 +1347,7 @@ mod tests {
         )
         .await
         .expect("handler error should remain conversation-scoped");
+        wait_for_smoke_test_final().await;
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");

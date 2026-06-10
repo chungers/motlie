@@ -343,12 +343,19 @@ pub fn split_speech_text_with_max_chars(text: &str, max_chars: usize) -> Vec<Str
     let mut current = String::new();
     for ch in text.chars() {
         current.push(ch);
-        if matches!(ch, '.' | '!' | '?' | ',' | ';' | ':' | '\n') {
+        if is_speech_chunk_boundary(ch, &current) {
             push_speech_chunk(&mut chunks, &mut current, max_chars);
         }
     }
     push_speech_chunk(&mut chunks, &mut current, max_chars);
     chunks
+}
+
+fn is_speech_chunk_boundary(ch: char, current: &str) -> bool {
+    if ch == ':' && current.trim().chars().count() <= 12 {
+        return false;
+    }
+    matches!(ch, '.' | '!' | '?' | ',' | ';' | ':' | '\n')
 }
 
 fn push_speech_chunk(chunks: &mut Vec<String>, current: &mut String, max_chars: usize) {
@@ -615,6 +622,14 @@ mod tests {
         assert_eq!(
             split_speech_text("Hello, then continue: now stop;"),
             vec!["Hello,", "then continue:", "now stop;"]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_keeps_short_colon_prelude_with_following_text() {
+        assert_eq!(
+            split_speech_text_with_max_chars("I heard: hello there. Done.", 90),
+            vec!["I heard: hello there.", "Done."]
         );
     }
 
