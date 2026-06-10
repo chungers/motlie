@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_WORKSTREAM_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_STATUS_ACTIVE_WINDOW_SECS: u64 = 30;
 pub const DEFAULT_STATUS_IDLE_AFTER_SECS: u64 = 300;
-pub const DEFAULT_TIMER_SUBMIT_RETRIES: u8 = 1;
-pub const DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS: u64 = 750;
+pub const DEFAULT_SUBMIT_SETTLE_MS: u64 = 500;
+pub const DEFAULT_SUBMIT_RETRIES: u8 = 1;
+pub const DEFAULT_SUBMIT_RETRY_DELAY_MS: u64 = 750;
+pub const DEFAULT_TIMER_SUBMIT_RETRIES: u8 = DEFAULT_SUBMIT_RETRIES;
+pub const DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS: u64 = DEFAULT_SUBMIT_RETRY_DELAY_MS;
 pub const DEFAULT_TIMER_INPUT_QUIET_FOR_SECS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -237,7 +240,12 @@ pub struct SendRequest {
     pub paste_mode: PasteMode,
     pub enter: bool,
     pub interrupt_first: bool,
+    #[serde(default = "default_submit_settle_ms")]
     pub settle_ms: u64,
+    #[serde(default = "default_submit_retries")]
+    pub submit_retries: u8,
+    #[serde(default = "default_submit_retry_delay_ms")]
+    pub submit_retry_delay_ms: u64,
     pub require_state: Option<AgentState>,
     pub set_state: Option<AgentState>,
 }
@@ -254,6 +262,12 @@ pub struct BroadcastRequest {
     pub text: String,
     pub paste_mode: PasteMode,
     pub enter: bool,
+    #[serde(default = "default_submit_settle_ms")]
+    pub settle_ms: u64,
+    #[serde(default = "default_submit_retries")]
+    pub submit_retries: u8,
+    #[serde(default = "default_submit_retry_delay_ms")]
+    pub submit_retry_delay_ms: u64,
     pub role: Option<String>,
     pub state: Option<AgentState>,
 }
@@ -320,6 +334,18 @@ fn default_status_active_window_secs() -> u64 {
 
 fn default_status_idle_after_secs() -> u64 {
     DEFAULT_STATUS_IDLE_AFTER_SECS
+}
+
+fn default_submit_settle_ms() -> u64 {
+    DEFAULT_SUBMIT_SETTLE_MS
+}
+
+fn default_submit_retries() -> u8 {
+    DEFAULT_SUBMIT_RETRIES
+}
+
+fn default_submit_retry_delay_ms() -> u64 {
+    DEFAULT_SUBMIT_RETRY_DELAY_MS
 }
 
 fn default_timer_submit_retries() -> u8 {

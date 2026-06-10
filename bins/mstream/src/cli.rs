@@ -11,9 +11,9 @@ use crate::protocol::{
     NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
     SessionMarkRequest, SessionRetagRequest, SnapshotRequest, SummaryInputRequest,
     TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
-    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS,
-    DEFAULT_TIMER_SUBMIT_RETRIES, DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS,
-    DEFAULT_WORKSTREAM_EVENT_LIMIT,
+    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_SUBMIT_RETRIES, DEFAULT_SUBMIT_RETRY_DELAY_MS,
+    DEFAULT_SUBMIT_SETTLE_MS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
+    DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -343,14 +343,22 @@ pub struct SendArgs {
     pub text: String,
     #[arg(long, value_enum, default_value_t = PasteMode::Bracketed)]
     pub paste_mode: PasteMode,
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub enter: bool,
-    #[arg(long)]
-    pub no_enter: bool,
+    #[arg(
+        long = "no-prompt-submit",
+        alias = "no-enter",
+        help = "Write the prompt without performing the settle-delayed verified prompt submit."
+    )]
+    pub no_prompt_submit: bool,
     #[arg(long)]
     pub interrupt_first: bool,
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_SETTLE_MS)]
     pub settle_ms: u64,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRIES)]
+    pub submit_retries: u8,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRY_DELAY_MS)]
+    pub submit_retry_delay_ms: u64,
     #[arg(long, value_enum)]
     pub require_state: Option<AgentState>,
     #[arg(long, value_enum)]
@@ -359,7 +367,7 @@ pub struct SendArgs {
 
 impl SendArgs {
     fn into_request(self) -> anyhow::Result<SendRequest> {
-        let enter = resolve_enter(self.enter, self.no_enter)?;
+        let enter = resolve_prompt_submit(self.enter, self.no_prompt_submit)?;
         Ok(SendRequest {
             workstream: self.workstream,
             target: self.target,
@@ -368,6 +376,8 @@ impl SendArgs {
             enter,
             interrupt_first: self.interrupt_first,
             settle_ms: self.settle_ms,
+            submit_retries: if enter { self.submit_retries } else { 0 },
+            submit_retry_delay_ms: self.submit_retry_delay_ms,
             require_state: self.require_state,
             set_state: self.set_state,
         })
@@ -388,10 +398,20 @@ pub struct BroadcastArgs {
     pub text: String,
     #[arg(long, value_enum, default_value_t = PasteMode::Bracketed)]
     pub paste_mode: PasteMode,
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub enter: bool,
-    #[arg(long)]
-    pub no_enter: bool,
+    #[arg(
+        long = "no-prompt-submit",
+        alias = "no-enter",
+        help = "Write the prompt without performing the settle-delayed verified prompt submit."
+    )]
+    pub no_prompt_submit: bool,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_SETTLE_MS)]
+    pub settle_ms: u64,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRIES)]
+    pub submit_retries: u8,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRY_DELAY_MS)]
+    pub submit_retry_delay_ms: u64,
     #[arg(long)]
     pub role: Option<String>,
     #[arg(long, value_enum)]
@@ -400,12 +420,15 @@ pub struct BroadcastArgs {
 
 impl BroadcastArgs {
     fn into_request(self) -> anyhow::Result<BroadcastRequest> {
-        let enter = resolve_enter(self.enter, self.no_enter)?;
+        let enter = resolve_prompt_submit(self.enter, self.no_prompt_submit)?;
         Ok(BroadcastRequest {
             workstream: self.workstream,
             text: self.text,
             paste_mode: self.paste_mode,
             enter,
+            settle_ms: self.settle_ms,
+            submit_retries: if enter { self.submit_retries } else { 0 },
+            submit_retry_delay_ms: self.submit_retry_delay_ms,
             role: self.role,
             state: self.state,
         })
@@ -535,10 +558,14 @@ pub struct TimerStartArgs {
     pub self_host: String,
     #[arg(long)]
     pub prompt: String,
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub enter: bool,
-    #[arg(long)]
-    pub no_enter: bool,
+    #[arg(
+        long = "no-prompt-submit",
+        alias = "no-enter",
+        help = "Write the prompt without performing the settle-delayed verified prompt submit."
+    )]
+    pub no_prompt_submit: bool,
     #[arg(long, default_value_t = DEFAULT_TIMER_SUBMIT_RETRIES)]
     pub submit_retries: u8,
     #[arg(long, default_value_t = DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS)]
@@ -567,7 +594,7 @@ impl TimerStartArgs {
             self.self_host,
             current_tmux_session,
         )?;
-        let enter = resolve_enter(self.enter, self.no_enter)?;
+        let enter = resolve_prompt_submit(self.enter, self.no_prompt_submit)?;
         Ok(TimerStartRequest {
             name: self.name,
             workstream: self.workstream,
@@ -676,11 +703,11 @@ impl RecruitArgs {
     }
 }
 
-fn resolve_enter(enter: bool, no_enter: bool) -> anyhow::Result<bool> {
-    if enter && no_enter {
-        bail!("--enter and --no-enter are mutually exclusive");
+fn resolve_prompt_submit(enter: bool, no_prompt_submit: bool) -> anyhow::Result<bool> {
+    if enter && no_prompt_submit {
+        bail!("--enter and --no-prompt-submit are mutually exclusive");
     }
-    Ok(!no_enter)
+    Ok(!no_prompt_submit)
 }
 
 fn resolve_timer_target(
@@ -810,6 +837,85 @@ mod tests {
         assert!(help.contains("Remote lookup uses the host non-login SSH PATH"));
         assert!(help.contains("absolute path"));
         assert!(help.contains("--agent-arg <AGENT_ARGS>"));
+    }
+
+    #[test]
+    fn prompt_submit_help_uses_new_flag_and_hides_legacy_aliases() {
+        let mut send_command = Cli::command();
+        let send_help = send_command
+            .find_subcommand_mut("send")
+            .expect("send subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(send_help.contains("--no-prompt-submit"));
+        assert!(send_help.contains("verified prompt submit"));
+        assert!(!send_help.contains("--no-enter"));
+        assert!(!send_help.contains("--enter"));
+
+        let mut broadcast_command = Cli::command();
+        let broadcast_help = broadcast_command
+            .find_subcommand_mut("broadcast")
+            .expect("broadcast subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(broadcast_help.contains("--no-prompt-submit"));
+        assert!(broadcast_help.contains("verified prompt submit"));
+        assert!(!broadcast_help.contains("--no-enter"));
+        assert!(!broadcast_help.contains("--enter"));
+
+        let mut timer_command = Cli::command();
+        let timer_help = timer_command
+            .find_subcommand_mut("timer")
+            .expect("timer subcommand")
+            .find_subcommand_mut("start")
+            .expect("timer start subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(timer_help.contains("--no-prompt-submit"));
+        assert!(timer_help.contains("verified prompt submit"));
+        assert!(!timer_help.contains("--no-enter"));
+        assert!(!timer_help.contains("--enter"));
+    }
+
+    #[test]
+    fn send_no_prompt_submit_disables_submit_retries() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "send",
+            "issue-421-agent-inbox",
+            "local::agent",
+            "--text",
+            "Hold this draft.",
+            "--no-prompt-submit",
+        ])
+        .expect("send command parses");
+
+        let request = cli.command.into_request().expect("send request");
+        let ClientRequest::Send(request) = request else {
+            panic!("expected send request");
+        };
+        assert!(!request.enter);
+        assert_eq!(request.submit_retries, 0);
+    }
+
+    #[test]
+    fn broadcast_no_prompt_submit_disables_submit_retries() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "broadcast",
+            "issue-421-agent-inbox",
+            "--text",
+            "Hold this draft.",
+            "--no-prompt-submit",
+        ])
+        .expect("broadcast command parses");
+
+        let request = cli.command.into_request().expect("broadcast request");
+        let ClientRequest::Broadcast(request) = request else {
+            panic!("expected broadcast request");
+        };
+        assert!(!request.enter);
+        assert_eq!(request.submit_retries, 0);
     }
 
     #[test]
@@ -1101,7 +1207,32 @@ mod tests {
     }
 
     #[test]
-    fn timer_start_no_enter_disables_submit_retries() {
+    fn timer_start_no_prompt_submit_disables_submit_retries() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "start",
+            "issue-337-poll",
+            "--every",
+            "5m",
+            "--target",
+            "local::orchestrator",
+            "--prompt",
+            "Wake up and poll.",
+            "--no-prompt-submit",
+        ])
+        .expect("timer command parses");
+
+        let request = cli.command.into_request().expect("timer request");
+        let ClientRequest::TimerStart(request) = request else {
+            panic!("expected timer start request");
+        };
+        assert!(!request.enter);
+        assert_eq!(request.submit_retries, 0);
+    }
+
+    #[test]
+    fn timer_start_no_enter_alias_disables_submit_retries() {
         let cli = Cli::try_parse_from([
             "mstream",
             "timer",
