@@ -1,0 +1,7 @@
+snapshot_id = "curated-v2-smoke"
+run_id = "curated-v2-smoke-1781113765355-3322247-01e3e487-amd-ryzen7-1-x86_64-cpu"
+profile = "local-cpu-x86_64"
+host = "amd-ryzen7-1"
+arch = "x86_64"
+command_arg_count = 8
+hf_token_present = true
