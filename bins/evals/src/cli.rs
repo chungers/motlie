@@ -414,7 +414,7 @@ fn print_usage() {
     println!("  evals matrix --snapshot <path> [--profile NAME] [--artifact-root PATH]");
     println!("  evals provision --snapshot <path> [--artifact-root PATH]");
     println!("  evals report --input <jsonl> --format markdown");
-    println!("  evals report --aggregate <glob-or-path> --output <path>");
+    println!("  evals report --aggregate <glob-or-path> --output <path> [--allow-invalid-records]");
 }
 
 #[cfg(test)]

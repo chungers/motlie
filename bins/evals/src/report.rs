@@ -54,11 +54,15 @@ pub fn run_report(args: &[String]) -> Result<()> {
             print!("{}", render_records_markdown(&records, &[input]));
             Ok(())
         }
-        ReportMode::Aggregate { aggregate, output } => {
+        ReportMode::Aggregate {
+            aggregate,
+            output,
+            allow_invalid_records,
+        } => {
             let paths = expand_aggregate_paths(&aggregate)?;
             let mut records = Vec::new();
             for path in &paths {
-                records.extend(read_aggregate_jsonl(path)?);
+                records.extend(read_aggregate_jsonl(path, !allow_invalid_records)?);
             }
             let markdown = render_records_markdown(&records, &paths);
             if let Some(parent) = output.parent() {
@@ -109,8 +113,15 @@ struct ReportOptions {
 
 #[derive(Debug)]
 enum ReportMode {
-    Input { input: PathBuf, format: String },
-    Aggregate { aggregate: String, output: PathBuf },
+    Input {
+        input: PathBuf,
+        format: String,
+    },
+    Aggregate {
+        aggregate: String,
+        output: PathBuf,
+        allow_invalid_records: bool,
+    },
 }
 
 impl ReportOptions {
@@ -119,6 +130,7 @@ impl ReportOptions {
         let mut format = "markdown".to_owned();
         let mut aggregate = None;
         let mut output = None;
+        let mut allow_invalid_records = false;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -128,6 +140,7 @@ impl ReportOptions {
                 "--output" => {
                     output = Some(PathBuf::from(take_value(args, &mut index, "--output")?))
                 }
+                "--allow-invalid-records" => allow_invalid_records = true,
                 other => bail!("unknown evals report option `{other}`"),
             }
             index += 1;
@@ -135,7 +148,11 @@ impl ReportOptions {
 
         let mode = match (input, aggregate, output) {
             (Some(input), None, None) => ReportMode::Input { input, format },
-            (None, Some(aggregate), Some(output)) => ReportMode::Aggregate { aggregate, output },
+            (None, Some(aggregate), Some(output)) => ReportMode::Aggregate {
+                aggregate,
+                output,
+                allow_invalid_records,
+            },
             _ => bail!(
                 "evals report requires either --input <jsonl> [--format markdown] or --aggregate <path> --output <path>"
             ),
@@ -321,14 +338,18 @@ where
 }
 
 fn read_jsonl(path: &Path) -> Result<Vec<ResultRecord>> {
-    read_jsonl_with_validation(path, false)
+    read_jsonl_with_validation(path, false, true)
 }
 
-fn read_aggregate_jsonl(path: &Path) -> Result<Vec<ResultRecord>> {
-    read_jsonl_with_validation(path, true)
+fn read_aggregate_jsonl(path: &Path, strict: bool) -> Result<Vec<ResultRecord>> {
+    read_jsonl_with_validation(path, true, strict)
 }
 
-fn read_jsonl_with_validation(path: &Path, validate_aggregate: bool) -> Result<Vec<ResultRecord>> {
+fn read_jsonl_with_validation(
+    path: &Path,
+    validate_aggregate: bool,
+    strict: bool,
+) -> Result<Vec<ResultRecord>> {
     let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
     let reader = io::BufReader::new(file);
     let mut records = Vec::new();
@@ -346,12 +367,16 @@ fn read_jsonl_with_validation(path: &Path, validate_aggregate: bool) -> Result<V
         })?;
         if validate_aggregate {
             if let Err(reason) = validate_aggregate_record(&record) {
-                eprintln!(
-                    "aggregate-input-excluded: {}:{}: {}",
+                let message = format!(
+                    "invalid aggregate input `{}` line {}: {}",
                     path.display(),
                     line_number + 1,
                     reason
                 );
+                if strict {
+                    bail!(message);
+                }
+                eprintln!("aggregate-input-excluded: {message}");
                 continue;
             }
         }
@@ -555,6 +580,31 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_strict_read_fails_on_invalid_record() {
+        let mut record = test_record();
+        record.coverage = CoverageSection::default();
+        let path = write_temp_record(&record, "strict-invalid");
+
+        let err = read_aggregate_jsonl(&path, true).unwrap_err();
+
+        let _ = std::fs::remove_file(path);
+        assert!(err.to_string().contains("invalid aggregate input"));
+        assert!(err.to_string().contains("coverage.snapshot_id"));
+    }
+
+    #[test]
+    fn aggregate_tolerant_read_excludes_invalid_record() {
+        let mut record = test_record();
+        record.coverage = CoverageSection::default();
+        let path = write_temp_record(&record, "tolerant-invalid");
+
+        let records = read_aggregate_jsonl(&path, false).unwrap();
+
+        let _ = std::fs::remove_file(path);
+        assert!(records.is_empty());
+    }
+
+    #[test]
     fn aggregate_validation_rejects_grouping_key_mismatch() {
         let mut record = test_record();
         record
@@ -565,6 +615,19 @@ mod tests {
         let err = validate_aggregate_record(&record).unwrap_err();
 
         assert!(err.contains("coverage.grouping_keys.quantization"));
+    }
+
+    fn write_temp_record(record: &ResultRecord, label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-evals-report-{label}-{}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(record).unwrap()),
+        )
+        .unwrap();
+        path
     }
 
     fn grouping_keys() -> BTreeMap<String, String> {

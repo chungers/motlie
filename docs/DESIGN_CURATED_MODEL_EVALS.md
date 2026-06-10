@@ -316,6 +316,12 @@ cargo run -p evals -- report --aggregate 'evals/results/**/results.jsonl' \
   --output evals/reports/<snapshot-id>/coverage.md
 ```
 
+Aggregate mode is strict by default: records that fail schema validation abort
+report generation so malformed host PR results cannot disappear into a smaller
+coverage report. A tolerant `--allow-invalid-records` mode may be used for local
+forensics; it prints excluded record diagnostics and must not be the final
+coverage gate.
+
 The aggregate report includes:
 
 - per-cell coverage: bundle, model family, checkpoint format, quantization,

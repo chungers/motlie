@@ -74,7 +74,7 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: Decision.
 - [x] Implement `report --aggregate 'evals/results/**/results.jsonl' --output <path>` for consolidated cross-host coverage.
   DESIGN reference: PR-Based Aggregation And Reports.
-- [x] Validate aggregate input records against the non-optional coverage schema before reporting.
+- [x] Validate aggregate input records against the non-optional coverage schema before reporting; strict aggregate mode fails on invalid records, with `--allow-invalid-records` reserved for local forensics.
   DESIGN reference: Skip/Block And Coverage Schema.
 
 ## Phase 4: Batch Example Migration

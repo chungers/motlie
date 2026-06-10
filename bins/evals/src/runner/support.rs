@@ -313,6 +313,52 @@ pub fn failure_reason(
     None
 }
 
+fn terminal_reason_for_record(
+    overall_status: &AcceptanceStatus,
+    assertions: &[AssertionOutcome],
+    performance_evaluation: &SectionEvaluation,
+    resource_evaluation: &SectionEvaluation,
+    accelerator: &crate::result::AcceleratorSection,
+    accelerator_status: &AcceptanceStatus,
+) -> Option<OutcomeReason> {
+    if matches!(overall_status, AcceptanceStatus::Pass) {
+        return None;
+    }
+
+    for status in [
+        AcceptanceStatus::Fail,
+        AcceptanceStatus::Blocked,
+        AcceptanceStatus::NotMeasured,
+    ] {
+        if assertions
+            .iter()
+            .any(|assertion| assertion.status == status)
+        {
+            return Some(OutcomeReason::BehaviorAssertionFailed);
+        }
+        if performance_evaluation.status == status {
+            return Some(OutcomeReason::PerformanceGateFailed);
+        }
+        if resource_evaluation.status == status {
+            return Some(OutcomeReason::ResourceGateFailed);
+        }
+        if accelerator_status == &status {
+            return accelerator.fallback_reason.clone().or(Some(
+                match (accelerator.requested_class, accelerator.resolved_class) {
+                    (requested, crate::result::AcceleratorClass::Unavailable)
+                        if requested != crate::result::AcceleratorClass::Unavailable =>
+                    {
+                        OutcomeReason::AcceleratorUnavailable
+                    }
+                    _ => OutcomeReason::AcceleratorMismatch,
+                },
+            ));
+        }
+    }
+
+    reason_for_status(overall_status)
+}
+
 pub fn build_record(
     context: &RunContext,
     prepared: &PreparedBundle,
@@ -395,7 +441,14 @@ pub fn build_record(
     coverage.resolved_accelerator = accelerator.resolved_class;
     coverage.terminal_outcome = terminal_outcome(&overall_status);
     if coverage.reason.is_none() {
-        coverage.reason = reason_for_status(&overall_status);
+        coverage.reason = terminal_reason_for_record(
+            &overall_status,
+            &assertions,
+            &performance_evaluation,
+            &resource_evaluation,
+            &accelerator,
+            &accelerator_status,
+        );
     }
 
     ResultRecord {
@@ -768,6 +821,7 @@ fn runtime_env() -> BTreeMap<String, Option<String>> {
 mod tests {
     use super::*;
     use crate::metrics::ResourceMetrics;
+    use crate::result::AcceleratorSection;
     use crate::runner::{BundleSelection, ProfileSelection, RuntimeFlags};
     use crate::{metrics::MetricsSampler, platform::PlatformCollector, report::OutputSink};
 
@@ -793,6 +847,98 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("process_swap_delta_peak=1.56GiB"));
+    }
+
+    #[test]
+    fn coverage_reason_uses_accelerator_fallback_reason() {
+        let assertions = vec![passing_assertion()];
+        let performance = passing_section();
+        let resources = passing_section();
+        let accelerator = test_accelerator(
+            AcceleratorClass::Cuda,
+            AcceleratorClass::Cuda,
+            Some(OutcomeReason::BackendOffloadUnverified),
+        );
+
+        let reason = terminal_reason_for_record(
+            &AcceptanceStatus::Blocked,
+            &assertions,
+            &performance,
+            &resources,
+            &accelerator,
+            &AcceptanceStatus::Blocked,
+        );
+
+        assert_eq!(reason, Some(OutcomeReason::BackendOffloadUnverified));
+    }
+
+    #[test]
+    fn coverage_reason_prefers_failed_resource_over_blocked_performance_gap() {
+        let assertions = vec![passing_assertion()];
+        let performance = SectionEvaluation {
+            status: AcceptanceStatus::Blocked,
+            failure_reason: Some("required LLM performance metrics unavailable".to_owned()),
+        };
+        let resources = SectionEvaluation {
+            status: AcceptanceStatus::Fail,
+            failure_reason: Some("resource gate exceeded".to_owned()),
+        };
+        let accelerator = test_accelerator(AcceleratorClass::Cpu, AcceleratorClass::Cpu, None);
+
+        let reason = terminal_reason_for_record(
+            &AcceptanceStatus::Fail,
+            &assertions,
+            &performance,
+            &resources,
+            &accelerator,
+            &AcceptanceStatus::Pass,
+        );
+
+        assert_eq!(reason, Some(OutcomeReason::ResourceGateFailed));
+    }
+
+    #[test]
+    fn coverage_reason_names_resource_gate_before_generic_blocked_reason() {
+        let assertions = vec![passing_assertion()];
+        let performance = passing_section();
+        let resources = SectionEvaluation {
+            status: AcceptanceStatus::Fail,
+            failure_reason: Some("resource gate exceeded".to_owned()),
+        };
+        let accelerator = test_accelerator(AcceleratorClass::Cpu, AcceleratorClass::Cpu, None);
+
+        let reason = terminal_reason_for_record(
+            &AcceptanceStatus::Fail,
+            &assertions,
+            &performance,
+            &resources,
+            &accelerator,
+            &AcceptanceStatus::Pass,
+        );
+
+        assert_eq!(reason, Some(OutcomeReason::ResourceGateFailed));
+    }
+
+    #[test]
+    fn coverage_reason_names_performance_gate_before_generic_blocked_reason() {
+        let assertions = vec![passing_assertion()];
+        let performance = SectionEvaluation {
+            status: AcceptanceStatus::Blocked,
+            failure_reason: Some("required LLM performance metrics unavailable".to_owned()),
+        };
+        let resources = passing_section();
+        let accelerator = test_accelerator(AcceleratorClass::Cpu, AcceleratorClass::Cpu, None);
+
+        let reason = terminal_reason_for_record(
+            &AcceptanceStatus::Blocked,
+            &assertions,
+            &performance,
+            &resources,
+            &accelerator,
+            &AcceptanceStatus::Pass,
+        );
+
+        assert_eq!(reason, Some(OutcomeReason::PerformanceGateFailed));
     }
 
     #[test]
@@ -823,6 +969,38 @@ mod tests {
             reason,
             "resources section not accepted: resource gate exceeded"
         );
+    }
+
+    fn passing_assertion() -> AssertionOutcome {
+        AssertionOutcome {
+            name: "behavior".to_owned(),
+            status: AcceptanceStatus::Pass,
+            message: None,
+        }
+    }
+
+    fn passing_section() -> SectionEvaluation {
+        SectionEvaluation {
+            status: AcceptanceStatus::Pass,
+            failure_reason: None,
+        }
+    }
+
+    fn test_accelerator(
+        requested_class: AcceleratorClass,
+        resolved_class: AcceleratorClass,
+        fallback_reason: Option<OutcomeReason>,
+    ) -> AcceleratorSection {
+        AcceleratorSection {
+            requested_class,
+            resolved_class,
+            selected_devices: Vec::new(),
+            backend_mode: Some(resolved_class.as_str().to_owned()),
+            offload: None,
+            driver_versions: BTreeMap::new(),
+            fallback_reason,
+            use_proof_source: Some("test".to_owned()),
+        }
     }
 
     fn test_context(profile_name: &str) -> RunContext {

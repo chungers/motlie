@@ -207,7 +207,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
             requested,
         )?;
         if !child.success {
-            let reason = classify_child_failure(cell, requested, &child.log_path);
+            let reason = child_failure_reason(cell, requested, &child);
             let child_coverage = coverage_for_cell(
                 &snapshot,
                 cell,
@@ -346,6 +346,7 @@ impl ProvisionOptions {
 struct ChildOutcome {
     success: bool,
     log_path: PathBuf,
+    reason: Option<OutcomeReason>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -428,6 +429,7 @@ fn run_child_cell(
             return Ok(ChildOutcome {
                 success: status.success(),
                 log_path,
+                reason: None,
             });
         }
         if started_at.elapsed() > Duration::from_secs(cell.budgets.wall_time_secs()) {
@@ -436,6 +438,7 @@ fn run_child_cell(
             return Ok(ChildOutcome {
                 success: false,
                 log_path,
+                reason: Some(OutcomeReason::RuntimeBudgetExceeded),
             });
         }
         thread::sleep(Duration::from_millis(250));
@@ -632,6 +635,17 @@ fn budget_map(cell: &SnapshotCell) -> BTreeMap<String, String> {
         budgets.insert("max_rss_bytes".to_owned(), value.to_string());
     }
     budgets
+}
+
+fn child_failure_reason(
+    cell: &SnapshotCell,
+    requested: AcceleratorClass,
+    child: &ChildOutcome,
+) -> OutcomeReason {
+    child
+        .reason
+        .clone()
+        .unwrap_or_else(|| classify_child_failure(cell, requested, &child.log_path))
 }
 
 fn classify_child_failure(
@@ -864,6 +878,26 @@ mod tests {
         assert!(run_id.contains("curated-v2-smoke"));
         assert!(run_id.contains("dgx-spark"));
         assert!(run_id.ends_with("cuda"));
+    }
+
+    #[test]
+    fn child_timeout_reason_does_not_depend_on_log_marker() {
+        let cell = test_snapshot_cell();
+        let log_path = std::env::temp_dir().join(format!(
+            "motlie-evals-timeout-test-{}.log",
+            std::process::id()
+        ));
+        std::fs::write(&log_path, "child exited without timeout marker").unwrap();
+        let child = ChildOutcome {
+            success: false,
+            log_path: log_path.clone(),
+            reason: Some(OutcomeReason::RuntimeBudgetExceeded),
+        };
+
+        let reason = child_failure_reason(&cell, AcceleratorClass::Cpu, &child);
+
+        let _ = std::fs::remove_file(log_path);
+        assert_eq!(reason, OutcomeReason::RuntimeBudgetExceeded);
     }
 
     #[test]
