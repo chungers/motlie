@@ -609,6 +609,8 @@ pub enum QualityTextCallCommand {
 pub enum QualityTtsCommand {
     Status,
     Chunking { state: OnOffArg },
+    MaxTextChunkChars { n: usize },
+    PrebufferChunks { n: usize },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2274,6 +2276,14 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             "tts.chunking_enabled={}",
             quality.config.tts.chunking_enabled
         ),
+        format!(
+            "tts.max_text_chunk_chars={}",
+            quality.config.tts.max_text_chunk_chars
+        ),
+        format!(
+            "tts.prebuffer_chunks={}",
+            quality.config.tts.prebuffer_chunks
+        ),
     ];
     Ok(CommandOutput {
         lines,
@@ -2426,8 +2436,10 @@ async fn quality_tts_command(
             let guard = context.state.read().await;
             let tts = &guard.quality.config.tts;
             Ok(CommandOutput::text(format!(
-                "chunking_enabled={}",
-                tts.chunking_enabled
+                "chunking_enabled={}
+max_text_chunk_chars={}
+prebuffer_chunks={}",
+                tts.chunking_enabled, tts.max_text_chunk_chars, tts.prebuffer_chunks
             )))
         }
         QualityTtsCommand::Chunking { state } => {
@@ -2435,6 +2447,13 @@ async fn quality_tts_command(
                 Ok(config.set_tts_chunking_enabled(state.enabled()))
             })
             .await
+        }
+        QualityTtsCommand::MaxTextChunkChars { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_tts_max_text_chunk_chars(n)))
+                .await
+        }
+        QualityTtsCommand::PrebufferChunks { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_tts_prebuffer_chunks(n))).await
         }
     }
 }
@@ -2947,6 +2966,8 @@ fn quality_help() -> String {
         "quality text-call callback-timeout-ms <ms>     range=100..60000 default=5000ms applies=new_turn",
         "quality tts status",
         "quality tts chunking on|off                    bool default=true applies=new_playback_request",
+        "quality tts max-text-chunk-chars <n>           range=40..500 default=140 applies=new_playback_request",
+        "quality tts prebuffer-chunks <n>               range=1..64 default=2 applies=new_playback_request",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
@@ -4715,6 +4736,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quality_tts_commands_update_live_config_knobs() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let chunk_output = engine
+            .run_line("quality tts max-text-chunk-chars 10")
+            .await
+            .expect("set max text chunk chars");
+        assert!(chunk_output.lines[0].contains("key=tts.max_text_chunk_chars"));
+        assert!(chunk_output.lines[0].contains("clamped=true"));
+        let prebuffer_output = engine
+            .run_line("quality tts prebuffer-chunks 3")
+            .await
+            .expect("set prebuffer chunks");
+        assert!(prebuffer_output.lines[0].contains("key=tts.prebuffer_chunks"));
+        assert!(prebuffer_output.lines[0].contains("applies=new_playback_request"));
+
+        let status = engine
+            .run_line("quality tts status")
+            .await
+            .expect("tts status");
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "max_text_chunk_chars=40"));
+        assert!(status.lines.iter().any(|line| line == "prebuffer_chunks=3"));
+
+        let guard = state.read().await;
+        assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
+        assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
+    }
+
+    #[tokio::test]
     async fn quality_state_dump_replays_exact_resolved_config() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         {
@@ -4737,6 +4793,8 @@ mod tests {
             config.set_text_call_playback_wait_timeout_ms(54_321);
             config.set_text_call_latest_response_wins(false);
             config.set_text_call_callback_timeout_ms(1_234);
+            config.set_tts_max_text_chunk_chars(88);
+            config.set_tts_prebuffer_chunks(4);
             config.set_barge_in_enabled(false);
             config.barge_in.speech_onset_cancel_enabled = false;
             config.barge_in.partial_asr_cancel_enabled = false;

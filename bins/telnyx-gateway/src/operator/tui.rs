@@ -630,8 +630,10 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             quality.barge_in.clear_timeout_ms
         )),
         Line::from(format!(
-            "tts: chunking={} backend={} warm={}",
+            "tts: chunking={} max_chars={} prebuf={} backend={} warm={}",
             quality.tts.chunking_enabled,
+            quality.tts.max_text_chunk_chars,
+            quality.tts.prebuffer_chunks,
             tts_backend.label(),
             tts_warm
         )),

@@ -218,12 +218,16 @@ impl TextCallQualityConfig {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TtsQualityConfig {
     pub chunking_enabled: bool,
+    pub max_text_chunk_chars: usize,
+    pub prebuffer_chunks: usize,
 }
 
 impl Default for TtsQualityConfig {
     fn default() -> Self {
         Self {
             chunking_enabled: true,
+            max_text_chunk_chars: 140,
+            prebuffer_chunks: 2,
         }
     }
 }
@@ -489,6 +493,13 @@ impl VoiceQualityConfig {
             100,
             60_000,
         )?;
+        ensure_usize(
+            "tts.max_text_chunk_chars",
+            self.tts.max_text_chunk_chars,
+            40,
+            500,
+        )?;
+        ensure_usize("tts.prebuffer_chunks", self.tts.prebuffer_chunks, 1, 64)?;
         ensure_u64(
             "barge_in.clear_timeout_ms",
             self.barge_in.clear_timeout_ms,
@@ -646,6 +657,12 @@ impl VoiceQualityConfig {
         if let Some(tts) = patch.tts {
             if let Some(value) = tts.chunking_enabled {
                 self.set_tts_chunking_enabled(value);
+            }
+            if let Some(value) = tts.max_text_chunk_chars {
+                self.set_tts_max_text_chunk_chars(value);
+            }
+            if let Some(value) = tts.prebuffer_chunks {
+                self.set_tts_prebuffer_chunks(value);
             }
         }
         if let Some(barge_in) = patch.barge_in {
@@ -929,6 +946,28 @@ impl VoiceQualityConfig {
             value,
             ApplyBoundary::NewPlaybackRequest,
             false,
+        )
+    }
+
+    pub fn set_tts_max_text_chunk_chars(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 40, 500);
+        self.tts.max_text_chunk_chars = clamped.value;
+        self.outcome(
+            "tts.max_text_chunk_chars",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_tts_prebuffer_chunks(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 64);
+        self.tts.prebuffer_chunks = clamped.value;
+        self.outcome(
+            "tts.prebuffer_chunks",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
         )
     }
 
@@ -1255,6 +1294,8 @@ pub struct TextCallQualityConfigPatch {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TtsQualityConfigPatch {
     pub chunking_enabled: Option<bool>,
+    pub max_text_chunk_chars: Option<usize>,
+    pub prebuffer_chunks: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

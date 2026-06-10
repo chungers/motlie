@@ -433,6 +433,7 @@ impl InboundTransportStats {
 struct OutboundPacingStats {
     frames_sent: u64,
     underrun_count: u64,
+    pre_audio_wait_ticks: u64,
     inter_frame_gap_ms: Vec<u64>,
     queue_depth_samples: Vec<u64>,
 }
@@ -450,11 +451,17 @@ impl OutboundPacingStats {
         self.underrun_count = self.underrun_count.saturating_add(1);
     }
 
+    fn observe_pre_audio_wait(&mut self) {
+        self.pre_audio_wait_ticks = self.pre_audio_wait_ticks.saturating_add(1);
+    }
+
     fn rollup_payload(&self, playback_id: Option<&str>) -> Map<String, Value> {
         map_from_value(json!({
             "playback_id": playback_id,
             "frames_sent": self.frames_sent,
             "underrun_count": self.underrun_count,
+            "pre_audio_wait_ticks": self.pre_audio_wait_ticks,
+            "pre_audio_wait_ms_estimate": self.pre_audio_wait_ticks.saturating_mul(20),
             "inter_frame_gap_ms_p50": percentile_u64(&self.inter_frame_gap_ms, 50),
             "inter_frame_gap_ms_p95": percentile_u64(&self.inter_frame_gap_ms, 95),
             "inter_frame_gap_ms_max": self.inter_frame_gap_ms.iter().copied().max().unwrap_or(0),
@@ -486,6 +493,7 @@ struct MediaSocketState {
     conversation: Option<ConversationRuntime>,
     outbound_frame_count: usize,
     outbound_underrun_ticks: usize,
+    outbound_pre_audio_wait_ticks: usize,
     outbound_pacing: OutboundPacingStats,
     last_outbound_frame_sent_at: Option<Instant>,
     first_frame_sent_playbacks: HashSet<String>,
@@ -523,6 +531,7 @@ impl MediaSocketState {
             conversation: None,
             outbound_frame_count: 0,
             outbound_underrun_ticks: 0,
+            outbound_pre_audio_wait_ticks: 0,
             outbound_pacing: OutboundPacingStats::default(),
             last_outbound_frame_sent_at: None,
             first_frame_sent_playbacks: HashSet::new(),
@@ -654,6 +663,29 @@ async fn send_outbound_or_silence(
         let Some(playback_id) = media_registry.active_speech_playback_id(&call_id).await else {
             return send_silence_keepalive(socket, media_state).await;
         };
+        if !media_state
+            .first_frame_sent_playbacks
+            .contains(playback_id.as_str())
+        {
+            media_state.outbound_pre_audio_wait_ticks =
+                media_state.outbound_pre_audio_wait_ticks.saturating_add(1);
+            media_state.outbound_pacing.observe_pre_audio_wait();
+            if media_state.outbound_pre_audio_wait_ticks <= 5
+                || media_state.outbound_pre_audio_wait_ticks.is_multiple_of(50)
+            {
+                tracing::debug!(
+                    gateway_call_id = call_id,
+                    playback_id = playback_id.as_str(),
+                    pre_audio_wait_ticks = media_state.outbound_pre_audio_wait_ticks,
+                    pre_audio_wait_ms_estimate =
+                        media_state.outbound_pre_audio_wait_ticks.saturating_mul(20),
+                    queue_depth = outbound_queue_depth(media_state),
+                    "tts.outbound.pre_audio_wait"
+                );
+            }
+            return Ok(());
+        }
+
         media_state.outbound_underrun_ticks = media_state.outbound_underrun_ticks.saturating_add(1);
         media_state.outbound_pacing.observe_underrun();
         if media_state.outbound_underrun_ticks <= 5
@@ -661,7 +693,7 @@ async fn send_outbound_or_silence(
         {
             tracing::warn!(
                 gateway_call_id = call_id,
-                playback_id,
+                playback_id = playback_id.as_str(),
                 underrun_ticks = media_state.outbound_underrun_ticks,
                 queue_depth = outbound_queue_depth(media_state),
                 "tts.outbound.underrun"
@@ -906,6 +938,7 @@ fn log_outbound_frame_sent(media_state: &mut MediaSocketState, call_id: &str, pl
         .outbound_pacing
         .observe_frame(interval_ms, outbound_queue_depth(media_state));
     media_state.outbound_underrun_ticks = 0;
+    media_state.outbound_pre_audio_wait_ticks = 0;
 
     let is_pacing_anomaly = interval_ms.is_some_and(|ms| !(15..=35).contains(&ms));
     if media_state.outbound_frame_count <= 5
@@ -2888,10 +2921,13 @@ mod tests {
         outbound.observe_frame(Some(20), 4);
         outbound.observe_frame(Some(50), 2);
         outbound.observe_underrun();
+        outbound.observe_pre_audio_wait();
         let payload = outbound.rollup_payload(Some("tts_test"));
         assert_eq!(payload["playback_id"], "tts_test");
         assert_eq!(payload["frames_sent"], 2);
         assert_eq!(payload["underrun_count"], 1);
+        assert_eq!(payload["pre_audio_wait_ticks"], 1);
+        assert_eq!(payload["pre_audio_wait_ms_estimate"], 20);
         assert_eq!(payload["inter_frame_gap_ms_max"], 50);
     }
 

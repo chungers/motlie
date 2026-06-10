@@ -335,24 +335,77 @@ impl OutboundTtsFactory for PiperTtsFactory {
 }
 
 pub fn split_speech_text(text: &str) -> Vec<String> {
+    split_speech_text_with_max_chars(text, usize::MAX)
+}
+
+pub fn split_speech_text_with_max_chars(text: &str, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     for ch in text.chars() {
         current.push(ch);
         if matches!(ch, '.' | '!' | '?' | ',' | ';' | ':' | '\n') {
-            push_speech_chunk(&mut chunks, &mut current);
+            push_speech_chunk(&mut chunks, &mut current, max_chars);
         }
     }
-    push_speech_chunk(&mut chunks, &mut current);
+    push_speech_chunk(&mut chunks, &mut current, max_chars);
     chunks
 }
 
-fn push_speech_chunk(chunks: &mut Vec<String>, current: &mut String) {
+fn push_speech_chunk(chunks: &mut Vec<String>, current: &mut String, max_chars: usize) {
     let trimmed = current.trim();
     if !trimmed.is_empty() {
-        chunks.push(trimmed.to_string());
+        push_bounded_speech_chunk(chunks, trimmed, max_chars.max(1));
     }
     current.clear();
+}
+
+fn push_bounded_speech_chunk(chunks: &mut Vec<String>, text: &str, max_chars: usize) {
+    if text.chars().count() <= max_chars {
+        chunks.push(text.to_string());
+        return;
+    }
+
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_chars = word.chars().count();
+        if word_chars > max_chars {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            push_long_word_chunks(chunks, word, max_chars);
+            continue;
+        }
+
+        let separator = usize::from(!current.is_empty());
+        let next_chars = current
+            .chars()
+            .count()
+            .saturating_add(separator)
+            .saturating_add(word_chars);
+        if !current.is_empty() && next_chars > max_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+}
+
+fn push_long_word_chunks(chunks: &mut Vec<String>, word: &str, max_chars: usize) {
+    let mut current = String::new();
+    for ch in word.chars() {
+        if current.chars().count() >= max_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
 }
 
 pub fn unavailable_registry() -> SharedTtsRegistry {
@@ -562,6 +615,14 @@ mod tests {
         assert_eq!(
             split_speech_text("Hello, then continue: now stop;"),
             vec!["Hello,", "then continue:", "now stop;"]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_with_max_chars_breaks_long_clauses_on_words() {
+        assert_eq!(
+            split_speech_text_with_max_chars("alpha beta gamma delta", 12),
+            vec!["alpha beta", "gamma delta"]
         );
     }
 
