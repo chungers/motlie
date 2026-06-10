@@ -1,10 +1,12 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
-use crate::adapter::LiveAsrBackend;
+use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegistry};
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
-use crate::conversation::{default_conversation_handler, ConversationRuntime};
+use crate::conversation::{ConversationRuntime, default_conversation_handler};
 use crate::media::SharedMediaRegistry;
 #[cfg(test)]
 use crate::media::{OutboundMediaCommand, SpeechCancelToken};
@@ -12,10 +14,11 @@ use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{
     CallStatus, ConversationMode, ConversationStatus, GatewayState, InboundMode, LogLevel,
-    SharedState,
+    SharedState, asr_warm_key, tts_warm_key,
 };
+use crate::quality::{QualityEventSink, QualityProfile, RedactionMode, VoiceQualityConfig};
 use crate::speech;
-use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
+use crate::tts::{LiveTtsBackend, SharedTtsRegistry, unavailable_registry};
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
@@ -24,6 +27,7 @@ use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 pub struct GatewayContext {
     pub state: SharedState,
     pub telnyx: TelnyxClient,
+    pub asr: SharedAsrRegistry,
     pub media: SharedMediaRegistry,
     pub tts: SharedTtsRegistry,
     pub conversation: ConversationRuntime,
@@ -33,6 +37,8 @@ pub struct GatewayContext {
 impl GatewayContext {
     pub fn new(state: SharedState, telnyx: TelnyxClient) -> Self {
         let media = SharedMediaRegistry::default();
+        let echo = Arc::new(EchoAsrFactory);
+        let asr = Arc::new(AsrRegistry::new(echo.clone(), echo));
         let tts = unavailable_registry();
         let conversation = ConversationRuntime::new(
             telnyx.clone(),
@@ -43,6 +49,7 @@ impl GatewayContext {
         Self::with_services(
             state,
             telnyx,
+            asr,
             media,
             tts,
             conversation,
@@ -53,6 +60,7 @@ impl GatewayContext {
     pub fn with_services(
         state: SharedState,
         telnyx: TelnyxClient,
+        asr: SharedAsrRegistry,
         media: SharedMediaRegistry,
         tts: SharedTtsRegistry,
         conversation: ConversationRuntime,
@@ -61,6 +69,7 @@ impl GatewayContext {
         Self {
             state,
             telnyx,
+            asr,
             media,
             tts,
             conversation,
@@ -72,6 +81,7 @@ impl GatewayContext {
         let mut context = Self::with_services(
             self.state.clone(),
             self.telnyx.clone(),
+            self.asr.clone(),
             self.media.clone(),
             self.tts.clone(),
             self.conversation.clone(),
@@ -210,6 +220,7 @@ pub enum GatewayCommand {
     Answer(CallTarget),
     Reject(CallTarget),
     Hangup(CallTarget),
+    Warm(WarmArgs),
     Test {
         #[command(subcommand)]
         command: TestCommand,
@@ -221,6 +232,10 @@ pub enum GatewayCommand {
     Log {
         #[command(subcommand)]
         command: LogCommand,
+    },
+    Quality {
+        #[command(subcommand)]
+        command: QualityCommand,
     },
 }
 
@@ -312,6 +327,29 @@ pub enum TtsCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum WarmTarget {
+    All,
+    Asr,
+    Tts,
+}
+
+impl WarmTarget {
+    fn includes_asr(self) -> bool {
+        matches!(self, Self::All | Self::Asr)
+    }
+
+    fn includes_tts(self) -> bool {
+        matches!(self, Self::All | Self::Tts)
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct WarmArgs {
+    #[arg(value_enum, default_value_t = WarmTarget::All)]
+    pub target: WarmTarget,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ConversationModeArg {
     Manual,
@@ -357,7 +395,9 @@ impl From<ConversationModeArg> for ConversationMode {
 }
 
 #[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 pub enum ConversationCommand {
+    Help,
     Status {
         call: Option<String>,
     },
@@ -446,6 +486,178 @@ pub enum LogCommand {
     Clear,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum QualityCommand {
+    Status,
+    #[command(hide = true)]
+    RestoreConfig {
+        encoded: String,
+    },
+    Profile {
+        profile: QualityProfileArg,
+    },
+    Endpoint {
+        #[command(subcommand)]
+        command: QualityEndpointCommand,
+    },
+    Speech {
+        #[command(subcommand)]
+        command: QualitySpeechCommand,
+    },
+    Asr {
+        #[command(subcommand)]
+        command: QualityAsrCommand,
+    },
+    TextCall {
+        #[command(subcommand)]
+        command: QualityTextCallCommand,
+    },
+    Tts {
+        #[command(subcommand)]
+        command: QualityTtsCommand,
+    },
+    Logging {
+        #[command(subcommand)]
+        command: QualityLoggingCommand,
+    },
+    Judge {
+        #[command(subcommand)]
+        command: QualityJudgeCommand,
+    },
+    BargeIn {
+        #[command(subcommand)]
+        command: QualityBargeInCommand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum QualityProfileArg {
+    Fast,
+    Balanced,
+    Complete,
+    Noisy,
+}
+
+impl From<QualityProfileArg> for QualityProfile {
+    fn from(value: QualityProfileArg) -> Self {
+        match value {
+            QualityProfileArg::Fast => Self::Fast,
+            QualityProfileArg::Balanced => Self::Balanced,
+            QualityProfileArg::Complete => Self::Complete,
+            QualityProfileArg::Noisy => Self::Noisy,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum OnOffArg {
+    On,
+    Off,
+}
+
+impl OnOffArg {
+    fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum RedactionModeArg {
+    MetricsOnly,
+    HashedText,
+    RedactedText,
+    SensitivePlaintext,
+}
+
+impl From<RedactionModeArg> for RedactionMode {
+    fn from(value: RedactionModeArg) -> Self {
+        match value {
+            RedactionModeArg::MetricsOnly => Self::MetricsOnly,
+            RedactionModeArg::HashedText => Self::HashedText,
+            RedactionModeArg::RedactedText => Self::RedactedText,
+            RedactionModeArg::SensitivePlaintext => Self::SensitivePlaintext,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityEndpointCommand {
+    Status,
+    TrailingSilenceMs { ms: u64 },
+    MinTurnWords { n: usize },
+    MinTurnChars { n: usize },
+    MergeWindowMs { ms: u64 },
+    MaxTurnWords { n: usize },
+    MaxTurnDurationMs { ms: u64 },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualitySpeechCommand {
+    Status,
+    RmsThreshold { value: f32 },
+    PeakThreshold { value: i32 },
+    OnsetMinSilenceMs { ms: u64 },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityAsrCommand {
+    Status,
+    FinishPadMs { ms: u64 },
+    RepeatedTokenRunThreshold { n: usize },
+    RepeatedQRunThreshold { n: usize },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityTextCallCommand {
+    Status,
+    MaxActiveTurns { n: usize },
+    MediaReadyTimeoutMs { ms: u64 },
+    PlaybackWaitTimeoutMs { ms: u64 },
+    LatestResponseWins { state: OnOffArg },
+    CallbackTimeoutMs { ms: u64 },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityTtsCommand {
+    Status,
+    Chunking { state: OnOffArg },
+    MaxTextChunkChars { n: usize },
+    FirstChunkMaxChars { n: usize },
+    PrebufferChunks { n: usize },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityLoggingCommand {
+    Status,
+    On { path: PathBuf },
+    Off,
+    IncludeTranscriptText { state: OnOffArg },
+    RedactionMode { mode: RedactionModeArg },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityJudgeCommand {
+    Status,
+    On {
+        #[arg(long)]
+        sample_rate: Option<f32>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    Off,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityBargeInCommand {
+    Status,
+    On,
+    Off,
+    SpeechOnset { state: OnOffArg },
+    PartialAsr { state: OnOffArg },
+    FinalAsr { state: OnOffArg },
+    ClearTimeoutMs { ms: u64 },
+}
+
 #[async_trait]
 impl CommandSet<GatewayContext> for GatewayCommand {
     type CompletionContext = ();
@@ -493,9 +705,11 @@ impl CommandSet<GatewayContext> for GatewayCommand {
             Self::Answer(target) => context.answer_call(target.call).await,
             Self::Reject(target) => call_control(context, target.call, CallControlOp::Reject).await,
             Self::Hangup(target) => call_control(context, target.call, CallControlOp::Hangup).await,
+            Self::Warm(args) => warm_command(context, args).await,
             Self::Test { command } => test_command(context, command).await,
             Self::Transcript { command } => transcript_command(context, command).await,
             Self::Log { command } => log_command(context, command).await,
+            Self::Quality { command } => quality_command(context, command).await,
         }
     }
 }
@@ -529,10 +743,7 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
             "conversation-handler: {}",
             context.conversation.handler_label()
         ),
-        format!(
-            "conversation-barge-in: {}",
-            context.conversation.barge_in_label()
-        ),
+        format!("conversation-barge-in: {}", quality_barge_in_label(&guard)),
         format!(
             "webhook-url: {}",
             guard
@@ -1102,6 +1313,116 @@ fn tts_availability_label(factory: &crate::tts::SharedTtsFactory) -> &'static st
     }
 }
 
+async fn warm_command(context: &mut GatewayContext, args: WarmArgs) -> DriverResult<CommandOutput> {
+    let mut lines = Vec::new();
+    if args.target.includes_asr() {
+        lines.push(warm_asr_model(context).await);
+    }
+    if args.target.includes_tts() {
+        lines.push(warm_tts_model(context).await);
+    }
+    Ok(CommandOutput {
+        lines,
+        effects: Vec::new(),
+    })
+}
+
+async fn warm_asr_model(context: &mut GatewayContext) -> String {
+    let backend = context.session.next_asr_backend;
+    let started = Instant::now();
+    match context.asr.warm(backend).await {
+        Ok(()) => {
+            let elapsed_ms = elapsed_ms(started);
+            let mut guard = context.state.write().await;
+            guard.mark_model_warm(
+                asr_warm_key(backend),
+                backend.label(),
+                backend.model_label(),
+                elapsed_ms,
+            );
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "warmed ASR backend {} ({}) in {elapsed_ms}ms",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            format!(
+                "warm asr={} model={} status=ready elapsed_ms={elapsed_ms}",
+                backend.label(),
+                backend.model_label()
+            )
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            context.state.write().await.log(
+                LogLevel::Warn,
+                format!(
+                    "failed to warm ASR backend {} ({}): {message}",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            format!(
+                "warm asr={} model={} status=failed error={message}",
+                backend.label(),
+                backend.model_label()
+            )
+        }
+    }
+}
+
+async fn warm_tts_model(context: &mut GatewayContext) -> String {
+    let backend = context.session.next_tts_backend;
+    let started = Instant::now();
+    match context.tts.warm(backend).await {
+        Ok(()) => {
+            let elapsed_ms = elapsed_ms(started);
+            let mut guard = context.state.write().await;
+            guard.mark_model_warm(
+                tts_warm_key(backend),
+                backend.label(),
+                backend.model_label(),
+                elapsed_ms,
+            );
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "warmed TTS backend {} ({}) in {elapsed_ms}ms",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            format!(
+                "warm tts={} model={} status=ready elapsed_ms={elapsed_ms}",
+                backend.label(),
+                backend.model_label()
+            )
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            context.state.write().await.log(
+                LogLevel::Warn,
+                format!(
+                    "failed to warm TTS backend {} ({}): {message}",
+                    backend.label(),
+                    backend.model_label()
+                ),
+            );
+            format!(
+                "warm tts={} model={} status=failed error={message}",
+                backend.label(),
+                backend.model_label()
+            )
+        }
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
 async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<CommandOutput> {
     let asr_backend = context.session.next_asr_backend;
     let (connection_id, from, stream_url, webhook_url, media) =
@@ -1512,6 +1833,7 @@ async fn conversation_command(
     command: ConversationCommand,
 ) -> DriverResult<CommandOutput> {
     match command {
+        ConversationCommand::Help => Ok(CommandOutput::text(conversation_help())),
         ConversationCommand::Status { call } => {
             let guard = context.state.read().await;
             let id = resolve_call_id(
@@ -1527,7 +1849,7 @@ async fn conversation_command(
                 lines: conversation_status_lines(
                     call,
                     context.conversation.handler_label(),
-                    context.conversation.barge_in_label(),
+                    quality_barge_in_label(&guard),
                 ),
                 effects: Vec::new(),
             })
@@ -1547,17 +1869,12 @@ async fn conversation_command(
         }
         ConversationCommand::BargeIn { state } => {
             if let Some(enabled) = state.and_then(ConversationBargeInArg::enabled) {
-                context.conversation.set_barge_in_enabled(enabled);
-                let label = if enabled { "on" } else { "off" };
-                context
-                    .state
-                    .write()
-                    .await
-                    .log(LogLevel::Info, format!("conversation barge-in {label}"));
+                set_barge_in_enabled(context, enabled, "conversation").await?;
             }
+            let guard = context.state.read().await;
             Ok(CommandOutput::line(format!(
                 "conversation barge-in: {}",
-                context.conversation.barge_in_label()
+                quality_barge_in_label(&guard)
             )))
         }
         ConversationCommand::Attach { call } => {
@@ -1670,7 +1987,9 @@ async fn disapprove_conversation(
 
     let line = match canceled_playback_id {
         Some(playback_id) => {
-            format!("conversation disapproved for {id}; canceled playback={playback_id}; transcription-only")
+            format!(
+                "conversation disapproved for {id}; canceled playback={playback_id}; transcription-only"
+            )
         }
         None => format!("conversation disapproved for {id}; transcription-only"),
     };
@@ -1905,6 +2224,599 @@ async fn transcript_command(
     }
 }
 
+async fn quality_command(
+    context: &mut GatewayContext,
+    command: QualityCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityCommand::Status => quality_status(context).await,
+        QualityCommand::RestoreConfig { encoded } => restore_quality_config(context, encoded).await,
+        QualityCommand::Profile { profile } => {
+            mutate_quality_config(context, |config| Ok(config.set_profile(profile.into()))).await
+        }
+        QualityCommand::Endpoint { command } => quality_endpoint_command(context, command).await,
+        QualityCommand::Speech { command } => quality_speech_command(context, command).await,
+        QualityCommand::Asr { command } => quality_asr_command(context, command).await,
+        QualityCommand::TextCall { command } => quality_text_call_command(context, command).await,
+        QualityCommand::Tts { command } => quality_tts_command(context, command).await,
+        QualityCommand::Logging { command } => quality_logging_command(context, command).await,
+        QualityCommand::Judge { command } => quality_judge_command(context, command).await,
+        QualityCommand::BargeIn { command } => quality_barge_in_command(context, command).await,
+    }
+}
+
+async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput> {
+    let guard = context.state.read().await;
+    let quality = &guard.quality;
+    let lines = vec![
+        format!("profile={}", quality.config.profile.label()),
+        format!("config_id={}", quality.config_id),
+        format!("logging_enabled={}", quality.event_sink.is_enabled()),
+        format!(
+            "logging_path={}",
+            quality
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unset>".to_string())
+        ),
+        format!("dropped_events={}", quality.event_sink.dropped_count()),
+        format!(
+            "include_transcript_text={}",
+            quality.config.logging.include_transcript_text
+        ),
+        format!(
+            "redaction_mode={}",
+            quality.config.logging.redaction_mode.label()
+        ),
+        format!(
+            "endpoint.trailing_silence_ms={}",
+            quality.config.endpoint.trailing_silence_ms
+        ),
+        format!(
+            "endpoint.merge_window_ms={}",
+            quality.config.endpoint.merge_window_ms
+        ),
+        format!("asr.finish_pad_ms={}", quality.config.asr.finish_pad_ms),
+        format!(
+            "speech.rms_threshold={}",
+            quality.config.speech.rms_threshold
+        ),
+        format!(
+            "speech.peak_threshold={}",
+            quality.config.speech.peak_threshold
+        ),
+        format!(
+            "text_call.max_active_turns={}",
+            quality.config.text_call.max_active_turns
+        ),
+        format!(
+            "tts.chunking_enabled={}",
+            quality.config.tts.chunking_enabled
+        ),
+        format!(
+            "tts.max_text_chunk_chars={}",
+            quality.config.tts.max_text_chunk_chars
+        ),
+        format!(
+            "tts.first_chunk_max_chars={}",
+            quality.config.tts.first_chunk_max_chars
+        ),
+        format!(
+            "tts.prebuffer_chunks={}",
+            quality.config.tts.prebuffer_chunks
+        ),
+    ];
+    Ok(CommandOutput {
+        lines,
+        effects: Vec::new(),
+    })
+}
+
+async fn quality_endpoint_command(
+    context: &mut GatewayContext,
+    command: QualityEndpointCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityEndpointCommand::Status => {
+            let guard = context.state.read().await;
+            let endpoint = &guard.quality.config.endpoint;
+            Ok(CommandOutput::text(format!(
+                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
+                endpoint.trailing_silence_ms,
+                endpoint.min_turn_words,
+                endpoint.min_turn_chars,
+                endpoint.merge_window_ms,
+                endpoint.max_turn_words,
+                endpoint.max_turn_duration_ms
+            )))
+        }
+        QualityEndpointCommand::TrailingSilenceMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_trailing_silence_ms(ms))
+            })
+            .await
+        }
+        QualityEndpointCommand::MinTurnWords { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_endpoint_min_turn_words(n))).await
+        }
+        QualityEndpointCommand::MinTurnChars { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_endpoint_min_turn_chars(n))).await
+        }
+        QualityEndpointCommand::MergeWindowMs { ms } => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_endpoint_merge_window_ms(ms)),
+            )
+            .await
+        }
+        QualityEndpointCommand::MaxTurnWords { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_endpoint_max_turn_words(n))).await
+        }
+        QualityEndpointCommand::MaxTurnDurationMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_max_turn_duration_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_speech_command(
+    context: &mut GatewayContext,
+    command: QualitySpeechCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualitySpeechCommand::Status => {
+            let guard = context.state.read().await;
+            let speech = &guard.quality.config.speech;
+            Ok(CommandOutput::text(format!(
+                "rms_threshold={}\npeak_threshold={}\nonset_min_silence_ms={}",
+                speech.rms_threshold, speech.peak_threshold, speech.onset_min_silence_ms
+            )))
+        }
+        QualitySpeechCommand::RmsThreshold { value } => {
+            mutate_quality_config(context, |config| {
+                config
+                    .set_speech_rms_threshold(value)
+                    .map_err(|error| DriverError::invalid_argument("value", error.to_string()))
+            })
+            .await
+        }
+        QualitySpeechCommand::PeakThreshold { value } => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_speech_peak_threshold(value)),
+            )
+            .await
+        }
+        QualitySpeechCommand::OnsetMinSilenceMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_speech_onset_min_silence_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_asr_command(
+    context: &mut GatewayContext,
+    command: QualityAsrCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityAsrCommand::Status => {
+            let guard = context.state.read().await;
+            let asr = &guard.quality.config.asr;
+            Ok(CommandOutput::text(format!(
+                "finish_pad_ms={}\nrepeated_token_run_threshold={}\nrepeated_q_run_threshold={}",
+                asr.finish_pad_ms, asr.repeated_token_run_threshold, asr.repeated_q_run_threshold
+            )))
+        }
+        QualityAsrCommand::FinishPadMs { ms } => {
+            mutate_quality_config(context, |config| Ok(config.set_asr_finish_pad_ms(ms))).await
+        }
+        QualityAsrCommand::RepeatedTokenRunThreshold { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_asr_repeated_token_run_threshold(n))
+            })
+            .await
+        }
+        QualityAsrCommand::RepeatedQRunThreshold { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_asr_repeated_q_run_threshold(n))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_text_call_command(
+    context: &mut GatewayContext,
+    command: QualityTextCallCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityTextCallCommand::Status => {
+            let guard = context.state.read().await;
+            let text_call = &guard.quality.config.text_call;
+            Ok(CommandOutput::text(format!(
+                "max_active_turns={}\nmedia_ready_timeout_ms={}\nplayback_wait_timeout_ms={}\nlatest_response_wins={}\ncallback_timeout_ms={}",
+                text_call.max_active_turns,
+                text_call.media_ready_timeout_ms,
+                text_call.playback_wait_timeout_ms,
+                text_call.latest_response_wins,
+                text_call.callback_timeout_ms
+            )))
+        }
+        QualityTextCallCommand::MaxActiveTurns { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_max_active_turns(n))
+            })
+            .await
+        }
+        QualityTextCallCommand::MediaReadyTimeoutMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_media_ready_timeout_ms(ms))
+            })
+            .await
+        }
+        QualityTextCallCommand::PlaybackWaitTimeoutMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_playback_wait_timeout_ms(ms))
+            })
+            .await
+        }
+        QualityTextCallCommand::LatestResponseWins { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_latest_response_wins(state.enabled()))
+            })
+            .await
+        }
+        QualityTextCallCommand::CallbackTimeoutMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_text_call_callback_timeout_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_tts_command(
+    context: &mut GatewayContext,
+    command: QualityTtsCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityTtsCommand::Status => {
+            let guard = context.state.read().await;
+            let tts = &guard.quality.config.tts;
+            Ok(CommandOutput::text(format!(
+                "chunking_enabled={}
+max_text_chunk_chars={}
+first_chunk_max_chars={}
+prebuffer_chunks={}",
+                tts.chunking_enabled,
+                tts.max_text_chunk_chars,
+                tts.first_chunk_max_chars,
+                tts.prebuffer_chunks
+            )))
+        }
+        QualityTtsCommand::Chunking { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_tts_chunking_enabled(state.enabled()))
+            })
+            .await
+        }
+        QualityTtsCommand::MaxTextChunkChars { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_tts_max_text_chunk_chars(n)))
+                .await
+        }
+        QualityTtsCommand::FirstChunkMaxChars { n } => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_tts_first_chunk_max_chars(n)),
+            )
+            .await
+        }
+        QualityTtsCommand::PrebufferChunks { n } => {
+            mutate_quality_config(context, |config| Ok(config.set_tts_prebuffer_chunks(n))).await
+        }
+    }
+}
+
+async fn quality_logging_command(
+    context: &mut GatewayContext,
+    command: QualityLoggingCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityLoggingCommand::Status => {
+            let guard = context.state.read().await;
+            let logging = &guard.quality.config.logging;
+            Ok(CommandOutput::text(format!(
+                "enabled={}\npath={}\nqueue_capacity={}\nper_frame_sample_rate={}\ninclude_transcript_text={}\nredaction_mode={}\ndropped_events={}",
+                guard.quality.event_sink.is_enabled(),
+                guard
+                    .quality
+                    .log_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unset>".to_string()),
+                logging.queue_capacity,
+                logging.per_frame_sample_rate,
+                logging.include_transcript_text,
+                logging.redaction_mode.label(),
+                guard.quality.event_sink.dropped_count()
+            )))
+        }
+        QualityLoggingCommand::On { path } => {
+            let capacity = context
+                .state
+                .read()
+                .await
+                .quality
+                .config
+                .logging
+                .queue_capacity;
+            let sink =
+                QualityEventSink::start_jsonl_writer(&path, capacity).map_err(driver_anyhow)?;
+            let mut guard = context.state.write().await;
+            let outcome = guard.quality.config.set_logging_enabled(true);
+            guard.quality.config_id = guard.quality.config.config_id();
+            guard.set_quality_event_sink(sink, Some(path.clone()));
+            emit_quality_snapshots_for_active_calls(
+                &mut guard,
+                "live_change",
+                outcome.apply_boundary.label(),
+                None,
+            );
+            guard.log(
+                LogLevel::Info,
+                format!("quality logging on {}", path.display()),
+            );
+            Ok(CommandOutput::line(format!(
+                "quality logging on path={} config_id={} applies={}",
+                path.display(),
+                guard.quality.config_id,
+                outcome.apply_boundary.label()
+            )))
+        }
+        QualityLoggingCommand::Off => {
+            let mut guard = context.state.write().await;
+            let outcome = guard.quality.config.set_logging_enabled(false);
+            guard.quality.config_id = guard.quality.config.config_id();
+            guard.set_quality_event_sink(QualityEventSink::disabled(), None);
+            guard.log(LogLevel::Info, "quality logging off");
+            Ok(CommandOutput::line(format!(
+                "quality logging off config_id={} applies={}",
+                guard.quality.config_id,
+                outcome.apply_boundary.label()
+            )))
+        }
+        QualityLoggingCommand::IncludeTranscriptText { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_logging_include_transcript_text(state.enabled()))
+            })
+            .await
+        }
+        QualityLoggingCommand::RedactionMode { mode } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_logging_redaction_mode(mode.into()))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_judge_command(
+    context: &mut GatewayContext,
+    command: QualityJudgeCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityJudgeCommand::Status => {
+            let guard = context.state.read().await;
+            let judge = &guard.quality.config.quality_judge;
+            Ok(CommandOutput::text(format!(
+                "enabled={}\nmode={:?}\nsample_rate={}\nmodel={}\nbatch_size={}\ntimeout_ms={}",
+                judge.enabled,
+                judge.mode,
+                judge.sample_rate,
+                judge.model,
+                judge.batch_size,
+                judge.timeout_ms
+            )))
+        }
+        QualityJudgeCommand::On { sample_rate, model } => {
+            mutate_quality_config(context, |config| {
+                let mut outcome = config.set_quality_judge_enabled(true);
+                if let Some(sample_rate) = sample_rate {
+                    outcome =
+                        config
+                            .set_quality_judge_sample_rate(sample_rate)
+                            .map_err(|error| {
+                                DriverError::invalid_argument("sample_rate", error.to_string())
+                            })?;
+                }
+                if let Some(model) = model {
+                    if model.trim().is_empty() {
+                        return Err(DriverError::invalid_argument(
+                            "model",
+                            "model must be non-empty",
+                        ));
+                    }
+                    config.quality_judge.model = model;
+                    outcome = config.set_quality_judge_enabled(true);
+                }
+                Ok(outcome)
+            })
+            .await
+        }
+        QualityJudgeCommand::Off => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_quality_judge_enabled(false)),
+            )
+            .await
+        }
+    }
+}
+
+async fn quality_barge_in_command(
+    context: &mut GatewayContext,
+    command: QualityBargeInCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityBargeInCommand::Status => {
+            let guard = context.state.read().await;
+            let barge_in = &guard.quality.config.barge_in;
+            Ok(CommandOutput::text(format!(
+                "enabled={}\nspeech_onset_cancel_enabled={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\nclear_timeout_ms={}",
+                barge_in.enabled,
+                barge_in.speech_onset_cancel_enabled,
+                barge_in.partial_asr_cancel_enabled,
+                barge_in.final_asr_cancel_enabled,
+                barge_in.clear_timeout_ms
+            )))
+        }
+        QualityBargeInCommand::On => set_barge_in_enabled(context, true, "quality").await,
+        QualityBargeInCommand::Off => set_barge_in_enabled(context, false, "quality").await,
+        QualityBargeInCommand::SpeechOnset { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_speech_onset_cancel_enabled(state.enabled()))
+            })
+            .await
+        }
+        QualityBargeInCommand::PartialAsr { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_partial_asr_cancel_enabled(state.enabled()))
+            })
+            .await
+        }
+        QualityBargeInCommand::FinalAsr { state } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_final_asr_cancel_enabled(state.enabled()))
+            })
+            .await
+        }
+        QualityBargeInCommand::ClearTimeoutMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_clear_timeout_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn restore_quality_config(
+    context: &mut GatewayContext,
+    encoded: String,
+) -> DriverResult<CommandOutput> {
+    let config = VoiceQualityConfig::from_replay_hex(&encoded)
+        .map_err(|error| DriverError::invalid_argument("encoded", format!("{error:#}")))?;
+    context
+        .conversation
+        .set_barge_in_enabled(config.barge_in.enabled);
+    let mut guard = context.state.write().await;
+    guard.set_quality_config(config);
+    if !guard.quality.config.logging.enabled {
+        guard.set_quality_event_sink(QualityEventSink::disabled(), None);
+    }
+    emit_quality_snapshots_for_active_calls(&mut guard, "restore_config", "restored", None);
+    guard.log(LogLevel::Info, "quality config restored");
+    Ok(CommandOutput::line(format!(
+        "quality restored config_id={}",
+        guard.quality.config_id
+    )))
+}
+
+async fn set_barge_in_enabled(
+    context: &mut GatewayContext,
+    enabled: bool,
+    source: &'static str,
+) -> DriverResult<CommandOutput> {
+    let output =
+        mutate_quality_config(context, |config| Ok(config.set_barge_in_enabled(enabled))).await?;
+    context.conversation.set_barge_in_enabled(enabled);
+    let label = if enabled { "on" } else { "off" };
+    context
+        .state
+        .write()
+        .await
+        .log(LogLevel::Info, format!("{source} barge-in {label}"));
+    Ok(output)
+}
+
+async fn mutate_quality_config(
+    context: &mut GatewayContext,
+    mutate: impl FnOnce(
+        &mut VoiceQualityConfig,
+    ) -> DriverResult<crate::quality::config::QualityMutationOutcome>,
+) -> DriverResult<CommandOutput> {
+    let mut guard = context.state.write().await;
+    let outcome = mutate(&mut guard.quality.config)?;
+    guard.quality.config_id = guard.quality.config.config_id();
+    context
+        .conversation
+        .set_barge_in_enabled(guard.quality.config.barge_in.enabled);
+    emit_quality_snapshots_for_active_calls(
+        &mut guard,
+        "live_change",
+        outcome.apply_boundary.label(),
+        None,
+    );
+    guard.log(
+        LogLevel::Info,
+        format!("quality {} {}", outcome.key, outcome.value),
+    );
+    Ok(CommandOutput::line(render_quality_mutation(&outcome)))
+}
+
+fn quality_barge_in_label(state: &GatewayState) -> &'static str {
+    if state.quality.config.barge_in.enabled {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn emit_quality_snapshots_for_active_calls(
+    state: &mut GatewayState,
+    snapshot_reason: &'static str,
+    effective_scope: &'static str,
+    effective_after_asr_session_id: Option<String>,
+) {
+    let call_ids = state
+        .calls
+        .values()
+        .filter(|call| {
+            !matches!(
+                call.status,
+                CallStatus::Ended | CallStatus::Failed | CallStatus::IgnoredInbound
+            )
+        })
+        .map(|call| call.gateway_call_id.clone())
+        .collect::<Vec<_>>();
+    for call_id in call_ids {
+        state.emit_quality_config_snapshot(
+            &call_id,
+            snapshot_reason,
+            effective_scope,
+            effective_after_asr_session_id.clone(),
+        );
+    }
+}
+
+fn render_quality_mutation(outcome: &crate::quality::config::QualityMutationOutcome) -> String {
+    let mut line = format!(
+        "quality changed key={} value={} config_id={} applies={}",
+        outcome.key,
+        outcome.value,
+        outcome.config_id,
+        outcome.apply_boundary.label()
+    );
+    if outcome.clamped {
+        line.push_str(" clamped=true");
+    }
+    line
+}
+
 async fn log_command(
     context: &mut GatewayContext,
     command: LogCommand,
@@ -2001,6 +2913,7 @@ fn gateway_help(topic: &[String]) -> Option<String> {
         [topic] if topic == "inbound" => Some(inbound_help()),
         [topic] if topic == "asr" => Some(asr_help()),
         [topic] if topic == "tts" => Some(tts_help()),
+        [topic] if topic == "warm" => Some(warm_help()),
         [topic] if topic == "conversation" || topic == "chat" => Some(conversation_help()),
         [topic] if topic == "calls" || topic == "call" => Some(call_help()),
         [topic] if topic == "dial" || topic == "speak" || topic == "outbound" => {
@@ -2015,6 +2928,7 @@ fn gateway_help(topic: &[String]) -> Option<String> {
         }
         [topic] if topic == "transcript" => Some(transcript_help()),
         [topic] if topic == "log" => Some(log_help()),
+        [topic] if topic == "quality" => Some(quality_help()),
         [topic] if topic == "socket" || topic == "agent" => Some(socket_help()),
         _ => None,
     }
@@ -2058,6 +2972,7 @@ fn gateway_root_help() -> String {
         "  tts list",
         "  tts status",
         "  tts use kokoro-82m|piper       Select TTS backend for the next speak command",
+        "  warm [all|asr|tts]             Load selected ASR/TTS models before serving calls",
         "",
         "Calls:",
         "  calls                          List calls in operator roster order",
@@ -2077,6 +2992,8 @@ fn gateway_root_help() -> String {
         "  transcript follow [call-id]",
         "  transcript clear [call-id]",
         "  log clear",
+        "  quality status                  Show M6 quality config/logging status",
+        "  quality endpoint trailing-silence-ms <ms>",
         "",
         "Testing:",
         "  conversation smoke-test on    Enable test-only echo reply handler for M3 smoke tests",
@@ -2086,6 +3003,54 @@ fn gateway_root_help() -> String {
         "  help config       help telnyx       help inbound      help asr",
         "  help tts          help call         help outbound     help socket",
         "  help transcript   help test",
+    ]
+    .join("\n")
+}
+
+fn quality_help() -> String {
+    [
+        "quality status",
+        "quality profile fast|balanced|complete|noisy  default=balanced applies=next_asr_session",
+        "quality endpoint status",
+        "quality endpoint trailing-silence-ms <ms>      range=100..5000 default=650ms applies=next_asr_session",
+        "quality endpoint min-turn-words <n>            range=0..50 default=2 report_only",
+        "quality endpoint min-turn-chars <n>            range=0..200 default=6 report_only",
+        "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms report_only",
+        "quality endpoint max-turn-words <n>            range=1..500 default=80 report_only",
+        "quality endpoint max-turn-duration-ms <ms>     range=1000..120000 default=12000ms report_only",
+        "quality speech status",
+        "quality speech rms-threshold <value>           range=0.0..20000.0 default=220.0 applies=next_asr_session",
+        "quality speech peak-threshold <value>          range=0..32767 default=1100 applies=next_asr_session",
+        "quality speech onset-min-silence-ms <ms>       range=0..2000 default=180ms applies=next_asr_session",
+        "quality asr status",
+        "quality asr finish-pad-ms <ms>                 range=0..2000 default=160ms applies=next_asr_session",
+        "quality asr repeated-token-run-threshold <n>   range=2..128 default=16 applies=next_asr_session",
+        "quality asr repeated-q-run-threshold <n>       range=2..64 default=8 applies=next_asr_session",
+        "quality text-call status",
+        "quality text-call max-active-turns <n>         range=1..1024 default=32 applies=new_text_call_session",
+        "quality text-call media-ready-timeout-ms <ms>  range=1000..120000 default=20000ms applies=new_playback_request",
+        "quality text-call playback-wait-timeout-ms <ms> range=1000..600000 default=180000ms applies=new_playback_request",
+        "quality text-call latest-response-wins on|off  bool default=true applies=new_turn",
+        "quality text-call callback-timeout-ms <ms>     range=100..60000 default=5000ms applies=new_turn",
+        "quality tts status",
+        "quality tts chunking on|off                    bool default=true applies=new_playback_request",
+        "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
+        "quality tts first-chunk-max-chars <n>          range=0|40..500 default=0 applies=new_playback_request",
+        "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
+        "quality logging on <path>",
+        "quality logging off",
+        "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
+        "quality logging redaction-mode metrics-only|hashed-text|redacted-text|sensitive-plaintext default=metrics-only applies=immediate",
+        "quality judge status|on|off",
+        "quality barge-in status|on|off                 bool default=true applies=next_asr_session",
+        "quality barge-in speech-onset on|off           bool default=true applies=next_asr_session",
+        "quality barge-in partial-asr on|off            bool default=true applies=next_asr_session",
+        "quality barge-in final-asr on|off              bool default=true applies=next_asr_session",
+        "quality barge-in clear-timeout-ms <ms>         range=100..10000 default=1000ms applies=new_turn",
+        "",
+        "M6 quality commands use the existing line-oriented operator dispatcher.",
+        "Transcript text remains disabled unless explicitly enabled.",
+        "Operator TUI Up/Down recalls submitted commands through motlie-driver HistoryBuffer.",
     ]
     .join("\n")
 }
@@ -2152,6 +3117,19 @@ fn config_help() -> String {
     .join("\n")
 }
 
+fn warm_help() -> String {
+    [
+        "warm",
+        "warm all",
+        "warm asr",
+        "warm tts",
+        "",
+        "Load the source-local next ASR and/or TTS model handles before serving a call.",
+        "Warm status is runtime-only and appears in the TUI Runtime pane.",
+    ]
+    .join("\n")
+}
+
 fn tts_help() -> String {
     [
         "tts list",
@@ -2176,6 +3154,7 @@ fn tts_help() -> String {
         "  tts status",
         "  tts use kokoro-82m",
         "  tts use piper",
+        "  warm tts",
     ]
     .join("\n")
 }
@@ -2248,7 +3227,7 @@ fn telnyx_help() -> String {
         "  config set webhook-url https://your-host/telnyx/webhooks",
         "  config set media-url wss://your-host/telnyx/media",
         "  telnyx app create motlie-test",
-        "  telnyx number bind +15551234567 <connection-id>",
+        "  telnyx number bind <phone-number> <connection-id>",
     ]
     .join("\n")
 }
@@ -2293,8 +3272,8 @@ fn telnyx_number_help() -> String {
         "",
         "Examples:",
         "  telnyx number list",
-        "  telnyx number use +15551234567",
-        "  telnyx number bind +15551234567 1234567890",
+        "  telnyx number use <phone-number>",
+        "  telnyx number bind <phone-number> <connection-id>",
     ]
     .join("\n")
 }
@@ -2360,6 +3339,7 @@ fn conversation_help() -> String {
         "  only when intentionally testing the echo/repeat TTS loop.",
         "",
         "Usage:",
+        "  conversation help",
         "  conversation status [call-id]",
         "  conversation smoke-test <on|off>",
         "  conversation barge-in [on|off|status]",
@@ -2483,7 +3463,7 @@ fn test_help() -> String {
         "This is for ASR quality testing; outbound TTS is not part of this command.",
         "",
         "Example:",
-        "  test dial-transcribe +15551234567 --from +15557654321",
+        "  test dial-transcribe <to-phone-number> --from <from-phone-number>",
     ]
     .join("\n")
 }
@@ -2545,6 +3525,7 @@ fn socket_help() -> String {
         "  help inbound",
         "  help asr",
         "  help tts",
+        "  help warm",
         "  help conversation",
         "  help transcript",
         "  help call",
@@ -2600,21 +3581,21 @@ mod tests {
 
     use motlie_driver::CommandEngine;
     use tokio::sync::mpsc;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     use super::*;
     use crate::adapter::LiveAsrBackend;
     use crate::call_control::TelnyxClient;
     use crate::operator::state::{
-        shared_state, CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus,
+        CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus, shared_state,
     };
-    use crate::tts::{StaticTtsFactory, TtsRegistry, KOKORO_SAMPLE_RATE_HZ};
+    use crate::tts::{KOKORO_SAMPLE_RATE_HZ, StaticTtsFactory, TtsRegistry};
 
     #[tokio::test]
     async fn inbound_is_disabled_by_default() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
-        let context = GatewayContext::new(state, telnyx);
+        let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine.run_line("inbound status").await.expect("status");
@@ -2631,10 +3612,12 @@ mod tests {
 
         let output = engine.run_line("status").await.expect("status");
 
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line.starts_with("listener: 127.0.0.1:")));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.starts_with("listener: 127.0.0.1:"))
+        );
         assert!(!output.lines.iter().any(|line| line.contains("Some(")));
     }
 
@@ -2733,6 +3716,10 @@ mod tests {
             .run_line("help conversation")
             .await
             .expect("conversation help");
+        let conversation_alias = engine
+            .run_line("conversation help")
+            .await
+            .expect("conversation help alias");
 
         assert!(asr.lines.join("\n").contains("source-local"));
         assert!(tts.lines.join("\n").contains("tts list"));
@@ -2741,12 +3728,14 @@ mod tests {
         let outbound = outbound.lines.join("\n");
         let socket = socket.lines.join("\n");
         let conversation = conversation.lines.join("\n");
+        let conversation_alias = conversation_alias.lines.join("\n");
         assert!(outbound.contains("auto-attaches conversation in auto mode"));
         assert!(outbound.contains("conversation smoke-test on"));
         assert!(socket.contains("Receive one JSON object"));
         assert!(socket.contains("Agent workflows"));
         assert!(socket.contains("smoke-test handler mode is gateway-wide"));
         assert!(conversation.contains("Default live behavior"));
+        assert!(conversation_alias.contains("Default live behavior"));
         assert!(conversation.contains("Normal inbound TUI/socket flow"));
         assert!(conversation.contains("Normal outbound TUI/socket flow"));
         assert!(conversation.contains("conversation disapprove [call-id]"));
@@ -2780,10 +3769,12 @@ mod tests {
         let output = engine.run_line("tts status").await.expect("tts status");
 
         assert!(output.lines.iter().any(|line| line == "next=kokoro-82m"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "next_model=kokoro/kokoro_82m"));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "next_model=kokoro/kokoro_82m")
+        );
         assert!(output.lines.iter().any(|line| line == "status=unavailable"));
         assert!(output.lines.iter().any(|line| {
             line == "reason=Kokoro-82M TTS is unavailable; rebuild with --features kokoro"
@@ -2828,6 +3819,62 @@ mod tests {
         assert_eq!(
             engine.context().session.next_tts_backend,
             LiveTtsBackend::Kokoro82m
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_command_records_selected_model_status() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context =
+            context_with_static_tts(state.clone(), telnyx, SharedMediaRegistry::default());
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("warm").await.expect("warm models");
+
+        assert_eq!(output.lines.len(), 2);
+        assert!(output.lines[0]
+            .starts_with("warm asr=kroko-2025 model=sherpa-zipformer-en-kroko-2025-08-06 status=ready elapsed_ms="));
+        assert!(
+            output.lines[1].starts_with(
+                "warm tts=kokoro-82m model=kokoro/kokoro_82m status=ready elapsed_ms="
+            )
+        );
+        let guard = state.read().await;
+        assert!(
+            guard
+                .model_warmups
+                .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025))
+        );
+        assert!(
+            guard
+                .model_warmups
+                .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m))
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_tts_only_skips_asr_status() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context =
+            context_with_static_tts(state.clone(), telnyx, SharedMediaRegistry::default());
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("warm tts").await.expect("warm tts");
+
+        assert_eq!(output.lines.len(), 1);
+        assert!(output.lines[0].starts_with("warm tts=kokoro-82m"));
+        let guard = state.read().await;
+        assert!(
+            !guard
+                .model_warmups
+                .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025))
+        );
+        assert!(
+            guard
+                .model_warmups
+                .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m))
         );
     }
 
@@ -3019,7 +4066,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.config.selected_connection_id = Some("conn-1".to_string());
-            guard.config.selected_phone_number = Some("+15550000001".to_string());
+            guard.config.selected_phone_number = Some("<from-phone-number>".to_string());
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
             guard.config.public_webhook_url =
                 Some("https://example.test/telnyx/webhooks".to_string());
@@ -3035,7 +4082,7 @@ mod tests {
             .await
             .expect("asr use");
         let output = engine
-            .run_line("test dial-transcribe +15550000002")
+            .run_line("test dial-transcribe <to-phone-number>")
             .await
             .expect("dial-transcribe");
 
@@ -3053,8 +4100,8 @@ mod tests {
             crate::operator::state::CallDirection::Outbound
         );
         assert_eq!(call.status, CallStatus::Dialing);
-        assert_eq!(call.from.as_deref(), Some("+15550000001"));
-        assert_eq!(call.to.as_deref(), Some("+15550000002"));
+        assert_eq!(call.from.as_deref(), Some("<from-phone-number>"));
+        assert_eq!(call.to.as_deref(), Some("<to-phone-number>"));
         assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
         assert!(call.conversation.attached);
@@ -3067,7 +4114,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.config.selected_connection_id = Some("conn-1".to_string());
-            guard.config.default_from_number = Some("+15550000001".to_string());
+            guard.config.default_from_number = Some("<from-phone-number>".to_string());
             guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
             guard.config.public_webhook_url =
                 Some("https://example.test/telnyx/webhooks".to_string());
@@ -3077,24 +4124,27 @@ mod tests {
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let output = engine
-            .run_line("dial +15550000002")
+            .run_line("dial <to-phone-number>")
             .await
             .expect("dial should create dry-run outbound call");
 
         assert!(output.lines[0].starts_with("dial requested for gwc_"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line
-                == "conversation attached in auto mode; smoke-test echo replies require:"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "  conversation smoke-test on"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line.contains("speak ") && line.contains("<text to say>")));
+        assert!(
+            output.lines.iter().any(|line| line
+                == "conversation attached in auto mode; smoke-test echo replies require:")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "  conversation smoke-test on")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.contains("speak ") && line.contains("<text to say>"))
+        );
         let guard = state.read().await;
         let call_id = engine
             .context()
@@ -3108,8 +4158,8 @@ mod tests {
             crate::operator::state::CallDirection::Outbound
         );
         assert_eq!(call.status, CallStatus::Dialing);
-        assert_eq!(call.from.as_deref(), Some("+15550000001"));
-        assert_eq!(call.to.as_deref(), Some("+15550000002"));
+        assert_eq!(call.from.as_deref(), Some("<from-phone-number>"));
+        assert_eq!(call.to.as_deref(), Some("<to-phone-number>"));
         assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
     }
@@ -3303,14 +4353,16 @@ mod tests {
     async fn conversation_smoke_test_command_toggles_echo_handler() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
-        let context = GatewayContext::new(state, telnyx);
+        let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let status = engine.run_line("status").await.expect("status");
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "conversation-handler: disabled"));
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "conversation-handler: disabled")
+        );
 
         let enabled = engine
             .run_line("conversation smoke-test on")
@@ -3318,6 +4370,8 @@ mod tests {
             .expect("enable smoke test");
         assert_eq!(enabled.lines, vec!["conversation smoke-test: on"]);
         assert!(engine.context().conversation.smoke_test_enabled());
+        assert!(engine.context().conversation.barge_in_enabled());
+        assert!(state.read().await.quality.config.barge_in.enabled);
 
         let disabled = engine
             .run_line("conversation smoke-test off")
@@ -3328,10 +4382,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_barge_in_command_toggles_runtime_setting() {
+    async fn conversation_barge_in_command_updates_quality_config_and_runtime_bridge() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
-        let context = GatewayContext::new(state, telnyx);
+        let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let status = engine
@@ -3340,6 +4394,7 @@ mod tests {
             .expect("barge-in status");
         assert_eq!(status.lines, vec!["conversation barge-in: on"]);
         assert!(engine.context().conversation.barge_in_enabled());
+        assert!(state.read().await.quality.config.barge_in.enabled);
 
         let disabled = engine
             .run_line("conversation barge-in off")
@@ -3347,6 +4402,7 @@ mod tests {
             .expect("disable barge-in");
         assert_eq!(disabled.lines, vec!["conversation barge-in: off"]);
         assert!(!engine.context().conversation.barge_in_enabled());
+        assert!(!state.read().await.quality.config.barge_in.enabled);
 
         let enabled = engine
             .run_line("conversation barge-in on")
@@ -3354,6 +4410,7 @@ mod tests {
             .expect("enable barge-in");
         assert_eq!(enabled.lines, vec!["conversation barge-in: on"]);
         assert!(engine.context().conversation.barge_in_enabled());
+        assert!(state.read().await.quality.config.barge_in.enabled);
     }
 
     #[tokio::test]
@@ -3524,8 +4581,8 @@ mod tests {
                     call_leg_id: Some("leg-1".to_string()),
                     stream_id: Some("stream-1".to_string()),
                 },
-                Some("+15550000001".to_string()),
-                Some("+15550000002".to_string()),
+                Some("<from-phone-number>".to_string()),
+                Some("<to-phone-number>".to_string()),
                 CallStatus::Answered,
             );
             guard.add_transcript(
@@ -3547,10 +4604,12 @@ mod tests {
 
         let output = engine.run_line("call show").await.expect("call show");
 
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "assembled transcript:"));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "assembled transcript:")
+        );
         assert!(output.lines.iter().any(|line| line == "HELLO WORLD"));
         assert!(output.lines.iter().any(|line| line == "final: HELLO"));
         assert!(output.lines.iter().any(|line| line == "partial: WORLD"));
@@ -3598,14 +4657,18 @@ mod tests {
             .await
             .expect("socket show");
 
-        assert!(tui_show
-            .lines
-            .iter()
-            .any(|line| line == &format!("call: {call_two}")));
-        assert!(socket_show
-            .lines
-            .iter()
-            .any(|line| line == &format!("call: {call_one}")));
+        assert!(
+            tui_show
+                .lines
+                .iter()
+                .any(|line| line == &format!("call: {call_two}"))
+        );
+        assert!(
+            socket_show
+                .lines
+                .iter()
+                .any(|line| line == &format!("call: {call_one}"))
+        );
     }
 
     fn add_test_call(state: &mut GatewayState, call_control_id: &str) -> String {
@@ -3634,8 +4697,8 @@ mod tests {
                 call_leg_id: Some(format!("leg-{call_control_id}")),
                 stream_id: Some(stream_id.to_string()),
             },
-            Some("+15550000001".to_string()),
-            Some("+15550000002".to_string()),
+            Some("<from-phone-number>".to_string()),
+            Some("<to-phone-number>".to_string()),
             CallStatus::MediaStarted,
         );
         let call = state
@@ -3651,6 +4714,283 @@ mod tests {
         };
         call.asr_backend = Some(LiveAsrBackend::Kroko2025);
         call_id
+    }
+
+    #[tokio::test]
+    async fn quality_status_defaults_to_transcript_text_disabled() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine
+            .run_line("quality status")
+            .await
+            .expect("quality status");
+
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "include_transcript_text=false")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "redaction_mode=metrics-only")
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_endpoint_command_clamps_and_marks_report_only_knobs() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let live_output = engine
+            .run_line("quality endpoint trailing-silence-ms 10")
+            .await
+            .expect("set trailing silence");
+        assert!(live_output.lines[0].contains("key=endpoint.trailing_silence_ms"));
+        assert!(live_output.lines[0].contains("applies=next_asr_session"));
+        assert!(live_output.lines[0].contains("clamped=true"));
+        assert_eq!(
+            state
+                .read()
+                .await
+                .quality
+                .config
+                .endpoint
+                .trailing_silence_ms,
+            100
+        );
+
+        let report_output = engine
+            .run_line("quality endpoint merge-window-ms 9999")
+            .await
+            .expect("set report-only merge window");
+        assert!(report_output.lines[0].contains("key=endpoint.merge_window_ms"));
+        assert!(report_output.lines[0].contains("applies=report_only"));
+        assert_eq!(
+            state.read().await.quality.config.endpoint.merge_window_ms,
+            5_000
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_text_call_commands_update_live_config_knobs() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line("quality text-call media-ready-timeout-ms 2345")
+            .await
+            .expect("set media-ready timeout");
+        engine
+            .run_line("quality text-call playback-wait-timeout-ms 3456")
+            .await
+            .expect("set playback-wait timeout");
+        engine
+            .run_line("quality text-call latest-response-wins off")
+            .await
+            .expect("set latest policy");
+        engine
+            .run_line("quality text-call callback-timeout-ms 4567")
+            .await
+            .expect("set callback timeout");
+
+        let status = engine
+            .run_line("quality text-call status")
+            .await
+            .expect("text-call status");
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "media_ready_timeout_ms=2345")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "playback_wait_timeout_ms=3456")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "latest_response_wins=false")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "callback_timeout_ms=4567")
+        );
+
+        let guard = state.read().await;
+        assert_eq!(guard.quality.config.text_call.media_ready_timeout_ms, 2_345);
+        assert_eq!(
+            guard.quality.config.text_call.playback_wait_timeout_ms,
+            3_456
+        );
+        assert!(!guard.quality.config.text_call.latest_response_wins);
+        assert_eq!(guard.quality.config.text_call.callback_timeout_ms, 4_567);
+    }
+
+    #[tokio::test]
+    async fn quality_tts_commands_update_live_config_knobs() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let chunk_output = engine
+            .run_line("quality tts max-text-chunk-chars 10")
+            .await
+            .expect("set max text chunk chars");
+        assert!(chunk_output.lines[0].contains("key=tts.max_text_chunk_chars"));
+        assert!(chunk_output.lines[0].contains("clamped=true"));
+        let first_chunk_output = engine
+            .run_line("quality tts first-chunk-max-chars 10")
+            .await
+            .expect("set first chunk max chars");
+        assert!(first_chunk_output.lines[0].contains("key=tts.first_chunk_max_chars"));
+        assert!(first_chunk_output.lines[0].contains("clamped=true"));
+        let disabled_first_chunk_output = engine
+            .run_line("quality tts first-chunk-max-chars 0")
+            .await
+            .expect("disable first chunk max chars");
+        assert!(disabled_first_chunk_output.lines[0].contains("key=tts.first_chunk_max_chars"));
+        assert!(disabled_first_chunk_output.lines[0].contains("value=0"));
+        let first_chunk_output = engine
+            .run_line("quality tts first-chunk-max-chars 45")
+            .await
+            .expect("set first chunk max chars");
+        assert!(first_chunk_output.lines[0].contains("value=45"));
+        let prebuffer_output = engine
+            .run_line("quality tts prebuffer-chunks 3")
+            .await
+            .expect("set prebuffer chunks");
+        assert!(prebuffer_output.lines[0].contains("key=tts.prebuffer_chunks"));
+        assert!(prebuffer_output.lines[0].contains("applies=new_playback_request"));
+
+        let status = engine
+            .run_line("quality tts status")
+            .await
+            .expect("tts status");
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "max_text_chunk_chars=40")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "first_chunk_max_chars=45")
+        );
+        assert!(status.lines.iter().any(|line| line == "prebuffer_chunks=3"));
+
+        let guard = state.read().await;
+        assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
+        assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
+        assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
+    }
+
+    #[tokio::test]
+    async fn quality_state_dump_replays_exact_resolved_config() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        {
+            let mut guard = state.write().await;
+            let config = &mut guard.quality.config;
+            config.set_profile(QualityProfile::Noisy);
+            config.set_speech_rms_threshold(321.0).expect("finite RMS");
+            config.set_speech_peak_threshold(1_234);
+            config.set_speech_onset_min_silence_ms(333);
+            config.set_endpoint_trailing_silence_ms(777);
+            config.set_endpoint_min_turn_words(4);
+            config.set_endpoint_min_turn_chars(12);
+            config.set_endpoint_merge_window_ms(444);
+            config.set_endpoint_max_turn_words(123);
+            config.set_endpoint_max_turn_duration_ms(7_654);
+            config.set_asr_repeated_token_run_threshold(42);
+            config.set_asr_repeated_q_run_threshold(12);
+            config.set_asr_finish_pad_ms(222);
+            config.set_text_call_max_active_turns(9);
+            config.set_text_call_media_ready_timeout_ms(12_345);
+            config.set_text_call_playback_wait_timeout_ms(54_321);
+            config.set_text_call_latest_response_wins(false);
+            config.set_text_call_callback_timeout_ms(1_234);
+            config.set_tts_max_text_chunk_chars(88);
+            config.set_tts_first_chunk_max_chars(44);
+            config.set_tts_prebuffer_chunks(4);
+            config.set_barge_in_enabled(false);
+            config.barge_in.speech_onset_cancel_enabled = false;
+            config.barge_in.partial_asr_cancel_enabled = false;
+            config.barge_in.final_asr_cancel_enabled = true;
+            config.set_barge_in_clear_timeout_ms(2_222);
+            config.set_logging_enabled(true);
+            config.set_logging_queue_capacity(8_192);
+            config
+                .set_logging_per_frame_sample_rate(0.25)
+                .expect("valid sample rate");
+            config.set_logging_include_transcript_text(false);
+            config.set_logging_redaction_mode(RedactionMode::HashedText);
+            config.set_quality_judge_enabled(true);
+            config
+                .set_quality_judge_sample_rate(0.5)
+                .expect("valid judge sample rate");
+            config.quality_judge.model = "judge-model-test".to_string();
+            config.set_quality_judge_batch_size(7);
+            config.set_quality_judge_timeout_ms(22_000);
+            config.targets.p50_endpoint_trailing_silence_ms = 801;
+            config.targets.p95_endpoint_trailing_silence_ms = 1_401;
+            config.targets.p50_turn_to_playback_started_ms = 1_101;
+            config.targets.p95_turn_to_playback_started_ms = 2_901;
+            config.targets.max_incomplete_turn_rate = 0.11;
+            config.targets.max_overmerged_turn_rate = 0.12;
+            config.targets.max_garbled_turn_rate = 0.13;
+            config.targets.max_inappropriate_cancel_rate = 0.14;
+            guard.quality.config_id = config.config_id();
+        }
+        let expected_config = state.read().await.quality.config.clone();
+        let expected_config_id = expected_config.config_id();
+        let dump = {
+            let guard = state.read().await;
+            crate::operator::persistence::render_state_dump(&guard)
+        };
+        assert!(dump.contains("quality restore-config "));
+
+        let path = std::env::temp_dir().join(format!(
+            "motlie-quality-state-{}.repl",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, dump).expect("write quality state dump");
+
+        let replay_state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let replay_telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let replay_context = GatewayContext::new(replay_state.clone(), replay_telnyx);
+        let mut replay_engine =
+            CommandEngine::<GatewayContext, GatewayCommand>::new(replay_context);
+        crate::operator::script::run_repl_file(&mut replay_engine, &path)
+            .await
+            .expect("replay quality state dump");
+
+        let replay_guard = replay_state.read().await;
+        assert_eq!(replay_guard.quality.config, expected_config);
+        assert_eq!(replay_guard.quality.config_id, expected_config_id);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn test_asr_registry() -> SharedAsrRegistry {
+        let echo = Arc::new(EchoAsrFactory);
+        Arc::new(AsrRegistry::new(echo.clone(), echo))
     }
 
     fn context_with_static_tts(
@@ -3674,6 +5014,7 @@ mod tests {
         GatewayContext::with_services(
             state,
             telnyx,
+            test_asr_registry(),
             media,
             tts,
             conversation,

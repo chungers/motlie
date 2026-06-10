@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-09 18:10 PDT | @codex-367-design | Added final M6 #419 review scope split: fix bounded telnyx-agent delivery, agent-path profiling spans, one-call bridge admission, text-call/config replay correctness now; defer `libs/agent` Channel adoption and streamed `agent.turn.partial`/Append protocol to #428 per David. |
+| 2026-06-09 15:31 PDT | @codex-367-design | Added M6 gap implementation plan for deferred latency spans/transport rollups, live call-bound tuning commands, and operator TUI command history via `motlie-driver::HistoryBuffer`. |
 | 2026-06-08 00:03 PDT | @codex-367-design | Updated M4/M5 coordination tasks for text-call playback terminal status, cancel-and-replace latest-response-wins, replaced playback cancellation frames, and stale valid `agent.turn` replies reported as `superseded` without hanging up. |
 | 2026-06-07 23:08 PDT | @codex-366-impl | Added M5 cancel-and-replace speech enqueue support for conversational text-agent handoff: active speech can be replaced without poisoning the media/text session, stale clears no longer demote newer playback, and M4 should surface terminal playback status in `playback.finished`. |
 | 2026-06-07 18:16 PDT | @codex-366-impl | Expanded M5 #402 into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared toggle, including a 120 ms resumed-speech onset threshold, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that chunk. |
@@ -599,11 +601,11 @@ M4 implementation must wait for the DESIGN to merge and M3.5 to land. This secti
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
 - [ ] Add the new workspace member `bins/telnyx-agent` as a daemon crate only during implementation: `Cargo.toml`, `src/main.rs`, `src/{config.rs,gateway_client.rs,http.rs,text_ws.rs,tmux_bridge.rs,socket.rs,error.rs}`.
   DESIGN reference: `Telnyx Agent Daemon` / `Responsibilities`
-- [ ] Implement `telnyx-agent daemon --gateway-url <https-url> --public-url <https-url> --subscribe-number <called-phone-number> --callback-secret-ref env:MOTLIE_APP_CALLBACK_SECRET --tmux-target <target> --input-quiet-for-ms <ms> --input-backoff-initial-ms <ms> --input-backoff-max-ms <ms> --trailing-enter-delay-ms <ms> [--no-trailing-enter] --socket <path>` to register inbound subscriptions with opaque hashed subscription IDs, serve signed inbound/outbound callbacks, reject stale/replayed callback IDs, and serve per-call `call_url` WebSockets.
+- [ ] Implement `telnyx-agent daemon --gateway-url <https-url> --public-url <https-url> --subscribe-number <called-phone-number> --callback-secret-ref env:MOTLIE_APP_CALLBACK_SECRET --tmux-target <target> --input-quiet-for-ms <ms> --input-delivery-timeout-ms <ms> --input-backoff-initial-ms <ms> --input-backoff-max-ms <ms> --trailing-enter-delay-ms <ms> [--no-trailing-enter] --socket <path>` to register inbound subscriptions with opaque hashed subscription IDs, serve signed inbound/outbound callbacks, reject stale/replayed callback IDs, and serve per-call `call_url` WebSockets.
   DESIGN reference: `Telnyx Agent Daemon` / `Daemon Usage Sketch`
 - [ ] Implement the daemon place-call socket with NDJSON request/response frames, e.g. `{"id":"req-1","type":"dial","to":"<destination-phone-number-or-sip-uri>"}`, and make it call gateway `POST /api/v1/outbound-calls` internally.
   DESIGN reference: `Telnyx Agent Daemon` / `Daemon Usage Sketch`
-- [ ] Implement the daemon tmux input bridge with `motlie-tmux` target resolution, `HostHandle::session_client_activity()` input quiet checks, `SessionWatchHandle` / history-based composer checks, capped exponential backoff while active, and `KeySequence::literal(...).then_enter()` delivery; never shell out raw `tmux send-keys` or build a parallel activity detector for call turns.
+- [ ] Implement the daemon tmux input bridge with `motlie-tmux` target resolution, `HostHandle::session_client_activity()` input quiet checks, `SessionWatchHandle` / history-based composer checks, capped exponential backoff while active, an overall delivery timeout so callers cannot wait in silence indefinitely, and `KeySequence::literal(...).then_enter()` delivery; never shell out raw `tmux send-keys` or build a parallel activity detector for call turns.
   DESIGN reference: `Telnyx Agent Daemon` / `Input to Tmux`
 - [ ] Add default-on delayed trailing Enter submit after prompt injection, with `--no-trailing-enter` and `--trailing-enter-delay-ms` controls; send only the bare Enter on the delayed retry, never duplicate the transcription text.
   DESIGN reference: `Telnyx Agent Daemon` / `Input to Tmux`
@@ -666,7 +668,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Application Text Call Protocol and Gateway Control API` / `Bidirectional Text WebSocket`
 - [ ] Add `bins/telnyx-agent` daemon tests with a fake gateway: startup re-registers inbound subscriptions idempotently, inbound offer accept/decline callbacks work, outbound place-call socket blocks until text stream setup, and one WebSocket-to-tmux bridge implementation handles inbound and outbound calls.
   DESIGN reference: `Telnyx Agent Daemon` / `Validation Scope`
-- [ ] Add tmux bridge tests using `motlie-tmux` monitor/history or a fake `HistoryHandle`: inbound `caller.turn` becomes activity-aware queued `KeySequence` input, active targets queue with backoff and flush when idle, idle targets send immediately, default delayed trailing Enter is sent once, disabled trailing Enter is honored, marker-delimited reply extraction returns exactly one `agent.turn`, duplicate scrape/activity logic is not introduced in the daemon, and missing marker/timeouts fail the turn without hanging the daemon.
+- [ ] Add tmux bridge tests using `motlie-tmux` monitor/history or a fake `HistoryHandle`: inbound `caller.turn` becomes activity-aware queued `KeySequence` input, active targets queue with backoff and flush when idle, idle targets send immediately, default delayed trailing Enter is sent once, disabled trailing Enter is honored, marker-delimited reply extraction returns exactly one `agent.turn`, wrapped prompt echoes do not become `agent.turn` text, duplicate scrape/activity logic is not introduced in the daemon, and missing marker/delivery timeouts fail the turn without hanging the daemon.
   DESIGN reference: `Telnyx Agent Daemon` / `Input to Tmux`, `Telnyx Agent Daemon` / `Output from Tmux`
 - [ ] Add persistence tests that dump state, restart with `--load <dump_path>`, and assert the replayed gateway state matches durable Telnyx/app-server configuration without resurrecting active calls or media sessions.
   DESIGN reference: `Replayable State Dumps`, `Gateway Configuration Requirement`
@@ -720,6 +722,70 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Transport Streaming vs Incremental TTS`, `Real-Time Latency Requirements`
 - [ ] During M2 live validation, review `tts.outbound.frame.sent` intervals, queue depth, `tts.outbound.underrun`, Telnyx `mark` receipt, and human-reported smoothness before accepting outbound TTS quality.
   DESIGN reference: `M2-Safe Bidirectional Media Contract`, `Testing Scope for PLAN`
+
+## Phase 9.5: M6 Quality Profiling Gap Implementation (#418)
+
+This phase implements the `PROFILING.md` M6 foundation gaps needed for live tuning and reviewer validation. It is stacked as a PR-to-the-PR on `codex-367-design/m6-quality` while PR #419 remains the parent M6 foundation PR.
+
+### 9.5.1 - Deferred Latency Spans and Transport Rollups
+
+- [x] Emit `voice.span.finished` for `utterance.speech_to_low_energy`, `asr.endpoint_wait`, and `asr.local_finish` using monotonic `Instant` deltas and the ASR-session `config_id` snapshot.
+  PROFILING reference: `Acoustic, ASR, and Endpointing Spans`.
+- [x] Emit `voice.span.finished` for `tts.synthesis_first_chunk`, `tts.packetize_first_chunk`, `tts.synthesis_full`, `media.first_frame_send`, and `media.playback_terminal` using playback-request config attribution.
+  PROFILING reference: `TTS and Playback Spans`.
+- [x] Emit barge-in spans for speech onset/partial/final cancel request and cancel-request-to-terminal clear latency without awaiting on the media hot path.
+  PROFILING reference: `Barge-In and Full-Duplex Spans`.
+- [x] Aggregate inbound sequence gaps, stale/reordered frames, and arrival jitter into `media.inbound_transport.rollup` at stream boundary.
+  PROFILING reference: `Transport Quality Rollups`.
+- [x] Aggregate outbound frame pacing gaps, queue-depth samples, and underruns into `media.outbound_pacing.rollup` at stream boundary.
+  PROFILING reference: `Transport Quality Rollups`.
+- [x] Add/finish focused tests proving span event shapes, ASR endpoint boundaries, TTS first-frame attribution, barge-in clear latency, and inbound/outbound rollup payloads.
+  PROFILING reference: `Acceptance Criteria`.
+
+### 9.5.2 - Call-Isolated Tuning Commands
+
+- [x] Keep speech detection, local endpointing, and barge-in enable/subpath decisions call/ASR-session isolated by using the `VoiceQualityConfig` snapshot opened with each ASR session.
+  PROFILING reference: `Gateway-Owned VoiceQualityConfig Knobs`.
+- [x] Expose live `quality ...` commands through the existing line-oriented command dispatcher for endpoint trailing silence, speech thresholds, barge-in enable/subpaths/clear timeout, and TTS chunking.
+  PROFILING reference: `Proposed REPL Commands`, `Proposed Socket Commands`.
+- [x] Keep TTS chunking call-isolated at new playback request boundaries through `quality tts chunking on|off`.
+  PROFILING reference: `TTS and Playback Spans`, `Gateway-Owned VoiceQualityConfig Knobs`.
+- [x] Finish help/status text so each tunable reports min/max/default units and apply boundary.
+  PROFILING reference: `Gateway-Owned VoiceQualityConfig Knobs`.
+
+### 9.5.3 - Operator TUI Command History
+
+- [x] Add `HistoryBuffer::prev()`, `HistoryBuffer::next()`, and `HistoryBuffer::reset_recall()` in `libs/driver` so recall cursor logic stays in the shared driver layer.
+  PROFILING reference: `Operator TUI Command History`.
+- [x] Bind gateway TUI shell `KeyCode::Up` and `KeyCode::Down` to the shared `HistoryBuffer` for command-input recall; do not maintain a parallel cursor in `operator/tui.rs`.
+  PROFILING reference: `Operator TUI Command History`.
+- [x] Add driver/TUI unit coverage for bounded history recall and quality-command input replacement.
+  PROFILING reference: `Operator TUI Command History`.
+
+
+### 9.5.5 - Final M6 #419 Review Bug Fixes
+
+- [x] Add a bounded `telnyx-agent` tmux delivery deadline (`--input-delivery-timeout-ms`, default `30000`) so quiet-guard backoff cannot leave the caller in silence indefinitely.
+  PROFILING reference: `Telnyx Agent-Owned Bridge Config`, `Text-Call and App-Agent Spans`.
+- [x] Make the shared telnyx-agent tmux bridge explicitly one-call-at-a-time by returning `409 bridge_busy` for a second live text-call WebSocket instead of silently queueing across calls behind the bridge lock.
+  PROFILING reference: `Future Streaming-Agent Contract Notes`, `Telnyx Agent-Owned Bridge Config`.
+- [x] Harden marker extraction so wrapped prompt echoes and embedded instruction markers are ignored; only the last standalone turn-end marker terminates an agent reply.
+  PROFILING reference: `Definitions`.
+- [x] Stamp final transcript `Instant`s into text-call turns, emit `app.agent_turn_wait`, and pass the final boundary into `SpeechQueueRequest` so `turn.finalize_to_first_audio` fires for agent calls.
+  PROFILING reference: `Text-Call and App-Agent Spans`, `TTS and Playback Spans`.
+- [x] Use nonblocking `try_send` for media-to-text-call `caller.turn` delivery; full app WebSocket queues fail the turn explicitly instead of awaiting on the media/ASR finalization path.
+  PROFILING reference: `Text-Call and App-Agent Spans`, `Acceptance Criteria`.
+- [x] Align live setter/help clamp ranges with `VoiceQualityConfig::validate_resolved()` and add replay clamp-edge round-trip coverage so `quality restore-config` preserves `config_id`.
+  PROFILING reference: `Gateway-Owned VoiceQualityConfig Knobs`, `Coherent Config Framework`.
+- [ ] Defer `libs/agent` Channel adoption and streamed `agent.turn.partial` + `SpeechConflictPolicy::Append` to #428 per David scope ruling; do not silently defer either item in PR review replies.
+  PROFILING reference: `Future Streaming-Agent Contract Notes`.
+
+### 9.5.4 - Gate and Review
+
+- [x] Run `cargo build -p motlie-telnyx-gateway --features "sherpa piper kokoro"` and `cargo build -p motlie-telnyx-agent`.
+- [x] Run `cargo test -p motlie-telnyx-gateway --features "sherpa piper kokoro"` and `cargo test -p motlie-telnyx-agent`.
+- [x] Run `cargo clippy -p motlie-telnyx-gateway --features "sherpa piper kokoro" -- -D warnings` and `cargo clippy -p motlie-telnyx-agent -- -D warnings`.
+- [ ] Push the stacked branch, keep PR #426 draft until the gate is green, then request the three M6 reviewer lenses again.
 
 ## Phase 10: Follow-On Backend Pairings
 

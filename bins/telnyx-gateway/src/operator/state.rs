@@ -2,14 +2,21 @@ use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
+use crate::quality::{
+    ActiveAsrQualitySession, QualityEvent, QualityEventContext, QualityEventSink, RedactionMode,
+    VoiceQualityConfig,
+};
+use crate::tts::LiveTtsBackend;
 
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
@@ -28,6 +35,55 @@ impl InboundMode {
             Self::Manual => "manual",
             Self::AutoTranscribe => "auto-transcribe",
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct QualityRuntimeState {
+    pub run_id: String,
+    pub config: VoiceQualityConfig,
+    pub config_id: String,
+    pub event_sink: QualityEventSink,
+    pub log_path: Option<PathBuf>,
+    pub event_sequence: u64,
+}
+
+impl Default for QualityRuntimeState {
+    fn default() -> Self {
+        let config = VoiceQualityConfig::default();
+        let config_id = config.config_id();
+        Self {
+            run_id: format!("run_{}", Uuid::new_v4().simple()),
+            config,
+            config_id,
+            event_sink: QualityEventSink::disabled(),
+            log_path: None,
+            event_sequence: 0,
+        }
+    }
+}
+
+pub struct QualitySpanEmission {
+    pub config_id: String,
+    pub redaction_mode: RedactionMode,
+    pub span_name: &'static str,
+    pub category: &'static str,
+    pub duration: Duration,
+    pub critical_path: bool,
+    pub concurrent: bool,
+    pub payload: Map<String, Value>,
+}
+
+impl QualityRuntimeState {
+    pub fn set_config(&mut self, config: VoiceQualityConfig) -> String {
+        self.config = config;
+        self.config_id = self.config.config_id();
+        self.config_id.clone()
+    }
+
+    fn next_sequence(&mut self) -> u64 {
+        self.event_sequence = self.event_sequence.saturating_add(1);
+        self.event_sequence
     }
 }
 
@@ -416,6 +472,14 @@ pub struct LogEntry {
     pub message: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelWarmStatus {
+    pub label: String,
+    pub model: String,
+    pub warmed_at: DateTime<Utc>,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogLevel {
     Info,
@@ -443,7 +507,17 @@ pub struct GatewayState {
     pub stream_index: BTreeMap<String, String>,
     pub inbound_subscriptions: BTreeMap<String, InboundSubscription>,
     pub logs: VecDeque<LogEntry>,
+    pub model_warmups: BTreeMap<String, ModelWarmStatus>,
+    pub quality: QualityRuntimeState,
     pub shutdown_requested: bool,
+}
+
+pub fn asr_warm_key(backend: LiveAsrBackend) -> String {
+    format!("asr:{}", backend.label())
+}
+
+pub fn tts_warm_key(backend: LiveTtsBackend) -> String {
+    format!("tts:{}", backend.label())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -474,8 +548,232 @@ impl GatewayState {
             stream_index: BTreeMap::new(),
             inbound_subscriptions: BTreeMap::new(),
             logs: VecDeque::new(),
+            model_warmups: BTreeMap::new(),
+            quality: QualityRuntimeState::default(),
             shutdown_requested: false,
         }
+    }
+
+    pub fn mark_model_warm(
+        &mut self,
+        key: String,
+        label: impl Into<String>,
+        model: impl Into<String>,
+        elapsed_ms: u64,
+    ) {
+        self.model_warmups.insert(
+            key,
+            ModelWarmStatus {
+                label: label.into(),
+                model: model.into(),
+                warmed_at: Utc::now(),
+                elapsed_ms,
+            },
+        );
+    }
+
+    pub fn set_quality_config(&mut self, config: VoiceQualityConfig) -> String {
+        self.quality.set_config(config)
+    }
+
+    pub fn set_quality_event_sink(&mut self, sink: QualityEventSink, log_path: Option<PathBuf>) {
+        self.quality.event_sink = sink;
+        self.quality.log_path = log_path;
+    }
+
+    fn quality_event_context(&mut self, gateway_call_id: Option<String>) -> QualityEventContext {
+        self.quality_event_context_with_config(gateway_call_id, self.quality.config_id.clone())
+    }
+
+    fn quality_event_context_with_config(
+        &mut self,
+        gateway_call_id: Option<String>,
+        config_id: String,
+    ) -> QualityEventContext {
+        self.quality_event_context_with_config_and_redaction(
+            gateway_call_id,
+            config_id,
+            self.quality.config.logging.redaction_mode,
+        )
+    }
+
+    fn quality_event_context_with_config_and_redaction(
+        &mut self,
+        gateway_call_id: Option<String>,
+        config_id: String,
+        redaction_mode: crate::quality::RedactionMode,
+    ) -> QualityEventContext {
+        QualityEventContext::new(
+            self.quality.next_sequence(),
+            self.quality.run_id.clone(),
+            gateway_call_id,
+            config_id,
+            redaction_mode,
+        )
+    }
+
+    pub fn emit_quality_config_snapshot(
+        &mut self,
+        gateway_call_id: &str,
+        snapshot_reason: &'static str,
+        effective_scope: &'static str,
+        effective_after_asr_session_id: Option<String>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::config_snapshot(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            &self.quality.config,
+            snapshot_reason,
+            effective_scope,
+            effective_after_asr_session_id,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn start_quality_asr_session(
+        &mut self,
+        gateway_call_id: &str,
+        stream_id: Option<&str>,
+        reason: &'static str,
+    ) -> ActiveAsrQualitySession {
+        let session = ActiveAsrQualitySession::new(&self.quality.config);
+        if self.quality.event_sink.is_enabled() {
+            let event = QualityEvent::asr_session_started(
+                self.quality_event_context_with_config_and_redaction(
+                    Some(gateway_call_id.to_string()),
+                    session.config_id.clone(),
+                    session.redaction_mode,
+                ),
+                &session,
+                stream_id,
+                reason,
+            );
+            self.quality.event_sink.emit(event);
+        }
+        session
+    }
+
+    pub fn emit_quality_asr_turn_mapped(
+        &mut self,
+        gateway_call_id: &str,
+        session: &ActiveAsrQualitySession,
+        turn_id: &str,
+        final_transcript_event_id: &str,
+        caller_turn_sent: bool,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::asr_turn_mapped(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                session.config_id.clone(),
+                session.redaction_mode,
+            ),
+            session,
+            turn_id.to_string(),
+            final_transcript_event_id.to_string(),
+            caller_turn_sent,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn emit_quality_caller_turn_sent(
+        &mut self,
+        gateway_call_id: &str,
+        turn_id: &str,
+        text: &str,
+        session: Option<&ActiveAsrQualitySession>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let (context, include_transcript_text) = if let Some(session) = session {
+            (
+                self.quality_event_context_with_config_and_redaction(
+                    Some(gateway_call_id.to_string()),
+                    session.config_id.clone(),
+                    session.redaction_mode,
+                ),
+                session.include_transcript_text,
+            )
+        } else {
+            (
+                self.quality_event_context(Some(gateway_call_id.to_string())),
+                self.quality.config.logging.include_transcript_text,
+            )
+        };
+        let event = QualityEvent::caller_turn_sent(
+            context,
+            turn_id.to_string(),
+            text,
+            include_transcript_text,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn emit_quality_span_finished(&mut self, gateway_call_id: &str, span: QualitySpanEmission) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::span_finished(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                span.config_id,
+                span.redaction_mode,
+            ),
+            span.span_name,
+            span.category,
+            span.duration,
+            span.critical_path,
+            span.concurrent,
+            span.payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn emit_quality_inbound_transport_rollup(
+        &mut self,
+        gateway_call_id: &str,
+        config_id: String,
+        redaction_mode: RedactionMode,
+        payload: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::inbound_transport_rollup(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                config_id,
+                redaction_mode,
+            ),
+            payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn emit_quality_outbound_pacing_rollup(
+        &mut self,
+        gateway_call_id: &str,
+        config_id: String,
+        redaction_mode: RedactionMode,
+        payload: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::outbound_pacing_rollup(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                config_id,
+                redaction_mode,
+            ),
+            payload,
+        );
+        self.quality.event_sink.emit(event);
     }
 
     pub fn log(&mut self, level: LogLevel, message: impl Into<String>) {

@@ -105,6 +105,10 @@ pub trait InboundAsrSession: Send {
 pub trait InboundAsrFactory: Send + Sync {
     // justification: the gateway chooses the concrete ASR backend at process startup while media handlers need a shared backend-independent session factory.
     async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>>;
+
+    async fn warm(&self) -> anyhow::Result<()> {
+        self.open_session().await.map(|_| ())
+    }
 }
 
 // justification: media WebSocket tasks share one process-selected ASR factory without coupling Telnyx wiring to a concrete model backend.
@@ -202,6 +206,10 @@ impl AsrRegistry {
     ) -> anyhow::Result<Box<dyn InboundAsrSession>> {
         self.factory(backend).open_session().await
     }
+
+    pub async fn warm(&self, backend: LiveAsrBackend) -> anyhow::Result<()> {
+        self.factory(backend).warm().await
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -290,6 +298,10 @@ impl SherpaAsrFactory {
 #[cfg(feature = "sherpa")]
 #[async_trait]
 impl InboundAsrFactory for SherpaAsrFactory {
+    async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
+    }
+
     async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
         let handle = self.handle().await?;
         let session = handle
@@ -370,6 +382,10 @@ impl MoonshineAsrFactory {
 #[cfg(feature = "moonshine")]
 #[async_trait]
 impl InboundAsrFactory for MoonshineAsrFactory {
+    async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
+    }
+
     async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
         let handle = self.handle().await?;
         let session = handle
@@ -450,6 +466,10 @@ impl WhisperAsrFactory {
 #[cfg(feature = "whisper")]
 #[async_trait]
 impl InboundAsrFactory for WhisperAsrFactory {
+    async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
+    }
+
     async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
         Ok(Box::new(WhisperAsrSession {
             handle: self.handle().await?,

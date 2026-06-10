@@ -46,6 +46,7 @@ pub fn render_state_dump(state: &GatewayState) -> String {
         lines.push(format!("telnyx number use {number}"));
         lines.push(format!("telnyx number bind {number} {connection_id}"));
     }
+    lines.extend(render_quality_dump(state));
     match state.inbound_mode {
         InboundMode::Disabled => lines.push("inbound disable".to_string()),
         InboundMode::Manual => lines.push("inbound enable --manual".to_string()),
@@ -55,6 +56,19 @@ pub fn render_state_dump(state: &GatewayState) -> String {
     }
     lines.push(String::new());
     lines.join("\n")
+}
+
+fn render_quality_dump(state: &GatewayState) -> Vec<String> {
+    let mut lines = vec![format!(
+        "quality restore-config {}",
+        state.quality.config.to_replay_hex()
+    )];
+    if state.quality.event_sink.is_enabled() {
+        if let Some(path) = &state.quality.log_path {
+            lines.push(format!("quality logging on {}", path.display()));
+        }
+    }
+    lines
 }
 
 pub fn write_state_dump(path: &Path, state: &GatewayState) -> anyhow::Result<()> {

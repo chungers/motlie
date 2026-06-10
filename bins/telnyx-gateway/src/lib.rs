@@ -9,6 +9,7 @@ pub mod golden_ab;
 pub mod logging;
 pub mod media;
 pub mod operator;
+pub mod quality;
 pub mod replay;
 pub mod serve;
 pub mod speech;

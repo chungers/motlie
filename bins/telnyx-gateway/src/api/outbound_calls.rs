@@ -53,7 +53,7 @@ pub async fn post_outbound_call(
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(45_000));
     let deadline = Instant::now() + timeout;
 
-    let (connection_id, from, stream_url, media) =
+    let (connection_id, from, stream_url, media, callback_timeout) =
         {
             let guard = services.state.read().await;
             let connection_id =
@@ -69,7 +69,13 @@ pub async fn post_outbound_call(
                 guard.config.public_media_url.clone().ok_or_else(|| {
                     ApiError::bad_request("public media WebSocket URL is required")
                 })?;
-            (connection_id, from, stream_url, guard.config.telnyx_media)
+            (
+                connection_id,
+                from,
+                stream_url,
+                guard.config.telnyx_media,
+                guard.quality.config.text_call.callback_timeout(),
+            )
         };
 
     let dialed = services
@@ -119,12 +125,15 @@ pub async fn post_outbound_call(
         to: Some(request.to),
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
+    let callback_timeout = remaining
+        .min(callback_timeout)
+        .max(Duration::from_millis(1));
     let decision = send_outbound_connected_callback(
         &client,
         &request.callback_url,
         request.secret_ref.as_deref(),
         call,
-        remaining.max(Duration::from_secs(1)),
+        callback_timeout,
     )
     .await;
 

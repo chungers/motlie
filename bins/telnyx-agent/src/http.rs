@@ -40,6 +40,12 @@ pub struct AgentState {
     pub outbound_timeout_ms: u64,
     pub callback_secret_ref: String,
     callback_security: CallbackSecurity,
+    bridge_admission: BridgeAdmission,
+}
+
+#[derive(Clone, Default)]
+struct BridgeAdmission {
+    active_call_id: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone)]
@@ -73,6 +79,7 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
         Duration::from_millis(args.reply_timeout_ms),
         KeystrokeInjectionConfig::new(
             Duration::from_millis(args.input_quiet_for_ms),
+            Duration::from_millis(args.input_delivery_timeout_ms),
             Duration::from_millis(args.input_backoff_initial_ms),
             Duration::from_millis(args.input_backoff_max_ms),
             !args.no_trailing_enter,
@@ -87,6 +94,7 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
         outbound_timeout_ms: args.outbound_timeout_ms,
         callback_secret_ref: callback_secret_ref.clone(),
         callback_security,
+        bridge_admission: BridgeAdmission::default(),
     };
 
     let inbound_callback = format!("{public_url}/motlie/inbound-offers");
@@ -168,11 +176,45 @@ fn accept_response(state: &AgentState, call_id: &str) -> (StatusCode, Json<Accep
 
 async fn text_call_ws(
     State(state): State<Arc<AgentState>>,
-    Path(_call_id): Path<String>,
+    Path(call_id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if !state.bridge_admission.try_start(&call_id).await {
+        tracing::warn!(call_id = call_id.as_str(), "telnyx_agent.bridge.busy");
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "bridge_busy",
+                "reason": "tmux bridge already has an active text call",
+            })),
+        )
+            .into_response();
+    }
     let bridge = state.bridge.clone();
-    ws.on_upgrade(move |socket| text_ws::handle_gateway_socket(socket, bridge))
+    let admission = state.bridge_admission.clone();
+    ws.on_upgrade(move |socket| async move {
+        text_ws::handle_gateway_socket(socket, bridge).await;
+        admission.finish(&call_id).await;
+    })
+    .into_response()
+}
+
+impl BridgeAdmission {
+    async fn try_start(&self, call_id: &str) -> bool {
+        let mut active = self.active_call_id.lock().await;
+        if active.is_some() {
+            return false;
+        }
+        *active = Some(call_id.to_string());
+        true
+    }
+
+    async fn finish(&self, call_id: &str) {
+        let mut active = self.active_call_id.lock().await;
+        if active.as_deref() == Some(call_id) {
+            *active = None;
+        }
+    }
 }
 
 impl CallbackSecurity {
@@ -355,6 +397,20 @@ mod tests {
     use motlie_telnyx_gateway::text_calls::turns::{TextCallDirection, TextCallInfo};
 
     const TEST_SECRET: &[u8] = b"callback-test-secret";
+
+    #[tokio::test]
+    async fn bridge_admission_allows_only_one_active_call() {
+        let admission = BridgeAdmission::default();
+
+        assert!(admission.try_start("call-one").await);
+        assert!(!admission.try_start("call-one").await);
+        assert!(!admission.try_start("call-two").await);
+
+        admission.finish("call-two").await;
+        assert!(!admission.try_start("call-two").await);
+        admission.finish("call-one").await;
+        assert!(admission.try_start("call-two").await);
+    }
 
     #[tokio::test]
     async fn callback_security_accepts_valid_signature() {
