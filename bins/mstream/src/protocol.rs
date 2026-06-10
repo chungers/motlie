@@ -246,6 +246,8 @@ pub struct SendRequest {
     pub submit_retries: u8,
     #[serde(default = "default_submit_retry_delay_ms")]
     pub submit_retry_delay_ms: u64,
+    #[serde(default)]
+    pub verify_delivery: bool,
     pub require_state: Option<AgentState>,
     pub set_state: Option<AgentState>,
 }
@@ -363,6 +365,8 @@ fn default_timer_input_quiet_for() -> Option<u64> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRequest {
     pub workstream: String,
+    #[serde(default)]
+    pub target: Option<String>,
     pub after: Option<String>,
     pub max_chars: usize,
 }

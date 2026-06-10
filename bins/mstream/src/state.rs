@@ -25,6 +25,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use unicode_width::UnicodeWidthStr;
 
+use crate::build_info;
 use crate::jsonl;
 use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
@@ -774,6 +775,8 @@ impl DaemonState {
                 Ok(vec![json!({
                     "type": "status",
                     "daemon": "running",
+                    "version": build_info::VERSION,
+                    "build_git_sha": build_info::BUILD_GIT_SHA,
                     "hosts": state.hosts.len(),
                     "workstreams": state.workstreams.len(),
                     "sessions": state.sessions.len(),
@@ -1598,7 +1601,37 @@ impl DaemonState {
             let state = shared.lock().await;
             state.host_handle(target.host_alias())?
         };
-        let resolved = Self::resolve_target(handle, target.clone()).await?;
+        let Some(resolved) = Self::resolve_target_optional(handle, target.clone()).await? else {
+            let (cursor, abort_tasks) = {
+                let mut state = shared.lock().await;
+                state.ensure_target_in_workstream(&request.workstream, &target)?;
+                let cursor = state.record_event(
+                    &request.workstream,
+                    EventDraft::new("left")
+                        .target(&target)
+                        .summary("tmux session missing; removed stale roster entry"),
+                )?;
+                let reason = format!("tmux session {target} is no longer present");
+                let abort_tasks = state.deregister_session_target(&target, &reason, None);
+                (cursor, abort_tasks)
+            };
+            for task in abort_tasks {
+                task.abort();
+            }
+            return Ok(vec![json!({
+                "type": "ok",
+                "op": "leave",
+                "workstream": request.workstream,
+                "target": target.to_string(),
+                "cursor": cursor,
+                "tmux_present": false,
+                "removed_from_roster": true,
+                "mmux_label_cleared": false,
+                "mmux_previous_selected_key_restored": false,
+                "mmux_selected_key_unchanged": false,
+                "mmux_label_cleanup_skipped": true,
+            })]);
+        };
         Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
             .await?;
         let stable_target = resolved.spec.clone();
@@ -1681,6 +1714,8 @@ impl DaemonState {
             "workstream": request.workstream,
             "target": stable_target.to_string(),
             "cursor": cursor,
+            "tmux_present": true,
+            "removed_from_roster": true,
             "mmux_label_cleared": mmux_cleanup.cleared,
             "mmux_previous_selected_key_restored": mmux_cleanup.restored_previous,
             "mmux_selected_key_unchanged": mmux_cleanup.selected_key_unchanged,
@@ -1818,12 +1853,11 @@ impl DaemonState {
         Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
             .await?;
         let stable_target = resolved.spec.clone();
-        let current_state = {
+        let (current_state, verify_delivery) = {
             let state = shared.lock().await;
             state.ensure_target_in_workstream(&request.workstream, &stable_target)?;
-            let current_state = state
-                .sessions
-                .get(&stable_target)
+            let record = state.sessions.get(&stable_target);
+            let current_state = record
                 .map(|record| record.state)
                 .unwrap_or(AgentState::Idle);
             if let Some(required) = request.require_state {
@@ -1836,7 +1870,12 @@ impl DaemonState {
                     );
                 }
             }
-            current_state
+            let verify_delivery = request.verify_delivery
+                || (request.paste_mode == PasteMode::Bracketed
+                    && record
+                        .and_then(|record| record.agent.as_deref())
+                        .is_some_and(agent_name_is_codex));
+            (current_state, verify_delivery)
         };
         if request.interrupt_first {
             Self::send_interrupt_to_resolved(&resolved, InterruptKey::Esc).await?;
@@ -1850,7 +1889,8 @@ impl DaemonState {
                     agent::MessageSource::human("mstream.send"),
                     request.text.clone(),
                     request.paste_mode,
-                ),
+                )
+                .with_delivery_verification(verify_delivery),
                 agent::SendOptions {
                     submit: Self::agent_submit_policy(
                         request.enter,
@@ -1902,6 +1942,8 @@ impl DaemonState {
             "paste_mode": request.paste_mode.as_str(),
             "enter": request.enter,
             "message_id": outcome.message_id().to_string(),
+            "delivery_ack_requested": verify_delivery,
+            "delivery_verified": outcome.delivery_verified(),
             "submit_verified": outcome.verified(),
             "cursor": cursor,
         })];
@@ -2247,13 +2289,41 @@ impl DaemonState {
         request: SessionMarkRequest,
     ) -> anyhow::Result<Vec<Value>> {
         let target: SessionTarget = request.target.parse()?;
-        let change = Self::apply_session_state_shared(
-            Arc::clone(&shared),
-            &target,
-            request.state,
-            Some(&request.summary),
-        )
-        .await?;
+        let handle = {
+            let state = shared.lock().await;
+            state.host_handle(target.host_alias())?
+        };
+        let (change, tmux_present) =
+            if let Some(resolved) = Self::resolve_target_optional(handle, target.clone()).await? {
+                (
+                    Self::apply_resolved_session_state_shared(
+                        Arc::clone(&shared),
+                        &resolved,
+                        request.state,
+                        Some(&request.summary),
+                    )
+                    .await?,
+                    true,
+                )
+            } else {
+                let mut state = shared.lock().await;
+                let Some(record) = state.sessions.get_mut(&target) else {
+                    bail!("session '{}' not found", target);
+                };
+                let previous_state = Some(record.state);
+                record.state = request.state;
+                record.updated_at = Utc::now();
+                record.last_report_kind = Some(request.state.as_str().to_string());
+                record.last_report_summary = Some(request.summary.clone());
+                (
+                    StateChange {
+                        target: target.clone(),
+                        state: request.state,
+                        previous_state,
+                    },
+                    false,
+                )
+            };
         let mut records = Vec::new();
         let workstream = {
             let state = shared.lock().await;
@@ -2278,6 +2348,7 @@ impl DaemonState {
                 "workstream": workstream,
                 "target": change.target.to_string(),
                 "state": request.state.as_str(),
+                "tmux_present": tmux_present,
                 "summary": request.summary,
                 "cursor": cursor,
             }));
@@ -2287,6 +2358,7 @@ impl DaemonState {
                 "op": "session_mark",
                 "target": change.target.to_string(),
                 "state": request.state.as_str(),
+                "tmux_present": tmux_present,
             }));
         }
         records.extend(Self::fire_handoffs_for_changes_shared(shared, vec![change]).await?);
@@ -2428,9 +2500,6 @@ impl DaemonState {
         let target: SessionTarget = request.target.parse()?;
         let handle = {
             let state = shared.lock().await;
-            if state.timers.contains_key(&request.name) {
-                bail!("timer '{}' already exists", request.name);
-            }
             state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
@@ -2442,11 +2511,11 @@ impl DaemonState {
             .map(|session| session.created);
         let stable_target = resolved.spec;
 
-        let (generation, next_fire_at) = {
+        let (generation, next_fire_at, previous_generation, old_task) = {
             let mut state = shared.lock().await;
-            if state.timers.contains_key(&request.name) {
-                bail!("timer '{}' already exists", request.name);
-            }
+            let previous = state.timers.remove(&request.name);
+            let previous_generation = previous.as_ref().map(|timer| timer.generation);
+            let old_task = previous.and_then(|timer| timer.task);
             let generation = state.next_timer_generation;
             state.next_timer_generation += 1;
             let started_at = Utc::now();
@@ -2477,8 +2546,11 @@ impl DaemonState {
                     task: None,
                 },
             );
-            (generation, next_fire_at)
+            (generation, next_fire_at, previous_generation, old_task)
         };
+        if let Some(task) = old_task {
+            task.abort();
+        }
         let name = request.name.clone();
         let task = tokio::spawn(Self::timer_loop(Arc::clone(&shared), name, generation));
         {
@@ -2506,6 +2578,8 @@ impl DaemonState {
             "submit_retry_delay_ms": request.submit_retry_delay_ms,
             "input_quiet_for_secs": option_u64_json(request.input_quiet_for_secs),
             "generation": generation,
+            "upserted": previous_generation.is_some(),
+            "previous_generation": previous_generation,
             "next_fire_at": datetime_option_json(next_fire_at),
         })])
     }
@@ -2699,6 +2773,23 @@ impl DaemonState {
         shared: Arc<Mutex<Self>>,
         request: SnapshotRequest,
     ) -> anyhow::Result<Vec<Value>> {
+        if let Some(target) = request.target.as_deref() {
+            let (stable_target, text) = Self::capture_target_shared(
+                Arc::clone(&shared),
+                &request.workstream,
+                target,
+                request.max_chars,
+            )
+            .await?;
+            return Ok(vec![json!({
+                "type": "snapshot",
+                "workstream": request.workstream,
+                "target": stable_target.to_string(),
+                "after": request.after,
+                "text": text,
+                "ordering": "single-target",
+            })]);
+        }
         let text = Self::capture_workstream_shared(
             Arc::clone(&shared),
             &request.workstream,
@@ -3346,6 +3437,33 @@ impl DaemonState {
         Ok(truncate_chars(&text, max_chars))
     }
 
+    async fn capture_target_shared(
+        shared: Arc<Mutex<Self>>,
+        workstream: &str,
+        target: &str,
+        max_chars: usize,
+    ) -> anyhow::Result<(SessionTarget, String)> {
+        let logical: SessionTarget = target.parse()?;
+        let handle = {
+            let state = shared.lock().await;
+            state.host_handle(logical.host_alias())?
+        };
+        let resolved = Self::resolve_target(handle, logical).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+            .await?;
+        {
+            let state = shared.lock().await;
+            state.ensure_target_in_workstream(workstream, &resolved.spec)?;
+        }
+        let capture = resolved.target.capture().await.unwrap_or_default();
+        let mut text = format!("=== {} ===\n", resolved.spec);
+        text.push_str(&capture);
+        if !capture.ends_with('\n') {
+            text.push('\n');
+        }
+        Ok((resolved.spec, truncate_chars(&text, max_chars)))
+    }
+
     async fn fire_handoffs_for_changes_shared(
         shared: Arc<Mutex<Self>>,
         changes: Vec<StateChange>,
@@ -3639,19 +3757,27 @@ impl DaemonState {
         handle: HostHandle,
         logical: SessionTarget,
     ) -> anyhow::Result<ResolvedTarget> {
-        let target = handle
-            .target(logical.target_spec())
+        Self::resolve_target_optional(handle, logical.clone())
             .await?
-            .with_context(|| format!("session '{}' not found", logical))?;
+            .with_context(|| format!("session '{}' not found", logical))
+    }
+
+    async fn resolve_target_optional(
+        handle: HostHandle,
+        logical: SessionTarget,
+    ) -> anyhow::Result<Option<ResolvedTarget>> {
+        let Some(target) = handle.target(logical.target_spec()).await? else {
+            return Ok(None);
+        };
         let stable = match target.session_id() {
             Some(session_id) => SessionTarget::session_id(logical.host_alias(), session_id)?,
             None => logical,
         };
-        Ok(ResolvedTarget {
+        Ok(Some(ResolvedTarget {
             spec: stable,
             host: handle,
             target,
-        })
+        }))
     }
 
     async fn ensure_resolved_target_fresh_shared(
@@ -4281,22 +4407,79 @@ impl DaemonState {
                 ),
             );
         }
-        let Some(workstream) = self.workstreams.get_mut(&workstream_name) else {
+        {
+            let Some(workstream) = self.workstreams.get_mut(&workstream_name) else {
+                return;
+            };
+            if generation < workstream.generation {
+                return;
+            }
+            if generation > workstream.generation {
+                workstream.reopen(generation);
+            }
+            if event.kind == "closed" {
+                workstream.state = WorkstreamState::Closed;
+                workstream.sessions.clear();
+            }
+            workstream.next_sequence = workstream.next_sequence.max(sequence.saturating_add(1));
+        }
+        self.ingest_replayed_membership(&event);
+        {
+            let Some(workstream) = self.workstreams.get_mut(&workstream_name) else {
+                return;
+            };
+            workstream.events.push_back(event);
+            workstream.prune_events();
+        }
+        self.next_generation = self.next_generation.max(generation.saturating_add(1));
+    }
+
+    fn ingest_replayed_membership(&mut self, event: &EventRecord) {
+        let Some(target_value) = event.target.as_deref() else {
             return;
         };
-        if generation < workstream.generation {
+        let Ok(target) = target_value.parse::<SessionTarget>() else {
             return;
+        };
+        match event.kind.as_str() {
+            "created" | "joined" | "recruited" | "retagged" => {
+                if let Some(workstream) = self.workstreams.get_mut(&event.workstream) {
+                    if workstream.state == WorkstreamState::Open {
+                        workstream.sessions.insert(target.clone());
+                    }
+                }
+                let state = event
+                    .state
+                    .as_deref()
+                    .and_then(parse_state)
+                    .unwrap_or(AgentState::Busy);
+                let record = self
+                    .sessions
+                    .entry(target.clone())
+                    .or_insert_with(|| SessionRecord::from_target(&target, state, None));
+                record.state = state;
+                record.workstream = Some(event.workstream.clone());
+            }
+            "left" => {
+                if let Some(workstream) = self.workstreams.get_mut(&event.workstream) {
+                    workstream.sessions.remove(&target);
+                }
+                if !self
+                    .workstreams
+                    .values()
+                    .any(|workstream| workstream.sessions.contains(&target))
+                {
+                    self.sessions.remove(&target);
+                }
+            }
+            "reclaimed" => {
+                self.sessions.remove(&target);
+                for workstream in self.workstreams.values_mut() {
+                    workstream.sessions.remove(&target);
+                }
+            }
+            _ => {}
         }
-        if generation > workstream.generation {
-            workstream.reopen(generation);
-        }
-        if event.kind == "closed" {
-            workstream.state = WorkstreamState::Closed;
-        }
-        workstream.next_sequence = workstream.next_sequence.max(sequence.saturating_add(1));
-        workstream.events.push_back(event);
-        workstream.prune_events();
-        self.next_generation = self.next_generation.max(generation.saturating_add(1));
     }
 
     fn enqueue_event_for_store(&self, event: &EventRecord) -> anyhow::Result<()> {
@@ -5377,6 +5560,13 @@ fn bootstrap_command(cwd: &Path, agent: &str, agent_args: &[String]) -> String {
         command.push_str(&shell_quote(arg));
     }
     command
+}
+
+fn agent_name_is_codex(agent: &str) -> bool {
+    Path::new(agent)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "codex" || name.starts_with("codex-"))
 }
 
 fn encode_agent_args_tag(agent_args: &[String]) -> String {
@@ -6925,6 +7115,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_mark_updates_known_missing_session_without_tmux_tags() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-453");
+        state
+            .add_session_to_workstream(
+                "issue-453",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::session_mark_shared(
+            Arc::clone(&shared),
+            SessionMarkRequest {
+                target: target.to_string(),
+                state: AgentState::Quarantined,
+                summary: "dead during boot".to_string(),
+            },
+        )
+        .await
+        .expect("mark missing session");
+
+        assert_eq!(records[0]["tmux_present"], false);
+        let state = shared.lock().await;
+        let record = state.sessions.get(&target).expect("session");
+        assert_eq!(record.state, AgentState::Quarantined);
+        assert_eq!(
+            record.last_report_summary.as_deref(),
+            Some("dead during boot")
+        );
+    }
+
+    #[tokio::test]
+    async fn leave_removes_known_missing_session_from_roster() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-453");
+        state
+            .add_session_to_workstream(
+                "issue-453",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Quarantined,
+            )
+            .expect("add session");
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::leave_shared(
+            Arc::clone(&shared),
+            LeaveRequest {
+                workstream: "issue-453".to_string(),
+                target: target.to_string(),
+                available: false,
+            },
+        )
+        .await
+        .expect("leave missing session");
+
+        assert_eq!(records[0]["tmux_present"], false);
+        assert_eq!(records[0]["removed_from_roster"], true);
+        let state = shared.lock().await;
+        assert!(!state.sessions.contains_key(&target));
+        assert!(!state
+            .workstream("issue-453")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
+    }
+
+    #[tokio::test]
     async fn scan_keeps_live_untagged_session_records() {
         let target = SessionTarget::session_id("local", "$1").expect("target");
         let mock = motlie_tmux::transport::MockTransport::new()
@@ -7117,6 +7392,7 @@ mod tests {
                 message_ids: vec![message_id],
                 submitted_at: std::time::Instant::now(),
                 verified: false,
+                delivery_verified: false,
             },
         )
         .await
@@ -7222,6 +7498,61 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("stale tmux session id"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_target_captures_only_requested_member() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let other = SessionTarget::session_id("local", "$2").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response(
+                "list-sessions",
+                "__MOTLIE_S__ worker $1 100 0 1  150\n__MOTLIE_S__ other $2 100 0 1  150\n",
+            )
+            .with_response("capture-pane", "only requested pane\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-453");
+        state
+            .add_session_to_workstream(
+                "issue-453",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add target");
+        state
+            .add_session_to_workstream(
+                "issue-453",
+                other,
+                "reviewer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add other target");
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::snapshot_shared(
+            shared,
+            SnapshotRequest {
+                workstream: "issue-453".to_string(),
+                target: Some(target.to_string()),
+                after: None,
+                max_chars: 12_000,
+            },
+        )
+        .await
+        .expect("snapshot target");
+
+        assert_eq!(records[0]["ordering"], "single-target");
+        assert_eq!(records[0]["target"], target.to_string());
+        let text = records[0]["text"].as_str().expect("text");
+        assert!(text.contains("only requested pane"));
+        assert!(!text.contains("local::$2"));
     }
 
     #[tokio::test]
@@ -7678,6 +8009,48 @@ mod tests {
         assert_eq!(events["events"][0]["kind"], "message_sent");
         assert_eq!(events["events"][0]["direction"], "to_agent");
         assert_eq!(events["events"][0]["actor"], "orchestrator");
+    }
+
+    #[test]
+    fn event_store_replay_restores_cross_workstream_membership() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store_path = tempdir.path().join("mstream.sock.events.jsonl");
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        {
+            let mut state = DaemonState::with_event_store(store_path.clone()).expect("event store");
+            open_test_workstream(&mut state, "issue-home");
+            open_test_workstream(&mut state, "issue-joined");
+            state
+                .record_event(
+                    "issue-home",
+                    EventDraft::new("created")
+                        .target(&target)
+                        .state(AgentState::Busy),
+                )
+                .expect("home event");
+            state
+                .record_event(
+                    "issue-joined",
+                    EventDraft::new("joined")
+                        .target(&target)
+                        .state(AgentState::Busy),
+                )
+                .expect("joined event");
+        }
+
+        let state = DaemonState::with_event_store(store_path).expect("replay memberships");
+
+        assert!(state
+            .workstream("issue-home")
+            .expect("home workstream")
+            .sessions
+            .contains(&target));
+        assert!(state
+            .workstream("issue-joined")
+            .expect("joined workstream")
+            .sessions
+            .contains(&target));
+        assert!(state.sessions.contains_key(&target));
     }
 
     #[test]
@@ -8163,6 +8536,43 @@ mod tests {
         assert_eq!(value["last_defer_reason"], "recent_client_input");
         assert_eq!(value["last_input_activity"], 995);
         assert_eq!(value["last_input_activity_at"], "1970-01-01T00:16:35Z");
+    }
+
+    #[tokio::test]
+    async fn timer_start_upserts_existing_timer_name() {
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ worker $1 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        let shared = Arc::new(Mutex::new(state));
+        let request = |prompt: &str| TimerStartRequest {
+            name: "poll".to_string(),
+            workstream: Some("issue-453".to_string()),
+            every_secs: 60,
+            target: "local::$1".to_string(),
+            prompt: prompt.to_string(),
+            enter: true,
+            submit_retries: 1,
+            submit_retry_delay_ms: 750,
+            input_quiet_for_secs: Some(10),
+        };
+
+        let first = DaemonState::timer_start_shared(Arc::clone(&shared), request("first"))
+            .await
+            .expect("first timer start");
+        let second = DaemonState::timer_start_shared(Arc::clone(&shared), request("second"))
+            .await
+            .expect("second timer upsert");
+
+        assert_eq!(first[0]["upserted"], false);
+        assert_eq!(second[0]["upserted"], true);
+        assert_eq!(second[0]["previous_generation"], 1);
+        let state = shared.lock().await;
+        assert_eq!(state.timers.len(), 1);
+        let timer = state.timers.get("poll").expect("timer");
+        assert_eq!(timer.generation, 2);
+        assert_eq!(timer.prompt, "second");
     }
 
     #[test]

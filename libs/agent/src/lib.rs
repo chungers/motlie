@@ -381,6 +381,7 @@ impl Channel {
                 segment.add_source(source.clone());
                 segment.submit = segment.submit.merged(submit);
                 segment.paste_mode = segment.paste_mode.merged(message.paste_mode);
+                segment.verify_delivery |= message.verify_delivery;
                 segment.quiet_guard = segment.quiet_guard.merged(quiet_guard);
                 segment.coalesce = segment.coalesce.merged(coalesce);
                 if let Some(waiter) = waiter {
@@ -396,6 +397,7 @@ impl Channel {
                     dedup_key: dedup_key.unwrap_or_else(|| format!("__unique:{message_id}")),
                     body: message.body,
                     paste_mode: message.paste_mode,
+                    verify_delivery: message.verify_delivery,
                     sources: vec![source.clone()],
                     submit,
                     quiet_guard,
@@ -841,11 +843,15 @@ impl Channel {
             .send_keys(&literal)
             .await
             .map_err(|err| DeliveryError::tmux("send_payload", err))?;
+        let delivery_verified = self
+            .verify_delivered_payload(batch, &body, paste_mode)
+            .await?;
 
         if !submit.prompt_submit {
             return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                 submitted_at: Instant::now(),
                 verified: false,
+                delivery_verified,
             }));
         }
 
@@ -872,6 +878,7 @@ impl Channel {
                     return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                         submitted_at,
                         verified: true,
+                        delivery_verified,
                     }));
                 }
                 SubmitVerification::Unknown => {
@@ -887,6 +894,7 @@ impl Channel {
                         return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                             submitted_at,
                             verified: false,
+                            delivery_verified,
                         }));
                     }
                     if !submit.retry_delay.is_zero() {
@@ -931,6 +939,52 @@ impl Channel {
         Ok(body)
     }
 
+    async fn verify_delivered_payload(
+        &self,
+        batch: &[PendingSegment],
+        body: &str,
+        paste_mode: PasteMode,
+    ) -> Result<bool, DeliveryError> {
+        if !batch.iter().any(|segment| segment.verify_delivery) {
+            return Ok(false);
+        }
+        let message_ids = batch
+            .iter()
+            .map(|segment| segment.message_id)
+            .collect::<Vec<_>>();
+        let Some(probe) = delivery_probe(body) else {
+            return Ok(true);
+        };
+
+        if self.delivery_probe_visible(&probe).await? {
+            return Ok(true);
+        }
+        if paste_mode == PasteMode::Bracketed {
+            let literal = KeySequence::literal(body);
+            self.inner
+                .target
+                .send_keys(&literal)
+                .await
+                .map_err(|err| DeliveryError::tmux("send_payload_literal_retry", err))?;
+            if self.delivery_probe_visible(&probe).await? {
+                return Ok(true);
+            }
+        }
+
+        Err(DeliveryError::DeliveryNotConfirmed { message_ids })
+    }
+
+    async fn delivery_probe_visible(&self, probe: &str) -> Result<bool, DeliveryError> {
+        sleep(Duration::from_millis(100)).await;
+        let capture = self
+            .inner
+            .target
+            .capture()
+            .await
+            .map_err(|err| DeliveryError::tmux("capture_delivery_ack", err))?;
+        Ok(capture.contains(probe))
+    }
+
     async fn complete_batch(&self, batch: Vec<PendingSegment>, result: BatchSubmitResult) {
         let ids = batch
             .iter()
@@ -941,17 +995,20 @@ impl Channel {
             message_ids: ids,
             submitted_at: result.submitted_at,
             verified: result.verified,
+            delivery_verified: result.delivery_verified,
         });
         for segment in batch {
             let outcome = if result.verified {
                 SubmissionOutcome::SubmittedVerified {
                     message_id: segment.message_id,
                     submitted_at: result.submitted_at,
+                    delivery_verified: result.delivery_verified,
                 }
             } else {
                 SubmissionOutcome::SubmittedUnverified {
                     message_id: segment.message_id,
                     submitted_at: result.submitted_at,
+                    delivery_verified: result.delivery_verified,
                 }
             };
             for waiter in segment.waiters {
@@ -1010,6 +1067,7 @@ struct PendingSegment {
     dedup_key: String,
     body: String,
     paste_mode: PasteMode,
+    verify_delivery: bool,
     sources: Vec<MessageSource>,
     submit: SubmitPolicy,
     quiet_guard: QuietGuardPolicy,
@@ -1043,6 +1101,7 @@ enum BatchSubmitAttempt {
 struct BatchSubmitResult {
     submitted_at: Instant,
     verified: bool,
+    delivery_verified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1059,6 +1118,7 @@ pub struct ManagedMessage {
     pub source: MessageSource,
     pub body: String,
     pub paste_mode: PasteMode,
+    pub verify_delivery: bool,
     pub dedup: DedupPolicy,
     pub coalesce: CoalescePolicy,
 }
@@ -1069,6 +1129,7 @@ impl ManagedMessage {
             source,
             body: body.into(),
             paste_mode: PasteMode::Bracketed,
+            verify_delivery: false,
             dedup: DedupPolicy::Body,
             coalesce: CoalescePolicy::Enabled,
         }
@@ -1076,6 +1137,11 @@ impl ManagedMessage {
 
     pub fn with_paste_mode(mut self, paste_mode: PasteMode) -> Self {
         self.paste_mode = paste_mode;
+        self
+    }
+
+    pub fn with_delivery_verification(mut self, verify: bool) -> Self {
+        self.verify_delivery = verify;
         self
     }
 
@@ -1285,10 +1351,12 @@ pub enum SubmissionOutcome {
     SubmittedVerified {
         message_id: MessageId,
         submitted_at: Instant,
+        delivery_verified: bool,
     },
     SubmittedUnverified {
         message_id: MessageId,
         submitted_at: Instant,
+        delivery_verified: bool,
     },
 }
 
@@ -1302,6 +1370,17 @@ impl SubmissionOutcome {
 
     pub fn verified(&self) -> bool {
         matches!(self, Self::SubmittedVerified { .. })
+    }
+
+    pub fn delivery_verified(&self) -> bool {
+        match self {
+            Self::SubmittedVerified {
+                delivery_verified, ..
+            }
+            | Self::SubmittedUnverified {
+                delivery_verified, ..
+            } => *delivery_verified,
+        }
     }
 }
 
@@ -1431,6 +1510,7 @@ pub enum DeliveryEvent {
         message_ids: Vec<MessageId>,
         submitted_at: Instant,
         verified: bool,
+        delivery_verified: bool,
     },
     Failed {
         target: SessionKey,
@@ -1461,6 +1541,8 @@ pub enum DeliveryError {
     VerificationUnavailable { message_ids: Vec<MessageId> },
     #[error("submit not confirmed for {message_ids:?}")]
     SubmitNotConfirmed { message_ids: Vec<MessageId> },
+    #[error("delivery not confirmed for {message_ids:?}")]
+    DeliveryNotConfirmed { message_ids: Vec<MessageId> },
     #[error(
         "delivery timed out after {timeout:?} for {message_id}; still_pending={still_pending}"
     )]
@@ -1506,6 +1588,14 @@ impl StdError for TmuxErrorSource {
 
 fn normalize_body(body: &str) -> String {
     body.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn delivery_probe(body: &str) -> Option<String> {
+    body.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(24).collect())
 }
 
 fn format_segments(batch: &[PendingSegment]) -> String {
@@ -1604,6 +1694,7 @@ mod tests {
                 dedup_key: "first".to_string(),
                 body: "first".to_string(),
                 paste_mode: PasteMode::Bracketed,
+                verify_delivery: false,
                 sources: vec![MessageSource::broadcast("broadcast")],
                 submit: SubmitPolicy::default(),
                 quiet_guard: QuietGuardPolicy::Default,
@@ -1617,6 +1708,7 @@ mod tests {
                 dedup_key: "second".to_string(),
                 body: "second".to_string(),
                 paste_mode: PasteMode::Bracketed,
+                verify_delivery: false,
                 sources: vec![MessageSource::timer("timer:poll")],
                 submit: SubmitPolicy::default(),
                 quiet_guard: QuietGuardPolicy::Default,
@@ -1648,6 +1740,7 @@ mod tests {
             dedup_key: "same".to_string(),
             body: "same".to_string(),
             paste_mode: PasteMode::Bracketed,
+            verify_delivery: false,
             sources: vec![MessageSource::broadcast("broadcast")],
             submit: SubmitPolicy::default(),
             quiet_guard: QuietGuardPolicy::Default,
@@ -1735,6 +1828,85 @@ mod tests {
             .filter(|command| command.contains("send-keys") && command.contains("Enter"))
             .count();
         assert_eq!(enter_sends, 3);
+    }
+
+    #[tokio::test]
+    async fn delivery_verification_confirms_visible_payload() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "composer has hello\n");
+        let (channel, _log) = mock_channel(mock, config()).await;
+
+        let outcome = channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "hello")
+                    .with_delivery_verification(true),
+                SendOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.delivery_verified());
+    }
+
+    #[tokio::test]
+    async fn bracketed_delivery_verification_retries_literal_before_failing() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "")
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "")
+            .with_response("capture-pane", "composer has hello\n");
+        let (channel, log) = mock_channel(mock, config()).await;
+
+        let outcome = channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "hello")
+                    .with_delivery_verification(true),
+                SendOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.delivery_verified());
+        let commands = log.lock().unwrap();
+        let payload_sends = commands
+            .iter()
+            .filter(|command| command.contains("send-keys") && command.contains("hello"))
+            .count();
+        assert_eq!(payload_sends, 2);
+    }
+
+    #[tokio::test]
+    async fn delivery_verification_reports_missing_payload() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "")
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "")
+            .with_response("capture-pane", "");
+        let (channel, _log) = mock_channel(mock, config()).await;
+
+        let error = channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "hello")
+                    .with_delivery_verification(true),
+                SendOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .expect_err("missing payload should fail verification");
+
+        assert!(matches!(error, DeliveryError::DeliveryNotConfirmed { .. }));
     }
 
     #[tokio::test]

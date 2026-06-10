@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Agent-facing tmux workstream orchestrator"
+build = "build.rs"
 
 [[bin]]
 name = "mstream"

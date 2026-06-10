@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, and timer start upsert behavior. |
 | 2026-06-07 | @codex-401-impl | Clarified issue #409 audit durability: non-`agent_output` events are lossless-enqueued, high-volume `agent_output` is best-effort with observable degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
 | 2026-06-06 | @codex-401-impl | Added issue #409 durable audit call-log events: redacted `to_agent`/`from_agent` text, OutputBus agent output capture, socket-adjacent JSONL replay, and readable transcripts that survive daemon restart. |
 | 2026-06-06 | @codex-401-impl | Added issue #410 `new`/`recruit --agent-arg` passthrough for agent argv flags such as Claude `--permission-mode auto`. |
@@ -36,12 +37,13 @@ avoid colliding with attached human typing.
 Workstream event history is served from an in-memory per-workstream ring and is
 also appended to a socket-adjacent JSONL audit log named
 `<socket>.events.jsonl`. Daemon startup replays retained audit records so
-`events --readable` survives daemon restart. Non-`agent_output` audit events are
-lossless-enqueued to the writer; high-volume `agent_output` entries are
-best-effort and report dropped/degraded counters through `status` and `events`
-`audit` fields. `snapshot` and `summary-input` use bounded one-shot tmux capture
-for joined sessions; pane/process-state stuck hints remain implementation
-follow-ups.
+`events --readable` survives daemon restart, and replay restores retained
+cross-workstream join memberships before `scan` refreshes live tmux facts.
+Non-`agent_output` audit events are lossless-enqueued to the writer; high-volume
+`agent_output` entries are best-effort and report dropped/degraded counters
+through `status` and `events` `audit` fields. `snapshot` and `summary-input`
+use bounded one-shot tmux capture for joined sessions; pane/process-state stuck
+hints remain implementation follow-ups.
 
 Install the release binary from the Motlie checkout before using this API:
 
@@ -59,6 +61,7 @@ release binary is available on `PATH`.
 mstream --socket /tmp/mstream.sock daemon start
 mstream --socket /tmp/mstream.sock daemon status
 mstream --socket /tmp/mstream.sock daemon stop
+mstream --version
 ```
 
 `daemon start` daemonizes by default. Use `--foreground` for tests and manual
@@ -74,6 +77,8 @@ state mutex, then re-lock briefly to reconcile metadata and emit events.
 
 Client commands resolve the socket from `--socket`, then `MSTREAM_SOCKET`, then
 `/tmp/mstream-${USER}.sock`.
+`daemon status` includes the daemon package `version` and `build_git_sha`, so
+operators can distinguish the running build from a stale installed binary.
 
 ## Host And Workstream Commands
 
@@ -108,9 +113,11 @@ workstream and applies it to currently joined sessions. `list`, `show`, and
 `status` include `mmux_label` and `mmux_label_conflicts`.
 
 After daemon restart, reconnect hosts and run `scan` to hydrate tagged sessions
-from tmux. Scan reads `@mstream/mmux-label` from joined sessions to recover the
-workstream label. If joined sessions disagree, `mmux_label_conflicts` reports
-the observed labels.
+from tmux. Retained audit replay restores known cross-workstream joins first;
+scan then keeps live observed session records even when a tmux tag only names
+the session's current/home workstream. Scan reads `@mstream/mmux-label` from
+joined sessions to recover the workstream label. If joined sessions disagree,
+`mmux_label_conflicts` reports the observed labels.
 
 Daemon records are keyed by `(host, tmux session_id)`, for example
 `local::$7`; tmux session names are display metadata. Commands may still accept
@@ -155,7 +162,10 @@ value as a separate agent argv entry, so flags such as Claude
 `--permission-mode auto` do not need wrapper scripts or shell-joined
 `--agent` strings. After validation, `new` creates the directory on the target
 host and starts the agent through a narrow shell bootstrap whose final command
-is an `exec <agent> <arg>...` argv. Joined/new sessions receive
+is an `exec <agent> <arg>...` argv. If tmux reports that the created session
+exited before it could be listed, `new` fails with an explicit
+agent-exited-during-startup error instead of leaving a phantom roster entry.
+Joined/new sessions receive
 `@mstream/*` tags and a managed-agent reporting prompt when a task is sent. If
 the workstream has an mmux label, assignment also writes:
 
@@ -203,6 +213,7 @@ then kills and deregisters only a managed target whose live tmux tags are
 
 ```sh
 mstream send pr-324 local::codex-worker --text "Re-run clippy." --enter
+mstream send pr-324 local::codex-worker --text "/permissions" --verify-delivery
 mstream send pr-324 local::codex-worker --interrupt-first --settle-ms 500 \
   --text "Stop and address feedback." --enter --set-state busy
 
@@ -222,12 +233,23 @@ When the target is joined to an open workstream, `interrupt` appends an
 target is a connected tmux session that is not joined to a known workstream, the
 command still sends the key and returns only the command result.
 
+`send --verify-delivery` captures the target pane after payload delivery and
+requires the prompt text to be visible before optional submit. For bracketed
+paste sends, mstream retries once with literal paste before returning a
+`delivery not confirmed` error. Known Codex sessions using bracketed paste
+request this delivery check automatically. Successful send results include
+`delivery_ack_requested`, `delivery_verified`, and `submit_verified`.
+
 `session mark` is coordinator-owned in the project workflow: the orchestrator
 marks explicit targets after observing durable evidence such as pushed commits,
 PRs, review comments, test output, or blockers. Collaborating agents do not
 have mstream access and should not be instructed to call mstream state commands.
 There is no `self` alias; use explicit `<host>::<session>` targets so marks are
 auditable coordinator actions.
+If the daemon already knows a session target but tmux no longer lists it,
+`session mark` records the state in daemon memory with `tmux_present=false`,
+and `leave` removes that stale target from the roster instead of failing before
+cleanup.
 
 Handoffs are daemon-memory edges:
 
@@ -252,6 +274,9 @@ Timers solve the orchestrator wakeup problem when the agent harness has no
 first-class cron or scheduler. A timer lives in the daemon and periodically
 sends a configured prompt into a tmux target through `motlie-tmux` send-keys.
 Timer state is daemon memory only; daemon restart loses timers.
+Starting a timer with an existing name is an upsert: the daemon validates the
+new target, replaces the previous timer, aborts the old task, and reports
+`upserted` plus `previous_generation`.
 
 ```sh
 mstream timer start issue-337-poll \
@@ -336,6 +361,7 @@ mstream status pr-324 --active-window-secs 30 --idle-after-secs 300
 mstream events pr-324 --limit 50
 mstream events pr-324 --limit 50 --readable
 mstream snapshot pr-324 --max-chars 12000
+mstream snapshot pr-324 --target local::$7 --max-chars 12000
 mstream summary-input pr-324 --max-chars 12000
 ```
 
@@ -347,6 +373,8 @@ output. Use this command for liveness instead of direct SSH/tmux probing.
 Timer input guards do not apply to observation commands; `status`, `events`,
 `snapshot`, `summary-input`, `timer list`, `hosts`, `scan`, `list`, and `show`
 remain read-only polling operations.
+`snapshot --target <host>::<session-or-id>` captures one joined target and is
+useful when aggregate workstream snapshots would truncate later panes.
 
 Each status agent includes:
 

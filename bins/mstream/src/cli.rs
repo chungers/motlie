@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::bail;
 use clap::{Args, Parser, Subcommand};
 
+use crate::build_info;
 use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
@@ -19,6 +20,7 @@ use crate::protocol::{
 #[derive(Debug, Parser)]
 #[command(name = "mstream")]
 #[command(about = "Agent-facing tmux workstream orchestrator")]
+#[command(version = build_info::VERSION)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub socket: Option<PathBuf>,
@@ -200,6 +202,7 @@ impl Command {
             })),
             Command::Snapshot(args) => Ok(ClientRequest::Snapshot(SnapshotRequest {
                 workstream: args.workstream,
+                target: args.target,
                 after: args.after,
                 max_chars: args.max_chars,
             })),
@@ -359,6 +362,11 @@ pub struct SendArgs {
     pub submit_retries: u8,
     #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRY_DELAY_MS)]
     pub submit_retry_delay_ms: u64,
+    #[arg(
+        long,
+        help = "Verify the prompt is visible after delivery; bracketed sends retry once with literal paste before failing."
+    )]
+    pub verify_delivery: bool,
     #[arg(long, value_enum)]
     pub require_state: Option<AgentState>,
     #[arg(long, value_enum)]
@@ -378,6 +386,7 @@ impl SendArgs {
             settle_ms: self.settle_ms,
             submit_retries: if enter { self.submit_retries } else { 0 },
             submit_retry_delay_ms: self.submit_retry_delay_ms,
+            verify_delivery: self.verify_delivery,
             require_state: self.require_state,
             set_state: self.set_state,
         })
@@ -650,6 +659,8 @@ pub struct EventsArgs {
 pub struct SnapshotArgs {
     pub workstream: String,
     #[arg(long)]
+    pub target: Option<String>,
+    #[arg(long)]
     pub after: Option<String>,
     #[arg(long, default_value_t = 12_000)]
     pub max_chars: usize,
@@ -896,6 +907,26 @@ mod tests {
         };
         assert!(!request.enter);
         assert_eq!(request.submit_retries, 0);
+    }
+
+    #[test]
+    fn send_verify_delivery_builds_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "send",
+            "issue-453",
+            "local::agent",
+            "--text",
+            "/permissions",
+            "--verify-delivery",
+        ])
+        .expect("send command parses");
+
+        let request = cli.command.into_request().expect("send request");
+        let ClientRequest::Send(request) = request else {
+            panic!("expected send request");
+        };
+        assert!(request.verify_delivery);
     }
 
     #[test]
@@ -1275,6 +1306,27 @@ mod tests {
             workstream.as_deref(),
             Some("issue-342-mmux-endpoint-identity")
         );
+    }
+
+    #[test]
+    fn snapshot_target_builds_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "snapshot",
+            "issue-453",
+            "--target",
+            "local::$1",
+            "--max-chars",
+            "4000",
+        ])
+        .expect("snapshot command parses");
+
+        let request = cli.command.into_request().expect("snapshot request");
+        let ClientRequest::Snapshot(request) = request else {
+            panic!("expected snapshot request");
+        };
+        assert_eq!(request.target.as_deref(), Some("local::$1"));
+        assert_eq!(request.max_chars, 4000);
     }
 
     #[test]
