@@ -12,13 +12,13 @@ use motlie_model::typed::BatchTranscriber;
 use motlie_model::{ArtifactPolicy, StartOptions, TranscriptionParams};
 use motlie_models::asr::whisper_base_en;
 
-#[path = "../asr_support.rs"]
+#[path = "../support/asr.rs"]
 mod asr_support;
-#[path = "../audio_support.rs"]
+#[path = "../support/audio.rs"]
 mod audio_support;
-#[path = "../bundle_support.rs"]
+#[path = "../support/bundle.rs"]
 mod bundle_support;
-#[path = "../quiet_support.rs"]
+#[path = "../support/quiet.rs"]
 mod quiet_support;
 
 fn main() -> Result<()> {

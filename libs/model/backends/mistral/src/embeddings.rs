@@ -304,6 +304,10 @@ impl BundleHandle for MistralEmbeddingHandle {
         ))
     }
 
+    fn accelerator_observation(&self) -> Option<motlie_model::RuntimeAcceleratorObservation> {
+        Some(crate::common::accelerator_observation())
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }

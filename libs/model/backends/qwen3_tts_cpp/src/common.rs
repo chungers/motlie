@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpoint};
 
 pub(crate) use motlie_model::metrics_runtime::{
-    RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
+    lock_metrics, observe_latency, observe_memory, RuntimeMetricState,
 };
 
 pub(crate) const MODEL_FILE_Q8_0: &str = "qwen3-tts-0.6b-q8_0.gguf";

@@ -1,3 +1,6 @@
+#[path = "../support/feature_matrix.rs"]
+mod feature_matrix;
+
 fn main() -> anyhow::Result<()> {
     gguf_example::run()
 }
@@ -27,23 +30,23 @@ mod gguf_example {
     feature = "model-gemma4-12b-qat-q4-0-gguf",
 ))]
 mod gguf_example {
-    use anyhow::{Context, Result, bail};
+    use anyhow::{bail, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, BundleId, ChatMessage, ChatModel, ChatRequest, ChatRole,
         CompletionModel, GenerationParams, QuantizationBits, StartOptions, ThinkingMode,
     };
     use motlie_model_llama_cpp::LlamaCppTextSpec;
     use motlie_models::{
-        BundleDescriptor, CuratedBundle, ModelSelector, chat::ChatModels, default_artifact_root,
-        quantization_label_gguf,
+        chat::ChatModels, default_artifact_root, quantization_label_gguf, BundleDescriptor,
+        CuratedBundle, ModelSelector,
     };
     use std::time::Instant;
 
     mod support {
-        include!("../support.rs");
+        include!("../support/runtime.rs");
     }
     mod tool_demo_support {
-        include!("../tool_demo_support.rs");
+        include!("../support/tool_demo.rs");
     }
 
     #[tokio::main]

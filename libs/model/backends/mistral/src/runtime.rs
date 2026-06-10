@@ -282,6 +282,10 @@ impl<P: MistralProfile> BundleHandle for MistralHandle<P> {
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
+    fn accelerator_observation(&self) -> Option<motlie_model::RuntimeAcceleratorObservation> {
+        Some(crate::common::accelerator_observation())
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Ok(self)
     }

@@ -1,0 +1,754 @@
+schema_version = 1
+id = "curated-v2-smoke"
+git_sha = "17c8304e"
+
+[[cells]]
+id = "embeddinggemma_300m__embeddings_similarity__smoke__hf_default"
+bundle_id = "embeddinggemma_300m"
+scenario = "embeddings_similarity"
+capability = "embeddings"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-google-gemma-300m"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.safetensors", "config.json", "tokenizer*"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_embedding_06b__embeddings_similarity__smoke__hf_default"
+bundle_id = "qwen3_embedding_06b"
+scenario = "embeddings_similarity"
+capability = "embeddings"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-qwen3-embedding-06b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.safetensors", "config.json", "tokenizer*"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_4b__chat_smoke__smoke__hf_safetensors_default"
+bundle_id = "qwen3_4b"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-qwen3-4b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default"
+bundle_id = "qwen3_4b"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-qwen3-4b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default"
+bundle_id = "qwen3_4b"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-qwen3-4b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e2b__chat_smoke__smoke__hf_safetensors_default"
+bundle_id = "gemma4_e2b"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-gemma4-e2b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default"
+bundle_id = "gemma4_e2b"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-gemma4-e2b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default"
+bundle_id = "gemma4_e2b"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-gemma4-e2b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e4b__chat_smoke__smoke__hf_safetensors_default"
+bundle_id = "gemma4_e4b"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-gemma4-e4b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default"
+bundle_id = "gemma4_e4b"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-gemma4-e4b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default"
+bundle_id = "gemma4_e4b"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "hf_safetensors"
+quantization = "default"
+backend = "mistralrs"
+features = ["model-gemma4-e4b"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "cudnn", "flash-attn"]
+"cuda-workstation" = ["cuda", "cudnn", "flash-attn"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.safetensors", "config.json"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m"
+bundle_id = "qwen3_4b_gguf"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-qwen3-4b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m"
+bundle_id = "qwen3_4b_gguf"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-qwen3-4b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m"
+bundle_id = "qwen3_4b_gguf"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-qwen3-4b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m"
+bundle_id = "qwen3_6_27b_gguf"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-qwen3-6-27b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m"
+bundle_id = "qwen3_6_27b_gguf"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-qwen3-6-27b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_e2b_gguf"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-e2b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_e2b_gguf"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-e2b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_e2b_gguf"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-e2b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_e4b_gguf"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-e4b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_e4b_gguf"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-e4b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_e4b_gguf"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-e4b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_12b_gguf"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-12b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_12b_gguf"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-12b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m"
+bundle_id = "gemma4_12b_gguf"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-gemma4-12b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0"
+bundle_id = "gemma4_12b_qat_q4_0_gguf"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_0"
+backend = "llama_cpp"
+features = ["model-gemma4-12b-qat-q4-0-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0"
+bundle_id = "gemma4_12b_qat_q4_0_gguf"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_0"
+backend = "llama_cpp"
+features = ["model-gemma4-12b-qat-q4-0-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0"
+bundle_id = "gemma4_12b_qat_q4_0_gguf"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "gemma"
+checkpoint_format = "gguf"
+quantization = "q4_0"
+backend = "llama_cpp"
+features = ["model-gemma4-12b-qat-q4-0-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = true
+patterns = ["*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "whisper_base_en__asr_short_transcription__smoke__ggml_default"
+bundle_id = "whisper_base_en"
+scenario = "asr_short_transcription"
+capability = "asr"
+depth = "smoke"
+model_family = "whisper"
+checkpoint_format = "ggml"
+quantization = "default"
+backend = "whisper_cpp"
+features = ["model-whisper-base-en"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "whisper-cpp-cuda"]
+"cuda-workstation" = ["cuda", "whisper-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.bin", "*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "moonshine_streaming_en__asr_short_transcription__smoke__hf_default"
+bundle_id = "moonshine_streaming_en"
+scenario = "asr_short_transcription"
+capability = "asr"
+depth = "smoke"
+model_family = "moonshine"
+checkpoint_format = "onnx"
+quantization = "default"
+backend = "ort"
+features = ["model-moonshine-streaming"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.onnx"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default"
+bundle_id = "sherpa_onnx_streaming_zipformer_en"
+scenario = "asr_short_transcription"
+capability = "asr"
+depth = "smoke"
+model_family = "sherpa_onnx"
+checkpoint_format = "onnx"
+quantization = "default"
+backend = "sherpa_onnx"
+features = ["model-sherpa-onnx-streaming"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "sherpa-onnx-cuda"]
+"cuda-workstation" = ["cuda", "sherpa-onnx-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.onnx"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default"
+bundle_id = "piper_en_us_ljspeech_medium"
+scenario = "tts_synthesis_smoke"
+capability = "tts"
+depth = "smoke"
+model_family = "piper"
+checkpoint_format = "onnx"
+quantization = "default"
+backend = "ort"
+features = ["model-piper-en-us-ljspeech-medium"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "piper-cuda"]
+"cuda-workstation" = ["cuda", "piper-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.onnx", "*.json"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0"
+bundle_id = "qwen3_tts_cpp_0_6b"
+scenario = "tts_synthesis_smoke"
+capability = "tts"
+depth = "smoke"
+model_family = "qwen3"
+checkpoint_format = "gguf"
+quantization = "q8_0"
+backend = "qwen3_tts_cpp"
+features = ["model-qwen3-tts-cpp"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "qwen3-tts-cpp-cuda"]
+"cuda-workstation" = ["cuda", "qwen3-tts-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.gguf", "tokenizer*.gguf"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]

@@ -1,10 +1,17 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
+#[cfg(not(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-moonshine-streaming",
+    feature = "model-sherpa-onnx-streaming",
+    feature = "piper-cuda",
+    feature = "sherpa-onnx-cuda",
+)))]
 use cel_cxx::{Activation, Env, Value};
 use motlie_model::{
     ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart, GenerationParams, ThinkingMode,
     Tool, ToolChoice, ToolName,
 };
-use motlie_models::{ToolDispatch, ToolList, tool_list};
+use motlie_models::{tool_list, ToolDispatch, ToolList};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -103,6 +110,13 @@ pub struct MathExpressionOutput {
     pub engine: &'static str,
 }
 
+#[cfg(not(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-moonshine-streaming",
+    feature = "model-sherpa-onnx-streaming",
+    feature = "piper-cuda",
+    feature = "sherpa-onnx-cuda",
+)))]
 #[derive(Debug, thiserror::Error)]
 pub enum MathExpressionError {
     #[error("expression cannot be empty")]
@@ -121,6 +135,30 @@ pub enum MathExpressionError {
     NonFinite,
 }
 
+#[cfg(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-moonshine-streaming",
+    feature = "model-sherpa-onnx-streaming",
+    feature = "piper-cuda",
+    feature = "sherpa-onnx-cuda",
+))]
+#[derive(Debug, thiserror::Error)]
+pub enum MathExpressionError {
+    #[error("expression cannot be empty")]
+    Empty,
+    #[error("expression is too long; keep examples under 512 bytes")]
+    TooLong,
+    #[error("CEL math tool disabled for ORT-backed additive example builds; build chat/tool examples without Piper, Moonshine, or Sherpa features to run the tool demo")]
+    OrtCelCxxCoLinkDisabled,
+}
+
+#[cfg(not(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-moonshine-streaming",
+    feature = "model-sherpa-onnx-streaming",
+    feature = "piper-cuda",
+    feature = "sherpa-onnx-cuda",
+)))]
 pub async fn evaluate_math_expression(
     args: MathExpressionArgs,
 ) -> std::result::Result<MathExpressionOutput, MathExpressionError> {
@@ -160,6 +198,27 @@ pub async fn evaluate_math_expression(
         formatted: trim_float(format!("{value:.6}")),
         engine: "cel-cxx",
     })
+}
+
+#[cfg(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-moonshine-streaming",
+    feature = "model-sherpa-onnx-streaming",
+    feature = "piper-cuda",
+    feature = "sherpa-onnx-cuda",
+))]
+pub async fn evaluate_math_expression(
+    args: MathExpressionArgs,
+) -> std::result::Result<MathExpressionOutput, MathExpressionError> {
+    let expression = args.expression.trim();
+    if expression.is_empty() {
+        return Err(MathExpressionError::Empty);
+    }
+    if expression.len() > 512 {
+        return Err(MathExpressionError::TooLong);
+    }
+
+    Err(MathExpressionError::OrtCelCxxCoLinkDisabled)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -350,6 +409,13 @@ fn print_thinking_trace(label: &str, reasoning: &Option<String>) {
     }
 }
 
+#[cfg(not(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-moonshine-streaming",
+    feature = "model-sherpa-onnx-streaming",
+    feature = "piper-cuda",
+    feature = "sherpa-onnx-cuda",
+)))]
 fn trim_float(mut value: String) -> String {
     if value.contains('.') {
         while value.ends_with('0') {
@@ -366,6 +432,13 @@ fn trim_float(mut value: String) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(not(any(
+        feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-moonshine-streaming",
+        feature = "model-sherpa-onnx-streaming",
+        feature = "piper-cuda",
+        feature = "sherpa-onnx-cuda",
+    )))]
     #[tokio::test]
     async fn evaluates_medium_complexity_expression() {
         let output = evaluate_math_expression(MathExpressionArgs {

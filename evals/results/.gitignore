@@ -1,0 +1,8 @@
+*
+!.gitignore
+!*/
+!**/results.jsonl
+!**/summary.md
+!**/run-manifest.toml
+**/logs/
+**/logs/**

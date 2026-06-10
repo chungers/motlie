@@ -8,9 +8,9 @@ use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSes
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, StartOptions, TranscriptSegment,
-    TranscriptionParams, TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion,
-    UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, RuntimeAcceleratorObservation,
+    StartOptions, TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use ndarray::{ArrayD, ArrayViewD, IxDyn};
 use ort::inputs;
@@ -19,8 +19,8 @@ use ort::value::TensorRef;
 use serde_json::Value;
 
 use crate::common::{
-    MoonshineArtifactPaths, MoonshineArtifactSpec, RuntimeMetricState, StagedModelDir,
     configure_artifact_policy, lock_metrics, observe_latency, resolve_onnx_artifacts,
+    MoonshineArtifactPaths, MoonshineArtifactSpec, RuntimeMetricState, StagedModelDir,
 };
 
 const MOONSHINE_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -248,6 +248,14 @@ impl BundleHandle for MoonshineHandle {
             }),
             text_generation: None,
             embeddings: None,
+        })
+    }
+
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        Some(RuntimeAcceleratorObservation {
+            backend_mode: "moonshine:cpu".to_owned(),
+            offload: Some("accelerator_feature=none".to_owned()),
+            selected_device: None,
         })
     }
 

@@ -1,3 +1,6 @@
+#[path = "../support/feature_matrix.rs"]
+mod feature_matrix;
+
 fn main() -> anyhow::Result<()> {
     gemma4_multimodal_example::run()
 }
@@ -14,24 +17,24 @@ mod gemma4_multimodal_example {
 #[cfg(any(feature = "model-gemma4-e2b", feature = "model-gemma4-e4b",))]
 mod gemma4_multimodal_example {
 
-    use anyhow::{Context, Result, bail, ensure};
+    use anyhow::{bail, ensure, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart,
         QuantizationBits, StartOptions,
     };
     use motlie_model_mistral::MistralMultimodalSpec;
     use motlie_models::{
-        BundleDescriptor, CuratedBundle, chat::ChatModels, default_artifact_root,
-        quantization_label_isq,
+        chat::ChatModels, default_artifact_root, quantization_label_isq, BundleDescriptor,
+        CuratedBundle,
     };
     use std::path::{Path, PathBuf};
     use std::time::Instant;
 
     mod support {
-        include!("../support.rs");
+        include!("../support/runtime.rs");
     }
     mod tool_demo_support {
-        include!("../tool_demo_support.rs");
+        include!("../support/tool_demo.rs");
     }
 
     #[tokio::main]

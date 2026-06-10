@@ -74,8 +74,8 @@ pub use motlie_model::{
 };
 use motlie_model::{
     BundleHandle, ChatModel, CompletionModel, EmbeddingModel, LoadedBundleDescriptor, ModelError,
-    ModelMetricSnapshot, StartOptions, UnsupportedChat, UnsupportedCompletion,
-    UnsupportedEmbeddings,
+    ModelMetricSnapshot, RuntimeAcceleratorObservation, StartOptions, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 pub use tool_registry::{Mcp, McpError, McpTransport, ToolDispatch, ToolList, ToolListError};
 pub use tts::TtsModels;
@@ -666,6 +666,45 @@ impl BundleHandle for CuratedHandle {
         }
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        #[allow(unreachable_patterns)]
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-e4b")]
+            Self::Gemma4E4B(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-qwen3-6-27b-gguf")]
+            Self::Qwen3_6_27B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-e4b-gguf")]
+            Self::Gemma4E4B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B(handle) => handle.accelerator_observation(),
+            _ => unreachable!("no curated handle variants are enabled"),
+        }
+    }
+
     fn chat(&self) -> std::result::Result<&Self::Chat, ModelError> {
         #[allow(unreachable_patterns)]
         match self {
@@ -715,6 +754,7 @@ impl BundleHandle for CuratedHandle {
     }
 
     fn embeddings(&self) -> std::result::Result<&Self::Embeddings, ModelError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(_) => Ok(self),
@@ -828,6 +868,7 @@ impl EmbeddingModel for CuratedHandle {
         &self,
         request: motlie_model::EmbeddingRequest,
     ) -> std::result::Result<motlie_model::EmbeddingResponse, ModelError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(handle) => handle.embed(request).await,
@@ -1917,11 +1958,9 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1940,11 +1979,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1963,11 +2000,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_6_27b_gguf");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Chat)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -2284,11 +2319,9 @@ mod tests {
         #[cfg(feature = "model-whisper-base-en")]
         {
             let descriptor = crate::asr::whisper_base_en::descriptor();
-            assert!(
-                descriptor
-                    .capabilities
-                    .supports(CapabilityKind::Transcription)
-            );
+            assert!(descriptor
+                .capabilities
+                .supports(CapabilityKind::Transcription));
             assert!(!descriptor.capabilities.supports(CapabilityKind::VoiceClone));
             assert_eq!(
                 descriptor.capabilities.descriptors(),

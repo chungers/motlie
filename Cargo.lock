@@ -2621,6 +2621,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "evals"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hound",
+ "motlie-eval-tools",
+ "motlie-model",
+ "motlie-models",
+ "motlie-voice",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
 name = "exr"
 version = "1.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5338,6 +5356,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-eval-tools"
+version = "0.1.0"
+dependencies = [
+ "motlie-model",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "motlie-mcp"
 version = "0.1.0"
 dependencies = [
@@ -5396,14 +5424,6 @@ name = "motlie-model-espeak-ng"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "motlie-model-eval"
-version = "0.1.0"
-dependencies = [
- "motlie-model",
- "motlie-models",
 ]
 
 [[package]]

@@ -8,6 +8,13 @@ pub struct ModelMetricSnapshot {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeAcceleratorObservation {
+    pub backend_mode: String,
+    pub offload: Option<String>,
+    pub selected_device: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeMetrics {
     pub resident_memory: Option<Bytes>,
     pub peak_resident_memory: Option<Bytes>,

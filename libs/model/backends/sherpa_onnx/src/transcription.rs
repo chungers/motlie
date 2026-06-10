@@ -11,18 +11,21 @@ use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSes
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
-    UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, StartOptions, TranscriptSegment, TranscriptionParams,
+    TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
-use motlie_model_ort::build_session;
+use motlie_model_ort::{
+    build_session_with_target, resolved_execution_target, OrtExecutionTarget,
+    OrtResolvedExecutionTarget,
+};
 use ndarray::ArrayView3;
 use ort::session::{Session, SessionInputValue};
 use ort::value::{DynValue, Tensor};
 
 use crate::common::{
-    RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec, configure_artifact_policy,
-    lock_metrics, observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec,
 };
 
 const SHERPA_ONNX_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -247,6 +250,21 @@ impl BundleHandle for SherpaOnnxHandle {
         })
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        match self.runtime.execution_target {
+            OrtResolvedExecutionTarget::Cuda => Some(RuntimeAcceleratorObservation {
+                backend_mode: "sherpa_onnx:cuda".to_owned(),
+                offload: Some("cuda_execution_provider=on;target=auto".to_owned()),
+                selected_device: Some("0".to_owned()),
+            }),
+            OrtResolvedExecutionTarget::Cpu => Some(RuntimeAcceleratorObservation {
+                backend_mode: "sherpa_onnx:cpu".to_owned(),
+                offload: Some(sherpa_cpu_offload_reason()),
+                selected_device: None,
+            }),
+        }
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
@@ -300,6 +318,7 @@ struct SherpaOnnxRuntime {
     joiner: Mutex<Session>,
     config: ZipformerConfig,
     tokens: TokenTable,
+    execution_target: OrtResolvedExecutionTarget,
 }
 
 #[derive(Clone, Debug)]
@@ -411,14 +430,26 @@ impl TokenTable {
     }
 }
 
+fn sherpa_cpu_offload_reason() -> String {
+    if motlie_model::metrics_runtime::should_force_cpu() {
+        "cuda_execution_provider=off;force_cpu=true".to_owned()
+    } else if cfg!(feature = "cuda") {
+        "cuda_execution_provider=off".to_owned()
+    } else {
+        "accelerator_feature=none".to_owned()
+    }
+}
+
 fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, ModelError> {
-    let encoder = build_session("sherpa-onnx", &artifacts.encoder)?;
+    let target = OrtExecutionTarget::Auto;
+    let execution_target = resolved_execution_target(target);
+    let encoder = build_session_with_target("sherpa-onnx", &artifacts.encoder, target)?;
     let config = ZipformerConfig::from_sessions(
         &encoder,
-        &build_session("sherpa-onnx", &artifacts.decoder)?,
+        &build_session_with_target("sherpa-onnx", &artifacts.decoder, target)?,
     )?;
-    let decoder = build_session("sherpa-onnx", &artifacts.decoder)?;
-    let joiner = build_session("sherpa-onnx", &artifacts.joiner)?;
+    let decoder = build_session_with_target("sherpa-onnx", &artifacts.decoder, target)?;
+    let joiner = build_session_with_target("sherpa-onnx", &artifacts.joiner, target)?;
     let tokens = TokenTable::from_path(&artifacts.tokens)?;
 
     Ok(SherpaOnnxRuntime {
@@ -430,6 +461,7 @@ fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, Mo
             ..config
         },
         tokens,
+        execution_target,
     })
 }
 
@@ -1438,11 +1470,9 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Onnx]);
         assert_eq!(adapter.backend_kind(), BackendKind::SherpaOnnx);
-        assert!(
-            adapter
-                .capabilities()
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(adapter
+            .capabilities()
+            .supports(CapabilityKind::Transcription));
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 
@@ -1558,10 +1588,9 @@ mod tests {
         .expect_err("metadata length mismatch should fail");
 
         assert!(matches!(err, ModelError::BackendInitialization { .. }));
-        assert!(
-            err.to_string()
-                .contains("zipformer encoder metadata length mismatch")
-        );
+        assert!(err
+            .to_string()
+            .contains("zipformer encoder metadata length mismatch"));
     }
 
     #[test]

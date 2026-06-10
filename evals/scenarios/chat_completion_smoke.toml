@@ -1,0 +1,39 @@
+schema_version = 1
+id = "chat_completion_smoke"
+capability = "chat"
+summary = "Completion-path smoke for chat bundles that advertise completion."
+
+[bundle_filter]
+capability = "chat"
+required_capabilities = ["completion"]
+backend = ["MistralRs", "LlamaCpp"]
+
+[input]
+system_prompt = "Be concise."
+prompt = "Answer with the word ready."
+completion_prompt = "Complete this sentence: A curated Motlie eval checks"
+max_tokens = 64
+temperature = 0.2
+
+[assertions]
+min_response_chars = 1
+min_completion_chars = 8
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+capture_peak_rss = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 0
+
+[profiles.local-cpu-aarch64.gates]
+max_process_swap_delta_bytes = 0
+
+[profiles.apple-metal]
+
+[profiles.dgx-spark.gates]
+max_process_swap_delta_bytes = 0
+
+[profiles.cuda-workstation.gates]
+max_process_swap_delta_bytes = 0

@@ -2,7 +2,7 @@ use std::io::Read;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use motlie_voice::wav::{StreamingWavWriter, WavSample};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

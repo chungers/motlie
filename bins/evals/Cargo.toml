@@ -1,0 +1,51 @@
+[package]
+name = "evals"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Curated model eval runner and report CLI"
+
+[features]
+default = []
+model-google-gemma-300m = ["motlie-models/model-google-gemma-300m"]
+model-qwen3-embedding-06b = ["motlie-models/model-qwen3-embedding-06b"]
+model-qwen3-4b = ["motlie-models/model-qwen3-4b"]
+model-gemma4-e2b = ["motlie-models/model-gemma4-e2b"]
+model-gemma4-e4b = ["motlie-models/model-gemma4-e4b"]
+model-gemma4-12b-gguf = ["motlie-models/model-gemma4-12b-gguf"]
+model-gemma4-12b-qat-q4-0-gguf = ["motlie-models/model-gemma4-12b-qat-q4-0-gguf"]
+model-qwen3-4b-gguf = ["motlie-models/model-qwen3-4b-gguf"]
+model-gemma4-e2b-gguf = ["motlie-models/model-gemma4-e2b-gguf"]
+model-gemma4-e4b-gguf = ["motlie-models/model-gemma4-e4b-gguf"]
+model-qwen3-6-27b-gguf = ["motlie-models/model-qwen3-6-27b-gguf"]
+model-piper-en-us-ljspeech-medium = ["motlie-models/model-piper-en-us-ljspeech-medium"]
+model-qwen3-tts-cpp = ["motlie-models/model-qwen3-tts-cpp"]
+model-moonshine-streaming = ["motlie-models/model-moonshine-streaming"]
+model-sherpa-onnx-streaming = ["motlie-models/model-sherpa-onnx-streaming"]
+model-whisper-base-en = ["motlie-models/model-whisper-base-en"]
+llama-cpp-cuda = ["motlie-models/llama-cpp-cuda"]
+piper-cuda = ["motlie-models/piper-cuda"]
+qwen3-tts-cpp-cuda = ["motlie-models/qwen3-tts-cpp-cuda"]
+sherpa-onnx-cuda = ["motlie-models/sherpa-onnx-cuda"]
+whisper-cpp-cuda = ["motlie-models/whisper-cpp-cuda"]
+cuda = ["motlie-models/cuda"]
+cudnn = ["motlie-models/cudnn"]
+flash-attn = ["motlie-models/flash-attn"]
+metal = ["motlie-models/metal"]
+accelerate = ["motlie-models/accelerate"]
+
+[dependencies]
+async-trait = "0.1"
+anyhow.workspace = true
+hound = "3.5"
+serde.workspace = true
+serde_json = "1.0.149"
+motlie-model = { path = "../../libs/model" }
+motlie-models = { path = "../../libs/models", default-features = false }
+motlie-eval-tools = { path = "../../libs/eval-tools" }
+motlie-voice = { path = "../../libs/voice" }
+sysinfo = "0.36.1"
+tokio.workspace = true
+toml = "0.9.12"

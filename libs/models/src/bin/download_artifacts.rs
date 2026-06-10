@@ -1,6 +1,6 @@
 use motlie_model::BundleId;
 use motlie_models::{
-    ArtifactDownloadOptions, Catalog, default_artifact_root, download_bundle_artifacts_with_options,
+    default_artifact_root, download_bundle_artifacts_with_options, ArtifactDownloadOptions, Catalog,
 };
 
 fn main() {
