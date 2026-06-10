@@ -9,7 +9,9 @@ use crate::media::{
 };
 use crate::operator::state::{LogLevel, QualitySpanEmission, SharedState};
 use crate::quality::RedactionMode;
-use crate::tts::{LiveTtsBackend, SharedTtsRegistry, TtsAudio, split_speech_text_with_max_chars};
+use crate::tts::{
+    LiveTtsBackend, SharedTtsRegistry, TtsAudio, split_speech_text_with_first_chunk_max_chars,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuedSpeech {
@@ -81,6 +83,7 @@ pub async fn queue_speech_with_request(
         quality_redaction_mode,
         tts_chunking_enabled,
         tts_max_text_chunk_chars,
+        tts_first_chunk_max_chars,
         tts_prebuffer_chunks,
     ) = {
         let guard = state.read().await;
@@ -98,6 +101,7 @@ pub async fn queue_speech_with_request(
             guard.quality.config.logging.redaction_mode,
             guard.quality.config.tts.chunking_enabled,
             guard.quality.config.tts.max_text_chunk_chars,
+            guard.quality.config.tts.first_chunk_max_chars,
             guard.quality.config.tts.prebuffer_chunks,
         )
     };
@@ -150,6 +154,7 @@ pub async fn queue_speech_with_request(
         quality_redaction_mode,
         tts_chunking_enabled,
         tts_max_text_chunk_chars,
+        tts_first_chunk_max_chars,
         tts_prebuffer_chunks,
         request_started_at,
         turn_finalized_at,
@@ -216,6 +221,7 @@ struct SpeechJob {
     quality_redaction_mode: RedactionMode,
     tts_chunking_enabled: bool,
     tts_max_text_chunk_chars: usize,
+    tts_first_chunk_max_chars: usize,
     tts_prebuffer_chunks: usize,
     request_started_at: Instant,
     turn_finalized_at: Option<Instant>,
@@ -313,7 +319,11 @@ impl SpeechJobFailure {
 
 async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, SpeechJobFailure> {
     let text_chunks = if job.tts_chunking_enabled {
-        split_speech_text_with_max_chars(&job.text, job.tts_max_text_chunk_chars)
+        split_speech_text_with_first_chunk_max_chars(
+            &job.text,
+            job.tts_max_text_chunk_chars,
+            job.tts_first_chunk_max_chars,
+        )
     } else {
         let text = job.text.trim();
         if text.is_empty() {
@@ -367,6 +377,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                     "text_chunks": text_chunks.len(),
                     "text_chunking_enabled": job.tts_chunking_enabled,
                     "max_text_chunk_chars": job.tts_max_text_chunk_chars,
+                    "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                     "prebuffer_chunks": job.tts_prebuffer_chunks,
                     "text_chars": text_chunk.chars().count(),
                     "audio_chunks": audio_chunks.len(),
@@ -435,6 +446,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                     "frames": total_frames,
                     "text_chunking_enabled": job.tts_chunking_enabled,
                     "max_text_chunk_chars": job.tts_max_text_chunk_chars,
+                    "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                     "prebuffer_chunks": job.tts_prebuffer_chunks,
                 }),
             )
@@ -461,6 +473,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                         "frames": buffered_frames,
                         "text_chunking_enabled": job.tts_chunking_enabled,
                         "max_text_chunk_chars": job.tts_max_text_chunk_chars,
+                        "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                         "prebuffer_chunks": job.tts_prebuffer_chunks,
                     }),
                 )
@@ -503,6 +516,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                     "frames": buffered_frames,
                     "text_chunking_enabled": job.tts_chunking_enabled,
                     "max_text_chunk_chars": job.tts_max_text_chunk_chars,
+                    "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                     "prebuffer_chunks": job.tts_prebuffer_chunks,
                 }),
             )
@@ -537,6 +551,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                 "frames": queued_frames,
                 "text_chunking_enabled": job.tts_chunking_enabled,
                 "max_text_chunk_chars": job.tts_max_text_chunk_chars,
+                "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                 "prebuffer_chunks": job.tts_prebuffer_chunks,
             }),
         )

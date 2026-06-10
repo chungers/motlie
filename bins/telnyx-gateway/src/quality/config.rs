@@ -221,6 +221,7 @@ impl TextCallQualityConfig {
 pub struct TtsQualityConfig {
     pub chunking_enabled: bool,
     pub max_text_chunk_chars: usize,
+    pub first_chunk_max_chars: usize,
     pub prebuffer_chunks: usize,
 }
 
@@ -229,6 +230,7 @@ impl Default for TtsQualityConfig {
         Self {
             chunking_enabled: true,
             max_text_chunk_chars: 90,
+            first_chunk_max_chars: 0,
             prebuffer_chunks: 1,
         }
     }
@@ -505,6 +507,14 @@ impl VoiceQualityConfig {
             40,
             500,
         )?;
+        if self.tts.first_chunk_max_chars != 0 {
+            ensure_usize(
+                "tts.first_chunk_max_chars",
+                self.tts.first_chunk_max_chars,
+                40,
+                500,
+            )?;
+        }
         ensure_usize("tts.prebuffer_chunks", self.tts.prebuffer_chunks, 1, 64)?;
         ensure_u64(
             "barge_in.clear_timeout_ms",
@@ -669,6 +679,9 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = tts.max_text_chunk_chars {
                 self.set_tts_max_text_chunk_chars(value);
+            }
+            if let Some(value) = tts.first_chunk_max_chars {
+                self.set_tts_first_chunk_max_chars(value);
             }
             if let Some(value) = tts.prebuffer_chunks {
                 self.set_tts_prebuffer_chunks(value);
@@ -974,6 +987,24 @@ impl VoiceQualityConfig {
         self.tts.max_text_chunk_chars = clamped.value;
         self.outcome(
             "tts.max_text_chunk_chars",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_tts_first_chunk_max_chars(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = if value == 0 {
+            Clamped {
+                value,
+                clamped: false,
+            }
+        } else {
+            clamp_usize(value, 40, 500)
+        };
+        self.tts.first_chunk_max_chars = clamped.value;
+        self.outcome(
+            "tts.first_chunk_max_chars",
             clamped.value,
             ApplyBoundary::NewPlaybackRequest,
             clamped.clamped,
@@ -1316,6 +1347,7 @@ pub struct TextCallQualityConfigPatch {
 pub struct TtsQualityConfigPatch {
     pub chunking_enabled: Option<bool>,
     pub max_text_chunk_chars: Option<usize>,
+    pub first_chunk_max_chars: Option<usize>,
     pub prebuffer_chunks: Option<usize>,
 }
 
@@ -1381,6 +1413,7 @@ mod tests {
         assert_eq!(config.asr.finish_pad_ms, 160);
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
+        assert_eq!(config.tts.first_chunk_max_chars, 0);
         assert_eq!(config.tts.prebuffer_chunks, 1);
     }
 

@@ -114,10 +114,11 @@ async fn main() -> anyhow::Result<()> {
     let media = SharedMediaRegistry::default();
     let text_calls = SharedTextCallRegistry::default();
     let tts = build_tts_registry(&cli);
-    let conversation = ConversationRuntime::new(
+    let conversation = ConversationRuntime::new_with_handler_options(
         telnyx.clone(),
         tts.clone(),
         default_conversation_handler(),
+        cli.conversation_smoke_test,
         cli.conversation_smoke_test,
     );
     if cli.conversation_smoke_test {

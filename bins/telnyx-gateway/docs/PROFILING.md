@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-09 | @codex-m6-ds-rv | Resolved #427 pluggability follow-up: separated generic handler dispatch from smoke final coalescing, added `tts.first_chunk_max_chars` for sentence-boundary first-audio ramp experiments, and documented streaming-agent partial/voice-response contract notes. |
 | 2026-06-09 | @codex-m6-ds-rv | Resolved #427 review: smoke-test final coalescing is handler-local and keyed by the ASR-session config snapshot, ASR finish padding is a separate `asr.finish_pad_ms` knob, first-audio critical-path spans include handler/TTS time, and smoke-test mode no longer mutates global barge-in. |
 | 2026-06-09 | @codex-m6-ds-rv | Updated live-call tuned defaults and TTS chunking guidance after M6 smoke-call trials: 650 ms endpoint tail, stricter speech gate, 90-char sentence-packed TTS chunks, and one-chunk prebuffer. |
 | 2026-06-09 | @codex-367-design | Added M6 gap implementation notes: deferred ASR/TTS/media/barge-in spans, inbound/outbound transport rollups, live call-bound tuning commands, and operator TUI command-history recall through `motlie-driver::HistoryBuffer`. |
@@ -64,6 +65,15 @@ M6 covers two related but distinct models.
 | Full-duplex realism model | M5 behavior: partial ASR and frame-level speech onset can cancel active playback before a final `caller.turn` exists. | This is how live conversation feels responsive and interruptible. |
 
 M6 must profile both. Reports must not force barge-in events into a purely request/response shape. Barge-in spans can overlap the prior playback span and the next caller turn, but overlap must be marked as concurrent and excluded from serial critical-path percentages.
+
+## Future Streaming-Agent Contract Notes
+
+A pluggable streaming `ConversationHandler` is the target real-agent path; the gateway-local smoke harness must not leak coalescing or deterministic echo assumptions into that path. Handler enablement and smoke-test final coalescing are separate controls.
+
+Contract requirements for that future streaming path:
+
+- The agent contract must deliver advisory partial ASR events for early-commit and barge-in decisions while keeping final `caller.turn` emission as the stable app-visible turn boundary.
+- Voice and TTS backend selection belong on the typed conversation response, for example `Say { text, voice: Option<...>, tts_backend: Option<...> }`, so per-response voice policy is explicit and does not inherit transient operator-session state.
 
 ## Non-Goals
 
@@ -179,6 +189,12 @@ Spans must not inline `config { ... }`. Instead, the gateway emits one `call.con
       "merge_window_ms": 350,
       "max_turn_words": 80,
       "max_turn_duration_ms": 12000
+    },
+    "tts": {
+      "chunking_enabled": true,
+      "max_text_chunk_chars": 90,
+      "first_chunk_max_chars": 0,
+      "prebuffer_chunks": 1
     },
     "asr": {
       "finish_pad_ms": 160,
@@ -862,6 +878,7 @@ Prompt requirements:
 | ASR finish pad | `quality asr finish-pad-ms <ms>` | REPL/socket/TUI implemented | `160 ms` | ASR final flush without doubling endpoint tail |
 | ASR suppression | `quality asr repeated-token-run-threshold <n>`, `quality asr repeated-q-run-threshold <n>` | REPL/socket/TUI implemented | run `16`, q-run `8` | hallucination suppression |
 | TTS chunking | `quality tts chunking on|off` | REPL/socket/TUI implemented | default on | first-audio latency vs smoothness |
+| TTS first chunk ramp | `quality tts first-chunk-max-chars <n>` | REPL/socket/TUI implemented | `0` disabled | first-audio latency vs sentence-complete audio |
 
 ### Gateway-Owned `VoiceQualityConfig` Knobs
 
@@ -889,6 +906,7 @@ Prompt requirements:
 | `text_call.callback_timeout_ms` | `DurationMs` | `100..60000` | `5000` | clamp to range | new callback attempt | Subscriber responsiveness. |
 | `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. |
 | `tts.max_text_chunk_chars` | `Count` | `40..500` | `90` | clamp to range | new playback request | Packs complete sentence segments up to this size before falling back to word splits for oversized segments. |
+| `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `0` | `0` disables, otherwise clamp to range | new playback request | Optional sentence-boundary first-chunk ramp for pipelining streaming LLM output into TTS. |
 | `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Number of prepared text chunks required before playback starts. |
 | `barge_in.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables barge-in path. |
 | `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. |
@@ -947,6 +965,12 @@ max_turn_duration_ms = 12000
 finish_pad_ms = 160
 repeated_token_run_threshold = 16
 repeated_q_run_threshold = 8
+
+[voice_quality.tts]
+chunking_enabled = true
+max_text_chunk_chars = 90
+first_chunk_max_chars = 0
+prebuffer_chunks = 1
 
 [voice_quality.text_call]
 max_active_turns = 32
@@ -1030,6 +1054,7 @@ quality endpoint max-turn-duration-ms 12000
 quality asr finish-pad-ms 160
 quality asr repeated-token-run-threshold 16
 quality asr repeated-q-run-threshold 8
+quality tts first-chunk-max-chars 0
 quality text-call max-active-turns 32
 quality text-call latest-response-wins on
 quality logging include-transcript-text off
@@ -1155,6 +1180,9 @@ quality text-call latest-response-wins on|off
 quality text-call callback-timeout-ms <ms>
 quality tts status
 quality tts chunking on|off
+quality tts max-text-chunk-chars <n>
+quality tts first-chunk-max-chars <n>
+quality tts prebuffer-chunks <n>
 quality logging status
 quality logging on <path>
 quality logging off

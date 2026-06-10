@@ -339,21 +339,82 @@ pub fn split_speech_text(text: &str) -> Vec<String> {
 }
 
 pub fn split_speech_text_with_max_chars(text: &str, max_chars: usize) -> Vec<String> {
-    let max_chars = max_chars.max(1);
-    let mut chunks = Vec::new();
-    let mut pending_chunk = String::new();
-    let mut segment = String::new();
+    split_speech_text_with_first_chunk_max_chars(text, max_chars, 0)
+}
 
+pub fn split_speech_text_with_first_chunk_max_chars(
+    text: &str,
+    max_chars: usize,
+    first_chunk_max_chars: usize,
+) -> Vec<String> {
+    let max_chars = max_chars.max(1);
+    let segments = speech_segments(text);
+    let mut chunks = Vec::new();
+    let mut segment_index = 0;
+
+    if first_chunk_max_chars > 0 {
+        segment_index = push_first_speech_chunk(&mut chunks, &segments, first_chunk_max_chars);
+    }
+
+    let mut pending_chunk = String::new();
+    for segment in segments.iter().skip(segment_index) {
+        push_speech_segment(&mut chunks, &mut pending_chunk, segment, max_chars);
+    }
+    flush_speech_chunk(&mut chunks, &mut pending_chunk);
+    chunks
+}
+
+fn speech_segments(text: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut segment = String::new();
     for ch in text.chars() {
         segment.push(ch);
         if is_speech_segment_boundary(ch) {
-            push_speech_segment(&mut chunks, &mut pending_chunk, segment.trim(), max_chars);
-            segment.clear();
+            push_trimmed_segment(&mut segments, &mut segment);
         }
     }
-    push_speech_segment(&mut chunks, &mut pending_chunk, segment.trim(), max_chars);
-    flush_speech_chunk(&mut chunks, &mut pending_chunk);
-    chunks
+    push_trimmed_segment(&mut segments, &mut segment);
+    segments
+}
+
+fn push_trimmed_segment(segments: &mut Vec<String>, segment: &mut String) {
+    let trimmed = segment.trim();
+    if !trimmed.is_empty() {
+        segments.push(trimmed.to_string());
+    }
+    segment.clear();
+}
+
+fn push_first_speech_chunk(
+    chunks: &mut Vec<String>,
+    segments: &[String],
+    first_chunk_max_chars: usize,
+) -> usize {
+    let mut first_chunk = String::new();
+    let mut consumed = 0;
+    for segment in segments {
+        let separator = usize::from(!first_chunk.is_empty());
+        let next_chars = first_chunk
+            .chars()
+            .count()
+            .saturating_add(separator)
+            .saturating_add(segment.chars().count());
+        if !first_chunk.is_empty() && next_chars > first_chunk_max_chars {
+            break;
+        }
+        if !first_chunk.is_empty() {
+            first_chunk.push(' ');
+        }
+        first_chunk.push_str(segment);
+        consumed += 1;
+        if first_chunk.chars().count() >= first_chunk_max_chars {
+            break;
+        }
+    }
+    if !first_chunk.is_empty() {
+        chunks.push(first_chunk);
+    }
+    consumed
 }
 
 fn is_speech_segment_boundary(ch: char) -> bool {
@@ -673,6 +734,29 @@ mod tests {
         assert_eq!(
             split_speech_text_with_max_chars("I heard: Okay, hello. Can you hear me?", 90),
             vec!["I heard: Okay, hello. Can you hear me?"]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_first_chunk_ramp_flushes_complete_sentence() {
+        assert_eq!(
+            split_speech_text_with_first_chunk_max_chars(
+                "A complete first sentence. The second sentence follows quickly.",
+                90,
+                12,
+            ),
+            vec![
+                "A complete first sentence.",
+                "The second sentence follows quickly."
+            ]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_first_chunk_zero_uses_normal_packing() {
+        assert_eq!(
+            split_speech_text_with_first_chunk_max_chars("First sentence. Second sentence.", 90, 0,),
+            vec!["First sentence. Second sentence."]
         );
     }
 

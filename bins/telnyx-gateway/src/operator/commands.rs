@@ -622,6 +622,7 @@ pub enum QualityTtsCommand {
     Status,
     Chunking { state: OnOffArg },
     MaxTextChunkChars { n: usize },
+    FirstChunkMaxChars { n: usize },
     PrebufferChunks { n: usize },
 }
 
@@ -2298,6 +2299,10 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             quality.config.tts.max_text_chunk_chars
         ),
         format!(
+            "tts.first_chunk_max_chars={}",
+            quality.config.tts.first_chunk_max_chars
+        ),
+        format!(
             "tts.prebuffer_chunks={}",
             quality.config.tts.prebuffer_chunks
         ),
@@ -2486,8 +2491,12 @@ async fn quality_tts_command(
             Ok(CommandOutput::text(format!(
                 "chunking_enabled={}
 max_text_chunk_chars={}
+first_chunk_max_chars={}
 prebuffer_chunks={}",
-                tts.chunking_enabled, tts.max_text_chunk_chars, tts.prebuffer_chunks
+                tts.chunking_enabled,
+                tts.max_text_chunk_chars,
+                tts.first_chunk_max_chars,
+                tts.prebuffer_chunks
             )))
         }
         QualityTtsCommand::Chunking { state } => {
@@ -2499,6 +2508,13 @@ prebuffer_chunks={}",
         QualityTtsCommand::MaxTextChunkChars { n } => {
             mutate_quality_config(context, |config| Ok(config.set_tts_max_text_chunk_chars(n)))
                 .await
+        }
+        QualityTtsCommand::FirstChunkMaxChars { n } => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_tts_first_chunk_max_chars(n)),
+            )
+            .await
         }
         QualityTtsCommand::PrebufferChunks { n } => {
             mutate_quality_config(context, |config| Ok(config.set_tts_prebuffer_chunks(n))).await
@@ -3019,6 +3035,7 @@ fn quality_help() -> String {
         "quality tts status",
         "quality tts chunking on|off                    bool default=true applies=new_playback_request",
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
+        "quality tts first-chunk-max-chars <n>          range=0|40..500 default=0 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
         "quality logging on <path>",
         "quality logging off",
@@ -4838,6 +4855,23 @@ mod tests {
             .expect("set max text chunk chars");
         assert!(chunk_output.lines[0].contains("key=tts.max_text_chunk_chars"));
         assert!(chunk_output.lines[0].contains("clamped=true"));
+        let first_chunk_output = engine
+            .run_line("quality tts first-chunk-max-chars 10")
+            .await
+            .expect("set first chunk max chars");
+        assert!(first_chunk_output.lines[0].contains("key=tts.first_chunk_max_chars"));
+        assert!(first_chunk_output.lines[0].contains("clamped=true"));
+        let disabled_first_chunk_output = engine
+            .run_line("quality tts first-chunk-max-chars 0")
+            .await
+            .expect("disable first chunk max chars");
+        assert!(disabled_first_chunk_output.lines[0].contains("key=tts.first_chunk_max_chars"));
+        assert!(disabled_first_chunk_output.lines[0].contains("value=0"));
+        let first_chunk_output = engine
+            .run_line("quality tts first-chunk-max-chars 45")
+            .await
+            .expect("set first chunk max chars");
+        assert!(first_chunk_output.lines[0].contains("value=45"));
         let prebuffer_output = engine
             .run_line("quality tts prebuffer-chunks 3")
             .await
@@ -4855,10 +4889,17 @@ mod tests {
                 .iter()
                 .any(|line| line == "max_text_chunk_chars=40")
         );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "first_chunk_max_chars=45")
+        );
         assert!(status.lines.iter().any(|line| line == "prebuffer_chunks=3"));
 
         let guard = state.read().await;
         assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
+        assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
         assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
     }
 
@@ -4887,6 +4928,7 @@ mod tests {
             config.set_text_call_latest_response_wins(false);
             config.set_text_call_callback_timeout_ms(1_234);
             config.set_tts_max_text_chunk_chars(88);
+            config.set_tts_first_chunk_max_chars(44);
             config.set_tts_prebuffer_chunks(4);
             config.set_barge_in_enabled(false);
             config.barge_in.speech_onset_cancel_enabled = false;

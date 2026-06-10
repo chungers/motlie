@@ -29,7 +29,8 @@ pub struct ConversationRuntime {
     telnyx: TelnyxClient,
     tts: SharedTtsRegistry,
     handler: SharedConversationHandler,
-    smoke_test_enabled: Arc<AtomicBool>,
+    handler_enabled: Arc<AtomicBool>,
+    smoke_test_final_coalescing_enabled: Arc<AtomicBool>,
     barge_in_enabled: Arc<AtomicBool>,
     smoke_test_pending_finals: Arc<Mutex<HashMap<String, PendingSmokeTestFinal>>>,
     deferred_say_generations: Arc<Mutex<HashMap<String, u64>>>,
@@ -42,23 +43,51 @@ impl ConversationRuntime {
         handler: SharedConversationHandler,
         smoke_test_enabled: bool,
     ) -> Self {
+        Self::new_with_handler_options(telnyx, tts, handler, smoke_test_enabled, false)
+    }
+
+    pub fn new_with_handler_options(
+        telnyx: TelnyxClient,
+        tts: SharedTtsRegistry,
+        handler: SharedConversationHandler,
+        handler_enabled: bool,
+        smoke_test_final_coalescing_enabled: bool,
+    ) -> Self {
         Self {
             telnyx,
             tts,
             handler,
-            smoke_test_enabled: Arc::new(AtomicBool::new(smoke_test_enabled)),
+            handler_enabled: Arc::new(AtomicBool::new(handler_enabled)),
+            smoke_test_final_coalescing_enabled: Arc::new(AtomicBool::new(
+                smoke_test_final_coalescing_enabled,
+            )),
             barge_in_enabled: Arc::new(AtomicBool::new(true)),
             smoke_test_pending_finals: Arc::new(Mutex::new(HashMap::new())),
             deferred_say_generations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    pub fn handler_enabled(&self) -> bool {
+        self.handler_enabled.load(Ordering::SeqCst)
+    }
+
+    pub fn set_handler_enabled(&self, enabled: bool) {
+        self.handler_enabled.store(enabled, Ordering::SeqCst);
+    }
+
     pub fn smoke_test_enabled(&self) -> bool {
-        self.smoke_test_enabled.load(Ordering::SeqCst)
+        self.handler_enabled()
     }
 
     pub fn set_smoke_test_enabled(&self, enabled: bool) {
-        self.smoke_test_enabled.store(enabled, Ordering::SeqCst);
+        self.set_handler_enabled(enabled);
+        self.smoke_test_final_coalescing_enabled
+            .store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn smoke_test_final_coalescing_enabled(&self) -> bool {
+        self.smoke_test_final_coalescing_enabled
+            .load(Ordering::SeqCst)
     }
 
     pub fn barge_in_enabled(&self) -> bool {
@@ -74,10 +103,12 @@ impl ConversationRuntime {
     }
 
     pub fn handler_label(&self) -> &'static str {
-        if self.smoke_test_enabled() {
+        if !self.handler_enabled() {
+            "disabled"
+        } else if self.smoke_test_final_coalescing_enabled() {
             "smoke-test"
         } else {
-            "disabled"
+            "handler"
         }
     }
 }
@@ -176,7 +207,7 @@ pub async fn handle_transcript_event(
         .await?;
     }
 
-    if !runtime.smoke_test_enabled() {
+    if !runtime.handler_enabled() {
         state
             .write()
             .await
@@ -194,7 +225,7 @@ pub async fn handle_transcript_event(
 
     let event = event_with_trimmed_text(event, transcript_text);
     let quality_config = quality_config.cloned();
-    if snapshot.endpoint_merge_window_ms == 0 {
+    if snapshot.endpoint_merge_window_ms == 0 || !runtime.smoke_test_final_coalescing_enabled() {
         return dispatch_final_transcript_to_handler(
             state,
             media_registry,
@@ -271,7 +302,7 @@ async fn schedule_smoke_test_final(
         else {
             return;
         };
-        if !runtime.smoke_test_enabled() {
+        if !runtime.handler_enabled() {
             return;
         }
         emit_smoke_final_debounce_span(&state, &gateway_call_id, &pending, debounce).await;
@@ -377,7 +408,7 @@ async fn dispatch_final_transcript_to_handler(
     quality_config: Option<&VoiceQualityConfig>,
     final_transcript_at: Instant,
 ) -> anyhow::Result<()> {
-    if !runtime.smoke_test_enabled() {
+    if !runtime.handler_enabled() {
         return Ok(());
     }
     let transcript_text = event.text().trim().to_string();
@@ -951,10 +982,11 @@ mod tests {
     use tokio::time::timeout;
 
     fn test_runtime() -> ConversationRuntime {
-        ConversationRuntime::new(
+        ConversationRuntime::new_with_handler_options(
             TelnyxClient::new("https://api.example.test", None, true),
             crate::tts::unavailable_registry(),
             default_conversation_handler(),
+            true,
             true,
         )
     }
@@ -964,10 +996,11 @@ mod tests {
             Arc::new(StaticTtsFactory),
             Arc::new(StaticTtsFactory),
         ));
-        ConversationRuntime::new(
+        ConversationRuntime::new_with_handler_options(
             TelnyxClient::new("https://api.example.test", None, true),
             tts,
             default_conversation_handler(),
+            true,
             true,
         )
     }
@@ -996,6 +1029,22 @@ mod tests {
             Arc::new(FailingConversationHandler),
             true,
         )
+    }
+
+    #[derive(Clone, Debug)]
+    struct PrefixConversationHandler;
+
+    #[async_trait]
+    impl ConversationHandler for PrefixConversationHandler {
+        async fn on_transcript(
+            &self,
+            event: TranscriptEvent,
+            _context: &mut CallContext,
+        ) -> Result<ConversationCommand, VoiceAppError> {
+            Ok(ConversationCommand::Say {
+                text: format!("agent: {}", event.text()),
+            })
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -1058,6 +1107,43 @@ mod tests {
             ConversationCommand::Say { text } => assert_eq!(text, "I heard: hello"),
             _ => panic!("expected say command"),
         }
+    }
+
+    #[tokio::test]
+    async fn generic_handler_dispatches_without_smoke_final_coalescing() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        let runtime = ConversationRuntime::new_with_handler_options(
+            TelnyxClient::new("https://api.example.test", None, true),
+            crate::tts::unavailable_registry(),
+            Arc::new(PrefixConversationHandler),
+            true,
+            false,
+        );
+        assert_eq!(runtime.handler_label(), "handler");
+
+        handle_transcript_event(
+            &state,
+            &SharedMediaRegistry::default(),
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "hello".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+        )
+        .await
+        .expect("generic handler should dispatch immediately");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Proposed);
+        assert_eq!(call.conversation.last_user_text.as_deref(), Some("hello"));
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("agent: hello")
+        );
     }
 
     #[tokio::test]
