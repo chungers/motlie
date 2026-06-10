@@ -33,7 +33,9 @@ These rules hold across every section below. They are stated once here; later se
 5. **Side effects need approval.** Treat `connect`, `open`, `join`/`new`/`recruit`, `send`, `interrupt`, `handoff`, `label`, `leave`, `retire`, `reclaim`, `close`, and `daemon start` as side-effecting. If the latest request asks for an outline, staffing, or risk plan, deliver that and wait. Otherwise summarize intended side effects before running them. On failure, stop the sequence, report the exact failure and implication, then decide the next step with the user unless the fix is local and obvious.
 6. **Never invent state.** Do not fabricate credentials, host aliases, SSH URIs, issue numbers, or product direction. Ask the user (see Prerequisites To Collect).
 7. **Report quietly, by outcome.** Surface material state changes, blockers, risks, and decisions needing a human. Do not narrate routine tool calls or paste raw logs; summarize the relevant result.
-8. **TUI submit retry.** Agent TUIs sometimes miss the submit newline. If the timeline shows typed-but-unsubmitted text after a send, wait briefly and send one extra empty `--enter`. This is a targeted retry, not a default double-send.
+8. **TUI submit retry.** Agent TUIs sometimes miss the submit newline. If the timeline shows typed-but-unsubmitted text after a send, wait briefly and send one extra empty `--enter`. This is a targeted retry, not a default double-send. (`send`/`broadcast`/`timer` now also accept `--submit-retries`/`--submit-retry-delay-ms` for a built-in settle-delayed resubmit; the bare empty `--enter` is the manual fallback.)
+9. **No unilateral scope decisions.** As orchestrator/coordinator you do not own scope. Never defer, drop, postpone, descope, or split a review finding or requirement into a follow-on — or otherwise change agreed scope — without **explicit, documented human approval**. Surface the tradeoff and your recommendation, then wait; if something is genuinely out of scope or blocked, flag it and let the human decide. Record the human's decision (who, when, and the issue/PR link for any follow-on) where the work is tracked. A human-approved follow-on is allowed; an orchestrator-initiated deferral is not. The same bar applies to collaborator agents: if one proposes a deferral or scope change, route it to the human — do not sanction it yourself.
+10. **Relay human decisions with high fidelity, and verify they land.** Capture each human design decision exactly as stated — names, values, ranges, scope — and relay it to implementers verbatim where specifics matter; do not paraphrase away or substitute your own wording. Track every directed change to **landed-and-verified**: confirm the merged code/CLI actually matches the directive (e.g. the renamed flag exists, the value is in range), and **surface any drop, divergence, or silent revert immediately** — never document the divergent reality as if it were settled. A directive is not done until you have verified it shipped as specified. If reality and a prior directive conflict, flag the conflict to the human rather than quietly adopting reality.
 
 ## Prerequisites To Collect
 
@@ -79,8 +81,8 @@ Shared enums:
 | | `reclaim <target>` | Terminal teardown: kill tmux + deregister. **GATED**: requires `managed` + `quarantined` | |
 | | `session list` | List sessions | |
 | | `session mark <target> --state --summary` | Annotate session state | |
-| Messaging | `send <ws> <target> --text` | Send to one session | `--enter`/`--no-enter`, `--interrupt-first`, `--settle-ms` (500), `--paste-mode bracketed\|literal`, `--require-state`, `--set-state` |
-| | `broadcast <ws> --text` | Send to many | `--enter`/`--no-enter`, `--role`, `--state`, `--paste-mode` |
+| Messaging | `send <ws> <target> --text` | Send to one session | `--enter`/`--no-enter`, `--interrupt-first`, `--settle-ms` (500), `--submit-retries` (1), `--submit-retry-delay-ms` (750), `--paste-mode bracketed\|literal`, `--require-state`, `--set-state` |
+| | `broadcast <ws> --text` | Send to many | `--enter`/`--no-enter`, `--role`, `--state`, `--paste-mode`, `--settle-ms` (500), `--submit-retries` (1), `--submit-retry-delay-ms` (750) |
 | | `interrupt <target>` | Non-destructive interrupt | `--key esc\|ctrl-c` (esc) |
 | Handoff | `handoff arm <ws> --from --to --on <state> --task` | Conditional sequencing | `--only-on-transition` |
 | | `handoff list <ws>` / `handoff cancel ...` | Inspect/cancel armed handoffs | |
@@ -234,7 +236,15 @@ after daemon restart. Do not target collaborator sessions with orchestrator
 timers unless the user explicitly asks for that behavior.
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key. Retries send only extra Enter keys, not
-the prompt text; `--no-enter` disables retries. Timer delivery also defaults to
+the prompt text; `--no-enter` disables retries. `send`/`broadcast` now carry the
+same settle-delayed, retried prompt-submit knobs the timer path uses
+(`--settle-ms`/`--submit-retries`/`--submit-retry-delay-ms`): the Enter is
+decoupled from the payload (settle, then a separate Enter, retried on miss), so
+the glued-Enter submit-miss is handled on those paths too, not just timers.
+NOTE (outstanding directed change): a human-directed rename of `--no-enter` →
+`--no-prompt-submit` has not shipped in the installed binary, which still
+exposes `--no-enter`. Use `--no-enter` until the rename lands; this is a tracked
+divergence from a directive, not the intended final name (see Invariant 10). Timer delivery also defaults to
 an input-quiet guard (`--input-quiet-for 10s`): if an attached client typed in
 the target session recently, mstream defers the timer and reports the deferral
 in `timer list` instead of interleaving prompt text with user input. Use
