@@ -159,7 +159,7 @@ usability across x86 CPU, GB10/CUDA, and Metal.
 - [x] Promote checkpoint format and artifact quantization label to snapshot/result/report grouping keys, independent from runtime precision flags.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [x] Fix or document a durable repo-wired GGUF toolchain path for the `llama-cpp-sys` `stdbool.h` bindgen failure on Linux x86 and GB10.
-  Implemented in `evals matrix` child builds by injecting repo-local C-header shims and host compiler builtin include dirs via `BINDGEN_EXTRA_CLANG_ARGS`; direct manual Linux GGUF Cargo builds use the documented equivalent env command. DESIGN reference: Artifact Provisioning And Native Toolchains.
+  Implemented in `evals matrix` child builds by injecting the repo-local C-header shim via `BINDGEN_EXTRA_CLANG_ARGS`, with host compiler builtin include dirs appended when discovered; direct manual Linux GGUF Cargo builds use the documented equivalent env command. DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [x] Add an explicit macOS/Metal GGUF build+verify task covering Apple clang, Metal backend feature flags, shader compilation, and runtime loading.
   Implemented through `apple-metal` GGUF snapshot cells plus the matrix command documented in `evals/README.md`; those cells build/run the llama.cpp GGUF path on Apple Metal hosts. DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [x] If GGUF-on-Metal is unsupported for a snapshot, emit blocked Metal GGUF cells with `gguf_metal_unverified` or `native_toolchain_missing` instead of leaving the quant x platform row empty.

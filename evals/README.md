@@ -96,13 +96,13 @@ On GB10/Linux AArch64, the repo `.cargo/config.toml` wires the required
 default Cargo command.
 
 For GGUF snapshot cells on Linux, `evals matrix` wires `BINDGEN_EXTRA_CLANG_ARGS`
-for child builds with the repo-local `tools/clang-compat/include` shim plus the
-host compiler builtin include directory. Direct, hand-run Linux GGUF feature
-builds need the same include arguments until `llama-cpp-sys` handles this
-compiler-builtin path itself:
+for child builds with the repo-local `tools/clang-compat/include` shim; host
+compiler builtin include directories are appended when discovered. Direct,
+hand-run Linux GGUF feature builds need the same include arguments until
+`llama-cpp-sys` handles this C-header path itself:
 
 ```sh
-BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include -I$(cc -print-file-name=include)" \
+BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include" \
   cargo build -p evals --no-default-features --features model-qwen3-4b-gguf --all-targets
 ```
 

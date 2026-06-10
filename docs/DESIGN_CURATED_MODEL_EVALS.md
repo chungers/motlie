@@ -379,10 +379,11 @@ The GGUF axis is blocked until native toolchain checks pass on every recruited
 platform that claims GGUF coverage. Linux x86 and GB10 use driver-wired child
 build args for the `llama-cpp-sys` bindgen/toolchain C-header failure: GGUF
 snapshot child builds receive `BINDGEN_EXTRA_CLANG_ARGS` with the repo-local
-`tools/clang-compat/include` shim and the host compiler builtin include
-directory. Direct hand-run Linux GGUF builds use the documented equivalent env
-command; Cargo config must not inject Linux bindgen args globally because that
-breaks macOS/Metal bindgen. The result record exposes only a boolean presence
+`tools/clang-compat/include` shim; host compiler builtin include directories
+are appended when discovered, but the repo shim is the durable path. Direct
+hand-run Linux GGUF builds use the documented equivalent env command; Cargo
+config must not inject Linux bindgen args globally because that breaks
+macOS/Metal bindgen. The result record exposes only a boolean presence
 marker, not host paths. macOS/Metal must separately verify the Apple clang,
 Metal backend feature flags, shader compilation, and any codesign/runtime
 requirements. If GGUF-on-Metal is not supported for a snapshot, the Metal cells

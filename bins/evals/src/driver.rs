@@ -502,8 +502,10 @@ fn run_child_cell(
 }
 
 fn evals_debug_binary() -> PathBuf {
-    repo_root()
-        .join("target")
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("target"));
+    target_dir
         .join("debug")
         .join(format!("evals{}", std::env::consts::EXE_SUFFIX))
 }
@@ -828,17 +830,28 @@ fn gguf_bindgen_env(cell: &SnapshotCell) -> Option<GgufBindgenEnv> {
     }
 
     let repo_include = repo_root().join("tools/clang-compat/include");
-    let repo_include = repo_include
-        .join("stdbool.h")
-        .is_file()
-        .then_some(repo_include);
-    let compiler_include = compiler_builtin_include_dir();
-
-    let repo_wired = repo_include.is_some() && compiler_include.is_some();
-    let args = merge_bindgen_args(
+    let repo_include = repo_compat_include_dir(repo_include);
+    build_gguf_bindgen_env(
         std::env::var("BINDGEN_EXTRA_CLANG_ARGS").ok().as_deref(),
-        repo_include.into_iter().chain(compiler_include),
-    );
+        repo_include,
+        compiler_builtin_include_dirs(),
+    )
+}
+
+fn repo_compat_include_dir(path: PathBuf) -> Option<PathBuf> {
+    ["stdbool.h", "stddef.h", "stdarg.h"]
+        .into_iter()
+        .all(|header| path.join(header).is_file())
+        .then_some(path)
+}
+
+fn build_gguf_bindgen_env(
+    existing: Option<&str>,
+    repo_include: Option<PathBuf>,
+    compiler_includes: Vec<PathBuf>,
+) -> Option<GgufBindgenEnv> {
+    let repo_wired = repo_include.is_some();
+    let args = merge_bindgen_args(existing, compiler_includes.into_iter().chain(repo_include));
 
     (!args.is_empty()).then_some(GgufBindgenEnv { args, repo_wired })
 }
@@ -851,7 +864,16 @@ fn is_gguf_cell(cell: &SnapshotCell) -> bool {
             .any(|feature| feature.contains("gguf"))
 }
 
-fn compiler_builtin_include_dir() -> Option<PathBuf> {
+fn compiler_builtin_include_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(path) = compiler_builtin_include_dir_from_cc() {
+        push_unique_compiler_include_dir(&mut dirs, path);
+    }
+    append_gcc_builtin_include_dirs(&mut dirs);
+    dirs
+}
+
+fn compiler_builtin_include_dir_from_cc() -> Option<PathBuf> {
     let output = Command::new("cc")
         .arg("-print-file-name=include")
         .output()
@@ -864,7 +886,31 @@ fn compiler_builtin_include_dir() -> Option<PathBuf> {
     if path.as_os_str().is_empty() || path == Path::new("include") {
         return None;
     }
-    (path.join("stddef.h").is_file() && path.join("stdbool.h").is_file()).then_some(path)
+    is_compiler_builtin_include_dir(&path).then_some(path)
+}
+
+fn append_gcc_builtin_include_dirs(dirs: &mut Vec<PathBuf>) {
+    let Ok(triples) = fs::read_dir("/usr/lib/gcc") else {
+        return;
+    };
+    for triple in triples.flatten() {
+        let Ok(versions) = fs::read_dir(triple.path()) else {
+            continue;
+        };
+        for version in versions.flatten() {
+            push_unique_compiler_include_dir(dirs, version.path().join("include"));
+        }
+    }
+}
+
+fn push_unique_compiler_include_dir(dirs: &mut Vec<PathBuf>, path: PathBuf) {
+    if is_compiler_builtin_include_dir(&path) && !dirs.iter().any(|existing| existing == &path) {
+        dirs.push(path);
+    }
+}
+
+fn is_compiler_builtin_include_dir(path: &Path) -> bool {
+    path.join("stdarg.h").is_file() && path.join("stddef.h").is_file()
 }
 
 fn merge_bindgen_args(
@@ -1158,6 +1204,35 @@ mod tests {
         assert_eq!(
             merged,
             "--target=aarch64-unknown-linux-gnu -I/repo/tools/clang-compat/include -I/usr/lib/gcc/include"
+        );
+    }
+
+    #[test]
+    fn gguf_bindgen_env_is_repo_wired_with_repo_compat_only() {
+        let env = build_gguf_bindgen_env(
+            None,
+            Some(PathBuf::from("/repo/tools/clang-compat/include")),
+            Vec::new(),
+        )
+        .expect("repo compat include should produce bindgen env");
+
+        assert!(env.repo_wired);
+        assert_eq!(env.args, "-I/repo/tools/clang-compat/include");
+    }
+
+    #[test]
+    fn gguf_bindgen_env_keeps_compiler_builtins_before_repo_compat() {
+        let env = build_gguf_bindgen_env(
+            Some("--target=x86_64-unknown-linux-gnu"),
+            Some(PathBuf::from("/repo/tools/clang-compat/include")),
+            vec![PathBuf::from("/usr/lib/gcc/x86_64-linux-gnu/13/include")],
+        )
+        .expect("compiler plus repo includes should produce bindgen env");
+
+        assert!(env.repo_wired);
+        assert_eq!(
+            env.args,
+            "--target=x86_64-unknown-linux-gnu -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/repo/tools/clang-compat/include"
         );
     }
 
