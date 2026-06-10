@@ -14,7 +14,7 @@ use crate::metrics::{CapabilityPerformanceMetrics, PerformanceMetrics, ToolUsePe
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, elapsed_ms, evaluate_performance_measured, evaluate_resource_status,
-    prepare_bundle, start_options,
+    observe_backend_accelerator, prepare_bundle, start_options,
 };
 use crate::runner::{RunContext, ScenarioRunner};
 use crate::scenario::{CapabilityName, ToolUseAssertions, ToolUseInput};
@@ -46,6 +46,7 @@ impl ScenarioRunner for ToolUseRunner {
             .await
             .with_context(|| format!("failed to start bundle `{}`", prepared.bundle_id))?;
         let startup_ms = elapsed_ms(startup_started_at.elapsed());
+        observe_backend_accelerator(&mut context, &handle);
         context.metrics_sampler.sample();
 
         let chat = handle

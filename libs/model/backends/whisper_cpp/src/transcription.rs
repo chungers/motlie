@@ -7,14 +7,14 @@ use motlie_model::typed::{AudioBuf, BatchTranscriber, Mono};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
-    UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, StartOptions, TranscriptSegment, TranscriptionParams,
+    TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    RuntimeMetricState, configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_ggml_model_path,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_ggml_model_path, RuntimeMetricState,
 };
 
 const WHISPER_CPP_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Ggml];
@@ -256,6 +256,22 @@ impl BundleHandle for WhisperCppHandle {
         })
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        if cfg!(feature = "cuda") {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "whisper_cpp:cuda".to_owned(),
+                offload: Some("cuda_execution_provider=on".to_owned()),
+                selected_device: Some("0".to_owned()),
+            })
+        } else {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "whisper_cpp:cpu".to_owned(),
+                offload: Some("accelerator_feature=none".to_owned()),
+                selected_device: None,
+            })
+        }
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
@@ -415,11 +431,9 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Ggml]);
         assert_eq!(adapter.backend_kind(), BackendKind::WhisperCpp);
-        assert!(
-            adapter
-                .capabilities()
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(adapter
+            .capabilities()
+            .supports(CapabilityKind::Transcription));
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 
@@ -429,11 +443,9 @@ mod tests {
             WhisperCppTranscriptionBundle::new(WhisperCppTranscriptionSpec::whisper_base_en());
 
         assert_eq!(bundle.id().as_str(), "whisper_base_en");
-        assert!(
-            bundle
-                .capabilities()
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(bundle
+            .capabilities()
+            .supports(CapabilityKind::Transcription));
         assert_eq!(bundle.metadata().quantization, QuantizationSupport::none());
     }
 }

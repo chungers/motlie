@@ -9,7 +9,8 @@ use crate::metrics::{CapabilityPerformanceMetrics, PerformanceMetrics, TtsPerfor
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
-    evaluate_performance_measured, evaluate_resource_status, prepare_bundle,
+    evaluate_performance_measured, evaluate_resource_status, observe_backend_accelerator,
+    prepare_bundle,
 };
 use crate::runner::{RunContext, ScenarioRunner};
 use crate::scenario::{CapabilityName, TtsAssertions};
@@ -146,6 +147,7 @@ where
     let startup_started_at = std::time::Instant::now();
     let handle = start(options).await.context("failed to start TTS bundle")?;
     let startup_ms = elapsed_ms(startup_started_at.elapsed());
+    observe_backend_accelerator(context, &handle);
     context.metrics_sampler.sample();
 
     let synthesis_started_at = std::time::Instant::now();

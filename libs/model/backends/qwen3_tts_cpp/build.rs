@@ -77,6 +77,9 @@ fn main() {
 
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-lib=dylib=c++");
+        println!("cargo:rustc-link-lib=framework=Accelerate");
+        println!("cargo:rustc-link-lib=framework=Metal");
+        println!("cargo:rustc-link-lib=framework=MetalKit");
     } else if cfg!(target_env = "gnu") {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
@@ -281,6 +284,15 @@ if(TARGET qwen3-tts-cli)
         EXCLUDE_FROM_ALL TRUE
         EXCLUDE_FROM_DEFAULT_BUILD TRUE
     )
+endif()
+
+if(APPLE)
+    find_library(MOTLIE_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+    foreach(lib_target text_tokenizer tts_transformer audio_tokenizer_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli)
+        if(TARGET ${lib_target})
+            target_link_libraries(${lib_target} PUBLIC ${MOTLIE_ACCELERATE_FRAMEWORK})
+        endif()
+    endforeach()
 endif()
 
 if(MOTLIE_ENABLE_CUDA)

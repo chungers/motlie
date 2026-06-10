@@ -17,7 +17,8 @@ use crate::metrics::{AsrPerformanceMetrics, CapabilityPerformanceMetrics, Perfor
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
-    evaluate_performance_measured, evaluate_resource_status, prepare_bundle,
+    evaluate_performance_measured, evaluate_resource_status, observe_backend_accelerator,
+    prepare_bundle,
 };
 use crate::runner::{RunContext, ScenarioRunner};
 use crate::scenario::{AsrAssertions, CapabilityName};
@@ -190,6 +191,7 @@ where
     let startup_started_at = std::time::Instant::now();
     let handle = start(options).await.context("failed to start ASR bundle")?;
     let startup_ms = elapsed_ms(startup_started_at.elapsed());
+    observe_backend_accelerator(context, &handle);
     context.metrics_sampler.sample();
 
     let transcription_started_at = std::time::Instant::now();
@@ -226,6 +228,7 @@ where
     let startup_started_at = std::time::Instant::now();
     let handle = start(options).await.context("failed to start ASR bundle")?;
     let startup_ms = elapsed_ms(startup_started_at.elapsed());
+    observe_backend_accelerator(context, &handle);
     context.metrics_sampler.sample();
 
     let transcription_started_at = std::time::Instant::now();

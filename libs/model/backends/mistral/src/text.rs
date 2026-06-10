@@ -1,15 +1,15 @@
 use std::future::Future;
 
-use mistralrs::TextModelBuilder;
 use mistralrs::core::NormalLoaderType;
+use mistralrs::TextModelBuilder;
 use motlie_model::{
     BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, GenerationParams,
     ModelError, QuantizationBits, QuantizationSupport, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    MistralMessageParts, configure_artifact_policy, map_quantization_bits, paged_attn_context_size,
-    should_force_cpu, text_only_message_parts,
+    configure_artifact_policy, map_quantization_bits, paged_attn_context_size, should_force_cpu,
+    text_only_message_parts, MistralMessageParts,
 };
 use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 

@@ -7,7 +7,8 @@ use crate::metrics::MetricsSampler;
 use crate::platform::PlatformCollector;
 use crate::report::{self, OutputSink};
 use crate::result::{
-    AcceleratorClass, ApplicabilityDecision, CoverageSection, EvalDepth, TerminalOutcome,
+    AcceleratorClass, ApplicabilityDecision, ChildBuildSection, CoverageSection, EvalDepth,
+    TerminalOutcome,
 };
 use crate::runner::asr::AsrRunner;
 use crate::runner::chat::ChatRunner;
@@ -75,6 +76,7 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
             ))
         });
     let coverage = options.coverage(&scenario, accelerator.as_ref(), &platform);
+    let child_build = options.child_build();
     let context = RunContext {
         scenario,
         bundle_selection: BundleSelection {
@@ -94,7 +96,7 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
         },
         coverage,
         accelerator,
-        child_build: None,
+        child_build,
         platform_collector,
         metrics_sampler: MetricsSampler::new(),
         output_sink,
@@ -172,6 +174,9 @@ struct RunOptions {
     model_family: Option<String>,
     backend: Option<String>,
     requested_accelerator: Option<AcceleratorClass>,
+    child_build_log: Option<String>,
+    child_build_status: Option<i32>,
+    child_build_duration_ms: Option<u64>,
 }
 
 impl RunOptions {
@@ -195,6 +200,9 @@ impl RunOptions {
         let mut model_family = None;
         let mut backend = None;
         let mut requested_accelerator = None;
+        let mut child_build_log = None;
+        let mut child_build_status = None;
+        let mut child_build_duration_ms = None;
 
         let mut index = 0;
         while index < args.len() {
@@ -261,6 +269,23 @@ impl RunOptions {
                         "--requested-accelerator",
                     )?)?);
                 }
+                "--child-build-log" => {
+                    child_build_log = Some(take_value(args, &mut index, "--child-build-log")?);
+                }
+                "--child-build-status" => {
+                    child_build_status = Some(
+                        take_value(args, &mut index, "--child-build-status")?
+                            .parse::<i32>()
+                            .context("--child-build-status must be an integer")?,
+                    );
+                }
+                "--child-build-duration-ms" => {
+                    child_build_duration_ms = Some(
+                        take_value(args, &mut index, "--child-build-duration-ms")?
+                            .parse::<u64>()
+                            .context("--child-build-duration-ms must be an integer")?,
+                    );
+                }
                 other => bail!("unknown evals run option `{other}`"),
             }
             index += 1;
@@ -288,6 +313,21 @@ impl RunOptions {
             model_family,
             backend,
             requested_accelerator,
+            child_build_log,
+            child_build_status,
+            child_build_duration_ms,
+        })
+    }
+
+    fn child_build(&self) -> Option<ChildBuildSection> {
+        (self.child_build_log.is_some()
+            || self.child_build_status.is_some()
+            || self.child_build_duration_ms.is_some())
+        .then(|| ChildBuildSection {
+            command: Vec::new(),
+            status: self.child_build_status,
+            duration_ms: self.child_build_duration_ms,
+            log_path: self.child_build_log.clone(),
         })
     }
 
@@ -414,7 +454,7 @@ fn print_usage() {
     println!("  evals matrix --snapshot <path> [--profile NAME] [--artifact-root PATH]");
     println!("  evals provision --snapshot <path> [--artifact-root PATH]");
     println!("  evals report --input <jsonl> --format markdown");
-    println!("  evals report --aggregate <glob-or-path> --output <path> [--allow-invalid-records]");
+    println!("  evals report --aggregate <glob-or-path> --output <path> [--snapshot <path>] [--allow-invalid-records]");
 }
 
 #[cfg(test)]

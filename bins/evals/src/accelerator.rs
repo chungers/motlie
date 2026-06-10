@@ -56,7 +56,14 @@ pub fn resolve(
     let caller_reported_backend = backend_mode.is_some() || offload.is_some();
     let mut backend_mode = backend_mode;
     let mut offload = offload.or_else(runtime_offload_override);
-    let runtime_forced_cpu = runtime_forces_cpu() || runtime_gpu_layers_override() == Some(0);
+    let backend_reported_cpu = backend_mode
+        .as_deref()
+        .is_some_and(|mode| mode == "cpu" || mode.ends_with(":cpu"))
+        || offload.as_deref().is_some_and(|value| {
+            value.contains("gpu_layers=0") || value.contains("force_cpu=true")
+        });
+    let runtime_forced_cpu =
+        runtime_forces_cpu() || runtime_gpu_layers_override() == Some(0) || backend_reported_cpu;
     let resolved = if runtime_forced_cpu && requested != AcceleratorClass::Unavailable {
         AcceleratorClass::Cpu
     } else {

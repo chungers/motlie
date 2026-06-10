@@ -313,6 +313,7 @@ result directories, not a live scheduler:
 
 ```sh
 cargo run -p evals -- report --aggregate 'evals/results/**/results.jsonl' \
+  --snapshot evals/snapshots/<snapshot-id>.toml \
   --output evals/reports/<snapshot-id>/coverage.md
 ```
 
@@ -332,7 +333,8 @@ The aggregate report includes:
   backend/platform/depth, capability x platform/profile, capability x depth,
   backend x platform, and requested x resolved accelerator
 - missing-coverage lists for snapshot cells not represented by any merged
-  result PR
+  result when `--snapshot <path>` is supplied; without the snapshot, the report
+  states that missing-cell detection was not requested
 - blocker rollups grouped by artifact, host profile, native toolchain, feature
   matrix, accelerator mismatch, behavior/performance/resource gate, and metric
   unavailability
@@ -374,10 +376,11 @@ Provisioning rules:
   reviewed checkpoint precision or default label.
 
 The GGUF axis is blocked until native toolchain checks pass on every recruited
-platform that claims GGUF coverage. Linux x86 and GB10 use driver-wired child
-build args for the `llama-cpp-sys` bindgen/toolchain `stdbool.h` failure: GGUF
-snapshot cells receive `BINDGEN_EXTRA_CLANG_ARGS` pointing at the repo-local
-`tools/clang-compat/include/stdbool.h` shim and the host compiler builtin
+platform that claims GGUF coverage. Linux x86 and GB10 use repo-wired Cargo
+environment plus driver-wired child build args for the `llama-cpp-sys`
+bindgen/toolchain C-header failure: direct Cargo builds inherit
+`tools/clang-compat/include`, and GGUF snapshot cells also receive
+`BINDGEN_EXTRA_CLANG_ARGS` with the repo shim plus the host compiler builtin
 include directory. The result record exposes only a boolean presence marker, not
 host paths. macOS/Metal must separately verify the Apple clang, Metal backend
 feature flags, shader compilation, and any codesign/runtime requirements. If
@@ -632,3 +635,16 @@ GGUF verification is platform-specific. Linux x86 and GB10 must cover the
 Apple clang, Metal backend flags, shader build, and runtime loading. Unsupported
 GGUF platform cells are represented by blocked records and visible quant x
 platform report gaps.
+
+
+### Tool-Use CEL Subset
+
+`libs/eval-tools` intentionally uses `engine = "motlie-eval-tools-cel-subset"`
+inside the eval binary instead of linking `cel-cxx` into ORT-backed eval builds.
+The supported assertion grammar is deterministic and documented for scenario
+authors: `tool_called(...)`, `argument_equals(...)`, `final_contains(...)`,
+`round_trip_success()`, numeric comparisons over `tool_call_count(...)` and
+`tool_precision()`, conjunction with `&&`, and first-call field paths such as
+`tool_calls[0].name == "get_weather"` and
+`tool_calls[0].args.city == "Seattle"`. Full CEL expressions outside this subset
+are rejected as unsupported assertion clauses.

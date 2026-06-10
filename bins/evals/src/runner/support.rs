@@ -3,8 +3,13 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Context, Result};
-use motlie_model::{ArtifactPolicy, BundleId, CapabilityKind, QuantizationBits, StartOptions};
-use motlie_models::{download_bundle_artifacts, BundleDescriptor, Catalog, CuratedBundle};
+use motlie_model::{
+    ArtifactPolicy, BundleHandle, BundleId, CapabilityKind, QuantizationBits, StartOptions,
+};
+use motlie_models::{
+    download_bundle_artifacts_with_options, ArtifactDownloadOptions, BundleDescriptor, Catalog,
+    CuratedBundle,
+};
 
 use crate::accelerator;
 use crate::metrics::{MemoryPeakKind, PerformanceMetrics, ResourceMetrics};
@@ -70,12 +75,20 @@ pub fn prepare_bundle(
     }
 
     let downloaded_artifacts = if context.runtime_flags.download_artifacts {
-        download_bundle_artifacts(&catalog, &bundle_id, &context.artifact_root)
-            .with_context(|| format!("failed to download artifacts for `{bundle_id}`"))?
-            .downloaded
-            .into_iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
+        let download_options = ArtifactDownloadOptions {
+            hf_token: hf_token_from_env(),
+        };
+        download_bundle_artifacts_with_options(
+            &catalog,
+            &bundle_id,
+            &context.artifact_root,
+            &download_options,
+        )
+        .with_context(|| format!("failed to download artifacts for `{bundle_id}`"))?
+        .downloaded
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
@@ -92,6 +105,45 @@ pub fn prepare_bundle(
         downloaded_artifacts,
         quantization,
     })
+}
+
+fn hf_token_from_env() -> Option<String> {
+    std::env::var("HF_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+}
+
+pub fn observe_backend_accelerator<H: BundleHandle>(context: &mut RunContext, handle: &H) {
+    let Some(observation) = handle.accelerator_observation() else {
+        return;
+    };
+
+    let platform = context.platform_collector.collect();
+    let requested = context
+        .accelerator
+        .as_ref()
+        .map(|accelerator| accelerator.requested_class)
+        .unwrap_or_else(|| accelerator::requested_for_profile(&context.profile.name));
+    let offload = merge_offload_and_device(observation.offload, observation.selected_device);
+    context.accelerator = Some(accelerator::resolve(
+        requested,
+        &platform,
+        Some(observation.backend_mode),
+        offload,
+    ));
+}
+
+fn merge_offload_and_device(
+    offload: Option<String>,
+    selected_device: Option<String>,
+) -> Option<String> {
+    match (offload, selected_device) {
+        (Some(offload), Some(device)) => Some(format!("{offload};selected_device={device}")),
+        (Some(offload), None) => Some(offload),
+        (None, Some(device)) => Some(format!("selected_device={device}")),
+        (None, None) => None,
+    }
 }
 
 pub fn start_options(context: &RunContext, prepared: &PreparedBundle) -> StartOptions {

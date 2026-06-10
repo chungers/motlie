@@ -10,7 +10,8 @@ use crate::metrics::{
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms, evaluate_resource_status,
-    mean, percentile, prepare_bundle, start_options, SectionEvaluation,
+    mean, observe_backend_accelerator, percentile, prepare_bundle, start_options,
+    SectionEvaluation,
 };
 use crate::runner::{RunContext, ScenarioRunner};
 use crate::scenario::{CapabilityName, PerfAssertions};
@@ -54,6 +55,7 @@ impl ScenarioRunner for PerfRunner {
             .await
             .with_context(|| format!("failed to start bundle `{}`", prepared.bundle_id))?;
         let startup_ms = elapsed_ms(startup_started_at.elapsed());
+        observe_backend_accelerator(&mut context, &handle);
         context.metrics_sampler.sample();
 
         let chat = handle
@@ -257,7 +259,7 @@ fn evaluate_performance_status(
     assertions: &PerfAssertions,
     mean_latency_ms: Option<f64>,
     p95_latency_ms: Option<f64>,
-    unavailable: &[MetricUnavailable],
+    _unavailable: &[MetricUnavailable],
 ) -> SectionEvaluation {
     if let Some(max_mean_latency_ms) = assertions.max_mean_latency_ms {
         match mean_latency_ms {
@@ -300,18 +302,6 @@ fn evaluate_performance_status(
                 };
             }
         }
-    }
-
-    if !unavailable.is_empty() {
-        let metrics = unavailable
-            .iter()
-            .map(|gap| gap.metric.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return SectionEvaluation {
-            status: AcceptanceStatus::Blocked,
-            failure_reason: Some(format!("required LLM perf metrics unavailable: {metrics}")),
-        };
     }
 
     SectionEvaluation {

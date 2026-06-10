@@ -72,7 +72,7 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: Result Record.
 - [x] Implement `report --input <jsonl> --format markdown`.
   DESIGN reference: Decision.
-- [x] Implement `report --aggregate 'evals/results/**/results.jsonl' --output <path>` for consolidated cross-host coverage.
+- [x] Implement `report --aggregate 'evals/results/**/results.jsonl' --snapshot <path> --output <path>` for consolidated cross-host coverage and snapshot-based missing-cell reporting.
   DESIGN reference: PR-Based Aggregation And Reports.
 - [x] Validate aggregate input records against the non-optional coverage schema before reporting; strict aggregate mode fails on invalid records, with `--allow-invalid-records` reserved for local forensics.
   DESIGN reference: Skip/Block And Coverage Schema.
@@ -159,7 +159,7 @@ usability across x86 CPU, GB10/CUDA, and Metal.
 - [x] Promote checkpoint format and artifact quantization label to snapshot/result/report grouping keys, independent from runtime precision flags.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [x] Fix or document a durable repo-wired GGUF toolchain path for the `llama-cpp-sys` `stdbool.h` bindgen failure on Linux x86 and GB10.
-  Implemented in `evals matrix` child builds by injecting repo-local `stdbool.h` plus host compiler builtin include dirs via `BINDGEN_EXTRA_CLANG_ARGS`; direct manual GGUF Cargo builds use the documented equivalent env command. DESIGN reference: Artifact Provisioning And Native Toolchains.
+  Implemented with repo `.cargo/config.toml` exposing `tools/clang-compat/include` for direct Cargo builds, plus `evals matrix` child builds injecting repo-local C-header shims and host compiler builtin include dirs via `BINDGEN_EXTRA_CLANG_ARGS`. DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [x] Add an explicit macOS/Metal GGUF build+verify task covering Apple clang, Metal backend feature flags, shader compilation, and runtime loading.
   Implemented through `apple-metal` GGUF snapshot cells plus the matrix command documented in `evals/README.md`; those cells build/run the llama.cpp GGUF path on Apple Metal hosts. DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [x] If GGUF-on-Metal is unsupported for a snapshot, emit blocked Metal GGUF cells with `gguf_metal_unverified` or `native_toolchain_missing` instead of leaving the quant x platform row empty.
@@ -205,7 +205,7 @@ usability across x86 CPU, GB10/CUDA, and Metal.
 
 - `evals/snapshots/curated-v2-smoke.toml` is the current pinned smoke snapshot. It contains per-profile feature overlays so CUDA/Metal model features are only added for matching host profiles.
 - `evals matrix --snapshot ... --dry-run` has been validated to emit one JSONL record per snapshot cell without launching model children.
-- `evals report --aggregate` has been validated against the dry-run JSONL and renders per-cell, model/capability, quant/backend/profile/depth, accelerator, blocker, and metric-gap slices.
+- `evals report --aggregate` has been validated against the dry-run JSONL and renders host-qualified per-cell rows, model/capability, capability/profile, capability/depth, backend/profile, quant/backend/profile/depth, accelerator, missing-coverage, blocker, and metric-gap slices.
 - Raw JSONL/log directories under `evals/results/` are ignored by default; committed Markdown summaries remain visible.
 
 ## Phase 10: PR-Based Distributed Dry Run And Aggregation

@@ -95,16 +95,11 @@ On GB10/Linux AArch64, the repo `.cargo/config.toml` wires the required
 `+fp16,+fhm` target features, so no manual `RUSTFLAGS` are needed for the
 default Cargo command.
 
-For GGUF snapshot cells on Linux, `evals matrix` wires `BINDGEN_EXTRA_CLANG_ARGS`
-for the child build with the repo-local `tools/clang-compat/include/stdbool.h`
-shim plus the host compiler builtin include directory. Direct, hand-run GGUF
-feature builds need the same include arguments until `llama-cpp-sys` handles this
-compiler-builtin path itself:
-
-```sh
-BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include -I$(cc -print-file-name=include)" \
-  cargo build -p evals --no-default-features --features model-qwen3-4b-gguf --all-targets
-```
+For GGUF snapshot cells on Linux, the repo `.cargo/config.toml` exposes
+`tools/clang-compat/include` for direct Cargo builds, and `evals matrix` also
+wires `BINDGEN_EXTRA_CLANG_ARGS` for child builds with the repo-local shim plus
+the host compiler builtin include directory. No manual bindgen env is required
+for the default repo commands.
 
 For CUDA-class hosts, pass the matching profile:
 
@@ -170,5 +165,5 @@ coverage summaries can live in `evals/results/`.
 Aggregate cross-host reports are generated with:
 
 ```sh
-cargo run -p evals -- report --aggregate 'evals/results/**/results.jsonl' --output evals/results/cross-platform-curated-results.md
+cargo run -p evals -- report --aggregate 'evals/results/**/results.jsonl' --snapshot evals/snapshots/curated-v2-smoke.toml --output evals/reports/curated-v2-smoke/coverage.md
 ```

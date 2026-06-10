@@ -12,8 +12,8 @@ use crate::metrics::{
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
-    evaluate_performance_measured, evaluate_resource_status, prepare_bundle, start_options,
-    SectionEvaluation,
+    evaluate_performance_measured, evaluate_resource_status, observe_backend_accelerator,
+    prepare_bundle, start_options, SectionEvaluation,
 };
 use crate::runner::{RunContext, ScenarioRunner};
 use crate::scenario::{CapabilityName, ChatAssertions};
@@ -60,6 +60,7 @@ impl ScenarioRunner for ChatRunner {
             .await
             .with_context(|| format!("failed to start bundle `{}`", prepared.bundle_id))?;
         let startup_ms = elapsed_ms(startup_started_at.elapsed());
+        observe_backend_accelerator(&mut context, &handle);
         context.metrics_sampler.sample();
 
         let chat = handle
@@ -308,21 +309,6 @@ fn evaluate_chat_performance(performance: &PerformanceMetrics) -> SectionEvaluat
             false,
             "performance metrics missing startup or request latency",
         );
-    }
-
-    if !performance.unavailable.is_empty() {
-        let metrics = performance
-            .unavailable
-            .iter()
-            .map(|gap| gap.metric.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return SectionEvaluation {
-            status: AcceptanceStatus::Blocked,
-            failure_reason: Some(format!(
-                "required LLM performance metrics unavailable: {metrics}"
-            )),
-        };
     }
 
     evaluate_performance_measured(

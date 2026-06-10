@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use crate::result::{
     terminal_outcome, AcceptanceStatus, ResultRecord, TerminalOutcome, RESULT_SCHEMA_VERSION,
 };
+use crate::snapshot::{load_snapshot, EvalSnapshot};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutputSink {
@@ -51,20 +52,25 @@ pub fn run_report(args: &[String]) -> Result<()> {
                 bail!("unsupported report format `{format}`");
             }
             let records = read_jsonl(&input)?;
-            print!("{}", render_records_markdown(&records, &[input]));
+            print!("{}", render_records_markdown(&records, &[input], None));
             Ok(())
         }
         ReportMode::Aggregate {
             aggregate,
             output,
             allow_invalid_records,
+            snapshot,
         } => {
             let paths = expand_aggregate_paths(&aggregate)?;
             let mut records = Vec::new();
             for path in &paths {
                 records.extend(read_aggregate_jsonl(path, !allow_invalid_records)?);
             }
-            let markdown = render_records_markdown(&records, &paths);
+            let snapshot = snapshot
+                .as_ref()
+                .map(|path| load_snapshot(path))
+                .transpose()?;
+            let markdown = render_records_markdown(&records, &paths, snapshot.as_ref());
             if let Some(parent) = output.parent() {
                 fs::create_dir_all(parent).with_context(|| {
                     format!(
@@ -121,6 +127,7 @@ enum ReportMode {
         aggregate: String,
         output: PathBuf,
         allow_invalid_records: bool,
+        snapshot: Option<PathBuf>,
     },
 }
 
@@ -131,6 +138,7 @@ impl ReportOptions {
         let mut aggregate = None;
         let mut output = None;
         let mut allow_invalid_records = false;
+        let mut snapshot = None;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -141,6 +149,9 @@ impl ReportOptions {
                     output = Some(PathBuf::from(take_value(args, &mut index, "--output")?))
                 }
                 "--allow-invalid-records" => allow_invalid_records = true,
+                "--snapshot" => {
+                    snapshot = Some(PathBuf::from(take_value(args, &mut index, "--snapshot")?));
+                }
                 other => bail!("unknown evals report option `{other}`"),
             }
             index += 1;
@@ -152,6 +163,7 @@ impl ReportOptions {
                 aggregate,
                 output,
                 allow_invalid_records,
+                snapshot,
             },
             _ => bail!(
                 "evals report requires either --input <jsonl> [--format markdown] or --aggregate <path> --output <path>"
@@ -161,7 +173,11 @@ impl ReportOptions {
     }
 }
 
-fn render_records_markdown(records: &[ResultRecord], inputs: &[PathBuf]) -> String {
+fn render_records_markdown(
+    records: &[ResultRecord],
+    inputs: &[PathBuf],
+    snapshot: Option<&EvalSnapshot>,
+) -> String {
     let mut out = String::new();
     out.push_str("# Curated Eval Coverage Report\n\n");
     out.push_str(&format!("- input files: `{}`\n", inputs.len()));
@@ -180,11 +196,14 @@ fn render_records_markdown(records: &[ResultRecord], inputs: &[PathBuf]) -> Stri
     }
 
     out.push_str("\n## Per-Cell Coverage\n\n");
-    out.push_str("| cell | bundle | capability | depth | profile | requested | resolved | outcome | reason |\n|---|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| cell | host | arch | run | bundle | capability | depth | profile | requested | resolved | outcome | reason |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for record in records {
         out.push_str(&format!(
-            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |\n",
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |\n",
             record.coverage.cell_id,
+            record.coverage.host_slug,
+            record.coverage.arch,
+            record.identity.run_id,
             record.coverage.bundle_id,
             record.coverage.capability,
             record.coverage.depth.as_str(),
@@ -209,6 +228,36 @@ fn render_records_markdown(records: &[ResultRecord], inputs: &[PathBuf]) -> Stri
         "capability",
         |record| record.coverage.model_family.clone(),
         |record| record.coverage.capability.clone(),
+    );
+
+    out.push_str("\n## Capability x Profile\n\n");
+    render_slice(
+        &mut out,
+        records,
+        "capability",
+        "profile",
+        |record| record.coverage.capability.clone(),
+        |record| record.coverage.profile.clone(),
+    );
+
+    out.push_str("\n## Capability x Depth\n\n");
+    render_slice(
+        &mut out,
+        records,
+        "capability",
+        "depth",
+        |record| record.coverage.capability.clone(),
+        |record| record.coverage.depth.as_str().to_owned(),
+    );
+
+    out.push_str("\n## Backend x Profile\n\n");
+    render_slice(
+        &mut out,
+        records,
+        "backend",
+        "profile",
+        |record| record.coverage.backend.clone(),
+        |record| record.coverage.profile.clone(),
     );
 
     out.push_str("\n## Model x Quantization x Backend/Profile/Depth\n\n");
@@ -244,6 +293,32 @@ fn render_records_markdown(records: &[ResultRecord], inputs: &[PathBuf]) -> Stri
         |record| record.coverage.resolved_accelerator.as_str().to_owned(),
     );
 
+    out.push_str("\n## Blocker Rollups\n\n");
+    out.push_str("| reason | profile | count |\n|---|---|---:|\n");
+    let mut blockers = BTreeMap::new();
+    for record in records {
+        if matches!(
+            record.coverage.terminal_outcome,
+            TerminalOutcome::Blocked | TerminalOutcome::Failed
+        ) {
+            let reason = record
+                .coverage
+                .reason
+                .as_ref()
+                .map(|reason| reason.as_str().to_owned())
+                .unwrap_or_else(|| "unknown".to_owned());
+            *blockers
+                .entry((reason, record.coverage.profile.clone()))
+                .or_insert(0_u64) += 1;
+        }
+    }
+    for ((reason, profile), count) in blockers {
+        out.push_str(&format!("| `{reason}` | `{profile}` | {count} |\n"));
+    }
+
+    out.push_str("\n## Missing Coverage\n\n");
+    render_missing_coverage(&mut out, records, snapshot);
+
     out.push_str("\n## Metric Gaps\n\n");
     out.push_str("| metric | reason | source | count |\n|---|---|---|---:|\n");
     let mut gaps = BTreeMap::new();
@@ -275,6 +350,51 @@ fn render_records_markdown(records: &[ResultRecord], inputs: &[PathBuf]) -> Stri
     }
 
     out
+}
+
+fn render_missing_coverage(
+    out: &mut String,
+    records: &[ResultRecord],
+    snapshot: Option<&EvalSnapshot>,
+) {
+    let Some(snapshot) = snapshot else {
+        out.push_str(
+            "Snapshot manifest not supplied; pass `--snapshot <path>` to list missing cells.\n",
+        );
+        return;
+    };
+
+    out.push_str(
+        "| cell | bundle | capability | depth | profile | reason |\n|---|---|---|---|---|---|\n",
+    );
+    let observed = records
+        .iter()
+        .map(|record| {
+            (
+                record.coverage.cell_id.as_str(),
+                record.coverage.profile.as_str(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut missing = 0_u64;
+    for cell in &snapshot.cells {
+        for profile in &cell.profiles {
+            if !observed.contains(&(cell.id.as_str(), profile.as_str())) {
+                missing += 1;
+                out.push_str(&format!(
+                    "| `{}` | `{}` | `{}` | `{}` | `{}` | `no_record` |\n",
+                    cell.id,
+                    cell.bundle_id,
+                    cell.capability.as_str(),
+                    cell.depth.as_str(),
+                    profile
+                ));
+            }
+        }
+    }
+    if missing == 0 {
+        out.push_str("| `none` | `none` | `none` | `none` | `none` | `complete` |\n");
+    }
 }
 
 fn render_slice<A, B, FA, FB>(
@@ -555,7 +675,7 @@ mod tests {
     #[test]
     fn aggregate_markdown_includes_quant_and_accelerator_slices() {
         let record = test_record();
-        let markdown = render_records_markdown(&[record], &[PathBuf::from("results.jsonl")]);
+        let markdown = render_records_markdown(&[record], &[PathBuf::from("results.jsonl")], None);
 
         assert!(markdown.contains("Model x Quantization"));
         assert!(markdown.contains("Requested x Resolved Accelerator"));

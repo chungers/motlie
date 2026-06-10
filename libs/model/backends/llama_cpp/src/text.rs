@@ -16,14 +16,15 @@ use motlie_model::{
     CapabilityKind, ChatFinishReason, ChatModel, ChatRequest, ChatResponse, ChatRole,
     CheckpointFormat, CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
     GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
-    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    ToolChoice, ToolSpec, UnsupportedEmbeddings,
+    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, StartOptions, ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::common::{
-    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
-    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
+    TextMetricState,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -1177,6 +1178,31 @@ impl BundleHandle for LlamaCppTextHandle {
     fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
         let metrics = lock_metrics(&self.metrics, "llama-cpp-text-metric-snapshot").clone();
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
+    }
+
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        let gpu_layers = resolve_gpu_layers();
+        if gpu_layers == 0 {
+            return Some(RuntimeAcceleratorObservation {
+                backend_mode: "llama_cpp:cpu".to_owned(),
+                offload: Some("gpu_layers=0".to_owned()),
+                selected_device: None,
+            });
+        }
+
+        let (backend_mode, selected_device) = if cfg!(feature = "cuda") {
+            ("llama_cpp:cuda".to_owned(), Some("0".to_owned()))
+        } else if cfg!(target_os = "macos") {
+            ("llama_cpp:metal".to_owned(), Some("0".to_owned()))
+        } else {
+            ("llama_cpp:cpu".to_owned(), None)
+        };
+
+        Some(RuntimeAcceleratorObservation {
+            backend_mode,
+            offload: Some(format!("gpu_layers={gpu_layers}")),
+            selected_device,
+        })
     }
 
     fn chat(&self) -> Result<&Self::Chat, ModelError> {

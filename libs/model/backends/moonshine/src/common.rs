@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpoint};
 use tokenizers::Tokenizer;
 
-pub(crate) use motlie_model::metrics_runtime::{RuntimeMetricState, lock_metrics, observe_latency};
+pub(crate) use motlie_model::metrics_runtime::{lock_metrics, observe_latency, RuntimeMetricState};
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 

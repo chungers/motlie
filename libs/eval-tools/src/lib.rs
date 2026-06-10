@@ -1,4 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
 
 use motlie_model::{ChatMessage, ToolCall, ToolInputSchema, ToolName, ToolSpec};
 use serde::{Deserialize, Serialize};
@@ -8,56 +10,74 @@ use thiserror::Error;
 pub const WEATHER_TOOL_NAME: &str = "get_weather";
 pub const CEL_TOOL_NAME: &str = "evaluate_cel_expression";
 
-#[derive(Clone, Debug)]
+pub trait EvalTool: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn spec(&self) -> Result<ToolSpec, EvalToolError>;
+    fn execute(&self, arguments: &Value) -> Result<Value, EvalToolError>;
+}
+
+#[derive(Clone)]
 pub struct EvalToolRegistry {
-    enabled: BTreeSet<String>,
+    handlers: BTreeMap<String, Arc<dyn EvalTool>>,
+}
+
+impl fmt::Debug for EvalToolRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EvalToolRegistry")
+            .field("tools", &self.handlers.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl EvalToolRegistry {
-    pub fn with_default_tools() -> Self {
+    pub fn empty() -> Self {
         Self {
-            enabled: [WEATHER_TOOL_NAME.to_owned(), CEL_TOOL_NAME.to_owned()]
-                .into_iter()
-                .collect(),
+            handlers: BTreeMap::new(),
         }
+    }
+
+    pub fn with_default_tools() -> Self {
+        let mut registry = Self::empty();
+        registry.register(WeatherTool);
+        registry.register(CelExpressionTool);
+        registry
     }
 
     pub fn with_tools<'a>(tools: impl IntoIterator<Item = &'a str>) -> Result<Self, EvalToolError> {
-        let mut enabled = BTreeSet::new();
+        let available = Self::with_default_tools();
+        let mut registry = Self::empty();
         for tool in tools {
-            if !is_builtin_tool(tool) {
+            let Some(handler) = available.handlers.get(tool) else {
                 return Err(EvalToolError::UnknownTool(tool.to_owned()));
-            }
-            enabled.insert(tool.to_owned());
+            };
+            registry
+                .handlers
+                .insert(tool.to_owned(), Arc::clone(handler));
         }
-        Ok(Self { enabled })
+        Ok(registry)
+    }
+
+    pub fn register<T>(&mut self, tool: T)
+    where
+        T: EvalTool + 'static,
+    {
+        self.handlers.insert(tool.name().to_owned(), Arc::new(tool));
     }
 
     pub fn specs(&self) -> Result<Vec<ToolSpec>, EvalToolError> {
-        let mut specs = Vec::new();
-        for tool in &self.enabled {
-            specs.push(spec_for_builtin(tool)?);
-        }
-        Ok(specs)
+        self.handlers
+            .values()
+            .map(|handler| handler.spec())
+            .collect()
     }
 
     pub fn execute(&self, call: &ToolCall) -> Result<ToolExecution, EvalToolError> {
         let name = call.name.as_str();
-        if !self.enabled.contains(name) {
+        let Some(handler) = self.handlers.get(name) else {
             return Err(EvalToolError::UnknownTool(name.to_owned()));
-        }
-        let arguments = serde_json::from_str::<Value>(call.arguments.raw_json_str())?;
-        let output = match name {
-            WEATHER_TOOL_NAME => {
-                let args = call.arguments.parse::<WeatherArgs>()?;
-                serde_json::to_value(get_weather(args))?
-            }
-            CEL_TOOL_NAME => {
-                let args = call.arguments.parse::<CelExpressionArgs>()?;
-                serde_json::to_value(evaluate_cel_expression(args)?)?
-            }
-            other => return Err(EvalToolError::UnknownTool(other.to_owned())),
         };
+        let arguments = serde_json::from_str::<Value>(call.arguments.raw_json_str())?;
+        let output = handler.execute(&arguments)?;
         let output_json = serde_json::to_string(&output)?;
         Ok(ToolExecution {
             call_id: call.id.as_str().to_owned(),
@@ -85,6 +105,52 @@ impl EvalToolRegistry {
 impl Default for EvalToolRegistry {
     fn default() -> Self {
         Self::with_default_tools()
+    }
+}
+
+struct WeatherTool;
+
+impl EvalTool for WeatherTool {
+    fn name(&self) -> &'static str {
+        WEATHER_TOOL_NAME
+    }
+
+    fn spec(&self) -> Result<ToolSpec, EvalToolError> {
+        Ok(ToolSpec {
+            name: ToolName::new(WEATHER_TOOL_NAME)?,
+            description: "Return a deterministic weather summary for a city.".to_owned(),
+            input_schema: ToolInputSchema::from_json_schema(
+                r#"{"type":"object","properties":{"city":{"type":"string"},"units":{"type":"string","enum":["fahrenheit","celsius"]}},"required":["city"]}"#,
+            )?,
+        })
+    }
+
+    fn execute(&self, arguments: &Value) -> Result<Value, EvalToolError> {
+        let args = serde_json::from_value::<WeatherArgs>(arguments.clone())?;
+        Ok(serde_json::to_value(get_weather(args))?)
+    }
+}
+
+struct CelExpressionTool;
+
+impl EvalTool for CelExpressionTool {
+    fn name(&self) -> &'static str {
+        CEL_TOOL_NAME
+    }
+
+    fn spec(&self) -> Result<ToolSpec, EvalToolError> {
+        Ok(ToolSpec {
+            name: ToolName::new(CEL_TOOL_NAME)?,
+            description: "Evaluate a deterministic CEL arithmetic expression.".to_owned(),
+            input_schema: ToolInputSchema::from_json_schema(
+                r#"{"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]}"#,
+            )?,
+        })
+    }
+
+    fn execute(&self, arguments: &Value) -> Result<Value, EvalToolError> {
+        let args = serde_json::from_value::<CelExpressionArgs>(arguments.clone())?;
+        Ok(serde_json::to_value(evaluate_cel_expression(args)?)?)
     }
 }
 
@@ -142,7 +208,7 @@ pub fn evaluate_cel_assertion(
     let mut messages = Vec::new();
     let mut passed = true;
     for clause in split_conjunctions(expression) {
-        let clause_passed = evaluate_cel_clause(clause, transcript)?;
+        let clause_passed = evaluate_cel_clause(&clause, transcript)?;
         messages.push(format!("{clause}={clause_passed}"));
         passed &= clause_passed;
     }
@@ -257,36 +323,74 @@ pub enum EvalToolError {
     ToolName(#[from] motlie_model::ToolNameError),
 }
 
-fn is_builtin_tool(tool: &str) -> bool {
-    matches!(tool, WEATHER_TOOL_NAME | CEL_TOOL_NAME)
-}
-
-fn spec_for_builtin(tool: &str) -> Result<ToolSpec, EvalToolError> {
-    match tool {
-        WEATHER_TOOL_NAME => Ok(ToolSpec {
-            name: ToolName::new(WEATHER_TOOL_NAME)?,
-            description: "Return a deterministic weather summary for a city.".to_owned(),
-            input_schema: ToolInputSchema::from_json_schema(
-                r#"{"type":"object","properties":{"city":{"type":"string"},"units":{"type":"string","enum":["fahrenheit","celsius"]}},"required":["city"]}"#,
-            )?,
-        }),
-        CEL_TOOL_NAME => Ok(ToolSpec {
-            name: ToolName::new(CEL_TOOL_NAME)?,
-            description: "Evaluate a deterministic CEL arithmetic expression.".to_owned(),
-            input_schema: ToolInputSchema::from_json_schema(
-                r#"{"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]}"#,
-            )?,
-        }),
-        other => Err(EvalToolError::UnknownTool(other.to_owned())),
-    }
-}
-
-fn split_conjunctions(expression: &str) -> Vec<&str> {
-    expression
-        .split("&&")
-        .map(str::trim)
+fn split_conjunctions(expression: &str) -> Vec<String> {
+    split_on_token_outside_quotes(expression, "&&")
+        .into_iter()
+        .map(|clause| clause.trim().to_owned())
         .filter(|clause| !clause.is_empty())
         .collect()
+}
+
+fn split_on_token_outside_quotes(input: &str, token: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_none() && input[index..].starts_with(token) {
+            parts.push(input[start..index].to_owned());
+            start = index + token.len();
+        }
+    }
+    parts.push(input[start..].to_owned());
+    parts
+}
+
+fn split_on_char_outside_quotes(input: &str, delimiter: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_none() && ch == delimiter {
+            parts.push(input[start..index].to_owned());
+            start = index + ch.len_utf8();
+        }
+    }
+    parts.push(input[start..].to_owned());
+    parts
 }
 
 fn evaluate_cel_clause(clause: &str, transcript: &ToolTranscript) -> Result<bool, EvalToolError> {
@@ -317,12 +421,86 @@ fn evaluate_cel_clause(clause: &str, transcript: &ToolTranscript) -> Result<bool
         }
         return Ok(transcript.final_response.is_some() && !transcript.invocations.is_empty());
     }
+    if let Some(result) = evaluate_field_equality(clause, transcript)? {
+        return Ok(result);
+    }
     if let Some(result) = evaluate_numeric_comparison(clause, transcript)? {
         return Ok(result);
     }
     Err(EvalToolError::Assertion(format!(
         "unsupported CEL assertion clause `{clause}`"
     )))
+}
+
+fn evaluate_field_equality(
+    clause: &str,
+    transcript: &ToolTranscript,
+) -> Result<Option<bool>, EvalToolError> {
+    let Some((left, right)) = split_once_operator_outside_quotes(clause, "==") else {
+        return Ok(None);
+    };
+    let Some(actual) = tool_call_field_value(left.trim(), transcript) else {
+        return Ok(None);
+    };
+    let expected = parse_quoted_string(right.trim()).ok_or_else(|| {
+        EvalToolError::Assertion(format!(
+            "CEL assertion right side `{}` must be a quoted string",
+            right.trim()
+        ))
+    })?;
+    Ok(Some(actual.eq_ignore_ascii_case(&expected)))
+}
+
+fn split_once_operator_outside_quotes<'a>(
+    input: &'a str,
+    operator: &str,
+) -> Option<(&'a str, &'a str)> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_none() && input[index..].starts_with(operator) {
+            return Some((&input[..index], &input[index + operator.len()..]));
+        }
+    }
+    None
+}
+
+fn tool_call_field_value(path: &str, transcript: &ToolTranscript) -> Option<String> {
+    let rest = path.strip_prefix("tool_calls[")?;
+    let (index, field) = rest.split_once(']')?;
+    let index = index.parse::<usize>().ok()?;
+    let field = field.strip_prefix('.')?;
+    let invocation = transcript.invocations.get(index)?;
+    if field == "name" {
+        return Some(invocation.name.clone());
+    }
+    let key = field.strip_prefix("args.")?;
+    invocation.arguments.get(key).and_then(json_value_to_string)
+}
+
+fn json_value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 fn evaluate_numeric_comparison(
@@ -401,23 +579,43 @@ fn three_args(args: &str, clause: &str) -> Result<[String; 3], EvalToolError> {
 
 fn parse_string_args(args: &str) -> Result<Vec<String>, EvalToolError> {
     let mut parsed = Vec::new();
-    for raw in args.split(',') {
+    if args.trim().is_empty() {
+        return Ok(parsed);
+    }
+    for raw in split_on_char_outside_quotes(args, ',') {
         let raw = raw.trim();
-        let Some(unquoted) = raw
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .or_else(|| {
-                raw.strip_prefix('\'')
-                    .and_then(|value| value.strip_suffix('\''))
-            })
-        else {
+        let Some(unquoted) = parse_quoted_string(raw) else {
             return Err(EvalToolError::Assertion(format!(
                 "CEL assertion argument `{raw}` must be quoted"
             )));
         };
-        parsed.push(unquoted.to_owned());
+        parsed.push(unquoted);
     }
     Ok(parsed)
+}
+
+fn parse_quoted_string(raw: &str) -> Option<String> {
+    let quote = raw.chars().next()?;
+    if !matches!(quote, '\'' | '"') || !raw.ends_with(quote) || raw.len() < 2 {
+        return None;
+    }
+    let inner = &raw[quote.len_utf8()..raw.len() - quote.len_utf8()];
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in inner.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    if escaped {
+        out.push('\\');
+    }
+    Some(out)
 }
 
 fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
@@ -593,6 +791,52 @@ mod tests {
 
         let result = evaluate_cel_assertion(
             "tool_called('get_weather') && argument_equals('get_weather','city','Seattle') && final_contains('seattle') && tool_precision() >= 1.0",
+            &transcript,
+        )
+        .unwrap();
+
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn cel_assertion_accepts_tool_calls_field_paths() {
+        let registry = EvalToolRegistry::with_default_tools();
+        let call =
+            ToolCall::from_json_args("call-1", WEATHER_TOOL_NAME, r#"{"city":"Seattle"}"#).unwrap();
+        let execution = registry.execute(&call).unwrap();
+        let transcript = ToolTranscript {
+            invocations: vec![execution],
+            final_response: Some("Seattle is clear.".to_owned()),
+            rounds: 1,
+            tool_call_errors: Vec::new(),
+        };
+
+        let result = evaluate_cel_assertion(
+            r#"tool_calls[0].name == "get_weather" && tool_calls[0].args.city == "Seattle""#,
+            &transcript,
+        )
+        .unwrap();
+
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn cel_parser_keeps_quoted_commas_and_conjunctions() {
+        let transcript = ToolTranscript {
+            invocations: vec![ToolExecution {
+                call_id: "call-1".to_owned(),
+                name: WEATHER_TOOL_NAME.to_owned(),
+                arguments: serde_json::json!({ "city": "Seattle, WA" }),
+                output: serde_json::json!({}),
+                output_json: "{}".to_owned(),
+            }],
+            final_response: Some("literal a && b".to_owned()),
+            rounds: 1,
+            tool_call_errors: Vec::new(),
+        };
+
+        let result = evaluate_cel_assertion(
+            r#"argument_equals('get_weather','city','Seattle, WA') && final_contains("a && b")"#,
             &transcript,
         )
         .unwrap();

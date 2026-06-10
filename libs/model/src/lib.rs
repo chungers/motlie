@@ -27,7 +27,10 @@ pub use generation::{
     ChatFinishReason, ChatRequest, ChatResponse, CompletionRequest, CompletionResponse,
     GenerationParams, GenerationUsage, ThinkingMode,
 };
-pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
+pub use metrics::{
+    EmbeddingMetrics, ModelMetricSnapshot, RuntimeAcceleratorObservation, RuntimeMetrics,
+    TextGenerationMetrics,
+};
 pub use speech::SpeechParams;
 pub use tool::{
     Tool, ToolArgumentError, ToolArguments, ToolCall, ToolCallError, ToolCallId, ToolCallIdError,
@@ -735,6 +738,9 @@ pub trait BundleHandle: Send + Sync + Sized {
         self.capabilities().supports(capability)
     }
     fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        None
+    }
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
         None
     }
 

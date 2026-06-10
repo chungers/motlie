@@ -17,8 +17,8 @@ use motlie_model::{
     ArtifactPolicy, ArtifactSource, Bytes, CapabilityKind, ChatFinishReason, ChatMessage,
     ChatRequest, ChatResponse, ChatRole, CheckpointFormat, ContentPart, EmbeddingMetrics,
     GenerationParams, GenerationUsage, Milliseconds, ModelError, ModelMetricSnapshot,
-    QuantizationBits, ResolvedCheckpoint, RuntimeMetrics, StartOptions, TextGenerationMetrics,
-    Tokens, TokensPerSecond,
+    QuantizationBits, ResolvedCheckpoint, RuntimeAcceleratorObservation, RuntimeMetrics,
+    StartOptions, TextGenerationMetrics, Tokens, TokensPerSecond,
 };
 use serde_json::Value;
 
@@ -85,6 +85,36 @@ pub(crate) fn should_force_cpu() -> bool {
         std::env::var("MOTLIE_MODEL_FORCE_CPU"),
         Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
     )
+}
+
+pub(crate) fn accelerator_observation() -> RuntimeAcceleratorObservation {
+    if should_force_cpu() {
+        return RuntimeAcceleratorObservation {
+            backend_mode: "mistralrs:cpu".to_owned(),
+            offload: Some("force_cpu=true".to_owned()),
+            selected_device: None,
+        };
+    }
+
+    if cfg!(feature = "cuda") {
+        RuntimeAcceleratorObservation {
+            backend_mode: "mistralrs:cuda".to_owned(),
+            offload: Some("device=cuda_auto".to_owned()),
+            selected_device: Some("0".to_owned()),
+        }
+    } else if cfg!(feature = "metal") {
+        RuntimeAcceleratorObservation {
+            backend_mode: "mistralrs:metal".to_owned(),
+            offload: Some("device=metal_auto".to_owned()),
+            selected_device: Some("0".to_owned()),
+        }
+    } else {
+        RuntimeAcceleratorObservation {
+            backend_mode: "mistralrs:cpu".to_owned(),
+            offload: Some("accelerator_feature=none".to_owned()),
+            selected_device: None,
+        }
+    }
 }
 
 /// Returns the requested PagedAttention context size, if configured.
@@ -832,7 +862,7 @@ fn aggregate_tokens_per_second(tokens: u64, total_time_msec: u128) -> Option<u64
 }
 
 fn current_resident_memory_bytes() -> Option<u64> {
-    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
 
     let pid = get_current_pid().ok()?;
     let mut system = System::new();

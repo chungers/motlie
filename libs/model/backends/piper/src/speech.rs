@@ -10,18 +10,19 @@ use motlie_model::typed::{
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, SpeechParams,
-    StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, SpeechParams, StartOptions, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_espeak_ng::text_to_phonemes;
-use motlie_model_ort::{OrtExecutionTarget, build_session_with_target};
+use motlie_model_ort::{build_session_with_target, OrtExecutionTarget};
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    PiperArtifactPaths, PiperConfig, RuntimeMetricState, configure_artifact_policy, lock_metrics,
-    observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, PiperArtifactPaths, PiperConfig, RuntimeMetricState,
 };
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -246,6 +247,22 @@ impl BundleHandle for PiperHandle {
             text_generation: None,
             embeddings: None,
         })
+    }
+
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        if cfg!(feature = "cuda") {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "piper:cuda".to_owned(),
+                offload: Some("cuda_execution_provider=on".to_owned()),
+                selected_device: Some("0".to_owned()),
+            })
+        } else {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "piper:cpu".to_owned(),
+                offload: Some("accelerator_feature=none".to_owned()),
+                selected_device: None,
+            })
+        }
     }
 
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
@@ -536,8 +553,8 @@ fn ort_tensor_error(err: ort::Error) -> ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::SpeechParams;
     use motlie_model::typed::SpeechStream as _;
+    use motlie_model::SpeechParams;
 
     #[tokio::test]
     async fn stream_emits_chunks_and_finishes_once() {
@@ -550,13 +567,11 @@ mod tests {
         }
 
         assert_eq!(total, 10_000);
-        assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("stream should stay exhausted")
-                .is_none()
-        );
+        assert!(stream
+            .next_chunk()
+            .await
+            .expect("stream should stay exhausted")
+            .is_none());
     }
 
     #[test]

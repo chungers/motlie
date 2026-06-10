@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
+use motlie_models::{ArtifactSource, BundleId, Catalog};
 
 use crate::accelerator;
 use crate::metrics::{PerformanceMetrics, ResourceMetrics};
@@ -13,8 +16,9 @@ use crate::platform::{sanitize_slug, PlatformCollector, PlatformSnapshot};
 use crate::report::OutputSink;
 use crate::result::{
     AcceleratorClass, AcceleratorSection, AcceptanceSection, AcceptanceStatus,
-    ApplicabilityDecision, CoverageSection, IdentitySection, OutcomeReason, ProfileSection,
-    ResultRecord, RuntimeSection, SelectionSection, TerminalOutcome, RESULT_SCHEMA_VERSION,
+    ApplicabilityDecision, ChildBuildSection, CoverageSection, IdentitySection, OutcomeReason,
+    ProfileSection, ResultRecord, RuntimeSection, SelectionSection, TerminalOutcome,
+    RESULT_SCHEMA_VERSION,
 };
 use crate::snapshot::{load_snapshot, EvalSnapshot, SnapshotCell};
 
@@ -83,7 +87,8 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
             continue;
         }
 
-        if requires_hf_token(cell) && std::env::var_os("HF_TOKEN").is_none() {
+        if requires_hf_token(cell, &options.artifact_root) && std::env::var_os("HF_TOKEN").is_none()
+        {
             sink.emit(&pre_run_record(
                 &snapshot,
                 cell,
@@ -218,7 +223,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
                 TerminalOutcome::Blocked,
                 Some(reason.clone()),
             );
-            sink.emit(&pre_run_record(
+            let mut record = pre_run_record(
                 &snapshot,
                 cell,
                 &profile,
@@ -227,12 +232,14 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
                 child_coverage,
                 AcceptanceStatus::Blocked,
                 Some(format!(
-                    "child cargo invocation failed; see {}",
+                    "child eval invocation failed; see {}",
                     child.log_path.display()
                 )),
                 &run_id,
                 &command_line,
-            ))?;
+            );
+            record.runtime.child_build = child.child_build.clone();
+            sink.emit(&record)?;
             emitted_pre_run += 1;
         }
     }
@@ -252,17 +259,28 @@ pub async fn run_provision(command_line: Vec<String>, args: &[String]) -> Result
         .iter()
         .filter(|cell| cell.artifact.requires_hf_token)
         .count();
-    let missing_token_cells = if hf_token_present { 0 } else { gated_cells };
+    let cached_gated_cells = snapshot
+        .cells
+        .iter()
+        .filter(|cell| cell.artifact.requires_hf_token)
+        .filter(|cell| artifact_cache_satisfies(cell, &options.artifact_root))
+        .count();
+    let missing_token_cells = if hf_token_present {
+        0
+    } else {
+        gated_cells.saturating_sub(cached_gated_cells)
+    };
 
     println!("provision-snapshot: {}", snapshot.id);
     println!("artifact-root: {}", options.artifact_root.display());
     println!("hf_token_present: {hf_token_present}");
     println!("gated-artifact-cells: {gated_cells}");
+    println!("cached-gated-artifact-cells: {cached_gated_cells}");
     println!("missing-token-cells: {missing_token_cells}");
     println!("command-args: {}", command_line.len());
 
     if missing_token_cells > 0 {
-        bail!("{missing_token_cells} snapshot cells require HF_TOKEN; token value was not logged");
+        bail!("{missing_token_cells} uncached snapshot cells require HF_TOKEN; token value was not logged");
     }
     Ok(())
 }
@@ -347,6 +365,7 @@ struct ChildOutcome {
     success: bool,
     log_path: PathBuf,
     reason: Option<OutcomeReason>,
+    child_build: Option<ChildBuildSection>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -367,60 +386,96 @@ fn run_child_cell(
     requested: AcceleratorClass,
 ) -> Result<ChildOutcome> {
     let log_path = results_dir.join("logs").join(format!("{}.log", cell.id));
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("failed to open child log `{}`", log_path.display()))?;
-    let stderr = log.try_clone()?;
     let gguf_bindgen_env = gguf_bindgen_env(cell);
-
-    let mut command = Command::new("cargo");
-    command.current_dir(repo_root());
-    command.args(["run", "-p", "evals", "--no-default-features"]);
     let features = cell.features_for_profile(profile);
+
+    let mut build_args = vec![
+        "build".to_owned(),
+        "-p".to_owned(),
+        "evals".to_owned(),
+        "--no-default-features".to_owned(),
+    ];
     if !features.is_empty() {
-        command.arg("--features").arg(features.join(" "));
+        build_args.push("--features".to_owned());
+        build_args.push(features.join(" "));
     }
-    command.arg("--").arg("run");
-    command.args(["--bundle", &cell.bundle_id]);
+
+    let build_started_at = Instant::now();
+    let mut build_command = Command::new("cargo");
+    build_command.current_dir(repo_root()).args(&build_args);
+    apply_child_env(&mut build_command, cell, gguf_bindgen_env.as_ref());
+    attach_child_log(&mut build_command, &log_path)?;
+    let build_status = build_command.status().with_context(|| {
+        format!(
+            "failed to spawn child cargo build for snapshot cell `{}`",
+            cell.id
+        )
+    })?;
+    let child_build = ChildBuildSection {
+        command: std::iter::once("cargo".to_owned())
+            .chain(build_args.clone())
+            .collect(),
+        status: build_status.code(),
+        duration_ms: Some(duration_ms(build_started_at.elapsed())),
+        log_path: Some(log_path.display().to_string()),
+    };
+    if !build_status.success() {
+        let reason = classify_child_failure(cell, requested, &log_path);
+        return Ok(ChildOutcome {
+            success: false,
+            log_path,
+            reason: Some(reason),
+            child_build: Some(child_build),
+        });
+    }
+
+    let mut run_command = Command::new(evals_debug_binary());
+    run_command.current_dir(repo_root());
+    run_command.arg("run");
+    run_command.args(["--bundle", &cell.bundle_id]);
     if let Some(selector) = &cell.selector {
-        command.args(["--selector", selector]);
+        run_command.args(["--selector", selector]);
     }
-    command.args(["--scenario", &cell.scenario]);
-    command.args(["--profile", profile]);
-    command.args(["--root", &options.eval_root.display().to_string()]);
-    command.args([
+    run_command.args(["--scenario", &cell.scenario]);
+    run_command.args(["--profile", profile]);
+    run_command.args(["--root", &options.eval_root.display().to_string()]);
+    run_command.args([
         "--artifact-root",
         &options.artifact_root.display().to_string(),
     ]);
-    command.args(["--jsonl", &jsonl_path.display().to_string()]);
-    command.args(["--run-id", run_id]);
-    command.args(["--snapshot-id", &snapshot.id]);
-    command.args(["--cell-id", &cell.id]);
-    command.args(["--depth", cell.depth.as_str()]);
-    command.args(["--checkpoint-format", &cell.checkpoint_format]);
-    command.args(["--artifact-quantization", &cell.quantization]);
-    command.args(["--model-family", &cell.model_family]);
-    command.args(["--backend", &cell.backend]);
-    command.args(["--requested-accelerator", requested.as_str()]);
-    command.arg("--quiet-backend-logs");
-    if let Some(bindgen_env) = &gguf_bindgen_env {
-        command.env("BINDGEN_EXTRA_CLANG_ARGS", &bindgen_env.args);
-        command.env(
-            "MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED",
-            bindgen_env.repo_wired.to_string(),
-        );
-    } else if is_gguf_cell(cell) {
-        command.env("MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED", "false");
+    run_command.args(["--jsonl", &jsonl_path.display().to_string()]);
+    run_command.args(["--run-id", run_id]);
+    run_command.args(["--snapshot-id", &snapshot.id]);
+    run_command.args(["--cell-id", &cell.id]);
+    run_command.args(["--depth", cell.depth.as_str()]);
+    run_command.args(["--checkpoint-format", &cell.checkpoint_format]);
+    run_command.args(["--artifact-quantization", &cell.quantization]);
+    run_command.args(["--model-family", &cell.model_family]);
+    run_command.args(["--backend", &cell.backend]);
+    run_command.args(["--requested-accelerator", requested.as_str()]);
+    run_command.args(["--child-build-log", &log_path.display().to_string()]);
+    if let Some(status) = child_build.status {
+        run_command
+            .arg("--child-build-status")
+            .arg(status.to_string());
     }
-    command.stdout(Stdio::from(log));
-    command.stderr(Stdio::from(stderr));
+    if let Some(duration_ms) = child_build.duration_ms {
+        run_command
+            .arg("--child-build-duration-ms")
+            .arg(duration_ms.to_string());
+    }
+    run_command.arg("--quiet-backend-logs");
+    apply_child_env(&mut run_command, cell, gguf_bindgen_env.as_ref());
+    attach_child_log(&mut run_command, &log_path)?;
+    #[cfg(unix)]
+    {
+        run_command.process_group(0);
+    }
 
     let started_at = Instant::now();
-    let mut child = command.spawn().with_context(|| {
+    let mut child = run_command.spawn().with_context(|| {
         format!(
-            "failed to spawn child cargo invocation for snapshot cell `{}`",
+            "failed to spawn child eval invocation for snapshot cell `{}`",
             cell.id
         )
     })?;
@@ -430,19 +485,70 @@ fn run_child_cell(
                 success: status.success(),
                 log_path,
                 reason: None,
+                child_build: Some(child_build),
             });
         }
         if started_at.elapsed() > Duration::from_secs(cell.budgets.wall_time_secs()) {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_child(&mut child);
             return Ok(ChildOutcome {
                 success: false,
                 log_path,
                 reason: Some(OutcomeReason::RuntimeBudgetExceeded),
+                child_build: Some(child_build),
             });
         }
         thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn evals_debug_binary() -> PathBuf {
+    repo_root()
+        .join("target")
+        .join("debug")
+        .join(format!("evals{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn attach_child_log(command: &mut Command, log_path: &Path) -> Result<()> {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open child log `{}`", log_path.display()))?;
+    let stderr = log.try_clone()?;
+    command.stdout(Stdio::from(log));
+    command.stderr(Stdio::from(stderr));
+    Ok(())
+}
+
+fn apply_child_env(
+    command: &mut Command,
+    cell: &SnapshotCell,
+    gguf_bindgen_env: Option<&GgufBindgenEnv>,
+) {
+    if let Some(bindgen_env) = gguf_bindgen_env {
+        command.env("BINDGEN_EXTRA_CLANG_ARGS", &bindgen_env.args);
+        command.env(
+            "MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED",
+            bindgen_env.repo_wired.to_string(),
+        );
+    } else if is_gguf_cell(cell) {
+        command.env("MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED", "false");
+    }
+}
+
+fn terminate_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pgid = format!("-{}", child.id());
+        let _ = Command::new("kill").args(["-TERM", &pgid]).status();
+        thread::sleep(Duration::from_millis(500));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -656,9 +762,37 @@ fn classify_child_failure(
     let log = fs::read_to_string(log_path)
         .unwrap_or_default()
         .to_ascii_lowercase();
+
+    if log.contains("401")
+        || log.contains("unauthorized")
+        || log.contains("gated repo")
+        || log.contains("access to model")
+    {
+        return OutcomeReason::ArtifactUnauthorized;
+    }
+    if log.contains("missing artifacts")
+        || log.contains("missing artifact")
+        || log.contains("no such file or directory")
+        || log.contains("not found in local artifact cache")
+    {
+        return OutcomeReason::ArtifactMissing;
+    }
+    if log.contains("submodule is missing")
+        || log.contains("submodule checkout")
+        || log.contains("nested `ggml` submodule is missing")
+    {
+        return OutcomeReason::SubmoduleMissing;
+    }
+    if log.contains("undefined symbols") && (log.contains("vdsp") || log.contains("accelerate")) {
+        return OutcomeReason::NativeToolchainMissing;
+    }
     if requested == AcceleratorClass::Metal
         && is_gguf_cell(cell)
-        && (log.contains("metal") || log.contains("apple clang") || log.contains("shader"))
+        && (log.contains("failed to compile metal")
+            || log.contains("metal shader compile")
+            || log.contains("metallib")
+            || log.contains("xcrun")
+            || log.contains("metal toolchain"))
     {
         return OutcomeReason::GgufMetalUnverified;
     }
@@ -751,8 +885,100 @@ fn merge_bindgen_args(
     args.join(" ")
 }
 
-fn requires_hf_token(cell: &SnapshotCell) -> bool {
-    cell.artifact.requires_hf_token
+fn requires_hf_token(cell: &SnapshotCell, artifact_root: &Path) -> bool {
+    cell.artifact.requires_hf_token && !artifact_cache_satisfies(cell, artifact_root)
+}
+
+fn artifact_cache_satisfies(cell: &SnapshotCell, artifact_root: &Path) -> bool {
+    if cell.artifact.allow_missing {
+        return true;
+    }
+    if cell.artifact.patterns.is_empty() {
+        return false;
+    }
+
+    let search_root = bundle_artifact_cache_root(cell, artifact_root)
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| artifact_root.to_path_buf());
+    if !search_root.exists() {
+        return false;
+    }
+
+    let mut patterns = cell.artifact.patterns.clone();
+    patterns.sort();
+    patterns.dedup();
+    patterns
+        .iter()
+        .all(|pattern| artifact_pattern_exists(&search_root, pattern))
+}
+
+fn bundle_artifact_cache_root(cell: &SnapshotCell, artifact_root: &Path) -> Option<PathBuf> {
+    let catalog = Catalog::with_defaults();
+    let descriptor = catalog.bundle(&BundleId::new(cell.bundle_id.clone()))?;
+    let artifacts = descriptor.artifacts.as_ref()?;
+    match &artifacts.source {
+        ArtifactSource::HuggingFace { repo } => {
+            Some(artifact_root.join(format!("models--{}", repo.replace('/', "--"))))
+        }
+    }
+}
+
+fn artifact_pattern_exists(root: &Path, pattern: &str) -> bool {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| wildcard_match(pattern, name))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == value;
+    }
+
+    let mut remainder = value;
+    let mut parts = pattern.split('*').peekable();
+    if let Some(first) = parts.next() {
+        if !first.is_empty() {
+            let Some(stripped) = remainder.strip_prefix(first) else {
+                return false;
+            };
+            remainder = stripped;
+        }
+    }
+
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            continue;
+        }
+        if parts.peek().is_none() {
+            return remainder.ends_with(part);
+        }
+        let Some(index) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[index + part.len()..];
+    }
+    true
 }
 
 fn is_cpu_profile(profile: &str) -> bool {
@@ -892,6 +1118,7 @@ mod tests {
             success: false,
             log_path: log_path.clone(),
             reason: Some(OutcomeReason::RuntimeBudgetExceeded),
+            child_build: None,
         };
 
         let reason = child_failure_reason(&cell, AcceleratorClass::Cpu, &child);
