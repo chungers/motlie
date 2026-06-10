@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
 
 const DEFAULT_INPUT_QUIET_FOR: Duration = Duration::from_secs(10);
+const DEFAULT_INPUT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_INPUT_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
 const DEFAULT_INPUT_BACKOFF_MAX: Duration = Duration::from_secs(5);
 const DEFAULT_TRAILING_ENTER_DELAY: Duration = Duration::from_millis(750);
@@ -30,6 +31,7 @@ pub struct TmuxBridge {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeystrokeInjectionConfig {
     pub input_quiet_for: Duration,
+    pub input_delivery_timeout: Duration,
     pub input_backoff_initial: Duration,
     pub input_backoff_max: Duration,
     pub trailing_enter: bool,
@@ -40,6 +42,7 @@ impl Default for KeystrokeInjectionConfig {
     fn default() -> Self {
         Self {
             input_quiet_for: DEFAULT_INPUT_QUIET_FOR,
+            input_delivery_timeout: DEFAULT_INPUT_DELIVERY_TIMEOUT,
             input_backoff_initial: DEFAULT_INPUT_BACKOFF_INITIAL,
             input_backoff_max: DEFAULT_INPUT_BACKOFF_MAX,
             trailing_enter: true,
@@ -51,6 +54,7 @@ impl Default for KeystrokeInjectionConfig {
 impl KeystrokeInjectionConfig {
     pub fn new(
         input_quiet_for: Duration,
+        input_delivery_timeout: Duration,
         input_backoff_initial: Duration,
         input_backoff_max: Duration,
         trailing_enter: bool,
@@ -60,6 +64,7 @@ impl KeystrokeInjectionConfig {
         let input_backoff_max = input_backoff_max.max(input_backoff_initial);
         Self {
             input_quiet_for,
+            input_delivery_timeout,
             input_backoff_initial,
             input_backoff_max,
             trailing_enter,
@@ -252,17 +257,36 @@ where
     A: ActivityProbe,
 {
     let mut backoff = config.input_backoff_initial;
+    let started_at = Instant::now();
     loop {
         let target_activity = activity.check().await?;
         if matches!(target_activity, TargetActivity::Idle) {
             return Ok(());
         }
+        if config.input_delivery_timeout > Duration::ZERO
+            && started_at.elapsed() >= config.input_delivery_timeout
+        {
+            anyhow::bail!(
+                "timed out waiting for tmux target to become idle after {} ms; last activity reason: {}",
+                config.input_delivery_timeout.as_millis(),
+                target_activity.reason().unwrap_or("active")
+            );
+        }
+        let sleep_for = if config.input_delivery_timeout > Duration::ZERO {
+            let remaining = config
+                .input_delivery_timeout
+                .saturating_sub(started_at.elapsed());
+            backoff.min(remaining.max(Duration::from_millis(1)))
+        } else {
+            backoff
+        };
         tracing::info!(
             reason = target_activity.reason().unwrap_or("active"),
-            retry_delay_ms = backoff.as_millis() as u64,
+            retry_delay_ms = sleep_for.as_millis() as u64,
+            delivery_wait_ms = started_at.elapsed().as_millis() as u64,
             "telnyx_agent.tmux_input.deferred"
         );
-        time::sleep(backoff).await;
+        time::sleep(sleep_for).await;
         backoff = next_backoff(backoff, config.input_backoff_max);
     }
 }
@@ -344,21 +368,30 @@ pub fn extract_reply_from_rendered_delta(
     marker: &str,
 ) -> Option<String> {
     let delta = rendered.strip_prefix(baseline).unwrap_or(rendered);
-    let delta = delta.replace(prompt, "");
-    let marker_index = delta.find(marker)?;
-    let before_marker = &delta[..marker_index];
-    let reply = before_marker
-        .lines()
-        .filter(|line| !line.contains("[motlie-call turn="))
+    let lines = delta.lines().collect::<Vec<_>>();
+    let marker_line_index = lines.iter().rposition(|line| line.trim() == marker)?;
+    let reply_start = lines[..marker_line_index]
+        .iter()
+        .rposition(|line| line.contains(marker))
+        .map_or(0, |index| index + 1);
+    let reply = lines[reply_start..marker_line_index]
+        .iter()
+        .copied()
+        .filter(|line| !is_prompt_echo_line(line, prompt, marker))
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
         .to_string();
-    if reply.is_empty() {
-        None
-    } else {
-        Some(reply)
-    }
+    if reply.is_empty() { None } else { Some(reply) }
+}
+
+fn is_prompt_echo_line(line: &str, prompt: &str, marker: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty()
+        || trimmed == prompt.trim()
+        || trimmed == marker
+        || trimmed.contains("[motlie-call turn=")
+        || trimmed.contains("Reply once, then end with")
 }
 
 #[cfg(test)]
@@ -375,6 +408,67 @@ mod tests {
         let rendered = format!("{baseline}{prompt}\nThe answer is yes.\n{marker}\n");
         let reply = extract_reply_from_rendered_delta(baseline, &rendered, prompt, marker);
         assert_eq!(reply.as_deref(), Some("The answer is yes."));
+    }
+
+    #[test]
+    fn extractor_ignores_wrapped_prompt_echo_marker() {
+        let baseline = "agent> ready\n";
+        let prompt = "[motlie-call turn=turn-test] Caller: hello from caller\nReply once, then end with [[motlie-call:end turn=turn-test]]";
+        let marker = "[[motlie-call:end turn=turn-test]]";
+        let rendered = format!(
+            "{baseline}[motlie-call turn=turn-test] Caller: hello from\ncaller\nReply once, then end with\n{marker}\nThe actual reply.\n{marker}\n"
+        );
+
+        let reply = extract_reply_from_rendered_delta(baseline, &rendered, prompt, marker);
+
+        assert_eq!(reply.as_deref(), Some("The actual reply."));
+    }
+
+    #[test]
+    fn extractor_does_not_return_instruction_echo_as_reply() {
+        let baseline = "agent> ready\n";
+        let prompt = "[motlie-call turn=turn-test] Caller: hello\nReply once, then end with [[motlie-call:end turn=turn-test]]";
+        let marker = "[[motlie-call:end turn=turn-test]]";
+        let rendered = format!(
+            "{baseline}[motlie-call turn=turn-test] Caller: hello\nReply once, then end with\n{marker}\n"
+        );
+
+        let reply = extract_reply_from_rendered_delta(baseline, &rendered, prompt, marker);
+
+        assert_eq!(reply, None);
+    }
+
+    #[tokio::test]
+    async fn active_target_times_out_when_delivery_deadline_expires() {
+        let mut activity = FakeActivityProbe::new(vec![
+            TargetActivity::Active {
+                reason: "recent_client_input",
+            },
+            TargetActivity::Active {
+                reason: "recent_client_input",
+            },
+            TargetActivity::Active {
+                reason: "recent_client_input",
+            },
+        ]);
+        let mut history = FakeHistoryRenderer::new("agent> ready\n");
+        let mut sender = FakeKeySender::default();
+        let mut config = test_config(false, Duration::ZERO);
+        config.input_delivery_timeout = Duration::from_millis(25);
+
+        let error = deliver_prompt_after_idle(
+            &mut activity,
+            &mut history,
+            &mut sender,
+            "queued transcription",
+            &config,
+        )
+        .await
+        .expect_err("delivery should fail when target stays active past the deadline");
+
+        assert!(format!("{error:#}").contains("timed out waiting for tmux target to become idle"));
+        assert_eq!(history.renders, 0);
+        assert!(sender.sent.is_empty());
     }
 
     #[tokio::test]
@@ -408,9 +502,11 @@ mod tests {
         assert_eq!(history.renders, 1);
         assert!(Instant::now().duration_since(start) >= Duration::from_millis(30));
         assert_eq!(sender.sent.len(), 1);
-        assert!(sender.sent[0].iter().any(|command| command
-            .last()
-            .is_some_and(|arg| arg == "queued transcription")));
+        assert!(sender.sent[0].iter().any(|command| {
+            command
+                .last()
+                .is_some_and(|arg| arg == "queued transcription")
+        }));
     }
 
     #[tokio::test]
@@ -505,6 +601,7 @@ mod tests {
     ) -> KeystrokeInjectionConfig {
         KeystrokeInjectionConfig::new(
             Duration::from_secs(10),
+            Duration::from_secs(2),
             Duration::from_millis(10),
             Duration::from_millis(40),
             trailing_enter,

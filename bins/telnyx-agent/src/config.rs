@@ -42,6 +42,8 @@ pub struct DaemonArgs {
     pub reply_timeout_ms: u64,
     #[arg(long, default_value_t = 10_000)]
     pub input_quiet_for_ms: u64,
+    #[arg(long, default_value_t = 30_000)]
+    pub input_delivery_timeout_ms: u64,
     #[arg(long, default_value_t = 250)]
     pub input_backoff_initial_ms: u64,
     #[arg(long, default_value_t = 5_000)]

@@ -413,26 +413,26 @@ impl VoiceQualityConfig {
         ensure_f32(
             "speech.rms_threshold",
             self.speech.rms_threshold,
-            1.0,
-            10_000.0,
+            0.0,
+            20_000.0,
         )?;
         ensure_i32(
             "speech.peak_threshold",
             self.speech.peak_threshold,
-            1,
+            0,
             32_767,
         )?;
         ensure_u64(
             "speech.onset_min_silence_ms",
             self.speech.onset_min_silence_ms,
             0,
-            5_000,
+            2_000,
         )?;
         ensure_u64(
             "endpoint.trailing_silence_ms",
             self.endpoint.trailing_silence_ms,
             100,
-            2_500,
+            5_000,
         )?;
         ensure_usize(
             "endpoint.min_turn_words",
@@ -1441,6 +1441,28 @@ mod tests {
 
         let restored = VoiceQualityConfig::from_replay_hex(&config.to_replay_hex())
             .expect("replay hex restores");
+
+        assert_eq!(restored, config);
+        assert_eq!(restored.config_id(), config.config_id());
+    }
+
+    #[test]
+    fn replay_hex_round_trips_live_clamp_edges() {
+        let mut config = VoiceQualityConfig::default();
+        config
+            .set_speech_rms_threshold(f32::MAX)
+            .expect("finite RMS clamps");
+        config.set_speech_peak_threshold(i32::MAX);
+        config.set_speech_onset_min_silence_ms(u64::MAX);
+        config.set_endpoint_trailing_silence_ms(u64::MAX);
+
+        assert_eq!(config.speech.rms_threshold, 20_000.0);
+        assert_eq!(config.speech.peak_threshold, 32_767);
+        assert_eq!(config.speech.onset_min_silence_ms, 2_000);
+        assert_eq!(config.endpoint.trailing_silence_ms, 5_000);
+
+        let restored = VoiceQualityConfig::from_replay_hex(&config.to_replay_hex())
+            .expect("clamp-edge replay config restores");
 
         assert_eq!(restored, config);
         assert_eq!(restored.config_id(), config.config_id());

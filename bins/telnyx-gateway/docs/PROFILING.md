@@ -68,11 +68,13 @@ M6 must profile both. Reports must not force barge-in events into a purely reque
 
 ## Future Streaming-Agent Contract Notes
 
-A pluggable streaming `ConversationHandler` is the target real-agent path; the gateway-local smoke harness must not leak coalescing or deterministic echo assumptions into that path. Handler enablement and smoke-test final coalescing are separate controls.
+A pluggable streaming `ConversationHandler` is the target real-agent path; the gateway-local smoke harness must not leak coalescing or deterministic echo assumptions into that path. Handler enablement and smoke-test final coalescing are separate controls. David scoped the streaming protocol work to follow-on issue #428, not PR #419.
 
-Contract requirements for that future streaming path:
+Contract requirements for that future streaming path (#428):
 
 - The agent contract must deliver advisory partial ASR events for early-commit and barge-in decisions while keeping final `caller.turn` emission as the stable app-visible turn boundary.
+- Streamed agent replies should use `agent.turn.partial { turn_id, text, append: true }` plus a terminal `agent.turn`, and the gateway should feed appended fragments into a future `SpeechConflictPolicy::Append` path upstream of the sentence packer. This avoids per-sentence cancel-and-replace self-interruption and lets first audio start from the agent's first complete sentence instead of the last token.
+- `bins/telnyx-agent` should adopt `libs/agent` Channel (#421) for delivery once `feature/telnyx-voice` syncs/cherry-picks the mainline crate. Channel should own quiet guard, dedup/coalescing, submit settle/verify/retry, and UI profile composer detection; the Telnyx agent may keep marker-based reply extraction as the response watcher.
 - Voice and TTS backend selection belong on the typed conversation response, for example `Say { text, voice: Option<...>, tts_backend: Option<...> }`, so per-response voice policy is explicit and does not inherit transient operator-session state.
 
 ## Non-Goals
@@ -112,7 +114,7 @@ The gateway already emits several useful signals, but M6 requires a coherent lif
 | Utterance ID | Opaque acoustic utterance ID linked to speech onset, endpointing, ASR finalization, and the eventual `turn_id`. It can be the same value as `asr_session_id` if the implementation has one active ASR session per utterance. |
 | Final transcript | ASR event considered final by backend or local endpoint finish. |
 | Caller turn | M4 protocol text unit sent to the app as `caller.turn`; created from final transcript text. |
-| Agent turn | App response text sent as `agent.turn` and correlated by `turn_id`. |
+| Agent turn | App response text sent as `agent.turn` and correlated by `turn_id`. In `bins/telnyx-agent`, tmux reply extraction accepts a turn-end marker only as the last standalone trimmed marker line, so wrapped prompt echoes are not returned as spoken agent text. |
 | Playback | TTS/media job created from an accepted `agent.turn`. |
 | Barge-in | Caller speech/partial/final transcript during active playback that cancels or replaces speech. |
 | Harness mode | A controlled profiling mode such as gateway echo, text-call echo, tmux echo, or real agent. |
@@ -367,7 +369,7 @@ Boundary rules:
 | Span | Start | End | Category | Critical path? | Purpose |
 |---|---|---|---|---|---|
 | `text_call.send_caller_turn` | caller turn frame serialization begins | WebSocket frame send completes | `network_transport` | yes | M4 outbound text protocol overhead including local serialization. |
-| `app.agent_turn_wait` | `caller.turn` sent | `agent.turn` received | `model_generation` or `harness` | yes | App response latency envelope. Echo handlers must classify deterministic work as `harness`, not model generation. |
+| `app.agent_turn_wait` | `caller.turn` sent | `agent.turn` received | `model_generation` or `harness` | yes | App response latency envelope. Implemented for the M4 WebSocket path by stamping the caller-turn send time and recovering it when the correlated `agent.turn` arrives. Echo handlers must classify deterministic work as `harness`, not model generation. |
 | `app.generation` | app receives turn | app creates response text | `model_generation` or `harness` | concurrent unless app instrumentation provides exact boundary | App-side detail when available. |
 | `text_call.agent_turn_accept` | `agent.turn` received | TTS queue request begins | `gateway_overhead` | yes | Turn correlation and policy work. |
 | `text_call.supersede_stale_turn` | stale valid `agent.turn` received | `playback.finished status=superseded` sent | `gateway_overhead` | concurrent | Validates stale-but-valid behavior without hanging up. |
@@ -386,7 +388,7 @@ The strict M4 protocol remains turn-based. The gateway should not require apps t
 | `tts.packetize_first_chunk` | first audio chunk available | first media packet queued | `media_packetization` | yes | Resample/packetization overhead. |
 | `media.first_frame_send` | first media packet queued | first outbound media frame sent | `playback_transport` | yes | Queue-to-wire latency. |
 | `tts.request_to_first_audio` | TTS queue request accepted | first outbound media frame sent | `tts_generation` | yes | End-to-end request-to-first-audio envelope, including synthesis, packetization, and prebuffer. |
-| `turn.finalize_to_first_audio` | final transcript/turn boundary captured | first outbound media frame sent | `turn_taking` rollup | yes, but not a category-attribution bucket | Full post-finalize critical-path envelope; includes handler dispatch, deterministic debounce, TTS, prebuffer, and first outbound frame. Reports use child/component spans for percentage attribution. |
+| `turn.finalize_to_first_audio` | final transcript/turn boundary captured | first outbound media frame sent | `turn_taking` rollup | yes, but not a category-attribution bucket | Full post-finalize critical-path envelope; includes handler dispatch, deterministic debounce, app-agent round trip, TTS, prebuffer, and first outbound frame. Text-call sessions pass the final transcript `Instant` through the turn tracker into `SpeechQueueRequest` so this fires for real agent calls as well as smoke calls. Reports use child/component spans for percentage attribution. |
 | `media.playback_terminal` | playback started | mark/clear/failure terminal status | `playback_transport` | concurrent after first frame | Completion/cancel/failure timing. |
 
 ## Barge-In and Full-Duplex Spans
@@ -865,13 +867,15 @@ Prompt requirements:
 | ASR backend | `--backend`, `asr use` | CLI/REPL implemented | selected backend | backend comparison |
 | Codec eval | `--codec` in golden A/B | CLI implemented | selected matrix | Telnyx format comparison |
 | Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` | interruption realism |
-| Text-call | `MAX_ACTIVE_TEXT_CALL_TURNS` | hard-coded | `32` | runaway app-agent lag |
-| Text-call | `MEDIA_READY_TIMEOUT` | hard-coded | `20 s` | setup reliability |
-| Text-call | `PLAYBACK_WAIT_TIMEOUT` | hard-coded | `180 s` | hung playback detection |
-| Inbound offer | callback timeout | hard-coded | `5 s` | subscriber responsiveness |
+| Text-call | `quality text-call max-active-turns <n>` | REPL/socket/TUI implemented | `32` | runaway app-agent lag |
+| Text-call | `quality text-call media-ready-timeout-ms <ms>` | REPL/socket/TUI implemented | `20000 ms` | setup reliability |
+| Text-call | `quality text-call playback-wait-timeout-ms <ms>` | REPL/socket/TUI implemented | `180000 ms` | hung playback detection |
+| Text-call | `quality text-call latest-response-wins <on|off>` | REPL/socket/TUI implemented | `on` | stale response policy |
+| Inbound/outbound callbacks | `quality text-call callback-timeout-ms <ms>` | REPL/socket/TUI implemented | `5000 ms` | subscriber responsiveness |
 | Outbound API | `timeout_ms` | request field implemented | `45000 ms` | outbound setup latency |
 | Agent bridge | `reply_timeout_ms` | CLI implemented | `120000 ms` | local agent responsiveness |
 | Agent bridge | `input_quiet_for_ms` | CLI implemented | `10000 ms` | non-barge-in tmux UX |
+| Agent bridge | `input_delivery_timeout_ms` | CLI implemented | `30000 ms` | maximum caller silence while waiting for target idle |
 | Agent bridge | input backoff initial/max | CLI implemented | `250 ms` / `5000 ms` | queued transcription delay |
 | Agent bridge | trailing Enter delay | CLI implemented | `750 ms` | prompt submission reliability |
 | Agent bridge | trailing Enter enabled | CLI implemented | default on | prompt submission reliability |
@@ -936,6 +940,7 @@ The gateway must not become the second owner of telnyx-agent bridge behavior. Th
 |---|---|---|
 | `reply_timeout_ms` | `bins/telnyx-agent` | local agent responsiveness. |
 | `input_quiet_for_ms` | `bins/telnyx-agent` | intentional tmux quiet-window delay. |
+| `input_delivery_timeout_ms` | `bins/telnyx-agent` | bounded admission/delivery failure instead of indefinite caller silence while the target stays active. |
 | `input_backoff_initial_ms` / `input_backoff_max_ms` | `bins/telnyx-agent` | queued transcription backoff delay. |
 | `trailing_enter_enabled` | `bins/telnyx-agent` | prompt submission behavior. |
 | `trailing_enter_delay_ms` | `bins/telnyx-agent` | intentional submit delay. |
@@ -1440,8 +1445,8 @@ M6 profiling is complete when:
 - [ ] Inbound RTP loss/stale/reorder/jitter and outbound pacing/underrun rollups are emitted and surfaced as confounders/exclusions.
 - [ ] `gateway-echo` profiling separates caller speech, endpointing, ASR final flush, TTS first chunk, packetization, and first media frame timings.
 - [ ] Operator TUI command input supports Up/Down recall through `motlie-driver::HistoryBuffer`, so live tuning commands can be repeated without retyping.
-- [ ] `text-call-echo` profiling separates M4 WebSocket/app protocol overhead from deterministic harness work.
-- [ ] `agent-tmux-echo` profiling separates activity quiet-window wait, backoff, trailing Enter delay, tmux injection, reply wait, and scrape latency.
+- [ ] `text-call-echo` profiling separates M4 WebSocket/app protocol overhead from deterministic harness work, and real text-call sessions emit `app.agent_turn_wait` plus `turn.finalize_to_first_audio` using the final transcript boundary.
+- [ ] `agent-tmux-echo` profiling separates activity quiet-window wait, bounded delivery timeout, backoff, trailing Enter delay, tmux injection, reply wait, and scrape latency.
 - [ ] `real-agent` profiling attributes incremental latency using fixed/replayed audio or per-category paired deltas, not noisy live whole-call subtraction.
 - [ ] Barge-in reports link speech onset/partial/final ASR to cancel request and playback terminal `canceled` status.
 - [ ] LLM judge output includes reproducibility metadata, anchored rubric scores, confidence, uncertainty/abstention, evidence references, dominant latency category, and recommended next probe.

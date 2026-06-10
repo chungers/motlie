@@ -2138,6 +2138,7 @@ struct TranscriptRecordContext<'a> {
 
 struct FinalTurnCandidate {
     text: String,
+    finalized_at: Instant,
     transcript_event_id: Option<String>,
 }
 
@@ -2219,6 +2220,7 @@ async fn record_transcript_events(
                 .then(|| format!("trn_{}", uuid::Uuid::new_v4().simple()));
             final_turns.push(FinalTurnCandidate {
                 text: text.clone(),
+                finalized_at: Instant::now(),
                 transcript_event_id,
             });
         }
@@ -2243,7 +2245,11 @@ async fn record_transcript_events(
     if let Some(text_calls) = context.text_calls {
         for final_turn in final_turns {
             match text_calls
-                .send_caller_turn(gateway_call_id, final_turn.text.clone())
+                .send_caller_turn(
+                    gateway_call_id,
+                    final_turn.text.clone(),
+                    final_turn.finalized_at,
+                )
                 .await
             {
                 Ok(Some(turn_id)) => {
