@@ -897,9 +897,15 @@ fn artifact_cache_satisfies(cell: &SnapshotCell, artifact_root: &Path) -> bool {
         return false;
     }
 
-    let search_root = bundle_artifact_cache_root(cell, artifact_root)
-        .filter(|path| path.exists())
-        .unwrap_or_else(|| artifact_root.to_path_buf());
+    let search_root = match bundle_artifact_cache_root(cell, artifact_root) {
+        Some(path) => {
+            if !path.exists() {
+                return false;
+            }
+            path
+        }
+        None => artifact_root.to_path_buf(),
+    };
     if !search_root.exists() {
         return false;
     }

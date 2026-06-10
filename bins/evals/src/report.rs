@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::result::{
-    terminal_outcome, AcceptanceStatus, ResultRecord, TerminalOutcome, RESULT_SCHEMA_VERSION,
+    terminal_outcome, AcceptanceStatus, OutcomeReason, ResultRecord, TerminalOutcome,
+    RESULT_SCHEMA_VERSION,
 };
 use crate::snapshot::{load_snapshot, EvalSnapshot};
 
@@ -195,6 +196,9 @@ fn render_records_markdown(
         out.push_str(&format!("| `{outcome}` | {count} |\n"));
     }
 
+    out.push_str("\n## Platform Notes\n\n");
+    render_platform_notes(&mut out, records);
+
     out.push_str("\n## Per-Cell Coverage\n\n");
     out.push_str("| cell | host | arch | run | bundle | capability | depth | profile | requested | resolved | outcome | reason |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for record in records {
@@ -350,6 +354,22 @@ fn render_records_markdown(
     }
 
     out
+}
+
+fn render_platform_notes(out: &mut String, records: &[ResultRecord]) {
+    let metal_mistral_mismatch = records.iter().any(|record| {
+        record.coverage.profile == "apple-metal"
+            && record.coverage.backend == "mistralrs"
+            && record.accelerator.fallback_reason == Some(OutcomeReason::AcceleratorMismatch)
+    });
+
+    if metal_mistral_mismatch {
+        out.push_str(
+            "- `apple-metal` mistralrs rows with `accelerator_mismatch` are expected at this head: the curated `metal` profile feature does not currently enable the mistralrs Metal backend, and forced candle-metal probing is blocked by upstream M4 threadgroup-memory limits. These rows are honest CPU-fallback/blocked coverage, not an eval-framework failure.\n",
+        );
+    } else {
+        out.push_str("- No platform-specific caveats detected in the input records.\n");
+    }
 }
 
 fn render_missing_coverage(

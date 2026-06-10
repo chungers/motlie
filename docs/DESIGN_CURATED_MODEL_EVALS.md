@@ -376,18 +376,19 @@ Provisioning rules:
   reviewed checkpoint precision or default label.
 
 The GGUF axis is blocked until native toolchain checks pass on every recruited
-platform that claims GGUF coverage. Linux x86 and GB10 use repo-wired Cargo
-environment plus driver-wired child build args for the `llama-cpp-sys`
-bindgen/toolchain C-header failure: direct Cargo builds inherit
-`tools/clang-compat/include`, and GGUF snapshot cells also receive
-`BINDGEN_EXTRA_CLANG_ARGS` with the repo shim plus the host compiler builtin
-include directory. The result record exposes only a boolean presence marker, not
-host paths. macOS/Metal must separately verify the Apple clang, Metal backend
-feature flags, shader compilation, and any codesign/runtime requirements. If
-GGUF-on-Metal is not supported for a snapshot, the Metal cells are emitted as
-structured `blocked` records with reason `gguf_metal_unverified` or
-`native_toolchain_missing`; the quant x platform slice must not be silently
-empty.
+platform that claims GGUF coverage. Linux x86 and GB10 use driver-wired child
+build args for the `llama-cpp-sys` bindgen/toolchain C-header failure: GGUF
+snapshot child builds receive `BINDGEN_EXTRA_CLANG_ARGS` with the repo-local
+`tools/clang-compat/include` shim and the host compiler builtin include
+directory. Direct hand-run Linux GGUF builds use the documented equivalent env
+command; Cargo config must not inject Linux bindgen args globally because that
+breaks macOS/Metal bindgen. The result record exposes only a boolean presence
+marker, not host paths. macOS/Metal must separately verify the Apple clang,
+Metal backend feature flags, shader compilation, and any codesign/runtime
+requirements. If GGUF-on-Metal is not supported for a snapshot, the Metal cells
+are emitted as structured `blocked` records with reason
+`gguf_metal_unverified` or `native_toolchain_missing`; the quant x platform
+slice must not be silently empty.
 
 ## Tool-Use Capability And `libs/eval-tools`
 
@@ -629,6 +630,14 @@ small Metal API probe where possible, with `system_profiler` or IOKit fallback.
 Per-cell accelerator use proof must report the resolved Metal backend/device and
 offload mode; CPU fallback cannot count as Apple Metal coverage. Unified-memory
 peak metrics are source-tagged separately from CUDA VRAM metrics.
+
+Known Metal limitation at this head: `mistralrs` curated cells on `apple-metal`
+are expected to report CPU fallback / `accelerator_mismatch`. The `metal` Cargo
+feature in `libs/models` does not currently forward to `motlie-model-mistral`,
+and forced candle Metal probing on M4-class GPUs hits an upstream
+threadgroup-memory limit. The eval framework should surface these rows honestly
+as blocked/mismatch coverage and the aggregate report must include the platform
+note so reviewers do not read the mistralrs Metal column as a harness failure.
 
 GGUF verification is platform-specific. Linux x86 and GB10 must cover the
 `stdbool.h`/bindgen toolchain path, while macOS/Metal must independently cover

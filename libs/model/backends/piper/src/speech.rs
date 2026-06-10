@@ -15,7 +15,10 @@ use motlie_model::{
     UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_espeak_ng::text_to_phonemes;
-use motlie_model_ort::{build_session_with_target, OrtExecutionTarget};
+use motlie_model_ort::{
+    build_session_with_target, resolved_execution_target, OrtExecutionTarget,
+    OrtResolvedExecutionTarget,
+};
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
@@ -250,18 +253,17 @@ impl BundleHandle for PiperHandle {
     }
 
     fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
-        if cfg!(feature = "cuda") {
-            Some(RuntimeAcceleratorObservation {
+        match self.runtime.execution_target {
+            OrtResolvedExecutionTarget::Cuda => Some(RuntimeAcceleratorObservation {
                 backend_mode: "piper:cuda".to_owned(),
-                offload: Some("cuda_execution_provider=on".to_owned()),
+                offload: Some("cuda_execution_provider=on;target=auto".to_owned()),
                 selected_device: Some("0".to_owned()),
-            })
-        } else {
-            Some(RuntimeAcceleratorObservation {
+            }),
+            OrtResolvedExecutionTarget::Cpu => Some(RuntimeAcceleratorObservation {
                 backend_mode: "piper:cpu".to_owned(),
-                offload: Some("accelerator_feature=none".to_owned()),
+                offload: Some(piper_cpu_offload_reason()),
                 selected_device: None,
-            })
+            }),
         }
     }
 
@@ -317,6 +319,7 @@ struct PiperRuntime {
     // so shared bundle handles must serialize access around the loaded session.
     session: Mutex<Session>,
     config: PiperConfig,
+    execution_target: OrtResolvedExecutionTarget,
 }
 
 impl PiperRuntime {
@@ -413,6 +416,18 @@ fn piper_ort_target() -> OrtExecutionTarget {
     }
 }
 
+fn piper_cpu_offload_reason() -> String {
+    if motlie_model::metrics_runtime::should_force_cpu() {
+        "cuda_execution_provider=off;force_cpu=true".to_owned()
+    } else if matches!(piper_ort_target(), OrtExecutionTarget::CpuOnly) {
+        "cuda_execution_provider=off;target=cpu_only".to_owned()
+    } else if cfg!(feature = "cuda") {
+        "cuda_execution_provider=off".to_owned()
+    } else {
+        "accelerator_feature=none".to_owned()
+    }
+}
+
 fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelError> {
     let config = PiperConfig::from_path(&artifacts.config)?;
     if config.sample_rate_hz != PIPER_SAMPLE_RATE_HZ {
@@ -422,6 +437,8 @@ fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelErr
         )));
     }
 
+    let target = piper_ort_target();
+    let execution_target = resolved_execution_target(target);
     Ok(PiperRuntime {
         // @codex-tts 2026-04-27 -- Piper exits with glibc heap corruption on this host when
         // the ONNX Runtime CUDA execution provider is enabled during teardown. Default to CPU
@@ -430,9 +447,10 @@ fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelErr
         session: Mutex::new(build_session_with_target(
             "piper",
             &artifacts.model,
-            piper_ort_target(),
+            target,
         )?),
         config,
+        execution_target,
     })
 }
 

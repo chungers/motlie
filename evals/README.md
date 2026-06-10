@@ -95,11 +95,16 @@ On GB10/Linux AArch64, the repo `.cargo/config.toml` wires the required
 `+fp16,+fhm` target features, so no manual `RUSTFLAGS` are needed for the
 default Cargo command.
 
-For GGUF snapshot cells on Linux, the repo `.cargo/config.toml` exposes
-`tools/clang-compat/include` for direct Cargo builds, and `evals matrix` also
-wires `BINDGEN_EXTRA_CLANG_ARGS` for child builds with the repo-local shim plus
-the host compiler builtin include directory. No manual bindgen env is required
-for the default repo commands.
+For GGUF snapshot cells on Linux, `evals matrix` wires `BINDGEN_EXTRA_CLANG_ARGS`
+for child builds with the repo-local `tools/clang-compat/include` shim plus the
+host compiler builtin include directory. Direct, hand-run Linux GGUF feature
+builds need the same include arguments until `llama-cpp-sys` handles this
+compiler-builtin path itself:
+
+```sh
+BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include -I$(cc -print-file-name=include)" \
+  cargo build -p evals --no-default-features --features model-qwen3-4b-gguf --all-targets
+```
 
 For CUDA-class hosts, pass the matching profile:
 
@@ -124,7 +129,10 @@ process swap delta gates on Linux/CUDA profiles; `apple-metal` intentionally
 does not gate on machine-wide swap because macOS reports system swap rather
 than per-process bundle swap through the current sampler. Performance output
 keeps common latency fields plus a nested `capability_metrics` object tagged by
-capability.
+capability. Current `apple-metal` mistralrs rows may report
+`accelerator_mismatch`; that reflects missing/blocked mistralrs Metal backend
+wiring at this head and is called out in generated aggregate report platform
+notes.
 
 The `model-qwen3-tts-cpp` feature depends on the native submodule checkout:
 

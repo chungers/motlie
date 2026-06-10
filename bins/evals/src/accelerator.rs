@@ -62,8 +62,9 @@ pub fn resolve(
         || offload.as_deref().is_some_and(|value| {
             value.contains("gpu_layers=0") || value.contains("force_cpu=true")
         });
-    let runtime_forced_cpu =
-        runtime_forces_cpu() || runtime_gpu_layers_override() == Some(0) || backend_reported_cpu;
+    let env_forced_cpu = runtime_forces_cpu();
+    let env_gpu_layers_zero = runtime_gpu_layers_override() == Some(0);
+    let runtime_forced_cpu = env_forced_cpu || env_gpu_layers_zero || backend_reported_cpu;
     let resolved = if runtime_forced_cpu && requested != AcceleratorClass::Unavailable {
         AcceleratorClass::Cpu
     } else {
@@ -87,7 +88,9 @@ pub fn resolve(
     };
 
     if runtime_forced_cpu {
-        backend_mode = Some("cpu".to_owned());
+        if backend_mode.is_none() {
+            backend_mode = Some("cpu".to_owned());
+        }
         if offload.is_none() {
             offload = Some("gpu_layers=0".to_owned());
         }
@@ -147,12 +150,10 @@ pub fn resolve(
         }
     }
 
-    let use_proof_source = if runtime_forced_cpu {
-        if runtime_forces_cpu() {
-            "env:motlie_model_force_cpu".to_owned()
-        } else {
-            "env:motlie_model_gpu_layers".to_owned()
-        }
+    let use_proof_source = if env_forced_cpu {
+        "env:motlie_model_force_cpu".to_owned()
+    } else if env_gpu_layers_zero {
+        "env:motlie_model_gpu_layers".to_owned()
     } else if caller_reported_backend {
         "backend_observation".to_owned()
     } else {

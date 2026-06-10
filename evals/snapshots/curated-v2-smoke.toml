@@ -1,6 +1,6 @@
 schema_version = 1
 id = "curated-v2-smoke"
-git_sha = "98e23af4"
+git_sha = "17c8304e"
 
 [[cells]]
 id = "embeddinggemma_300m__embeddings_similarity__smoke__hf_default"
@@ -742,7 +742,7 @@ checkpoint_format = "gguf"
 quantization = "q8_0"
 backend = "qwen3_tts_cpp"
 features = ["model-qwen3-tts-cpp"]
-profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "dgx-spark", "cuda-workstation"]
 [cells.profile_features]
 "dgx-spark" = ["cuda", "qwen3-tts-cpp-cuda"]
 "cuda-workstation" = ["cuda", "qwen3-tts-cpp-cuda"]
