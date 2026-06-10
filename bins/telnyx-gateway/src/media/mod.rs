@@ -1,22 +1,22 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use axum::extract::ws::{Message, WebSocket};
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
+use motlie_voice::VoiceError;
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
-use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
-use motlie_voice::VoiceError;
+use motlie_voice::pipeline::resample::{WindowedSincResampler, resample_i16_mono};
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
-use tokio::sync::{mpsc, Mutex};
+use serde_json::{Map, Value, json};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{
@@ -114,6 +114,8 @@ struct MarkPayload {
 pub struct OutboundFrameQualityContext {
     pub config_id: String,
     pub redaction_mode: RedactionMode,
+    pub request_started_at: Instant,
+    pub turn_finalized_at: Option<Instant>,
     pub queued_at: Instant,
     pub first_for_playback: bool,
 }
@@ -433,6 +435,7 @@ impl InboundTransportStats {
 struct OutboundPacingStats {
     frames_sent: u64,
     underrun_count: u64,
+    pre_audio_wait_ticks: u64,
     inter_frame_gap_ms: Vec<u64>,
     queue_depth_samples: Vec<u64>,
 }
@@ -450,11 +453,17 @@ impl OutboundPacingStats {
         self.underrun_count = self.underrun_count.saturating_add(1);
     }
 
+    fn observe_pre_audio_wait(&mut self) {
+        self.pre_audio_wait_ticks = self.pre_audio_wait_ticks.saturating_add(1);
+    }
+
     fn rollup_payload(&self, playback_id: Option<&str>) -> Map<String, Value> {
         map_from_value(json!({
             "playback_id": playback_id,
             "frames_sent": self.frames_sent,
             "underrun_count": self.underrun_count,
+            "pre_audio_wait_ticks": self.pre_audio_wait_ticks,
+            "pre_audio_wait_ms_estimate": self.pre_audio_wait_ticks.saturating_mul(20),
             "inter_frame_gap_ms_p50": percentile_u64(&self.inter_frame_gap_ms, 50),
             "inter_frame_gap_ms_p95": percentile_u64(&self.inter_frame_gap_ms, 95),
             "inter_frame_gap_ms_max": self.inter_frame_gap_ms.iter().copied().max().unwrap_or(0),
@@ -486,6 +495,7 @@ struct MediaSocketState {
     conversation: Option<ConversationRuntime>,
     outbound_frame_count: usize,
     outbound_underrun_ticks: usize,
+    outbound_pre_audio_wait_ticks: usize,
     outbound_pacing: OutboundPacingStats,
     last_outbound_frame_sent_at: Option<Instant>,
     first_frame_sent_playbacks: HashSet<String>,
@@ -523,6 +533,7 @@ impl MediaSocketState {
             conversation: None,
             outbound_frame_count: 0,
             outbound_underrun_ticks: 0,
+            outbound_pre_audio_wait_ticks: 0,
             outbound_pacing: OutboundPacingStats::default(),
             last_outbound_frame_sent_at: None,
             first_frame_sent_playbacks: HashSet::new(),
@@ -556,6 +567,14 @@ pub async fn handle_socket(
 
     loop {
         tokio::select! {
+            biased;
+
+            _ = silence_keepalive.tick(), if media_state.silence_keepalive => {
+                if let Err(error) = send_outbound_or_silence(&mut socket, &state, &mut media_state).await {
+                    log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
+                    break;
+                }
+            }
             message = socket.next() => {
                 let Some(message) = message else {
                     break;
@@ -579,12 +598,6 @@ pub async fn handle_socket(
                         .await;
                         break;
                     }
-                }
-            }
-            _ = silence_keepalive.tick(), if media_state.silence_keepalive => {
-                if let Err(error) = send_outbound_or_silence(&mut socket, &state, &mut media_state).await {
-                    log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
-                    break;
                 }
             }
         }
@@ -652,6 +665,29 @@ async fn send_outbound_or_silence(
         let Some(playback_id) = media_registry.active_speech_playback_id(&call_id).await else {
             return send_silence_keepalive(socket, media_state).await;
         };
+        if !media_state
+            .first_frame_sent_playbacks
+            .contains(playback_id.as_str())
+        {
+            media_state.outbound_pre_audio_wait_ticks =
+                media_state.outbound_pre_audio_wait_ticks.saturating_add(1);
+            media_state.outbound_pacing.observe_pre_audio_wait();
+            if media_state.outbound_pre_audio_wait_ticks <= 5
+                || media_state.outbound_pre_audio_wait_ticks.is_multiple_of(50)
+            {
+                tracing::debug!(
+                    gateway_call_id = call_id,
+                    playback_id = playback_id.as_str(),
+                    pre_audio_wait_ticks = media_state.outbound_pre_audio_wait_ticks,
+                    pre_audio_wait_ms_estimate =
+                        media_state.outbound_pre_audio_wait_ticks.saturating_mul(20),
+                    queue_depth = outbound_queue_depth(media_state),
+                    "tts.outbound.pre_audio_wait"
+                );
+            }
+            return Ok(());
+        }
+
         media_state.outbound_underrun_ticks = media_state.outbound_underrun_ticks.saturating_add(1);
         media_state.outbound_pacing.observe_underrun();
         if media_state.outbound_underrun_ticks <= 5
@@ -659,7 +695,7 @@ async fn send_outbound_or_silence(
         {
             tracing::warn!(
                 gateway_call_id = call_id,
-                playback_id,
+                playback_id = playback_id.as_str(),
                 underrun_ticks = media_state.outbound_underrun_ticks,
                 queue_depth = outbound_queue_depth(media_state),
                 "tts.outbound.underrun"
@@ -809,9 +845,10 @@ async fn maybe_emit_first_frame_span(
     media_state
         .playback_quality_contexts
         .insert(frame.playback_id.clone(), quality.clone());
+    let queue_depth = outbound_queue_depth(media_state);
     let payload = map_from_value(json!({
         "playback_id": frame.playback_id.as_str(),
-        "queue_depth": outbound_queue_depth(media_state),
+        "queue_depth": queue_depth,
     }));
     state.write().await.emit_quality_span_finished(
         call_id,
@@ -826,6 +863,50 @@ async fn maybe_emit_first_frame_span(
             payload,
         },
     );
+    let payload = map_from_value(json!({
+        "playback_id": frame.playback_id.as_str(),
+        "queue_depth": queue_depth,
+        "request_to_enqueue_ms": quality
+            .queued_at
+            .saturating_duration_since(quality.request_started_at)
+            .as_millis() as u64,
+    }));
+    state.write().await.emit_quality_span_finished(
+        call_id,
+        QualitySpanEmission {
+            config_id: quality.config_id.clone(),
+            redaction_mode: quality.redaction_mode,
+            span_name: "tts.request_to_first_audio",
+            category: "tts_generation",
+            duration: quality.request_started_at.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload,
+        },
+    );
+    if let Some(finalized_at) = quality.turn_finalized_at {
+        let payload = map_from_value(json!({
+            "playback_id": frame.playback_id.as_str(),
+            "queue_depth": queue_depth,
+            "handler_to_request_ms": quality
+                .request_started_at
+                .saturating_duration_since(finalized_at)
+                .as_millis() as u64,
+        }));
+        state.write().await.emit_quality_span_finished(
+            call_id,
+            QualitySpanEmission {
+                config_id: quality.config_id.clone(),
+                redaction_mode: quality.redaction_mode,
+                span_name: "turn.finalize_to_first_audio",
+                category: "turn_taking",
+                duration: finalized_at.elapsed(),
+                critical_path: true,
+                concurrent: false,
+                payload,
+            },
+        );
+    }
 }
 
 async fn emit_playback_terminal_spans(
@@ -904,6 +985,7 @@ fn log_outbound_frame_sent(media_state: &mut MediaSocketState, call_id: &str, pl
         .outbound_pacing
         .observe_frame(interval_ms, outbound_queue_depth(media_state));
     media_state.outbound_underrun_ticks = 0;
+    media_state.outbound_pre_audio_wait_ticks = 0;
 
     let is_pacing_anomaly = interval_ms.is_some_and(|ms| !(15..=35).contains(&ms));
     if media_state.outbound_frame_count <= 5
@@ -1880,16 +1962,58 @@ async fn finish_asr_session(
     stream_id: Option<String>,
     text_calls: Option<&SharedTextCallRegistry>,
 ) -> anyhow::Result<()> {
-    if let (Some(call_id), Some(asr_session)) = (gateway_call_id, media_state.session.take()) {
+    if let (Some(call_id), Some(mut asr_session)) = (gateway_call_id, media_state.session.take()) {
         let quality_session = media_state.active_quality_asr.take();
-        let finish_started_at = Instant::now();
-        let events = asr_session.finish().await?;
+        let finish_pad_ms = media_state.quality_config.asr.finish_pad_ms;
+        let pad_started_at = Instant::now();
+        let pad_events = ingest_asr_finish_silence(asr_session.as_mut(), finish_pad_ms).await?;
+        let pad_duration = pad_started_at.elapsed();
+        let pad_event_count = pad_events.len();
         if let Some(session) = quality_session.as_ref() {
             let payload = map_from_value(json!({
                 "asr_session_id": session.asr_session_id.as_str(),
                 "utterance_id": session.utterance_id.as_str(),
                 "stream_id": stream_id.as_deref(),
-                "transcript_events": events.len(),
+                "finish_pad_ms": finish_pad_ms,
+                "pad_transcript_events": pad_event_count,
+            }));
+            state.write().await.emit_quality_span_finished(
+                call_id,
+                QualitySpanEmission {
+                    config_id: session.config_id.clone(),
+                    redaction_mode: session.redaction_mode,
+                    span_name: "asr.finish_pad",
+                    category: "asr_generation",
+                    duration: pad_duration,
+                    critical_path: true,
+                    concurrent: false,
+                    payload,
+                },
+            );
+        }
+        record_and_forward_asr_events(
+            state,
+            media_state,
+            call_id,
+            stream_id.as_deref(),
+            text_calls,
+            quality_session.as_ref(),
+            pad_events,
+        )
+        .await;
+
+        let finish_started_at = Instant::now();
+        let events = asr_session.finish().await?;
+        let finish_event_count = events.len();
+        if let Some(session) = quality_session.as_ref() {
+            let payload = map_from_value(json!({
+                "asr_session_id": session.asr_session_id.as_str(),
+                "utterance_id": session.utterance_id.as_str(),
+                "stream_id": stream_id.as_deref(),
+                "finish_pad_ms": finish_pad_ms,
+                "pad_transcript_events": pad_event_count,
+                "finish_transcript_events": finish_event_count,
+                "transcript_events": pad_event_count.saturating_add(finish_event_count),
             }));
             state.write().await.emit_quality_span_finished(
                 call_id,
@@ -1906,31 +2030,67 @@ async fn finish_asr_session(
             );
             media_state.last_quality_asr = Some(session.clone());
         }
-        let conversation_events = conversation_events_from_transcripts(&events);
-        let _ = record_transcript_events(
+        record_and_forward_asr_events(
             state,
+            media_state,
             call_id,
+            stream_id.as_deref(),
+            text_calls,
+            quality_session.as_ref(),
             events,
-            TranscriptRecordContext {
-                stream_id: stream_id.as_deref(),
-                media_format: media_state.media_format.as_ref(),
-                capture: media_state.capture.as_mut(),
-                text_calls,
-                quality_session: quality_session.as_ref(),
-            },
-        )
-        .await;
-        forward_conversation_events(
-            state,
-            &media_state.media_registry,
-            media_state.conversation.as_ref(),
-            call_id,
-            conversation_events,
-            Some(&media_state.quality_config),
         )
         .await;
     }
     Ok(())
+}
+
+async fn ingest_asr_finish_silence(
+    asr_session: &mut dyn InboundAsrSession,
+    pad_ms: u64,
+) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+    const ASR_SAMPLE_RATE_HZ: u64 = 16_000;
+
+    let samples = ((ASR_SAMPLE_RATE_HZ * pad_ms) / 1_000) as usize;
+    if samples == 0 {
+        return Ok(Vec::new());
+    }
+    asr_session
+        .ingest(AudioBuf::<i16, 16_000, Mono>::new(vec![0; samples]))
+        .await
+}
+
+async fn record_and_forward_asr_events(
+    state: &SharedState,
+    media_state: &mut MediaSocketState,
+    call_id: &str,
+    stream_id: Option<&str>,
+    text_calls: Option<&SharedTextCallRegistry>,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    events: Vec<AsrTranscriptEvent>,
+) {
+    let conversation_events = conversation_events_from_transcripts(&events);
+    let _ = record_transcript_events(
+        state,
+        call_id,
+        events,
+        TranscriptRecordContext {
+            stream_id,
+            media_format: media_state.media_format.as_ref(),
+            capture: media_state.capture.as_mut(),
+            text_calls,
+            quality_session,
+        },
+    )
+    .await;
+    forward_conversation_events(
+        state,
+        &media_state.media_registry,
+        media_state.conversation.as_ref(),
+        call_id,
+        conversation_events,
+        Some(&media_state.quality_config),
+    )
+    .await;
 }
 
 fn conversation_events_from_transcripts(events: &[AsrTranscriptEvent]) -> Vec<TranscriptEvent> {
@@ -2156,8 +2316,8 @@ fn validate_media_format(format: &MediaFormat) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use motlie_model::typed::{AudioBuf, Mono};
@@ -2166,9 +2326,9 @@ mod tests {
     use crate::adapter::{
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
-    use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
+    use crate::operator::state::{CallStatus, TelnyxIds, TtsPlaybackStatus, shared_state};
     use crate::tts::{
-        LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
+        LiveTtsBackend, OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry,
     };
 
     #[test]
@@ -2318,6 +2478,13 @@ mod tests {
                 CallStatus::MediaStarted,
             )
         };
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_tts_max_text_chunk_chars(40);
+            guard.quality.config.set_tts_prebuffer_chunks(2);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
+        }
         let media_registry = SharedMediaRegistry::default();
         let (tx, rx) = mpsc::channel(16);
         media_registry
@@ -2337,43 +2504,44 @@ mod tests {
             &tts,
             LiveTtsBackend::Piper,
             gateway_call_id.clone(),
-            "Hello, world.".to_string(),
+            "Hello world. Second sentence blocks here.".to_string(),
             "test say",
         )
         .await
         .expect("speech should start");
 
-        let clear = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
-                if let Some(command) = pending_clear_command(&mut media_state).await {
-                    return command;
+                if media_registry
+                    .active_speech_playback_id(&gateway_call_id)
+                    .await
+                    .is_none()
+                {
+                    break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("failed chunk should request clear");
+        .expect("failed prebuffered chunk should release active playback");
 
-        match clear {
-            OutboundMediaCommand::Clear { playback_id, .. } => {
-                assert_eq!(playback_id, queued.playback_id)
-            }
-            other => panic!("expected clear command, got {other:?}"),
-        }
         assert!(next_outbound_command(&mut media_state).is_none());
-        assert!(media_registry
-            .active_speech_playback_id(&gateway_call_id)
-            .await
-            .is_none());
+        assert!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .is_none()
+        );
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         let tts = call.tts.as_ref().expect("TTS state should exist");
         assert_eq!(tts.status, TtsPlaybackStatus::Failed);
-        assert!(tts
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("second chunk failed")));
+        assert!(
+            tts.error
+                .as_deref()
+                .is_some_and(|error| error.contains("second chunk failed"))
+        );
         assert_eq!(call.status, CallStatus::MediaStarted);
         drop(guard);
 
@@ -2638,14 +2806,16 @@ mod tests {
         handle_text(&media_one, &state, &asr, &mut media_state)
             .await
             .expect("first non-one media chunk should establish reorder base");
-        assert!(state
-            .read()
-            .await
-            .calls
-            .get(&gateway_call_id)
-            .expect("call exists")
-            .transcripts
-            .is_empty());
+        assert!(
+            state
+                .read()
+                .await
+                .calls
+                .get(&gateway_call_id)
+                .expect("call exists")
+                .transcripts
+                .is_empty()
+        );
 
         let media_two = media_event("stream-1", "8", &chunk);
         handle_text(&media_two, &state, &asr, &mut media_state)
@@ -2671,9 +2841,12 @@ mod tests {
         assert_eq!(call.ids.stream_id.as_deref(), Some("stream-1"));
         assert_eq!(call.media.encoding.as_deref(), Some("L16"));
         assert_eq!(call.media.sample_rate_hz, Some(16_000));
-        assert_eq!(call.transcripts.len(), 2);
+        assert_eq!(call.transcripts.len(), 2 + finish_pad_silence_frames());
         assert_eq!(call.transcripts[0].text, "received 16000 samples");
-        assert_eq!(call.transcripts[1].text, "received 16000 samples");
+        assert_eq!(
+            call.transcripts.last().map(|event| event.text.as_str()),
+            Some("received 18560 samples")
+        );
     }
 
     #[tokio::test]
@@ -2775,14 +2948,16 @@ mod tests {
         )
         .await
         .expect("silence should be accepted by transport");
-        assert!(state
-            .read()
-            .await
-            .calls
-            .get(&gateway_call_id)
-            .expect("call exists")
-            .transcripts
-            .is_empty());
+        assert!(
+            state
+                .read()
+                .await
+                .calls
+                .get(&gateway_call_id)
+                .expect("call exists")
+                .transcripts
+                .is_empty()
+        );
 
         let speech = STANDARD.encode(l16_samples(16_000, 4_000));
         handle_text(
@@ -2824,10 +2999,13 @@ mod tests {
         outbound.observe_frame(Some(20), 4);
         outbound.observe_frame(Some(50), 2);
         outbound.observe_underrun();
+        outbound.observe_pre_audio_wait();
         let payload = outbound.rollup_payload(Some("tts_test"));
         assert_eq!(payload["playback_id"], "tts_test");
         assert_eq!(payload["frames_sent"], 2);
         assert_eq!(payload["underrun_count"], 1);
+        assert_eq!(payload["pre_audio_wait_ticks"], 1);
+        assert_eq!(payload["pre_audio_wait_ms_estimate"], 20);
         assert_eq!(payload["inter_frame_gap_ms_max"], 50);
     }
 
@@ -2890,7 +3068,7 @@ mod tests {
             gate.accept(1, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue { speech_onset: true }
         );
-        for frame_index in 2..=7 {
+        for frame_index in 2..=10 {
             assert_eq!(
                 gate.accept(frame_index, "stream-1", 20, &silence, &quality),
                 AsrFrameDecision::Continue {
@@ -2899,11 +3077,11 @@ mod tests {
             );
         }
         assert_eq!(
-            gate.accept(8, "stream-1", 20, &speech, &quality),
+            gate.accept(11, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue { speech_onset: true }
         );
         assert_eq!(
-            gate.accept(9, "stream-1", 20, &speech, &quality),
+            gate.accept(12, "stream-1", 20, &speech, &quality),
             AsrFrameDecision::Continue {
                 speech_onset: false,
             }
@@ -2950,7 +3128,10 @@ mod tests {
             .expect("silence should be accepted by transport");
         }
 
-        assert_eq!(counting_asr.ingests(), 1 + endpoint_frames);
+        assert_eq!(
+            counting_asr.ingests(),
+            1 + endpoint_frames + finish_pad_silence_frames()
+        );
         assert_eq!(counting_asr.finishes(), 1);
     }
 
@@ -3061,7 +3242,10 @@ mod tests {
         .expect("resumed speech should open a fresh ASR session");
 
         assert_eq!(counting_asr.opens(), 2);
-        assert_eq!(counting_asr.ingests(), 2 + endpoint_frames);
+        assert_eq!(
+            counting_asr.ingests(),
+            2 + endpoint_frames + finish_pad_silence_frames()
+        );
 
         let guard = state.read().await;
         let call = guard.calls.get(&_gateway_call_id).expect("call exists");
@@ -3239,9 +3423,11 @@ mod tests {
         .await
         .expect_err("unsupported codec should fail at start");
 
-        assert!(error
-            .to_string()
-            .contains("unsupported inbound media encoding"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported inbound media encoding")
+        );
         assert!(media_state.session.is_none());
         assert!(media_state.gateway_call_id.is_none());
         assert!(media_state.media_format.is_none());
@@ -3354,6 +3540,10 @@ mod tests {
     fn local_endpoint_silence_frames() -> usize {
         let frame_ms = SILENCE_KEEPALIVE_INTERVAL.as_millis() as u64;
         (VoiceQualityConfig::default().endpoint.trailing_silence_ms / frame_ms) as usize
+    }
+
+    fn finish_pad_silence_frames() -> usize {
+        usize::from(VoiceQualityConfig::default().asr.finish_pad_ms > 0)
     }
 
     #[derive(Default)]

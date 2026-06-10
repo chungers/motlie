@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::{fmt, str::FromStr};
 
-use anyhow::bail;
 #[cfg(any(feature = "kokoro", feature = "piper"))]
 use anyhow::Context;
+use anyhow::bail;
 use async_trait::async_trait;
 use clap::ValueEnum;
 #[cfg(feature = "kokoro")]
@@ -124,6 +124,10 @@ impl FromStr for LiveTtsBackend {
 pub trait OutboundTtsFactory: Send + Sync {
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>>;
 
+    async fn warm(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn label(&self) -> &'static str;
 
     fn is_available(&self) -> bool {
@@ -165,6 +169,10 @@ impl TtsRegistry {
             LiveTtsBackend::Piper => self.piper(),
         }
     }
+
+    pub async fn warm(&self, backend: LiveTtsBackend) -> anyhow::Result<()> {
+        self.factory(backend).warm().await
+    }
 }
 
 pub struct UnavailableTtsFactory {
@@ -181,6 +189,10 @@ impl UnavailableTtsFactory {
 #[async_trait]
 impl OutboundTtsFactory for UnavailableTtsFactory {
     async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+        bail!(self.message)
+    }
+
+    async fn warm(&self) -> anyhow::Result<()> {
         bail!(self.message)
     }
 
@@ -229,6 +241,10 @@ impl KokoroTtsFactory {
 #[cfg(feature = "kokoro")]
 #[async_trait]
 impl OutboundTtsFactory for KokoroTtsFactory {
+    async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
+    }
+
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
         let handle = self.handle().await?;
         let audio = handle
@@ -285,6 +301,10 @@ impl PiperTtsFactory {
 #[cfg(feature = "piper")]
 #[async_trait]
 impl OutboundTtsFactory for PiperTtsFactory {
+    async fn warm(&self) -> anyhow::Result<()> {
+        self.handle().await.map(|_| ())
+    }
+
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
         let handle = self.handle().await?;
         let mut stream = handle
@@ -315,24 +335,178 @@ impl OutboundTtsFactory for PiperTtsFactory {
 }
 
 pub fn split_speech_text(text: &str) -> Vec<String> {
+    split_speech_text_with_max_chars(text, usize::MAX)
+}
+
+pub fn split_speech_text_with_max_chars(text: &str, max_chars: usize) -> Vec<String> {
+    split_speech_text_with_first_chunk_max_chars(text, max_chars, 0)
+}
+
+pub fn split_speech_text_with_first_chunk_max_chars(
+    text: &str,
+    max_chars: usize,
+    first_chunk_max_chars: usize,
+) -> Vec<String> {
+    let max_chars = max_chars.max(1);
+    let segments = speech_segments(text);
     let mut chunks = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        current.push(ch);
-        if matches!(ch, '.' | '!' | '?' | ',' | ';' | ':' | '\n') {
-            push_speech_chunk(&mut chunks, &mut current);
-        }
+    let mut segment_index = 0;
+
+    if first_chunk_max_chars > 0 {
+        segment_index = push_first_speech_chunk(&mut chunks, &segments, first_chunk_max_chars);
     }
-    push_speech_chunk(&mut chunks, &mut current);
+
+    let mut pending_chunk = String::new();
+    for segment in segments.iter().skip(segment_index) {
+        push_speech_segment(&mut chunks, &mut pending_chunk, segment, max_chars);
+    }
+    flush_speech_chunk(&mut chunks, &mut pending_chunk);
     chunks
 }
 
-fn push_speech_chunk(chunks: &mut Vec<String>, current: &mut String) {
-    let trimmed = current.trim();
+fn speech_segments(text: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut segment = String::new();
+    for ch in text.chars() {
+        segment.push(ch);
+        if is_speech_segment_boundary(ch) {
+            push_trimmed_segment(&mut segments, &mut segment);
+        }
+    }
+    push_trimmed_segment(&mut segments, &mut segment);
+    segments
+}
+
+fn push_trimmed_segment(segments: &mut Vec<String>, segment: &mut String) {
+    let trimmed = segment.trim();
+    if !trimmed.is_empty() {
+        segments.push(trimmed.to_string());
+    }
+    segment.clear();
+}
+
+fn push_first_speech_chunk(
+    chunks: &mut Vec<String>,
+    segments: &[String],
+    first_chunk_max_chars: usize,
+) -> usize {
+    let mut first_chunk = String::new();
+    let mut consumed = 0;
+    for segment in segments {
+        let separator = usize::from(!first_chunk.is_empty());
+        let next_chars = first_chunk
+            .chars()
+            .count()
+            .saturating_add(separator)
+            .saturating_add(segment.chars().count());
+        if !first_chunk.is_empty() && next_chars > first_chunk_max_chars {
+            break;
+        }
+        if !first_chunk.is_empty() {
+            first_chunk.push(' ');
+        }
+        first_chunk.push_str(segment);
+        consumed += 1;
+        if first_chunk.chars().count() >= first_chunk_max_chars {
+            break;
+        }
+    }
+    if !first_chunk.is_empty() {
+        chunks.push(first_chunk);
+    }
+    consumed
+}
+
+fn is_speech_segment_boundary(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?' | '\n')
+}
+
+fn push_speech_segment(
+    chunks: &mut Vec<String>,
+    pending_chunk: &mut String,
+    segment: &str,
+    max_chars: usize,
+) {
+    if segment.is_empty() {
+        return;
+    }
+
+    if segment.chars().count() > max_chars {
+        flush_speech_chunk(chunks, pending_chunk);
+        push_bounded_speech_chunk(chunks, segment, max_chars);
+        return;
+    }
+
+    let separator = usize::from(!pending_chunk.is_empty());
+    let next_chars = pending_chunk
+        .chars()
+        .count()
+        .saturating_add(separator)
+        .saturating_add(segment.chars().count());
+    if !pending_chunk.is_empty() && next_chars > max_chars {
+        flush_speech_chunk(chunks, pending_chunk);
+    }
+    if !pending_chunk.is_empty() {
+        pending_chunk.push(' ');
+    }
+    pending_chunk.push_str(segment);
+}
+
+fn flush_speech_chunk(chunks: &mut Vec<String>, pending_chunk: &mut String) {
+    let trimmed = pending_chunk.trim();
     if !trimmed.is_empty() {
         chunks.push(trimmed.to_string());
     }
-    current.clear();
+    pending_chunk.clear();
+}
+
+fn push_bounded_speech_chunk(chunks: &mut Vec<String>, text: &str, max_chars: usize) {
+    if text.chars().count() <= max_chars {
+        chunks.push(text.to_string());
+        return;
+    }
+
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_chars = word.chars().count();
+        if word_chars > max_chars {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            push_long_word_chunks(chunks, word, max_chars);
+            continue;
+        }
+
+        let separator = usize::from(!current.is_empty());
+        let next_chars = current
+            .chars()
+            .count()
+            .saturating_add(separator)
+            .saturating_add(word_chars);
+        if !current.is_empty() && next_chars > max_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+}
+
+fn push_long_word_chunks(chunks: &mut Vec<String>, word: &str, max_chars: usize) {
+    let mut current = String::new();
+    for ch in word.chars() {
+        if current.chars().count() >= max_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
 }
 
 pub fn unavailable_registry() -> SharedTtsRegistry {
@@ -469,8 +643,10 @@ impl StaticTtsFactory {
 
     pub fn with_sample_rate(samples: Vec<i16>, sample_rate_hz: u32) -> Self {
         Self {
-            chunks: vec![TtsAudio::new(samples, sample_rate_hz)
-                .expect("test TTS sample rate should be non-zero")],
+            chunks: vec![
+                TtsAudio::new(samples, sample_rate_hz)
+                    .expect("test TTS sample rate should be non-zero"),
+            ],
         }
     }
 }
@@ -522,10 +698,10 @@ mod tests {
     }
 
     #[test]
-    fn split_speech_text_uses_sentence_boundaries() {
+    fn split_speech_text_packs_complete_sentences() {
         assert_eq!(
-            split_speech_text("Hello there. This is Motlie!"),
-            vec!["Hello there.", "This is Motlie!"]
+            split_speech_text_with_max_chars("Hello there. This is Motlie!", 90),
+            vec!["Hello there. This is Motlie!"]
         );
     }
 
@@ -538,10 +714,57 @@ mod tests {
     }
 
     #[test]
-    fn split_speech_text_uses_clause_boundaries() {
+    fn split_speech_text_does_not_split_clause_fragments() {
         assert_eq!(
-            split_speech_text("Hello, then continue: now stop;"),
-            vec!["Hello,", "then continue:", "now stop;"]
+            split_speech_text_with_max_chars("Hello, then continue: now stop;", 90),
+            vec!["Hello, then continue: now stop;"]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_keeps_short_colon_prelude_with_following_text() {
+        assert_eq!(
+            split_speech_text_with_max_chars("I heard: hello there. Done.", 90),
+            vec!["I heard: hello there. Done."]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_starts_smoke_echo_as_complete_sentence() {
+        assert_eq!(
+            split_speech_text_with_max_chars("I heard: Okay, hello. Can you hear me?", 90),
+            vec!["I heard: Okay, hello. Can you hear me?"]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_first_chunk_ramp_flushes_complete_sentence() {
+        assert_eq!(
+            split_speech_text_with_first_chunk_max_chars(
+                "A complete first sentence. The second sentence follows quickly.",
+                90,
+                12,
+            ),
+            vec![
+                "A complete first sentence.",
+                "The second sentence follows quickly."
+            ]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_first_chunk_zero_uses_normal_packing() {
+        assert_eq!(
+            split_speech_text_with_first_chunk_max_chars("First sentence. Second sentence.", 90, 0,),
+            vec!["First sentence. Second sentence."]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_with_max_chars_breaks_long_clauses_on_words() {
+        assert_eq!(
+            split_speech_text_with_max_chars("alpha beta gamma delta", 12),
+            vec!["alpha beta", "gamma delta"]
         );
     }
 

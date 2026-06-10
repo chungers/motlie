@@ -135,9 +135,9 @@ pub struct SpeechQualityConfig {
 impl Default for SpeechQualityConfig {
     fn default() -> Self {
         Self {
-            rms_threshold: 180.0,
-            peak_threshold: 900,
-            onset_min_silence_ms: 120,
+            rms_threshold: 220.0,
+            peak_threshold: 1_100,
+            onset_min_silence_ms: 180,
         }
     }
 }
@@ -155,7 +155,7 @@ pub struct EndpointQualityConfig {
 impl Default for EndpointQualityConfig {
     fn default() -> Self {
         Self {
-            trailing_silence_ms: 800,
+            trailing_silence_ms: 650,
             min_turn_words: 2,
             min_turn_chars: 6,
             merge_window_ms: 350,
@@ -169,6 +169,7 @@ impl Default for EndpointQualityConfig {
 pub struct AsrQualityConfig {
     pub repeated_token_run_threshold: usize,
     pub repeated_q_run_threshold: usize,
+    pub finish_pad_ms: u64,
 }
 
 impl Default for AsrQualityConfig {
@@ -176,6 +177,7 @@ impl Default for AsrQualityConfig {
         Self {
             repeated_token_run_threshold: 16,
             repeated_q_run_threshold: 8,
+            finish_pad_ms: 160,
         }
     }
 }
@@ -218,12 +220,18 @@ impl TextCallQualityConfig {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TtsQualityConfig {
     pub chunking_enabled: bool,
+    pub max_text_chunk_chars: usize,
+    pub first_chunk_max_chars: usize,
+    pub prebuffer_chunks: usize,
 }
 
 impl Default for TtsQualityConfig {
     fn default() -> Self {
         Self {
             chunking_enabled: true,
+            max_text_chunk_chars: 90,
+            first_chunk_max_chars: 0,
+            prebuffer_chunks: 1,
         }
     }
 }
@@ -366,15 +374,18 @@ impl VoiceQualityConfig {
         match profile {
             QualityProfile::Fast => {
                 config.endpoint.trailing_silence_ms = 550;
+                config.asr.finish_pad_ms = 80;
             }
             QualityProfile::Balanced => {}
             QualityProfile::Complete => {
                 config.endpoint.trailing_silence_ms = 1_100;
+                config.asr.finish_pad_ms = 320;
             }
             QualityProfile::Noisy => {
                 config.endpoint.trailing_silence_ms = 950;
-                config.speech.rms_threshold = 220.0;
+                config.speech.rms_threshold = 260.0;
                 config.speech.peak_threshold = 1_200;
+                config.asr.finish_pad_ms = 240;
             }
         }
         config
@@ -465,6 +476,7 @@ impl VoiceQualityConfig {
             2,
             64,
         )?;
+        ensure_u64("asr.finish_pad_ms", self.asr.finish_pad_ms, 0, 2_000)?;
         ensure_usize(
             "text_call.max_active_turns",
             self.text_call.max_active_turns,
@@ -489,6 +501,21 @@ impl VoiceQualityConfig {
             100,
             60_000,
         )?;
+        ensure_usize(
+            "tts.max_text_chunk_chars",
+            self.tts.max_text_chunk_chars,
+            40,
+            500,
+        )?;
+        if self.tts.first_chunk_max_chars != 0 {
+            ensure_usize(
+                "tts.first_chunk_max_chars",
+                self.tts.first_chunk_max_chars,
+                40,
+                500,
+            )?;
+        }
+        ensure_usize("tts.prebuffer_chunks", self.tts.prebuffer_chunks, 1, 64)?;
         ensure_u64(
             "barge_in.clear_timeout_ms",
             self.barge_in.clear_timeout_ms,
@@ -625,6 +652,9 @@ impl VoiceQualityConfig {
             if let Some(value) = asr.repeated_q_run_threshold {
                 self.set_asr_repeated_q_run_threshold(value);
             }
+            if let Some(value) = asr.finish_pad_ms {
+                self.set_asr_finish_pad_ms(value);
+            }
         }
         if let Some(text_call) = patch.text_call {
             if let Some(value) = text_call.max_active_turns {
@@ -646,6 +676,15 @@ impl VoiceQualityConfig {
         if let Some(tts) = patch.tts {
             if let Some(value) = tts.chunking_enabled {
                 self.set_tts_chunking_enabled(value);
+            }
+            if let Some(value) = tts.max_text_chunk_chars {
+                self.set_tts_max_text_chunk_chars(value);
+            }
+            if let Some(value) = tts.first_chunk_max_chars {
+                self.set_tts_first_chunk_max_chars(value);
+            }
+            if let Some(value) = tts.prebuffer_chunks {
+                self.set_tts_prebuffer_chunks(value);
             }
         }
         if let Some(barge_in) = patch.barge_in {
@@ -868,6 +907,17 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_asr_finish_pad_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 2_000);
+        self.asr.finish_pad_ms = clamped.value;
+        self.outcome(
+            "asr.finish_pad_ms",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
     pub fn set_text_call_max_active_turns(&mut self, value: usize) -> QualityMutationOutcome {
         let clamped = clamp_usize(value, 1, 1_024);
         self.text_call.max_active_turns = clamped.value;
@@ -929,6 +979,46 @@ impl VoiceQualityConfig {
             value,
             ApplyBoundary::NewPlaybackRequest,
             false,
+        )
+    }
+
+    pub fn set_tts_max_text_chunk_chars(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 40, 500);
+        self.tts.max_text_chunk_chars = clamped.value;
+        self.outcome(
+            "tts.max_text_chunk_chars",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_tts_first_chunk_max_chars(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = if value == 0 {
+            Clamped {
+                value,
+                clamped: false,
+            }
+        } else {
+            clamp_usize(value, 40, 500)
+        };
+        self.tts.first_chunk_max_chars = clamped.value;
+        self.outcome(
+            "tts.first_chunk_max_chars",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_tts_prebuffer_chunks(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 64);
+        self.tts.prebuffer_chunks = clamped.value;
+        self.outcome(
+            "tts.prebuffer_chunks",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
         )
     }
 
@@ -1241,6 +1331,7 @@ pub struct EndpointQualityConfigPatch {
 pub struct AsrQualityConfigPatch {
     pub repeated_token_run_threshold: Option<usize>,
     pub repeated_q_run_threshold: Option<usize>,
+    pub finish_pad_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1255,6 +1346,9 @@ pub struct TextCallQualityConfigPatch {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TtsQualityConfigPatch {
     pub chunking_enabled: Option<bool>,
+    pub max_text_chunk_chars: Option<usize>,
+    pub first_chunk_max_chars: Option<usize>,
+    pub prebuffer_chunks: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1306,6 +1400,21 @@ mod tests {
         let config = VoiceQualityConfig::default();
         assert!(!config.logging.include_transcript_text);
         assert_eq!(config.logging.redaction_mode, RedactionMode::MetricsOnly);
+    }
+
+    #[test]
+    fn balanced_defaults_match_live_call_tuned_values() {
+        let config = VoiceQualityConfig::default();
+        assert_eq!(config.profile, QualityProfile::Balanced);
+        assert_eq!(config.endpoint.trailing_silence_ms, 650);
+        assert_eq!(config.speech.rms_threshold, 220.0);
+        assert_eq!(config.speech.peak_threshold, 1_100);
+        assert_eq!(config.speech.onset_min_silence_ms, 180);
+        assert_eq!(config.asr.finish_pad_ms, 160);
+        assert!(config.tts.chunking_enabled);
+        assert_eq!(config.tts.max_text_chunk_chars, 90);
+        assert_eq!(config.tts.first_chunk_max_chars, 0);
+        assert_eq!(config.tts.prebuffer_chunks, 1);
     }
 
     #[test]
@@ -1393,7 +1502,7 @@ mod tests {
         .expect("quality config parses");
 
         assert_eq!(config.profile, QualityProfile::Noisy);
-        assert_eq!(config.speech.rms_threshold, 220.0);
+        assert_eq!(config.speech.rms_threshold, 260.0);
         assert_eq!(config.endpoint.trailing_silence_ms, 100);
         assert!(!config.logging.include_transcript_text);
     }
@@ -1410,7 +1519,7 @@ mod tests {
             )
             .expect("toml overlay parses");
         assert_eq!(config.profile, QualityProfile::Noisy);
-        assert_eq!(config.speech.rms_threshold, 220.0);
+        assert_eq!(config.speech.rms_threshold, 260.0);
         assert_eq!(config.endpoint.trailing_silence_ms, 700);
     }
 }
