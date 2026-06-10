@@ -371,3 +371,11 @@ for help when possible.
 - No style debates in PRs
 
 ---
+
+## Toolchain & CI Policy
+
+**Floating stable, fix-forward. (David, 2026-06-10)**
+
+- CI and dev intentionally track the **latest stable Rust** (`dtolnay/rust-toolchain@stable` in workflows). Do **NOT** add `rust-toolchain.toml` or pin CI toolchain versions — we prefer discovering incompatibility as we build over intentional bumps that always fall behind.
+- When a toolchain update breaks the build (CI or local), **fix forward immediately** with a small, surgical, version-portable change (e.g. `as *const _` casts when intrinsic signatures changed — commit `baf91858`). Such breaks are expected and are not the fault of the PR that surfaces them.
+- The same applies to tooling drift generally (clippy lints added by new stables): address the lint properly, don't pin or suppress.
