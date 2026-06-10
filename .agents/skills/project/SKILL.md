@@ -234,6 +234,20 @@ timers, `mstream timer fire <name>` to test prompt delivery, and
 periodic attention. Timer state is daemon memory only and must be recreated
 after daemon restart. Do not target collaborator sessions with orchestrator
 timers unless the user explicitly asks for that behavior.
+
+**Self-timer prompt hygiene (treat the recurring timer like a renewed one-shot).**
+The recurring self-timer is a liveness convenience; its original design intent
+was a one-shot reminder renewed each cycle. That intent carries an obligation:
+**frequently re-assess both the timer and its prompt content.** On every
+material phase change (a PR opens/merges, a review converges, a decision lands,
+work moves to a new phase), stop and re-start the timer with a rewritten
+prompt — compact, current-phase-only, no stale status. Never let a prompt keep
+describing finished work, resolved decisions, or superseded holds: a stale
+prompt re-primes the orchestrator with wrong context on every fire. Also
+re-evaluate cadence at each rewrite (fast while shepherding active review
+rounds, slow/idle-watch when holding for a human, stop when the goal is done).
+If a timer fires and its prompt no longer matches reality, that is the signal
+you missed a rewrite — fix the timer before doing anything else.
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key. Retries send only extra Enter keys, not
 the prompt text; `--no-prompt-submit` disables retries (deprecated alias
