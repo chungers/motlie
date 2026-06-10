@@ -6,7 +6,9 @@ use motlie_model::{
     ToolSpec,
 };
 
-use crate::metrics::{CapabilityPerformanceMetrics, ChatPerformanceMetrics, PerformanceMetrics};
+use crate::metrics::{
+    CapabilityPerformanceMetrics, ChatPerformanceMetrics, MetricUnavailable, PerformanceMetrics,
+};
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
@@ -163,20 +165,17 @@ impl ScenarioRunner for ChatRunner {
             .as_ref()
             .and_then(|usage| usage.prompt_tokens)
             .map(u64::from);
-        let latency_sum = request_latencies_ms.iter().sum::<u64>();
-        let tokens_per_second = completion_tokens.and_then(|tokens| {
-            (latency_sum > 0).then(|| tokens as f64 / (latency_sum as f64 / 1000.0))
-        });
         let model_text_metrics = model_metrics.and_then(|snapshot| snapshot.text_generation);
+        let tokens_per_second = model_text_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.avg_generated_tokens_per_sec)
+            .map(|tokens| tokens.0 as f64);
         let chat_metrics = ChatPerformanceMetrics {
             prompt_tokens,
             completion_tokens,
-            tokens_per_second: tokens_per_second.or_else(|| {
-                model_text_metrics
-                    .as_ref()
-                    .and_then(|metrics| metrics.avg_generated_tokens_per_sec)
-                    .map(|tokens| tokens.0 as f64)
-            }),
+            time_to_first_token_ms: None,
+            decode_ms: None,
+            tokens_per_second,
             response_chars: Some(char_count(&primary.content)),
             followup_response_chars: followup
                 .as_ref()
@@ -187,13 +186,14 @@ impl ScenarioRunner for ChatRunner {
             tool_call_count: tool_response
                 .as_ref()
                 .map(|response| response.tool_calls.len() as u64),
-            ..Default::default()
         };
+        let unavailable = required_chat_metric_gaps(&chat_metrics, None);
         let performance = PerformanceMetrics {
             startup_ms: Some(startup_ms),
+            warmup_ms: None,
             request_latencies_ms,
+            unavailable,
             capability_metrics: CapabilityPerformanceMetrics::Chat(chat_metrics),
-            ..Default::default()
         };
         let resources = context.metrics_sampler.finish();
         let assertions = evaluate_assertions(
@@ -203,10 +203,7 @@ impl ScenarioRunner for ChatRunner {
             tool_response.as_ref(),
             &chat_scenario.assertions,
         );
-        let performance_evaluation = evaluate_performance_measured(
-            performance.startup_ms.is_some() && !performance.request_latencies_ms.is_empty(),
-            "performance metrics missing startup or request latency",
-        );
+        let performance_evaluation = evaluate_chat_performance(&performance);
         let resource_evaluation = evaluate_resource_status(&resources, &context);
         let record = build_record(
             &context,
@@ -260,6 +257,78 @@ fn weather_tool_spec(tool_name: Option<&str>) -> Result<ToolSpec> {
             r#"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#,
         )?,
     })
+}
+
+fn required_chat_metric_gaps(
+    metrics: &ChatPerformanceMetrics,
+    warmup_ms: Option<u64>,
+) -> Vec<MetricUnavailable> {
+    let mut gaps = Vec::new();
+    if warmup_ms.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "warmup_ms",
+            "metric_not_instrumented",
+            "chat_runner",
+        ));
+    }
+    if metrics.time_to_first_token_ms.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "time_to_first_token_ms",
+            "metric_not_instrumented",
+            "chat_runner_streaming_callback",
+        ));
+    }
+    if metrics.decode_ms.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "decode_ms",
+            "metric_not_instrumented",
+            "chat_runner_streaming_callback",
+        ));
+    }
+    if metrics.completion_tokens.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "completion_tokens",
+            "metric_unsupported_by_backend",
+            "chat_response_usage",
+        ));
+    }
+    if metrics.tokens_per_second.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "tokens_per_second",
+            "metric_unsupported_by_backend",
+            "model_metric_snapshot.text_generation.avg_generated_tokens_per_sec",
+        ));
+    }
+    gaps
+}
+
+fn evaluate_chat_performance(performance: &PerformanceMetrics) -> SectionEvaluation {
+    if performance.startup_ms.is_none() || performance.request_latencies_ms.is_empty() {
+        return evaluate_performance_measured(
+            false,
+            "performance metrics missing startup or request latency",
+        );
+    }
+
+    if !performance.unavailable.is_empty() {
+        let metrics = performance
+            .unavailable
+            .iter()
+            .map(|gap| gap.metric.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return SectionEvaluation {
+            status: AcceptanceStatus::Blocked,
+            failure_reason: Some(format!(
+                "required LLM performance metrics unavailable: {metrics}"
+            )),
+        };
+    }
+
+    evaluate_performance_measured(
+        true,
+        "performance metrics missing startup or request latency",
+    )
 }
 
 fn evaluate_assertions(

@@ -507,7 +507,7 @@ fn pre_run_record(
             artifact_root: String::new(),
             download_artifacts: false,
             context_length: None,
-            gpu_layers: None,
+            gpu_layers: accelerator::runtime_gpu_layers(),
             child_build: None,
             budgets: budget_map(cell),
             env,

@@ -260,6 +260,16 @@ impl MetricsSampler {
     }
 }
 
+impl MetricUnavailable {
+    pub fn new(metric: &str, reason: &str, source: &str) -> Self {
+        Self {
+            metric: metric.to_owned(),
+            reason: reason.to_owned(),
+            source: Some(source.to_owned()),
+        }
+    }
+}
+
 impl Default for MetricsSampler {
     fn default() -> Self {
         Self::new()
@@ -319,11 +329,7 @@ fn parse_kib_value(raw: &str) -> Option<u64> {
 }
 
 fn metric_unavailable(metric: &str, reason: &str, source: &str) -> MetricUnavailable {
-    MetricUnavailable {
-        metric: metric.to_owned(),
-        reason: reason.to_owned(),
-        source: Some(source.to_owned()),
-    }
+    MetricUnavailable::new(metric, reason, source)
 }
 
 fn process_swap_source() -> &'static str {

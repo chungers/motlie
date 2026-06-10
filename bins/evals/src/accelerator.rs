@@ -53,22 +53,40 @@ pub fn resolve(
     offload: Option<String>,
 ) -> AcceleratorSection {
     let available = available_class(platform);
-    let resolved = match requested {
-        AcceleratorClass::Any => {
-            if available == AcceleratorClass::Unavailable {
-                AcceleratorClass::Cpu
-            } else {
-                available
+    let caller_reported_backend = backend_mode.is_some() || offload.is_some();
+    let mut backend_mode = backend_mode;
+    let mut offload = offload.or_else(runtime_offload_override);
+    let runtime_forced_cpu = runtime_forces_cpu() || runtime_gpu_layers_override() == Some(0);
+    let resolved = if runtime_forced_cpu && requested != AcceleratorClass::Unavailable {
+        AcceleratorClass::Cpu
+    } else {
+        match requested {
+            AcceleratorClass::Any => {
+                if available == AcceleratorClass::Unavailable {
+                    AcceleratorClass::Cpu
+                } else {
+                    available
+                }
+            }
+            AcceleratorClass::Cpu => AcceleratorClass::Cpu,
+            AcceleratorClass::Cuda if available == AcceleratorClass::Cuda => AcceleratorClass::Cuda,
+            AcceleratorClass::Metal if available == AcceleratorClass::Metal => {
+                AcceleratorClass::Metal
+            }
+            AcceleratorClass::Cuda | AcceleratorClass::Metal | AcceleratorClass::Unavailable => {
+                AcceleratorClass::Unavailable
             }
         }
-        AcceleratorClass::Cpu => AcceleratorClass::Cpu,
-        AcceleratorClass::Cuda if available == AcceleratorClass::Cuda => AcceleratorClass::Cuda,
-        AcceleratorClass::Metal if available == AcceleratorClass::Metal => AcceleratorClass::Metal,
-        AcceleratorClass::Cuda | AcceleratorClass::Metal | AcceleratorClass::Unavailable => {
-            AcceleratorClass::Unavailable
-        }
     };
-    let fallback_reason = if requested == AcceleratorClass::Any
+
+    if runtime_forced_cpu {
+        backend_mode = Some("cpu".to_owned());
+        if offload.is_none() {
+            offload = Some("gpu_layers=0".to_owned());
+        }
+    }
+
+    let mut fallback_reason = if requested == AcceleratorClass::Any
         || requested == resolved
         || (requested == AcceleratorClass::Cpu && resolved == AcceleratorClass::Cpu)
     {
@@ -78,6 +96,24 @@ pub fn resolve(
     } else {
         Some(OutcomeReason::AcceleratorMismatch)
     };
+
+    if matches!(requested, AcceleratorClass::Cuda | AcceleratorClass::Metal)
+        && resolved == requested
+        && !caller_reported_backend
+    {
+        fallback_reason = Some(OutcomeReason::BackendOffloadUnverified);
+        backend_mode = Some("backend_offload_unverified".to_owned());
+    }
+
+    if backend_mode.is_none() {
+        backend_mode = Some(match resolved {
+            AcceleratorClass::Cpu => "cpu".to_owned(),
+            AcceleratorClass::Unavailable => "unavailable".to_owned(),
+            AcceleratorClass::Cuda | AcceleratorClass::Metal | AcceleratorClass::Any => {
+                resolved.as_str().to_owned()
+            }
+        });
+    }
 
     let selected_devices = platform
         .gpus
@@ -104,29 +140,69 @@ pub fn resolve(
         }
     }
 
+    let use_proof_source = if runtime_forced_cpu {
+        if runtime_forces_cpu() {
+            "env:motlie_model_force_cpu".to_owned()
+        } else {
+            "env:motlie_model_gpu_layers".to_owned()
+        }
+    } else if caller_reported_backend {
+        "backend_observation".to_owned()
+    } else {
+        match resolved {
+            AcceleratorClass::Cuda | AcceleratorClass::Metal => "backend:unreported".to_owned(),
+            AcceleratorClass::Cpu => "profile:cpu".to_owned(),
+            AcceleratorClass::Any | AcceleratorClass::Unavailable => "unavailable".to_owned(),
+        }
+    };
+
     AcceleratorSection {
         requested_class: requested,
         resolved_class: resolved,
         selected_devices,
-        backend_mode: backend_mode.or_else(|| Some(resolved.as_str().to_owned())),
+        backend_mode,
         offload,
         driver_versions,
         fallback_reason,
-        use_proof_source: Some(match resolved {
-            AcceleratorClass::Cuda => "platform_probe:nvidia-smi".to_owned(),
-            AcceleratorClass::Metal => "platform_probe:metal_inventory".to_owned(),
-            AcceleratorClass::Cpu => "profile:cpu".to_owned(),
-            AcceleratorClass::Any | AcceleratorClass::Unavailable => "unavailable".to_owned(),
-        }),
+        use_proof_source: Some(use_proof_source),
     }
 }
 
 pub fn evaluate_use(accelerator: &AcceleratorSection) -> AcceptanceStatus {
+    if accelerator.fallback_reason == Some(OutcomeReason::BackendOffloadUnverified) {
+        return AcceptanceStatus::Blocked;
+    }
+
     match accelerator.requested_class {
         AcceleratorClass::Any | AcceleratorClass::Cpu => AcceptanceStatus::Pass,
         requested if requested == accelerator.resolved_class => AcceptanceStatus::Pass,
         _ => AcceptanceStatus::Blocked,
     }
+}
+
+fn runtime_forces_cpu() -> bool {
+    matches!(
+        std::env::var("MOTLIE_MODEL_FORCE_CPU"),
+        Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+fn runtime_gpu_layers_override() -> Option<u32> {
+    std::env::var("MOTLIE_MODEL_GPU_LAYERS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+pub fn runtime_gpu_layers() -> Option<u32> {
+    if runtime_forces_cpu() {
+        Some(0)
+    } else {
+        runtime_gpu_layers_override()
+    }
+}
+
+fn runtime_offload_override() -> Option<String> {
+    runtime_gpu_layers().map(|layers| format!("gpu_layers={layers}"))
 }
 
 fn available_class(platform: &PlatformSnapshot) -> AcceleratorClass {
@@ -152,13 +228,40 @@ mod tests {
     }
 
     #[test]
-    fn resolves_metal_when_inventory_has_metal() {
+    fn inventory_only_metal_is_unverified_until_backend_reports_device() {
         let platform = platform_with("metal", "Apple M3");
         let accelerator = resolve_for_profile("apple-metal", &platform);
 
         assert_eq!(accelerator.requested_class, AcceleratorClass::Metal);
         assert_eq!(accelerator.resolved_class, AcceleratorClass::Metal);
         assert_eq!(accelerator.selected_devices.len(), 1);
+        assert_eq!(
+            accelerator.fallback_reason,
+            Some(OutcomeReason::BackendOffloadUnverified)
+        );
+        assert_eq!(
+            accelerator.use_proof_source.as_deref(),
+            Some("backend:unreported")
+        );
+        assert_eq!(evaluate_use(&accelerator), AcceptanceStatus::Blocked);
+    }
+
+    #[test]
+    fn backend_observation_credits_metal_use() {
+        let platform = platform_with("metal", "Apple M3");
+        let accelerator = resolve(
+            AcceleratorClass::Metal,
+            &platform,
+            Some("metal".to_owned()),
+            Some("selected_device=0".to_owned()),
+        );
+
+        assert_eq!(accelerator.resolved_class, AcceleratorClass::Metal);
+        assert_eq!(accelerator.fallback_reason, None);
+        assert_eq!(
+            accelerator.use_proof_source.as_deref(),
+            Some("backend_observation")
+        );
         assert_eq!(evaluate_use(&accelerator), AcceptanceStatus::Pass);
     }
 

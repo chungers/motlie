@@ -7,11 +7,11 @@ use motlie_model::{ArtifactPolicy, BundleId, CapabilityKind, QuantizationBits, S
 use motlie_models::{download_bundle_artifacts, BundleDescriptor, Catalog, CuratedBundle};
 
 use crate::accelerator;
-use crate::metrics::{PerformanceMetrics, ResourceMetrics};
+use crate::metrics::{MemoryPeakKind, PerformanceMetrics, ResourceMetrics};
 use crate::result::{
-    overall_status_with_accelerator, reason_for_status, terminal_outcome, AcceptanceSection,
-    AcceptanceStatus, AssertionOutcome, CoverageSection, GateOutcome, IdentitySection,
-    OutcomeReason, ProfileSection, ResultRecord, RuntimeSection, SelectionSection,
+    overall_status_with_accelerator, reason_for_status, terminal_outcome, AcceleratorClass,
+    AcceptanceSection, AcceptanceStatus, AssertionOutcome, CoverageSection, GateOutcome,
+    IdentitySection, OutcomeReason, ProfileSection, ResultRecord, RuntimeSection, SelectionSection,
     RESULT_SCHEMA_VERSION,
 };
 use crate::runner::RunContext;
@@ -203,6 +203,12 @@ pub fn evaluate_resource_status(
         }
     }
 
+    if let Some(accelerator_memory_evaluation) =
+        evaluate_accelerator_memory_gate(resources, context)
+    {
+        return accelerator_memory_evaluation;
+    }
+
     if resources.rss_peak_bytes.is_some() {
         SectionEvaluation {
             status: AcceptanceStatus::Pass,
@@ -214,6 +220,50 @@ pub fn evaluate_resource_status(
             failure_reason: Some("resource metrics missing rss_peak_bytes".to_owned()),
         }
     }
+}
+
+fn evaluate_accelerator_memory_gate(
+    resources: &ResourceMetrics,
+    context: &RunContext,
+) -> Option<SectionEvaluation> {
+    let requested = context
+        .accelerator
+        .as_ref()
+        .map(|accelerator| accelerator.requested_class)
+        .unwrap_or_else(|| accelerator::requested_for_profile(&context.profile.name));
+
+    match requested {
+        AcceleratorClass::Cuda if resources.gpu_memory_peak_bytes.is_none() => {
+            Some(SectionEvaluation {
+                status: AcceptanceStatus::Blocked,
+                failure_reason: Some(
+                    "resource metric gpu_memory_peak_bytes blocked: CUDA peak VRAM sampler not instrumented"
+                        .to_owned(),
+                ),
+            })
+        }
+        AcceleratorClass::Metal if !has_metal_unified_memory_peak(resources) => {
+            Some(SectionEvaluation {
+                status: AcceptanceStatus::Blocked,
+                failure_reason: Some(
+                    "resource metric apple unified-memory peak blocked: Metal memory sampler unavailable"
+                        .to_owned(),
+                ),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn has_metal_unified_memory_peak(resources: &ResourceMetrics) -> bool {
+    resources.memory_peaks.iter().any(|peak| {
+        matches!(
+            peak.kind,
+            MemoryPeakKind::MetalCurrentAllocated
+                | MemoryPeakKind::AppleFootprint
+                | MemoryPeakKind::SystemUnifiedMemory
+        ) && peak.bytes.is_some()
+    })
 }
 
 pub fn failure_reason(
@@ -397,7 +447,7 @@ pub fn build_record(
             artifact_root: context.artifact_root.display().to_string(),
             download_artifacts: context.runtime_flags.download_artifacts,
             context_length: None,
-            gpu_layers: None,
+            gpu_layers: accelerator::runtime_gpu_layers(),
             child_build: context.child_build.clone(),
             budgets: Default::default(),
             env: runtime_env(),

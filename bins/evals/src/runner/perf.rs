@@ -4,7 +4,9 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use motlie_model::{BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole};
 
-use crate::metrics::{CapabilityPerformanceMetrics, PerfPerformanceMetrics, PerformanceMetrics};
+use crate::metrics::{
+    CapabilityPerformanceMetrics, MetricUnavailable, PerfPerformanceMetrics, PerformanceMetrics,
+};
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms, evaluate_resource_status,
@@ -57,10 +59,12 @@ impl ScenarioRunner for PerfRunner {
         let chat = handle
             .chat()
             .context("selected bundle should expose chat")?;
+        let warmup_started_at = std::time::Instant::now();
         for _ in 0..perf_scenario.input.warmup_iterations {
             let _ = run_one(chat, &prompt).await?;
             context.metrics_sampler.sample();
         }
+        let warmup_ms = elapsed_ms(warmup_started_at.elapsed());
 
         let mut request_latencies_ms = Vec::new();
         let mut successful_iterations = 0_u64;
@@ -97,9 +101,10 @@ impl ScenarioRunner for PerfRunner {
         };
         let performance = PerformanceMetrics {
             startup_ms: Some(startup_ms),
+            warmup_ms: Some(warmup_ms),
             request_latencies_ms,
+            unavailable: required_perf_metric_gaps(),
             capability_metrics: CapabilityPerformanceMetrics::Perf(perf_metrics),
-            ..Default::default()
         };
         let resources = context.metrics_sampler.finish();
         let assertions = evaluate_assertions(
@@ -108,8 +113,12 @@ impl ScenarioRunner for PerfRunner {
             mean_latency_ms,
             p95_latency_ms,
         );
-        let performance_evaluation =
-            evaluate_performance_status(&perf_scenario.assertions, mean_latency_ms, p95_latency_ms);
+        let performance_evaluation = evaluate_performance_status(
+            &perf_scenario.assertions,
+            mean_latency_ms,
+            p95_latency_ms,
+            &performance.unavailable,
+        );
         let resource_evaluation = evaluate_resource_status(&resources, &context);
         let record = build_record(
             &context,
@@ -219,10 +228,36 @@ fn evaluate_assertions(
     outcomes
 }
 
+fn required_perf_metric_gaps() -> Vec<MetricUnavailable> {
+    vec![
+        MetricUnavailable::new(
+            "time_to_first_token_ms",
+            "metric_not_instrumented",
+            "perf_runner_streaming_callback",
+        ),
+        MetricUnavailable::new(
+            "decode_ms",
+            "metric_not_instrumented",
+            "perf_runner_streaming_callback",
+        ),
+        MetricUnavailable::new(
+            "output_tokens",
+            "metric_not_instrumented",
+            "perf_runner_tokenizer",
+        ),
+        MetricUnavailable::new(
+            "tokens_per_second",
+            "metric_not_instrumented",
+            "perf_runner_decode_interval",
+        ),
+    ]
+}
+
 fn evaluate_performance_status(
     assertions: &PerfAssertions,
     mean_latency_ms: Option<f64>,
     p95_latency_ms: Option<f64>,
+    unavailable: &[MetricUnavailable],
 ) -> SectionEvaluation {
     if let Some(max_mean_latency_ms) = assertions.max_mean_latency_ms {
         match mean_latency_ms {
@@ -267,6 +302,18 @@ fn evaluate_performance_status(
         }
     }
 
+    if !unavailable.is_empty() {
+        let metrics = unavailable
+            .iter()
+            .map(|gap| gap.metric.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return SectionEvaluation {
+            status: AcceptanceStatus::Blocked,
+            failure_reason: Some(format!("required LLM perf metrics unavailable: {metrics}")),
+        };
+    }
+
     SectionEvaluation {
         status: if mean_latency_ms.is_some() {
             AcceptanceStatus::Pass
@@ -296,6 +343,7 @@ mod tests {
             },
             Some(12.0),
             None,
+            &[],
         );
 
         assert_eq!(evaluation.status, AcceptanceStatus::Fail);

@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::result::{AcceptanceStatus, ResultRecord, TerminalOutcome};
+use crate::result::{
+    terminal_outcome, AcceptanceStatus, ResultRecord, TerminalOutcome, RESULT_SCHEMA_VERSION,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutputSink {
@@ -56,7 +58,7 @@ pub fn run_report(args: &[String]) -> Result<()> {
             let paths = expand_aggregate_paths(&aggregate)?;
             let mut records = Vec::new();
             for path in &paths {
-                records.extend(read_jsonl(path)?);
+                records.extend(read_aggregate_jsonl(path)?);
             }
             let markdown = render_records_markdown(&records, &paths);
             if let Some(parent) = output.parent() {
@@ -319,6 +321,14 @@ where
 }
 
 fn read_jsonl(path: &Path) -> Result<Vec<ResultRecord>> {
+    read_jsonl_with_validation(path, false)
+}
+
+fn read_aggregate_jsonl(path: &Path) -> Result<Vec<ResultRecord>> {
+    read_jsonl_with_validation(path, true)
+}
+
+fn read_jsonl_with_validation(path: &Path, validate_aggregate: bool) -> Result<Vec<ResultRecord>> {
     let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
     let reader = io::BufReader::new(file);
     let mut records = Vec::new();
@@ -327,17 +337,115 @@ fn read_jsonl(path: &Path) -> Result<Vec<ResultRecord>> {
         if line.trim().is_empty() {
             continue;
         }
-        records.push(
-            serde_json::from_str::<ResultRecord>(&line).with_context(|| {
-                format!(
-                    "failed to parse `{}` line {} as ResultRecord",
+        let record = serde_json::from_str::<ResultRecord>(&line).with_context(|| {
+            format!(
+                "failed to parse `{}` line {} as ResultRecord",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        if validate_aggregate {
+            if let Err(reason) = validate_aggregate_record(&record) {
+                eprintln!(
+                    "aggregate-input-excluded: {}:{}: {}",
                     path.display(),
-                    line_number + 1
-                )
-            })?,
-        );
+                    line_number + 1,
+                    reason
+                );
+                continue;
+            }
+        }
+        records.push(record);
     }
     Ok(records)
+}
+
+fn validate_aggregate_record(record: &ResultRecord) -> std::result::Result<(), String> {
+    if record.schema_version != RESULT_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported schema_version {}; expected {}",
+            record.schema_version, RESULT_SCHEMA_VERSION
+        ));
+    }
+
+    let coverage = &record.coverage;
+    for (name, value) in [
+        ("snapshot_id", coverage.snapshot_id.as_str()),
+        ("cell_id", coverage.cell_id.as_str()),
+        ("capability", coverage.capability.as_str()),
+        ("scenario_id", coverage.scenario_id.as_str()),
+        ("bundle_id", coverage.bundle_id.as_str()),
+        ("model_family", coverage.model_family.as_str()),
+        ("checkpoint_format", coverage.checkpoint_format.as_str()),
+        ("quantization", coverage.quantization.as_str()),
+        ("backend", coverage.backend.as_str()),
+        ("profile", coverage.profile.as_str()),
+        ("host_id", coverage.host_id.as_str()),
+        ("host_slug", coverage.host_slug.as_str()),
+        ("arch", coverage.arch.as_str()),
+    ] {
+        if is_missing_coverage_value(value) {
+            return Err(format!("coverage.{name} is missing or ad_hoc/unknown"));
+        }
+    }
+
+    for (key, expected) in [
+        ("bundle", coverage.bundle_id.as_str()),
+        ("capability", coverage.capability.as_str()),
+        ("depth", coverage.depth.as_str()),
+        ("backend", coverage.backend.as_str()),
+        ("checkpoint_format", coverage.checkpoint_format.as_str()),
+        ("quantization", coverage.quantization.as_str()),
+        ("profile", coverage.profile.as_str()),
+    ] {
+        match coverage.grouping_keys.get(key).map(String::as_str) {
+            Some(value) if value == expected && !value.trim().is_empty() => {}
+            Some(value) => {
+                return Err(format!(
+                    "coverage.grouping_keys.{key}={value:?} does not match {expected:?}"
+                ));
+            }
+            None => return Err(format!("coverage.grouping_keys.{key} is missing")),
+        }
+    }
+
+    if coverage.requested_accelerator != record.accelerator.requested_class {
+        return Err("coverage/requested accelerator mismatch".to_owned());
+    }
+    if coverage.resolved_accelerator != record.accelerator.resolved_class {
+        return Err("coverage/resolved accelerator mismatch".to_owned());
+    }
+    if record
+        .accelerator
+        .use_proof_source
+        .as_deref()
+        .is_none_or(|source| source.trim().is_empty())
+    {
+        return Err("accelerator.use_proof_source is missing".to_owned());
+    }
+
+    if terminal_outcome(&record.acceptance.overall_status) != coverage.terminal_outcome {
+        return Err(
+            "coverage terminal_outcome does not match acceptance.overall_status".to_owned(),
+        );
+    }
+
+    match coverage.terminal_outcome {
+        TerminalOutcome::Passed if coverage.reason.is_some() => {
+            Err("passed records must not carry a terminal reason".to_owned())
+        }
+        TerminalOutcome::Failed | TerminalOutcome::Blocked | TerminalOutcome::Skipped
+            if coverage.reason.is_none() =>
+        {
+            Err("non-passed records must carry a terminal reason".to_owned())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn is_missing_coverage_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed == "ad_hoc" || trimmed == "unknown"
 }
 
 fn expand_aggregate_paths(pattern: &str) -> Result<Vec<PathBuf>> {
@@ -429,6 +537,48 @@ mod tests {
         assert!(markdown.contains("q4_0"));
     }
 
+    #[test]
+    fn aggregate_validation_accepts_snapshot_record() {
+        let record = test_record();
+
+        validate_aggregate_record(&record).expect("snapshot record should validate");
+    }
+
+    #[test]
+    fn aggregate_validation_rejects_ad_hoc_coverage() {
+        let mut record = test_record();
+        record.coverage = CoverageSection::default();
+
+        let err = validate_aggregate_record(&record).unwrap_err();
+
+        assert!(err.contains("coverage.snapshot_id"));
+    }
+
+    #[test]
+    fn aggregate_validation_rejects_grouping_key_mismatch() {
+        let mut record = test_record();
+        record
+            .coverage
+            .grouping_keys
+            .insert("quantization".to_owned(), "default".to_owned());
+
+        let err = validate_aggregate_record(&record).unwrap_err();
+
+        assert!(err.contains("coverage.grouping_keys.quantization"));
+    }
+
+    fn grouping_keys() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("bundle".to_owned(), "bundle".to_owned()),
+            ("capability".to_owned(), "chat".to_owned()),
+            ("depth".to_owned(), "smoke".to_owned()),
+            ("backend".to_owned(), "llama_cpp".to_owned()),
+            ("checkpoint_format".to_owned(), "gguf".to_owned()),
+            ("quantization".to_owned(), "q4_0".to_owned()),
+            ("profile".to_owned(), "dgx-spark".to_owned()),
+        ])
+    }
+
     fn test_record() -> ResultRecord {
         ResultRecord {
             schema_version: 2,
@@ -460,7 +610,7 @@ mod tests {
                 applicability: ApplicabilityDecision::Applicable,
                 terminal_outcome: TerminalOutcome::Passed,
                 reason: None,
-                grouping_keys: BTreeMap::new(),
+                grouping_keys: grouping_keys(),
             },
             selection: SelectionSection {
                 bundle_id: "bundle".to_owned(),

@@ -81,6 +81,11 @@ impl PlatformCollector {
                 (Some("unavailable".to_owned()), Vec::new(), BTreeMap::new())
             }
         };
+        if gpu_backend.as_deref() == Some("metal") {
+            unavailable.push("metal_usability_probe".to_owned());
+            unavailable.push("metal_recommended_max_working_set_size_bytes".to_owned());
+        }
+
         let hostname = portable_hostname();
         let host_slug = hostname.as_deref().map(sanitize_slug);
 
@@ -233,7 +238,19 @@ fn parse_metal_system_profiler(raw: &str) -> Option<AcceleratorInventory> {
 
     let mut accelerator_metadata = BTreeMap::new();
     accelerator_metadata.insert("collector".to_owned(), "system_profiler".to_owned());
+    accelerator_metadata.insert(
+        "metal_probe".to_owned(),
+        "system_profiler_presence_only".to_owned(),
+    );
+    accelerator_metadata.insert(
+        "metal_usability_probe".to_owned(),
+        "not_instrumented".to_owned(),
+    );
     accelerator_metadata.insert("unified_memory".to_owned(), "true".to_owned());
+    accelerator_metadata.insert(
+        "recommended_max_working_set_size_bytes".to_owned(),
+        "unavailable".to_owned(),
+    );
 
     Some(AcceleratorInventory {
         gpus: vec![GpuSnapshot {
@@ -376,6 +393,20 @@ mod tests {
         assert_eq!(inventory.gpus[0].backend.as_deref(), Some("metal"));
         assert_eq!(inventory.gpus[0].model.as_deref(), Some("Apple M3 Max"));
         assert_eq!(inventory.gpus[0].unified_memory, Some(true));
+        assert_eq!(
+            inventory
+                .accelerator_metadata
+                .get("metal_probe")
+                .map(String::as_str),
+            Some("system_profiler_presence_only")
+        );
+        assert_eq!(
+            inventory
+                .accelerator_metadata
+                .get("recommended_max_working_set_size_bytes")
+                .map(String::as_str),
+            Some("unavailable")
+        );
     }
 
     #[test]

@@ -262,7 +262,7 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{MetricsSampler, ResourceMetrics};
+    use crate::metrics::{MemoryPeak, MemoryPeakKind, MetricsSampler, ResourceMetrics};
     use crate::platform::PlatformCollector;
     use crate::report::OutputSink;
     use crate::runner::{BundleSelection, ProfileSelection, RuntimeFlags};
@@ -273,6 +273,13 @@ mod tests {
         let resources = ResourceMetrics {
             rss_peak_bytes: Some(1),
             process_swap_delta_peak_bytes: None,
+            memory_peaks: vec![MemoryPeak {
+                kind: MemoryPeakKind::AppleFootprint,
+                bytes: Some(1),
+                device_id: None,
+                source: "sysinfo_process_rss_proxy".to_owned(),
+                unavailable_reason: None,
+            }],
             ..Default::default()
         };
 

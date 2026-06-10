@@ -172,10 +172,11 @@ Driver responsibilities:
   class by probe, not by OS/arch heuristic alone. CUDA detection uses NVML when
   available and `nvidia-smi` as fallback. Metal detection uses a small
   `MTLCreateSystemDefaultDevice` probe when possible, with
-  `system_profiler SPDisplaysDataType` or IOKit as fallback for inventory. A
-  macOS host maps to `apple-metal` only when the Metal probe confirms a usable
-  device/backend; otherwise Metal-required cells are skipped or blocked with a
-  structured reason.
+  `system_profiler SPDisplaysDataType` or IOKit as fallback for inventory. When
+  only `system_profiler` is available, the platform record labels the probe as
+  presence-only and emits the missing Metal usability / working-set metrics as
+  unavailable. A Metal cell still needs backend-reported device selection or
+  offload proof; inventory alone cannot count as green `apple-metal` coverage.
 - Load a pinned snapshot manifest from the repo. The snapshot enumerates the
   bundle x scenario x depth x checkpoint-format x quantization matrix, expected
   Cargo feature groups, artifact requirements, platform constraints, runtime
