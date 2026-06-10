@@ -1,16 +1,18 @@
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::call_control::TelnyxMediaConfig;
 use crate::media::{
-    CallMediaHandle, OutboundFrameQualityContext, OutboundMediaCommand, OutboundMediaFrame,
-    SharedMediaRegistry, SpeechCancelToken, SpeechClearReason, packetize_tts_samples,
+    packetize_tts_samples, percentile_u64, CallMediaHandle, OutboundFrameQualityContext,
+    OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry, SpeechCancelToken,
+    SpeechClearReason,
 };
 use crate::operator::state::{LogLevel, QualitySpanEmission, SharedState};
 use crate::quality::RedactionMode;
 use crate::tts::{
-    LiveTtsBackend, SharedTtsRegistry, TtsAudio, split_speech_text_with_first_chunk_max_chars,
+    split_speech_text_with_first_chunk_max_chars, LiveTtsBackend, SharedTtsRegistry, TtsAudio,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +25,7 @@ pub struct QueuedSpeech {
 pub enum SpeechConflictPolicy {
     Reject,
     CancelAndReplace,
+    Append,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +36,49 @@ pub struct SpeechQueueRequest {
     pub source_label: String,
     pub conflict_policy: SpeechConflictPolicy,
     pub turn_finalized_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppendSpeechHandle {
+    pub playback_id: String,
+    tx: mpsc::Sender<AppendSpeechCommand>,
+    cancel: SpeechCancelToken,
+}
+
+impl AppendSpeechHandle {
+    pub async fn append_chunks(
+        &self,
+        chunks: Vec<String>,
+        final_fragment: bool,
+    ) -> anyhow::Result<()> {
+        self.tx
+            .send(AppendSpeechCommand::Chunks {
+                chunks,
+                final_fragment,
+                received_at: Instant::now(),
+            })
+            .await
+            .context("append speech chunk")
+    }
+
+    pub async fn finish(&self) -> anyhow::Result<()> {
+        self.append_chunks(Vec::new(), true).await
+    }
+
+    pub async fn cancel(&self) {
+        self.cancel.cancel();
+        let _ = self.tx.send(AppendSpeechCommand::Cancel).await;
+    }
+}
+
+#[derive(Debug)]
+enum AppendSpeechCommand {
+    Chunks {
+        chunks: Vec<String>,
+        final_fragment: bool,
+        received_at: Instant,
+    },
+    Cancel,
 }
 
 pub async fn queue_speech(
@@ -121,6 +167,9 @@ pub async fn queue_speech_with_request(
                 )
                 .await?
         }
+        SpeechConflictPolicy::Append => {
+            bail!("append speech policy requires an append speech session")
+        }
     };
     {
         let mut guard = state.write().await;
@@ -168,6 +217,133 @@ pub async fn queue_speech_with_request(
         playback_id,
         replaced_playback_id,
     })
+}
+
+pub async fn queue_append_speech_with_request(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    tts: &SharedTtsRegistry,
+    request: SpeechQueueRequest,
+    initial_chunks: Vec<String>,
+) -> anyhow::Result<(AppendSpeechHandle, QueuedSpeech)> {
+    if initial_chunks.is_empty() {
+        bail!("append speech session requires at least one initial chunk");
+    }
+    let SpeechQueueRequest {
+        tts_backend,
+        gateway_call_id,
+        text,
+        source_label,
+        conflict_policy,
+        turn_finalized_at,
+    } = request;
+    let request_started_at = Instant::now();
+    let playback_id = format!("tts_{}", Uuid::new_v4().simple());
+    let cancel = SpeechCancelToken::default();
+    let (
+        media,
+        quality_config_id,
+        quality_redaction_mode,
+        tts_chunking_enabled,
+        tts_max_text_chunk_chars,
+        tts_first_chunk_max_chars,
+        tts_prebuffer_chunks,
+    ) = {
+        let guard = state.read().await;
+        let media = guard.config.telnyx_media;
+        let call = guard
+            .calls
+            .get(&gateway_call_id)
+            .with_context(|| format!("call not found: {gateway_call_id}"))?;
+        if call.ids.stream_id.is_none() {
+            bail!("media stream is not ready for call {gateway_call_id}");
+        }
+        (
+            media,
+            guard.quality.config_id.clone(),
+            guard.quality.config.logging.redaction_mode,
+            guard.quality.config.tts.chunking_enabled,
+            guard.quality.config.tts.max_text_chunk_chars,
+            guard.quality.config.tts.first_chunk_max_chars,
+            guard.quality.config.tts.prebuffer_chunks,
+        )
+    };
+    let (media_handle, replaced_playback_id) = match conflict_policy {
+        SpeechConflictPolicy::Reject | SpeechConflictPolicy::Append => (
+            media_registry
+                .start_speech(&gateway_call_id, playback_id.clone(), cancel.clone())
+                .await?,
+            None,
+        ),
+        SpeechConflictPolicy::CancelAndReplace => {
+            media_registry
+                .start_speech_replacing_active(
+                    &gateway_call_id,
+                    playback_id.clone(),
+                    cancel.clone(),
+                )
+                .await?
+        }
+    };
+    {
+        let mut guard = state.write().await;
+        if let Some(replaced_playback_id) = &replaced_playback_id {
+            guard.mark_tts_canceling(&gateway_call_id, replaced_playback_id);
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "{source_label} replaced active speech for {gateway_call_id}: {replaced_playback_id}"
+                ),
+            );
+        }
+        guard.start_tts_job(&gateway_call_id, playback_id.clone(), &text);
+        guard.log(
+            LogLevel::Info,
+            format!("{source_label} append speech started for {gateway_call_id}: {playback_id}"),
+        );
+    }
+
+    let (tx, rx) = mpsc::channel(32);
+    let handle = AppendSpeechHandle {
+        playback_id: playback_id.clone(),
+        tx,
+        cancel: cancel.clone(),
+    };
+    let job = AppendSpeechJob {
+        speech: SpeechJob {
+            state: state.clone(),
+            tts: tts.clone(),
+            media_registry: media_registry.clone(),
+            media_handle,
+            gateway_call_id: gateway_call_id.clone(),
+            playback_id: playback_id.clone(),
+            tts_backend,
+            text,
+            media,
+            quality_config_id,
+            quality_redaction_mode,
+            tts_chunking_enabled,
+            tts_max_text_chunk_chars,
+            tts_first_chunk_max_chars,
+            tts_prebuffer_chunks,
+            request_started_at,
+            turn_finalized_at,
+            cancel,
+        },
+        rx,
+        initial_chunks,
+    };
+    tokio::spawn(async move {
+        run_append_speech_job(job).await;
+    });
+
+    Ok((
+        handle,
+        QueuedSpeech {
+            playback_id,
+            replaced_playback_id,
+        },
+    ))
 }
 
 pub async fn cancel_speech(
@@ -228,6 +404,19 @@ struct SpeechJob {
     cancel: SpeechCancelToken,
 }
 
+struct AppendSpeechJob {
+    speech: SpeechJob,
+    rx: mpsc::Receiver<AppendSpeechCommand>,
+    initial_chunks: Vec<String>,
+}
+
+#[derive(Default)]
+struct AppendSpeechStats {
+    append_wait: Duration,
+    inter_fragment_gap_ms: Vec<u64>,
+    last_fragment_at: Option<Instant>,
+}
+
 async fn run_speech_job(job: SpeechJob) {
     let result = run_speech_job_inner(&job).await;
     match result {
@@ -267,6 +456,338 @@ async fn run_speech_job(job: SpeechJob) {
             );
         }
     }
+}
+
+async fn run_append_speech_job(job: AppendSpeechJob) {
+    let result = run_append_speech_job_inner(job).await;
+    match result {
+        Ok((speech, SpeechJobOutcome::MarkQueued)) => {
+            let _ = speech
+                .media_handle
+                .send(OutboundMediaCommand::AppendState {
+                    playback_id: speech.playback_id.clone(),
+                    open: false,
+                    empty: true,
+                })
+                .await;
+        }
+        Ok((speech, SpeechJobOutcome::NoAudioOrCanceled)) => {
+            let _ = speech
+                .media_handle
+                .send(OutboundMediaCommand::AppendState {
+                    playback_id: speech.playback_id.clone(),
+                    open: false,
+                    empty: true,
+                })
+                .await;
+            speech
+                .media_registry
+                .finish_speech(&speech.gateway_call_id, &speech.playback_id)
+                .await;
+        }
+        Err((speech, failure)) => {
+            let _ = speech
+                .media_handle
+                .send(OutboundMediaCommand::AppendState {
+                    playback_id: speech.playback_id.clone(),
+                    open: false,
+                    empty: true,
+                })
+                .await;
+            if failure.queued_frames > 0 {
+                request_failed_speech_clear(&speech, failure.queued_frames).await;
+            } else {
+                speech
+                    .media_registry
+                    .finish_speech(&speech.gateway_call_id, &speech.playback_id)
+                    .await;
+            }
+            let mut guard = speech.state.write().await;
+            guard.mark_tts_failed(
+                &speech.gateway_call_id,
+                &speech.playback_id,
+                format!("{:#}", failure.error),
+            );
+            guard.log(
+                LogLevel::Error,
+                format!(
+                    "append speak failed for {}: {:#}",
+                    speech.gateway_call_id, failure.error
+                ),
+            );
+            tracing::error!(
+                gateway_call_id = speech.gateway_call_id.as_str(),
+                playback_id = speech.playback_id.as_str(),
+                queued_frames = failure.queued_frames,
+                error = %failure.error,
+                "tts.append.failed"
+            );
+        }
+    }
+}
+
+async fn run_append_speech_job_inner(
+    mut job: AppendSpeechJob,
+) -> Result<(SpeechJob, SpeechJobOutcome), (SpeechJob, SpeechJobFailure)> {
+    let mut queued_frames = 0usize;
+    let mut total_frames = 0usize;
+    let mut model_chunks = 0usize;
+    let mut text_chunks = 0usize;
+    let mut enqueue_duration = Duration::ZERO;
+    let mut emitted_first_synthesis = false;
+    let mut emitted_first_packetize = false;
+    let mut emitted_prebuffer_ready = false;
+    let mut first_packet_for_playback = true;
+    let mut stats = AppendSpeechStats::default();
+    let synthesis_started_at = Instant::now();
+    let mut pending_chunks = std::mem::take(&mut job.initial_chunks);
+    let mut final_received = false;
+
+    loop {
+        for text_chunk in pending_chunks.drain(..) {
+            if job.speech.cancel.is_canceled() {
+                return Ok((job.speech, SpeechJobOutcome::NoAudioOrCanceled));
+            }
+            let chunk_index = text_chunks;
+            text_chunks = text_chunks.saturating_add(1);
+            let chunk_synthesis_started_at = Instant::now();
+            let synthesis_context = SpeechSynthesisContext {
+                state: &job.speech.state,
+                tts: &job.speech.tts,
+                backend: job.speech.tts_backend,
+                gateway_call_id: &job.speech.gateway_call_id,
+                playback_id: &job.speech.playback_id,
+                cancel: &job.speech.cancel,
+            };
+            let audio_chunks = match synthesize_text_chunk_with_fallback(
+                &synthesis_context,
+                chunk_index,
+                &text_chunk,
+            )
+            .await
+            {
+                Ok(Some(audio_chunks)) => audio_chunks,
+                Ok(None) => return Ok((job.speech, SpeechJobOutcome::NoAudioOrCanceled)),
+                Err(error) => {
+                    return Err((job.speech, SpeechJobFailure::new(error, queued_frames)));
+                }
+            };
+            if !emitted_first_synthesis {
+                emitted_first_synthesis = true;
+                emit_speech_span(
+                    &job.speech,
+                    "tts.synthesis_first_chunk",
+                    "tts_generation",
+                    chunk_synthesis_started_at.elapsed(),
+                    true,
+                    false,
+                    serde_json::json!({
+                        "playback_id": job.speech.playback_id.as_str(),
+                        "tts_backend": job.speech.tts_backend.label(),
+                        "text_chunk_index": chunk_index,
+                        "text_chunking_enabled": job.speech.tts_chunking_enabled,
+                        "max_text_chunk_chars": job.speech.tts_max_text_chunk_chars,
+                        "first_chunk_max_chars": job.speech.tts_first_chunk_max_chars,
+                        "append_stream": true,
+                        "text_chars": text_chunk.chars().count(),
+                        "audio_chunks": audio_chunks.len(),
+                    }),
+                )
+                .await;
+            }
+            let synthesis = match concatenate_audio_chunks(job.speech.tts_backend, audio_chunks) {
+                Ok(Some(synthesis)) => synthesis,
+                Ok(None) => continue,
+                Err(error) => {
+                    return Err((job.speech, SpeechJobFailure::new(error, queued_frames)));
+                }
+            };
+            let packetize_started_at = Instant::now();
+            let frames = match packetize_tts_samples(
+                synthesis.samples_i16,
+                synthesis.sample_rate_hz,
+                job.speech.media,
+            ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    return Err((job.speech, SpeechJobFailure::new(error, queued_frames)));
+                }
+            };
+            if frames.is_empty() {
+                continue;
+            }
+            if !emitted_first_packetize {
+                emitted_first_packetize = true;
+                emit_speech_span(
+                    &job.speech,
+                    "tts.packetize_first_chunk",
+                    "media_packetization",
+                    packetize_started_at.elapsed(),
+                    true,
+                    false,
+                    serde_json::json!({
+                        "playback_id": job.speech.playback_id.as_str(),
+                        "tts_backend": job.speech.tts_backend.label(),
+                        "text_chunk_index": chunk_index,
+                        "append_stream": true,
+                        "frames": frames.len(),
+                    }),
+                )
+                .await;
+            }
+            total_frames = total_frames.saturating_add(frames.len());
+            model_chunks = model_chunks.saturating_add(synthesis.audio_chunk_count);
+            let mut prepared = vec![PreparedSpeechChunk {
+                text_chunk_index: chunk_index,
+                audio_chunk_count: synthesis.audio_chunk_count,
+                sample_rate_hz: synthesis.sample_rate_hz,
+                frames,
+            }];
+            if !emitted_prebuffer_ready {
+                emitted_prebuffer_ready = true;
+                let buffered_frames = prepared_frame_count(&prepared);
+                emit_speech_span(
+                    &job.speech,
+                    "tts.prebuffer_ready",
+                    "tts_generation",
+                    synthesis_started_at.elapsed(),
+                    true,
+                    false,
+                    serde_json::json!({
+                        "playback_id": job.speech.playback_id.as_str(),
+                        "tts_backend": job.speech.tts_backend.label(),
+                        "prepared_text_chunks": 1,
+                        "append_stream": true,
+                        "frames": buffered_frames,
+                        "text_chunking_enabled": job.speech.tts_chunking_enabled,
+                        "max_text_chunk_chars": job.speech.tts_max_text_chunk_chars,
+                        "first_chunk_max_chars": job.speech.tts_first_chunk_max_chars,
+                    }),
+                )
+                .await;
+            }
+            match enqueue_prepared_chunks(
+                &job.speech,
+                &mut prepared,
+                &mut queued_frames,
+                &mut first_packet_for_playback,
+            )
+            .await
+            {
+                Ok(duration) => enqueue_duration += duration,
+                Err(failure) => return Err((job.speech, failure)),
+            }
+        }
+
+        if final_received || job.speech.cancel.is_canceled() {
+            break;
+        }
+
+        let wait_started_at = Instant::now();
+        let _ = job
+            .speech
+            .media_handle
+            .send(OutboundMediaCommand::AppendState {
+                playback_id: job.speech.playback_id.clone(),
+                open: true,
+                empty: true,
+            })
+            .await;
+        let command = tokio::select! {
+            command = job.rx.recv() => command,
+            _ = job.speech.cancel.canceled() => None,
+        };
+        stats.append_wait += wait_started_at.elapsed();
+        let _ = job
+            .speech
+            .media_handle
+            .send(OutboundMediaCommand::AppendState {
+                playback_id: job.speech.playback_id.clone(),
+                open: true,
+                empty: false,
+            })
+            .await;
+        match command {
+            Some(AppendSpeechCommand::Chunks {
+                chunks,
+                final_fragment,
+                received_at,
+            }) => {
+                if let Some(last) = stats.last_fragment_at.replace(received_at) {
+                    stats
+                        .inter_fragment_gap_ms
+                        .push(received_at.saturating_duration_since(last).as_millis() as u64);
+                }
+                pending_chunks = chunks;
+                final_received = final_fragment;
+            }
+            Some(AppendSpeechCommand::Cancel) | None => {
+                job.speech.cancel.cancel();
+                break;
+            }
+        }
+    }
+
+    if queued_frames == 0 || job.speech.cancel.is_canceled() {
+        return Ok((job.speech, SpeechJobOutcome::NoAudioOrCanceled));
+    }
+
+    emit_speech_span(
+        &job.speech,
+        "tts.synthesis_full",
+        "tts_generation",
+        synthesis_started_at.elapsed(),
+        false,
+        true,
+        serde_json::json!({
+            "playback_id": job.speech.playback_id.as_str(),
+            "tts_backend": job.speech.tts_backend.label(),
+            "text_chunks": text_chunks,
+            "audio_chunks": model_chunks,
+            "frames": total_frames,
+            "append_stream": true,
+            "append_wait_ms": stats.append_wait.as_millis() as u64,
+            "inter_fragment_gap_p50_ms": percentile_u64(&stats.inter_fragment_gap_ms, 50),
+            "inter_fragment_gap_p95_ms": percentile_u64(&stats.inter_fragment_gap_ms, 95),
+        }),
+    )
+    .await;
+    emit_speech_span(
+        &job.speech,
+        "tts.frames_enqueue",
+        "media_packetization",
+        enqueue_duration,
+        false,
+        true,
+        serde_json::json!({
+            "playback_id": job.speech.playback_id.as_str(),
+            "tts_backend": job.speech.tts_backend.label(),
+            "text_chunks": text_chunks,
+            "frames": queued_frames,
+            "append_stream": true,
+        }),
+    )
+    .await;
+    if let Err(error) = job
+        .speech
+        .media_handle
+        .send(OutboundMediaCommand::Mark {
+            playback_id: job.speech.playback_id.clone(),
+        })
+        .await
+    {
+        return Err((job.speech, SpeechJobFailure::new(error, queued_frames)));
+    }
+    tracing::info!(
+        gateway_call_id = job.speech.gateway_call_id.as_str(),
+        playback_id = job.speech.playback_id.as_str(),
+        text_chunks,
+        model_chunks,
+        frames = queued_frames,
+        append_wait_ms = stats.append_wait.as_millis() as u64,
+        "tts.append.queued"
+    );
+    Ok((job.speech, SpeechJobOutcome::MarkQueued))
 }
 
 async fn request_failed_speech_clear(job: &SpeechJob, queued_frames: usize) {
@@ -812,13 +1333,13 @@ async fn synthesize_text_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operator::state::{CallStatus, TelnyxIds, shared_state};
-    use crate::tts::{OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry};
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
+    use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
     use async_trait::async_trait;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::{Notify, mpsc};
-    use tokio::time::{Duration, timeout};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Notify};
+    use tokio::time::{timeout, Duration};
 
     struct SequencedTtsFactory {
         sample_rate_hz: u32,

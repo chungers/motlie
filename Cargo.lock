@@ -5580,6 +5580,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "motlie-agent",
  "motlie-telnyx-gateway",
  "motlie-tmux",
  "reqwest 0.13.4",

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::{fmt, str::FromStr};
 
+use anyhow::bail;
 #[cfg(any(feature = "kokoro", feature = "piper"))]
 use anyhow::Context;
-use anyhow::bail;
 use async_trait::async_trait;
 use clap::ValueEnum;
 #[cfg(feature = "kokoro")]
@@ -364,6 +364,99 @@ pub fn split_speech_text_with_first_chunk_max_chars(
     chunks
 }
 
+#[derive(Debug, Clone)]
+pub struct StreamingSpeechTextPacker {
+    chunking_enabled: bool,
+    max_chars: usize,
+    first_chunk_max_chars: usize,
+    pending_text: String,
+    emitted_first_chunk: bool,
+}
+
+impl StreamingSpeechTextPacker {
+    pub fn new(chunking_enabled: bool, max_chars: usize, first_chunk_max_chars: usize) -> Self {
+        Self {
+            chunking_enabled,
+            max_chars: max_chars.max(1),
+            first_chunk_max_chars,
+            pending_text: String::new(),
+            emitted_first_chunk: false,
+        }
+    }
+
+    pub fn push_fragment(&mut self, fragment: &str, final_fragment: bool) -> Vec<String> {
+        self.pending_text.push_str(fragment);
+        if !self.chunking_enabled {
+            if final_fragment {
+                return self.flush_all_pending();
+            }
+            return Vec::new();
+        }
+
+        let mut chunks = Vec::new();
+        let segments = if final_fragment {
+            self.flush_all_pending_segments()
+        } else {
+            self.take_complete_segments()
+        };
+        self.push_streaming_segments(&mut chunks, &segments);
+        chunks
+    }
+
+    fn push_streaming_segments(&mut self, chunks: &mut Vec<String>, segments: &[String]) {
+        if segments.is_empty() {
+            return;
+        }
+        let mut segment_index = 0;
+        if !self.emitted_first_chunk && self.first_chunk_max_chars > 0 {
+            segment_index = push_first_speech_chunk(chunks, segments, self.first_chunk_max_chars);
+            if segment_index > 0 {
+                self.emitted_first_chunk = true;
+            }
+        }
+        let before = chunks.len();
+        let mut pending = String::new();
+        for segment in segments.iter().skip(segment_index) {
+            push_speech_segment(chunks, &mut pending, segment, self.max_chars);
+        }
+        flush_speech_chunk(chunks, &mut pending);
+        if chunks.len() > before {
+            self.emitted_first_chunk = true;
+        }
+    }
+
+    fn take_complete_segments(&mut self) -> Vec<String> {
+        let Some(boundary_end) = last_speech_boundary_end(&self.pending_text) else {
+            return Vec::new();
+        };
+        let complete = self.pending_text[..boundary_end].to_string();
+        let remainder = self.pending_text[boundary_end..].to_string();
+        self.pending_text = remainder;
+        speech_segments(&complete)
+    }
+
+    fn flush_all_pending_segments(&mut self) -> Vec<String> {
+        let text = std::mem::take(&mut self.pending_text);
+        speech_segments(&text)
+    }
+
+    fn flush_all_pending(&mut self) -> Vec<String> {
+        let text = std::mem::take(&mut self.pending_text);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            vec![trimmed.to_string()]
+        }
+    }
+}
+
+fn last_speech_boundary_end(text: &str) -> Option<usize> {
+    text.char_indices()
+        .rev()
+        .find_map(|(index, ch)| is_speech_segment_boundary(ch).then_some(index + ch.len_utf8()))
+}
+
 fn speech_segments(text: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut segment = String::new();
@@ -643,10 +736,8 @@ impl StaticTtsFactory {
 
     pub fn with_sample_rate(samples: Vec<i16>, sample_rate_hz: u32) -> Self {
         Self {
-            chunks: vec![
-                TtsAudio::new(samples, sample_rate_hz)
-                    .expect("test TTS sample rate should be non-zero"),
-            ],
+            chunks: vec![TtsAudio::new(samples, sample_rate_hz)
+                .expect("test TTS sample rate should be non-zero")],
         }
     }
 }
@@ -694,6 +785,44 @@ mod tests {
         assert_eq!(
             "piper".parse::<LiveTtsBackend>().unwrap(),
             LiveTtsBackend::Piper
+        );
+    }
+
+    #[test]
+    fn streaming_speech_packer_holds_incomplete_fragment_until_sentence_boundary() {
+        let mut packer = StreamingSpeechTextPacker::new(true, 90, 45);
+        assert!(packer.push_fragment("Hello wor", false).is_empty());
+        assert_eq!(
+            packer.push_fragment("ld. Next", false),
+            vec!["Hello world."]
+        );
+        assert!(packer.push_fragment(" bit", false).is_empty());
+        assert_eq!(packer.push_fragment(" done", true), vec!["Next bit done"]);
+    }
+
+    #[test]
+    fn streaming_speech_packer_flushes_final_unsentenced_text() {
+        let mut packer = StreamingSpeechTextPacker::new(true, 90, 0);
+        assert!(packer.push_fragment("No boundary yet", false).is_empty());
+        assert_eq!(packer.push_fragment("", true), vec!["No boundary yet"]);
+    }
+
+    #[test]
+    fn streaming_speech_packer_respects_chunking_disabled_until_final() {
+        let mut packer = StreamingSpeechTextPacker::new(false, 10, 0);
+        assert!(packer.push_fragment("First. ", false).is_empty());
+        assert_eq!(
+            packer.push_fragment("Second.", true),
+            vec!["First. Second."]
+        );
+    }
+
+    #[test]
+    fn streaming_speech_packer_packs_short_sentences_from_one_fragment() {
+        let mut packer = StreamingSpeechTextPacker::new(true, 90, 0);
+        assert_eq!(
+            packer.push_fragment("Hi. Yes. OK. Sure.", false),
+            vec!["Hi. Yes. OK. Sure."]
         );
     }
 
