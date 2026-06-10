@@ -248,6 +248,15 @@ re-evaluate cadence at each rewrite (fast while shepherding active review
 rounds, slow/idle-watch when holding for a human, stop when the goal is done).
 If a timer fires and its prompt no longer matches reality, that is the signal
 you missed a rewrite — fix the timer before doing anything else.
+
+**Do not embed lookup-able state in the prompt.** Anything queryable at fire
+time — PR heads/states, who has approved, which runs finished, agent liveness —
+must NOT be written into the prompt; embedding lookup results bakes in
+staleness. The prompt carries only: the goal, the procedure (*which* lookups to
+run: the gh queries, `status`, the discussion/PR to read), decision rules for
+what to do with the results, and standing guardrails. "Check open PRs against
+<branch> and merge token-clean results" is durable; "PRs #433+#434 are merged,
+amd still running" rots the moment it is written.
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key. Retries send only extra Enter keys, not
 the prompt text; `--no-prompt-submit` disables retries (deprecated alias
