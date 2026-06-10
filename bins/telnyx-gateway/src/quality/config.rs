@@ -169,6 +169,7 @@ impl Default for EndpointQualityConfig {
 pub struct AsrQualityConfig {
     pub repeated_token_run_threshold: usize,
     pub repeated_q_run_threshold: usize,
+    pub finish_pad_ms: u64,
 }
 
 impl Default for AsrQualityConfig {
@@ -176,6 +177,7 @@ impl Default for AsrQualityConfig {
         Self {
             repeated_token_run_threshold: 16,
             repeated_q_run_threshold: 8,
+            finish_pad_ms: 160,
         }
     }
 }
@@ -370,15 +372,18 @@ impl VoiceQualityConfig {
         match profile {
             QualityProfile::Fast => {
                 config.endpoint.trailing_silence_ms = 550;
+                config.asr.finish_pad_ms = 80;
             }
             QualityProfile::Balanced => {}
             QualityProfile::Complete => {
                 config.endpoint.trailing_silence_ms = 1_100;
+                config.asr.finish_pad_ms = 320;
             }
             QualityProfile::Noisy => {
                 config.endpoint.trailing_silence_ms = 950;
                 config.speech.rms_threshold = 260.0;
                 config.speech.peak_threshold = 1_200;
+                config.asr.finish_pad_ms = 240;
             }
         }
         config
@@ -469,6 +474,7 @@ impl VoiceQualityConfig {
             2,
             64,
         )?;
+        ensure_u64("asr.finish_pad_ms", self.asr.finish_pad_ms, 0, 2_000)?;
         ensure_usize(
             "text_call.max_active_turns",
             self.text_call.max_active_turns,
@@ -635,6 +641,9 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = asr.repeated_q_run_threshold {
                 self.set_asr_repeated_q_run_threshold(value);
+            }
+            if let Some(value) = asr.finish_pad_ms {
+                self.set_asr_finish_pad_ms(value);
             }
         }
         if let Some(text_call) = patch.text_call {
@@ -879,6 +888,17 @@ impl VoiceQualityConfig {
         self.asr.repeated_q_run_threshold = clamped.value;
         self.outcome(
             "asr.repeated_q_run_threshold",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_asr_finish_pad_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 2_000);
+        self.asr.finish_pad_ms = clamped.value;
+        self.outcome(
+            "asr.finish_pad_ms",
             clamped.value,
             ApplyBoundary::NextAsrSession,
             clamped.clamped,
@@ -1280,6 +1300,7 @@ pub struct EndpointQualityConfigPatch {
 pub struct AsrQualityConfigPatch {
     pub repeated_token_run_threshold: Option<usize>,
     pub repeated_q_run_threshold: Option<usize>,
+    pub finish_pad_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1357,6 +1378,7 @@ mod tests {
         assert_eq!(config.speech.rms_threshold, 220.0);
         assert_eq!(config.speech.peak_threshold, 1_100);
         assert_eq!(config.speech.onset_min_silence_ms, 180);
+        assert_eq!(config.asr.finish_pad_ms, 160);
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
         assert_eq!(config.tts.prebuffer_chunks, 1);

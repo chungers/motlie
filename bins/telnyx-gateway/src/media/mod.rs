@@ -114,6 +114,8 @@ struct MarkPayload {
 pub struct OutboundFrameQualityContext {
     pub config_id: String,
     pub redaction_mode: RedactionMode,
+    pub request_started_at: Instant,
+    pub turn_finalized_at: Option<Instant>,
     pub queued_at: Instant,
     pub first_for_playback: bool,
 }
@@ -843,9 +845,10 @@ async fn maybe_emit_first_frame_span(
     media_state
         .playback_quality_contexts
         .insert(frame.playback_id.clone(), quality.clone());
+    let queue_depth = outbound_queue_depth(media_state);
     let payload = map_from_value(json!({
         "playback_id": frame.playback_id.as_str(),
-        "queue_depth": outbound_queue_depth(media_state),
+        "queue_depth": queue_depth,
     }));
     state.write().await.emit_quality_span_finished(
         call_id,
@@ -860,6 +863,50 @@ async fn maybe_emit_first_frame_span(
             payload,
         },
     );
+    let payload = map_from_value(json!({
+        "playback_id": frame.playback_id.as_str(),
+        "queue_depth": queue_depth,
+        "request_to_enqueue_ms": quality
+            .queued_at
+            .saturating_duration_since(quality.request_started_at)
+            .as_millis() as u64,
+    }));
+    state.write().await.emit_quality_span_finished(
+        call_id,
+        QualitySpanEmission {
+            config_id: quality.config_id.clone(),
+            redaction_mode: quality.redaction_mode,
+            span_name: "tts.request_to_first_audio",
+            category: "tts_generation",
+            duration: quality.request_started_at.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload,
+        },
+    );
+    if let Some(finalized_at) = quality.turn_finalized_at {
+        let payload = map_from_value(json!({
+            "playback_id": frame.playback_id.as_str(),
+            "queue_depth": queue_depth,
+            "handler_to_request_ms": quality
+                .request_started_at
+                .saturating_duration_since(finalized_at)
+                .as_millis() as u64,
+        }));
+        state.write().await.emit_quality_span_finished(
+            call_id,
+            QualitySpanEmission {
+                config_id: quality.config_id.clone(),
+                redaction_mode: quality.redaction_mode,
+                span_name: "turn.finalize_to_first_audio",
+                category: "turn_taking",
+                duration: finalized_at.elapsed(),
+                critical_path: true,
+                concurrent: false,
+                payload,
+            },
+        );
+    }
 }
 
 async fn emit_playback_terminal_spans(
@@ -1917,10 +1964,33 @@ async fn finish_asr_session(
 ) -> anyhow::Result<()> {
     if let (Some(call_id), Some(mut asr_session)) = (gateway_call_id, media_state.session.take()) {
         let quality_session = media_state.active_quality_asr.take();
-        let finish_pad_ms = media_state.quality_config.endpoint.trailing_silence_ms;
-        let finish_started_at = Instant::now();
+        let finish_pad_ms = media_state.quality_config.asr.finish_pad_ms;
+        let pad_started_at = Instant::now();
         let pad_events = ingest_asr_finish_silence(asr_session.as_mut(), finish_pad_ms).await?;
+        let pad_duration = pad_started_at.elapsed();
         let pad_event_count = pad_events.len();
+        if let Some(session) = quality_session.as_ref() {
+            let payload = map_from_value(json!({
+                "asr_session_id": session.asr_session_id.as_str(),
+                "utterance_id": session.utterance_id.as_str(),
+                "stream_id": stream_id.as_deref(),
+                "finish_pad_ms": finish_pad_ms,
+                "pad_transcript_events": pad_event_count,
+            }));
+            state.write().await.emit_quality_span_finished(
+                call_id,
+                QualitySpanEmission {
+                    config_id: session.config_id.clone(),
+                    redaction_mode: session.redaction_mode,
+                    span_name: "asr.finish_pad",
+                    category: "asr_generation",
+                    duration: pad_duration,
+                    critical_path: true,
+                    concurrent: false,
+                    payload,
+                },
+            );
+        }
         record_and_forward_asr_events(
             state,
             media_state,
@@ -1932,6 +2002,7 @@ async fn finish_asr_session(
         )
         .await;
 
+        let finish_started_at = Instant::now();
         let events = asr_session.finish().await?;
         let finish_event_count = events.len();
         if let Some(session) = quality_session.as_ref() {
@@ -1978,21 +2049,14 @@ async fn ingest_asr_finish_silence(
     pad_ms: u64,
 ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
     const ASR_SAMPLE_RATE_HZ: u64 = 16_000;
-    const PAD_CHUNK_MS: u64 = 20;
 
-    let mut remaining_samples = ((ASR_SAMPLE_RATE_HZ * pad_ms) / 1_000) as usize;
-    let chunk_samples = ((ASR_SAMPLE_RATE_HZ * PAD_CHUNK_MS) / 1_000) as usize;
-    let mut events = Vec::new();
-    while remaining_samples > 0 {
-        let samples = remaining_samples.min(chunk_samples);
-        remaining_samples -= samples;
-        events.extend(
-            asr_session
-                .ingest(AudioBuf::<i16, 16_000, Mono>::new(vec![0; samples]))
-                .await?,
-        );
+    let samples = ((ASR_SAMPLE_RATE_HZ * pad_ms) / 1_000) as usize;
+    if samples == 0 {
+        return Ok(Vec::new());
     }
-    Ok(events)
+    asr_session
+        .ingest(AudioBuf::<i16, 16_000, Mono>::new(vec![0; samples]))
+        .await
 }
 
 async fn record_and_forward_asr_events(
@@ -2781,7 +2845,7 @@ mod tests {
         assert_eq!(call.transcripts[0].text, "received 16000 samples");
         assert_eq!(
             call.transcripts.last().map(|event| event.text.as_str()),
-            Some("received 26400 samples")
+            Some("received 18560 samples")
         );
     }
 
@@ -3479,9 +3543,7 @@ mod tests {
     }
 
     fn finish_pad_silence_frames() -> usize {
-        let frame_ms = SILENCE_KEEPALIVE_INTERVAL.as_millis() as u64;
-        let trailing_ms = VoiceQualityConfig::default().endpoint.trailing_silence_ms;
-        trailing_ms.saturating_add(frame_ms - 1) as usize / frame_ms as usize
+        usize::from(VoiceQualityConfig::default().asr.finish_pad_ms > 0)
     }
 
     #[derive(Default)]

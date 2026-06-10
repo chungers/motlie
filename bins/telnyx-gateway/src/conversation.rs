@@ -1,16 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use motlie_voice::app::{
     CallContext, CallIds, ConversationCommand, ConversationHandler, TranscriptEvent, VoiceAppError,
 };
 use motlie_voice::telephony::CallAction;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 use crate::call_control::TelnyxClient;
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
@@ -21,10 +21,6 @@ use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
 
 const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
-#[cfg(not(test))]
-const SMOKE_TEST_FINAL_DEBOUNCE: Duration = Duration::from_millis(700);
-#[cfg(test)]
-const SMOKE_TEST_FINAL_DEBOUNCE: Duration = Duration::from_millis(20);
 
 pub type SharedConversationHandler = Arc<dyn ConversationHandler>;
 
@@ -36,6 +32,7 @@ pub struct ConversationRuntime {
     smoke_test_enabled: Arc<AtomicBool>,
     barge_in_enabled: Arc<AtomicBool>,
     smoke_test_pending_finals: Arc<Mutex<HashMap<String, PendingSmokeTestFinal>>>,
+    deferred_say_generations: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl ConversationRuntime {
@@ -52,6 +49,7 @@ impl ConversationRuntime {
             smoke_test_enabled: Arc::new(AtomicBool::new(smoke_test_enabled)),
             barge_in_enabled: Arc::new(AtomicBool::new(true)),
             smoke_test_pending_finals: Arc::new(Mutex::new(HashMap::new())),
+            deferred_say_generations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -72,11 +70,7 @@ impl ConversationRuntime {
     }
 
     pub fn barge_in_label(&self) -> &'static str {
-        if self.barge_in_enabled() {
-            "on"
-        } else {
-            "off"
-        }
+        if self.barge_in_enabled() { "on" } else { "off" }
     }
 
     pub fn handler_label(&self) -> &'static str {
@@ -89,8 +83,18 @@ impl ConversationRuntime {
 }
 
 #[derive(Clone, Debug)]
+struct SmokeTestFinalInput {
+    event: TranscriptEvent,
+    quality_config: Option<VoiceQualityConfig>,
+    final_transcript_at: Instant,
+    debounce: Duration,
+}
+
+#[derive(Clone, Debug)]
 struct PendingSmokeTestFinal {
-    text: String,
+    event: TranscriptEvent,
+    quality_config: Option<VoiceQualityConfig>,
+    final_transcript_at: Instant,
     generation: u64,
 }
 
@@ -158,10 +162,7 @@ pub async fn handle_transcript_event(
         return Ok(());
     }
 
-    state
-        .write()
-        .await
-        .record_conversation_user_turn(gateway_call_id, transcript_text.clone());
+    let final_transcript_at = Instant::now();
 
     if barge_in_allows(&snapshot.barge_in, BargeInTrigger::Final) {
         cancel_active_speech_for_barge_in(
@@ -179,6 +180,10 @@ pub async fn handle_transcript_event(
         state
             .write()
             .await
+            .record_conversation_user_turn(gateway_call_id, transcript_text);
+        state
+            .write()
+            .await
             .record_conversation_idle(gateway_call_id);
         tracing::debug!(
             gateway_call_id,
@@ -187,15 +192,42 @@ pub async fn handle_transcript_event(
         return Ok(());
     }
 
+    let event = event_with_trimmed_text(event, transcript_text);
+    let quality_config = quality_config.cloned();
+    if snapshot.endpoint_merge_window_ms == 0 {
+        return dispatch_final_transcript_to_handler(
+            state,
+            media_registry,
+            runtime,
+            gateway_call_id,
+            event,
+            quality_config.as_ref(),
+            final_transcript_at,
+        )
+        .await;
+    }
+
     schedule_smoke_test_final(
         state,
         media_registry,
         runtime,
         gateway_call_id,
-        transcript_text,
+        SmokeTestFinalInput {
+            event,
+            quality_config,
+            final_transcript_at,
+            debounce: Duration::from_millis(snapshot.endpoint_merge_window_ms),
+        },
     )
     .await;
     Ok(())
+}
+
+fn event_with_trimmed_text(event: TranscriptEvent, text: String) -> TranscriptEvent {
+    match event {
+        TranscriptEvent::Partial { update, .. } => TranscriptEvent::Partial { text, update },
+        TranscriptEvent::Final { update, .. } => TranscriptEvent::Final { text, update },
+    }
 }
 
 async fn schedule_smoke_test_final(
@@ -203,17 +235,26 @@ async fn schedule_smoke_test_final(
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
-    transcript_text: String,
+    input: SmokeTestFinalInput,
 ) {
     let generation = {
         let mut pending = runtime.smoke_test_pending_finals.lock().await;
         let entry = pending
             .entry(gateway_call_id.to_string())
             .or_insert_with(|| PendingSmokeTestFinal {
-                text: String::new(),
+                event: input.event.clone(),
+                quality_config: input.quality_config.clone(),
+                final_transcript_at: input.final_transcript_at,
                 generation: 0,
             });
-        entry.text = merge_smoke_test_finals(&entry.text, &transcript_text);
+        if entry.generation == 0 {
+            entry.event = input.event;
+        } else {
+            entry.event = merge_smoke_test_final_events(&entry.event, input.event);
+        }
+        if entry.quality_config.is_none() {
+            entry.quality_config = input.quality_config;
+        }
         entry.generation = entry.generation.saturating_add(1);
         entry.generation
     };
@@ -222,14 +263,28 @@ async fn schedule_smoke_test_final(
     let media_registry = media_registry.clone();
     let runtime = runtime.clone();
     let gateway_call_id = gateway_call_id.to_string();
+    let debounce = input.debounce;
     tokio::spawn(async move {
-        sleep(SMOKE_TEST_FINAL_DEBOUNCE).await;
-        let Some(text) = take_ready_smoke_test_final(&runtime, &gateway_call_id, generation).await
+        sleep(debounce).await;
+        let Some(pending) =
+            take_ready_smoke_test_final(&runtime, &gateway_call_id, generation).await
         else {
             return;
         };
-        if let Err(error) =
-            apply_smoke_test_final(&state, &media_registry, &runtime, &gateway_call_id, text).await
+        if !runtime.smoke_test_enabled() {
+            return;
+        }
+        emit_smoke_final_debounce_span(&state, &gateway_call_id, &pending, debounce).await;
+        if let Err(error) = dispatch_final_transcript_to_handler(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            pending.event,
+            pending.quality_config.as_ref(),
+            pending.final_transcript_at,
+        )
+        .await
         {
             let error = format!("{error:#}");
             state
@@ -249,14 +304,20 @@ async fn take_ready_smoke_test_final(
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
     generation: u64,
-) -> Option<String> {
+) -> Option<PendingSmokeTestFinal> {
     let mut pending = runtime.smoke_test_pending_finals.lock().await;
     match pending.get(gateway_call_id) {
-        Some(entry) if entry.generation == generation => {
-            pending.remove(gateway_call_id).map(|entry| entry.text)
-        }
+        Some(entry) if entry.generation == generation => pending.remove(gateway_call_id),
         _ => None,
     }
+}
+
+fn merge_smoke_test_final_events(
+    existing: &TranscriptEvent,
+    next: TranscriptEvent,
+) -> TranscriptEvent {
+    let merged_text = merge_smoke_test_finals(existing.text(), next.text());
+    event_with_trimmed_text(next, merged_text)
 }
 
 fn merge_smoke_test_finals(existing: &str, next: &str) -> String {
@@ -269,30 +330,72 @@ fn merge_smoke_test_finals(existing: &str, next: &str) -> String {
     }
 }
 
-async fn apply_smoke_test_final(
+async fn emit_smoke_final_debounce_span(
+    state: &SharedState,
+    gateway_call_id: &str,
+    pending: &PendingSmokeTestFinal,
+    debounce: Duration,
+) {
+    let (config_id, redaction_mode) = if let Some(config) = pending.quality_config.as_ref() {
+        (config.config_id(), config.logging.redaction_mode)
+    } else {
+        let guard = state.read().await;
+        (
+            guard.quality.config_id.clone(),
+            guard.quality.config.logging.redaction_mode,
+        )
+    };
+    let payload = serde_json::json!({
+        "debounce_ms": debounce.as_millis() as u64,
+        "text_chars": pending.event.text().chars().count(),
+    });
+    let payload = match payload {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    state.write().await.emit_quality_span_finished(
+        gateway_call_id,
+        QualitySpanEmission {
+            config_id,
+            redaction_mode,
+            span_name: "conversation.smoke_final_debounce",
+            category: "intentional_delay",
+            duration: pending.final_transcript_at.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload,
+        },
+    );
+}
+
+async fn dispatch_final_transcript_to_handler(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
-    transcript_text: String,
+    event: TranscriptEvent,
+    quality_config: Option<&VoiceQualityConfig>,
+    final_transcript_at: Instant,
 ) -> anyhow::Result<()> {
-    let Some(snapshot) = conversation_snapshot(state, gateway_call_id, None).await else {
-        return Ok(());
-    };
-    if !snapshot.attached || !runtime.smoke_test_enabled() {
+    if !runtime.smoke_test_enabled() {
         return Ok(());
     }
-
+    let transcript_text = event.text().trim().to_string();
+    if transcript_text.is_empty() {
+        return Ok(());
+    }
+    let Some(snapshot) = conversation_snapshot(state, gateway_call_id, quality_config).await else {
+        return Ok(());
+    };
+    if !snapshot.attached {
+        return Ok(());
+    }
     state
         .write()
         .await
-        .record_conversation_user_turn(gateway_call_id, transcript_text.clone());
+        .record_conversation_user_turn(gateway_call_id, transcript_text);
 
     let mut context = snapshot.context;
-    let event = TranscriptEvent::Final {
-        text: transcript_text,
-        update: motlie_model::TranscriptionUpdate::default(),
-    };
     let command = match runtime.handler.on_transcript(event, &mut context).await {
         Ok(command) => command,
         Err(error) => {
@@ -305,7 +408,7 @@ async fn apply_smoke_test_final(
             return Ok(());
         }
     };
-    apply_conversation_command(
+    apply_conversation_command_with_timing(
         state,
         media_registry,
         runtime,
@@ -316,6 +419,7 @@ async fn apply_smoke_test_final(
             barge_in: snapshot.barge_in,
         },
         command,
+        Some(final_transcript_at),
     )
     .await
 }
@@ -471,6 +575,7 @@ struct ConversationSnapshot {
     barge_in: BargeInQualityConfig,
     config_id: String,
     redaction_mode: RedactionMode,
+    endpoint_merge_window_ms: u64,
     context: CallContext,
 }
 
@@ -497,12 +602,13 @@ async fn conversation_snapshot(
     if let Some(text) = &call.conversation.last_assistant_text {
         custom_state.insert("last_assistant_text".to_string(), text.clone());
     }
-    let (barge_in, config_id, redaction_mode) = quality_config
+    let (barge_in, config_id, redaction_mode, endpoint_merge_window_ms) = quality_config
         .map(|quality_config| {
             (
                 quality_config.barge_in.clone(),
                 quality_config.config_id(),
                 quality_config.logging.redaction_mode,
+                quality_config.endpoint.merge_window_ms,
             )
         })
         .unwrap_or_else(|| {
@@ -510,6 +616,7 @@ async fn conversation_snapshot(
                 guard.quality.config.barge_in.clone(),
                 guard.quality.config_id.clone(),
                 guard.quality.config.logging.redaction_mode,
+                guard.quality.config.endpoint.merge_window_ms,
             )
         });
     Some(ConversationSnapshot {
@@ -519,6 +626,7 @@ async fn conversation_snapshot(
         barge_in,
         config_id,
         redaction_mode,
+        endpoint_merge_window_ms,
         context: CallContext {
             ids: Some(CallIds {
                 provider_call_id: call.ids.call_control_id.clone(),
@@ -530,6 +638,7 @@ async fn conversation_snapshot(
     })
 }
 
+#[cfg(test)]
 async fn apply_conversation_command(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
@@ -537,6 +646,27 @@ async fn apply_conversation_command(
     gateway_call_id: &str,
     target: ConversationCommandTarget,
     command: ConversationCommand,
+) -> anyhow::Result<()> {
+    apply_conversation_command_with_timing(
+        state,
+        media_registry,
+        runtime,
+        gateway_call_id,
+        target,
+        command,
+        None,
+    )
+    .await
+}
+
+async fn apply_conversation_command_with_timing(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    target: ConversationCommandTarget,
+    command: ConversationCommand,
+    turn_finalized_at: Option<Instant>,
 ) -> anyhow::Result<()> {
     match command {
         ConversationCommand::Noop => {
@@ -584,7 +714,9 @@ async fn apply_conversation_command(
                             runtime,
                             gateway_call_id,
                             response_text,
-                        );
+                            turn_finalized_at,
+                        )
+                        .await;
                         return Ok(());
                     }
                     queue_conversation_speech(
@@ -594,6 +726,7 @@ async fn apply_conversation_command(
                         gateway_call_id,
                         response_text,
                         SpeechConflictPolicy::CancelAndReplace,
+                        turn_finalized_at,
                     )
                     .await;
                     Ok(())
@@ -627,13 +760,15 @@ async fn apply_conversation_command(
     }
 }
 
-fn spawn_deferred_conversation_say(
+async fn spawn_deferred_conversation_say(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
     response_text: String,
+    turn_finalized_at: Option<Instant>,
 ) {
+    let generation = next_deferred_say_generation(runtime, gateway_call_id).await;
     let state = state.clone();
     let media_registry = media_registry.clone();
     let runtime = runtime.clone();
@@ -644,10 +779,47 @@ fn spawn_deferred_conversation_say(
             &media_registry,
             &runtime,
             &gateway_call_id,
+            generation,
             response_text,
+            turn_finalized_at,
         )
         .await;
     });
+}
+
+async fn next_deferred_say_generation(runtime: &ConversationRuntime, gateway_call_id: &str) -> u64 {
+    let mut generations = runtime.deferred_say_generations.lock().await;
+    let generation = generations.entry(gateway_call_id.to_string()).or_insert(0);
+    *generation = generation.saturating_add(1);
+    *generation
+}
+
+async fn is_latest_deferred_say_generation(
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    generation: u64,
+) -> bool {
+    runtime
+        .deferred_say_generations
+        .lock()
+        .await
+        .get(gateway_call_id)
+        .is_some_and(|current| *current == generation)
+}
+
+async fn take_latest_deferred_say_generation(
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    generation: u64,
+) -> bool {
+    let mut generations = runtime.deferred_say_generations.lock().await;
+    match generations.get(gateway_call_id) {
+        Some(current) if *current == generation => {
+            generations.remove(gateway_call_id);
+            true
+        }
+        _ => false,
+    }
 }
 
 async fn wait_and_queue_deferred_conversation_say(
@@ -655,7 +827,9 @@ async fn wait_and_queue_deferred_conversation_say(
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
+    generation: u64,
     response_text: String,
+    turn_finalized_at: Option<Instant>,
 ) {
     let timeout_ms = state
         .read()
@@ -670,6 +844,14 @@ async fn wait_and_queue_deferred_conversation_say(
         .await
         .is_some()
     {
+        if !is_latest_deferred_say_generation(runtime, gateway_call_id, generation).await {
+            tracing::debug!(
+                gateway_call_id,
+                generation,
+                "conversation.say.deferred_superseded"
+            );
+            return;
+        }
         if started.elapsed() >= Duration::from_millis(timeout_ms) {
             let error = format!(
                 "deferred conversation response timed out after {timeout_ms}ms waiting for active playback"
@@ -683,6 +865,14 @@ async fn wait_and_queue_deferred_conversation_say(
         }
         sleep(Duration::from_millis(50)).await;
     }
+    if !take_latest_deferred_say_generation(runtime, gateway_call_id, generation).await {
+        tracing::debug!(
+            gateway_call_id,
+            generation,
+            "conversation.say.deferred_superseded"
+        );
+        return;
+    }
 
     queue_conversation_speech(
         state,
@@ -691,6 +881,7 @@ async fn wait_and_queue_deferred_conversation_say(
         gateway_call_id,
         response_text,
         SpeechConflictPolicy::Reject,
+        turn_finalized_at,
     )
     .await;
 }
@@ -702,6 +893,7 @@ async fn queue_conversation_speech(
     gateway_call_id: &str,
     response_text: String,
     conflict_policy: SpeechConflictPolicy,
+    turn_finalized_at: Option<Instant>,
 ) {
     let queued = speech::queue_speech_with_request(
         state,
@@ -713,6 +905,7 @@ async fn queue_conversation_speech(
             text: response_text.clone(),
             source_label: "conversation say".to_string(),
             conflict_policy,
+            turn_finalized_at,
         },
     )
     .await
@@ -752,8 +945,8 @@ async fn queue_conversation_speech(
 mod tests {
     use super::*;
     use crate::media::SpeechCancelToken;
-    use crate::operator::state::{shared_state, CallStatus, ConversationStatus, TelnyxIds};
-    use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
+    use crate::operator::state::{CallStatus, ConversationStatus, TelnyxIds, shared_state};
+    use crate::tts::{OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry};
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
@@ -837,7 +1030,10 @@ mod tests {
     }
 
     async fn wait_for_smoke_test_final() {
-        sleep(SMOKE_TEST_FINAL_DEBOUNCE + Duration::from_millis(30)).await;
+        sleep(Duration::from_millis(
+            VoiceQualityConfig::default().endpoint.merge_window_ms + 30,
+        ))
+        .await;
     }
 
     #[tokio::test]
@@ -990,10 +1186,12 @@ mod tests {
         .expect("partial barge-in should cancel active speech");
 
         assert!(cancel.is_canceled());
-        assert!(media_registry
-            .active_speech_playback_id(&gateway_call_id)
-            .await
-            .is_none());
+        assert!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .is_none()
+        );
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.conversation.status, ConversationStatus::Interrupted);
@@ -1029,10 +1227,12 @@ mod tests {
             .expect("speech onset barge-in should cancel active speech");
 
         assert!(cancel.is_canceled());
-        assert!(media_registry
-            .active_speech_playback_id(&gateway_call_id)
-            .await
-            .is_none());
+        assert!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .is_none()
+        );
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.conversation.status, ConversationStatus::Interrupted);
@@ -1171,6 +1371,70 @@ mod tests {
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.conversation.status, ConversationStatus::Speaking);
+    }
+
+    #[tokio::test]
+    async fn disabled_barge_in_deferred_auto_say_uses_latest_final_turn() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        state.write().await.record_conversation_speaking(
+            &gateway_call_id,
+            "assistant is speaking".to_string(),
+            "tts_test".to_string(),
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(&gateway_call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        let runtime = test_runtime_with_tts();
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_barge_in_enabled(false);
+            guard.quality.config.set_endpoint_merge_window_ms(0);
+            guard.quality.config_id = guard.quality.config.config_id();
+        }
+
+        for text in ["first", "second"] {
+            handle_transcript_event(
+                &state,
+                &media_registry,
+                &runtime,
+                &gateway_call_id,
+                TranscriptEvent::Final {
+                    text: text.to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                },
+                None,
+            )
+            .await
+            .expect("disabled barge-in should defer overlapping final turn");
+        }
+
+        assert!(!cancel.is_canceled());
+        media_registry
+            .finish_speech(&gateway_call_id, "tts_test")
+            .await;
+        timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("latest deferred speech should enqueue")
+            .expect("latest deferred speech should emit a media command");
+        sleep(Duration::from_millis(100)).await;
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Speaking);
+        assert_eq!(call.conversation.last_user_text.as_deref(), Some("second"));
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("I heard: second")
+        );
+        assert!(call.conversation.last_error.is_none());
     }
 
     #[tokio::test]

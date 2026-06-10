@@ -504,6 +504,10 @@ pub enum QualityCommand {
         #[command(subcommand)]
         command: QualitySpeechCommand,
     },
+    Asr {
+        #[command(subcommand)]
+        command: QualityAsrCommand,
+    },
     TextCall {
         #[command(subcommand)]
         command: QualityTextCallCommand,
@@ -593,6 +597,14 @@ pub enum QualitySpeechCommand {
     RmsThreshold { value: f32 },
     PeakThreshold { value: i32 },
     OnsetMinSilenceMs { ms: u64 },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityAsrCommand {
+    Status,
+    FinishPadMs { ms: u64 },
+    RepeatedTokenRunThreshold { n: usize },
+    RepeatedQRunThreshold { n: usize },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1844,9 +1856,6 @@ async fn conversation_command(
         ConversationCommand::SmokeTest { state } => {
             let enabled = state.enabled();
             context.conversation.set_smoke_test_enabled(enabled);
-            if enabled {
-                set_barge_in_enabled(context, false, "conversation smoke-test").await?;
-            }
             let label = if enabled { "on" } else { "off" };
             context
                 .state
@@ -2226,6 +2235,7 @@ async fn quality_command(
         }
         QualityCommand::Endpoint { command } => quality_endpoint_command(context, command).await,
         QualityCommand::Speech { command } => quality_speech_command(context, command).await,
+        QualityCommand::Asr { command } => quality_asr_command(context, command).await,
         QualityCommand::TextCall { command } => quality_text_call_command(context, command).await,
         QualityCommand::Tts { command } => quality_tts_command(context, command).await,
         QualityCommand::Logging { command } => quality_logging_command(context, command).await,
@@ -2262,6 +2272,11 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             "endpoint.trailing_silence_ms={}",
             quality.config.endpoint.trailing_silence_ms
         ),
+        format!(
+            "endpoint.merge_window_ms={}",
+            quality.config.endpoint.merge_window_ms
+        ),
+        format!("asr.finish_pad_ms={}", quality.config.asr.finish_pad_ms),
         format!(
             "speech.rms_threshold={}",
             quality.config.speech.rms_threshold
@@ -2373,6 +2388,37 @@ async fn quality_speech_command(
         QualitySpeechCommand::OnsetMinSilenceMs { ms } => {
             mutate_quality_config(context, |config| {
                 Ok(config.set_speech_onset_min_silence_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_asr_command(
+    context: &mut GatewayContext,
+    command: QualityAsrCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityAsrCommand::Status => {
+            let guard = context.state.read().await;
+            let asr = &guard.quality.config.asr;
+            Ok(CommandOutput::text(format!(
+                "finish_pad_ms={}\nrepeated_token_run_threshold={}\nrepeated_q_run_threshold={}",
+                asr.finish_pad_ms, asr.repeated_token_run_threshold, asr.repeated_q_run_threshold
+            )))
+        }
+        QualityAsrCommand::FinishPadMs { ms } => {
+            mutate_quality_config(context, |config| Ok(config.set_asr_finish_pad_ms(ms))).await
+        }
+        QualityAsrCommand::RepeatedTokenRunThreshold { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_asr_repeated_token_run_threshold(n))
+            })
+            .await
+        }
+        QualityAsrCommand::RepeatedQRunThreshold { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_asr_repeated_q_run_threshold(n))
             })
             .await
         }
@@ -2960,6 +3006,10 @@ fn quality_help() -> String {
         "quality speech rms-threshold <value>           range=0.0..20000.0 default=220.0 applies=next_asr_session",
         "quality speech peak-threshold <value>          range=0..32767 default=1100 applies=next_asr_session",
         "quality speech onset-min-silence-ms <ms>       range=0..2000 default=180ms applies=next_asr_session",
+        "quality asr status",
+        "quality asr finish-pad-ms <ms>                 range=0..2000 default=160ms applies=next_asr_session",
+        "quality asr repeated-token-run-threshold <n>   range=2..128 default=16 applies=next_asr_session",
+        "quality asr repeated-q-run-threshold <n>       range=2..64 default=8 applies=next_asr_session",
         "quality text-call status",
         "quality text-call max-active-turns <n>         range=1..1024 default=32 applies=new_text_call_session",
         "quality text-call media-ready-timeout-ms <ms>  range=1000..120000 default=20000ms applies=new_playback_request",
@@ -4303,8 +4353,8 @@ mod tests {
             .expect("enable smoke test");
         assert_eq!(enabled.lines, vec!["conversation smoke-test: on"]);
         assert!(engine.context().conversation.smoke_test_enabled());
-        assert!(!engine.context().conversation.barge_in_enabled());
-        assert!(!state.read().await.quality.config.barge_in.enabled);
+        assert!(engine.context().conversation.barge_in_enabled());
+        assert!(state.read().await.quality.config.barge_in.enabled);
 
         let disabled = engine
             .run_line("conversation smoke-test off")
@@ -4830,6 +4880,7 @@ mod tests {
             config.set_endpoint_max_turn_duration_ms(7_654);
             config.set_asr_repeated_token_run_threshold(42);
             config.set_asr_repeated_q_run_threshold(12);
+            config.set_asr_finish_pad_ms(222);
             config.set_text_call_max_active_turns(9);
             config.set_text_call_media_ready_timeout_ms(12_345);
             config.set_text_call_playback_wait_timeout_ms(54_321);

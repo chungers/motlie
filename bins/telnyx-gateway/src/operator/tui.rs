@@ -5,21 +5,21 @@ use chrono::{DateTime, Local, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use motlie_driver::{CommandEffect, CommandEngine, HistoryBuffer};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Terminal;
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
 use crate::operator::script::run_operator_line;
-use crate::operator::session::{ordered_call_ids, OperatorSession};
+use crate::operator::session::{OperatorSession, ordered_call_ids};
 use crate::operator::state::{
-    asr_warm_key, tts_warm_key, CallStatus, GatewayState, LogLevel, ModelWarmStatus,
+    CallStatus, GatewayState, LogLevel, ModelWarmStatus, asr_warm_key, tts_warm_key,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -600,9 +600,10 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             quality.logging.include_transcript_text
         )),
         Line::from(format!(
-            "models: asr={} warm={} tts={} warm={}",
+            "models: asr={} warm={} finish_pad={}ms tts={} warm={}",
             asr_backend.label(),
             asr_warm,
+            quality.asr.finish_pad_ms,
             tts_backend.label(),
             tts_warm
         )),

@@ -30,6 +30,7 @@ pub struct SpeechQueueRequest {
     pub text: String,
     pub source_label: String,
     pub conflict_policy: SpeechConflictPolicy,
+    pub turn_finalized_at: Option<Instant>,
 }
 
 pub async fn queue_speech(
@@ -51,6 +52,7 @@ pub async fn queue_speech(
             text,
             source_label: source_label.to_string(),
             conflict_policy: SpeechConflictPolicy::Reject,
+            turn_finalized_at: None,
         },
     )
     .await
@@ -68,7 +70,9 @@ pub async fn queue_speech_with_request(
         text,
         source_label,
         conflict_policy,
+        turn_finalized_at,
     } = request;
+    let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
     let cancel = SpeechCancelToken::default();
     let (
@@ -147,6 +151,8 @@ pub async fn queue_speech_with_request(
         tts_chunking_enabled,
         tts_max_text_chunk_chars,
         tts_prebuffer_chunks,
+        request_started_at,
+        turn_finalized_at,
         cancel,
     };
     tokio::spawn(async move {
@@ -211,6 +217,8 @@ struct SpeechJob {
     tts_chunking_enabled: bool,
     tts_max_text_chunk_chars: usize,
     tts_prebuffer_chunks: usize,
+    request_started_at: Instant,
+    turn_finalized_at: Option<Instant>,
     cancel: SpeechCancelToken,
 }
 
@@ -433,7 +441,8 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
             .await;
         }
 
-        if prepared_chunks.len() >= job.tts_prebuffer_chunks || is_last_chunk {
+        let playback_started = !first_packet_for_playback;
+        if playback_started || prepared_chunks.len() >= job.tts_prebuffer_chunks || is_last_chunk {
             if !emitted_prebuffer_ready {
                 emitted_prebuffer_ready = true;
                 let buffered_frames = prepared_frame_count(&prepared_chunks);
@@ -474,6 +483,38 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
             )
             .await?;
         }
+    }
+
+    if !prepared_chunks.is_empty() && !job.cancel.is_canceled() {
+        if !emitted_prebuffer_ready {
+            let buffered_frames = prepared_frame_count(&prepared_chunks);
+            emit_speech_span(
+                job,
+                "tts.prebuffer_ready",
+                "tts_generation",
+                synthesis_started_at.elapsed(),
+                true,
+                false,
+                serde_json::json!({
+                    "playback_id": job.playback_id.as_str(),
+                    "tts_backend": job.tts_backend.label(),
+                    "prepared_text_chunks": prepared_chunks.len(),
+                    "text_chunks": text_chunks.len(),
+                    "frames": buffered_frames,
+                    "text_chunking_enabled": job.tts_chunking_enabled,
+                    "max_text_chunk_chars": job.tts_max_text_chunk_chars,
+                    "prebuffer_chunks": job.tts_prebuffer_chunks,
+                }),
+            )
+            .await;
+        }
+        enqueue_duration += enqueue_prepared_chunks(
+            job,
+            &mut prepared_chunks,
+            &mut queued_frames,
+            &mut first_packet_for_playback,
+        )
+        .await?;
     }
 
     if queued_frames == 0 || job.cancel.is_canceled() {
@@ -579,6 +620,8 @@ async fn enqueue_prepared_chunks(
             let quality = OutboundFrameQualityContext {
                 config_id: job.quality_config_id.clone(),
                 redaction_mode: job.quality_redaction_mode,
+                request_started_at: job.request_started_at,
+                turn_finalized_at: job.turn_finalized_at,
                 queued_at: Instant::now(),
                 first_for_playback: *first_packet_for_playback,
             };
@@ -1050,6 +1093,7 @@ mod tests {
                 text: "new reply".to_string(),
                 source_label: "test replace".to_string(),
                 conflict_policy: SpeechConflictPolicy::CancelAndReplace,
+                turn_finalized_at: None,
             },
         )
         .await

@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{self, Instant};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -19,7 +19,7 @@ use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
 
 use super::offers::validate_call_url;
 use super::turns::{
-    AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_PROTOCOL,
+    AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus, TEXT_CALL_PROTOCOL, TextCallDirection,
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
@@ -505,6 +505,7 @@ async fn queue_agent_speech_with_media_wait(
                 text: text.clone(),
                 source_label: "text-call agent.turn".to_string(),
                 conflict_policy,
+                turn_finalized_at: None,
             },
         )
         .await
