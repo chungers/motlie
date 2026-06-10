@@ -42,7 +42,7 @@ pub fn parse_escaped_fields(line: &str) -> Vec<String> {
     fields
 }
 
-pub const LIST_CLIENTS_FMT: &str = "#{q:client_width} #{q:client_height} #{q:client_session} #{q:client_activity} #{q:client_readonly} #{q:client_tty}";
+pub const LIST_CLIENTS_FMT: &str = "#{q:client_width} #{q:client_height} #{q:client_session} #{q:session_id} #{q:client_activity} #{q:client_readonly} #{q:client_tty}";
 
 pub const PANE_GEOMETRY_FMT: &str =
     "#{q:pane_width} #{q:pane_height} #{q:history_size} #{q:history_limit}";
@@ -391,17 +391,22 @@ fn parse_clients(output: &str) -> Result<Vec<ClientInfo>> {
         if line.is_empty() {
             continue;
         }
-        let fields = parse_exact_fields(line, 6, "client")?;
+        let fields = parse_exact_fields(line, 7, "client")?;
         clients.push(ClientInfo {
             width: parse_client_dimension_field(&fields[0], "width", line)?,
             height: parse_client_dimension_field(&fields[1], "height", line)?,
             session: fields[2].clone(),
-            activity: parse_u64_field(&fields[3], "activity", "client", line)?,
-            readonly: parse_bool_field(&fields[4], "readonly", "client", line)?,
-            tty: if fields[5].is_empty() {
+            session_id: if fields[3].is_empty() {
                 None
             } else {
-                Some(fields[5].clone())
+                Some(fields[3].clone())
+            },
+            activity: parse_u64_field(&fields[4], "activity", "client", line)?,
+            readonly: parse_bool_field(&fields[5], "readonly", "client", line)?,
+            tty: if fields[6].is_empty() {
+                None
+            } else {
+                Some(fields[6].clone())
             },
         });
     }
@@ -817,7 +822,7 @@ mod tests {
     async fn list_clients_parses() {
         let mock = MockTransport::new().with_response(
             "list-clients",
-            "200 50 build 100 0 /dev/ttys001\n180 40 test 80 1 \n80  worker 120 0 \n",
+            "200 50 build $1 100 0 /dev/ttys001\n180 40 test $2 80 1 \n80  worker $3 120 0 \n",
         );
         let transport = TransportKind::Mock(mock);
         let clients = list_clients_with_prefix(&transport, "tmux").await.unwrap();
@@ -825,17 +830,20 @@ mod tests {
         assert_eq!(clients[0].width, 200);
         assert_eq!(clients[0].height, 50);
         assert_eq!(clients[0].session, "build");
+        assert_eq!(clients[0].session_id.as_deref(), Some("$1"));
         assert_eq!(clients[0].activity, 100);
         assert!(!clients[0].readonly);
         assert_eq!(clients[0].tty.as_deref(), Some("/dev/ttys001"));
         assert_eq!(clients[1].width, 180);
         assert_eq!(clients[1].height, 40);
+        assert_eq!(clients[1].session_id.as_deref(), Some("$2"));
         assert_eq!(clients[1].activity, 80);
         assert!(clients[1].readonly);
         assert_eq!(clients[1].tty, None);
         assert_eq!(clients[2].width, 80);
         assert_eq!(clients[2].height, 0);
         assert_eq!(clients[2].session, "worker");
+        assert_eq!(clients[2].session_id.as_deref(), Some("$3"));
         assert_eq!(clients[2].activity, 120);
         assert!(!clients[2].readonly);
         assert_eq!(clients[2].tty, None);
@@ -887,7 +895,7 @@ mod tests {
     #[tokio::test]
     async fn take_snapshot_combines_clients_and_pane() {
         let mock = MockTransport::new()
-            .with_response("list-clients", "200 50 build 100 0 /dev/ttys001\n")
+            .with_response("list-clients", "200 50 build $1 100 0 /dev/ttys001\n")
             .with_response("display-message", "80 24 100 2000\n");
         let transport = TransportKind::Mock(mock);
         let snap = take_geometry_snapshot_with_prefix(&transport, "tmux", "build:0.0")
@@ -913,7 +921,7 @@ mod tests {
     #[tokio::test]
     async fn take_snapshot_pane_target_session_lookup_failure_is_error() {
         let mock = MockTransport::new()
-            .with_response("list-clients", "200 50 build 100 0 /dev/ttys001\n")
+            .with_response("list-clients", "200 50 build $1 100 0 /dev/ttys001\n")
             .with_response("display-message", "80 24 100 2000\n")
             .with_error("#{session_name}", "lookup failed");
         let transport = TransportKind::Mock(mock);

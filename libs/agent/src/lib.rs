@@ -11,10 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use motlie_tmux::{HostHandle, KeySequence, Target};
+use motlie_tmux::{HostHandle, KeySequence, SessionClientActivity, Target};
 use thiserror::Error;
 use tokio::sync::{broadcast, oneshot, Mutex};
-use tokio::time::{sleep, timeout};
+use tokio::time::{sleep, timeout, Instant as TokioInstant};
 
 const DEFAULT_EVENT_CAPACITY: usize = 1024;
 const COMPOSER_SEPARATOR: &str = "\n\n---\n\n";
@@ -180,6 +180,7 @@ impl Default for ChannelManager {
 pub struct ChannelConfig {
     pub input_quiet_for: Duration,
     pub coalesce_window: Duration,
+    pub coalesce_max_wait: Duration,
     pub default_submit: SubmitPolicy,
     pub default_ui_profile: UiProfile,
     pub event_capacity: usize,
@@ -191,6 +192,7 @@ impl Default for ChannelConfig {
         Self {
             input_quiet_for: Duration::from_secs(10),
             coalesce_window: Duration::from_millis(500),
+            coalesce_max_wait: Duration::from_millis(1500),
             default_submit: SubmitPolicy::default(),
             default_ui_profile: UiProfile::Generic,
             event_capacity: DEFAULT_EVENT_CAPACITY,
@@ -330,6 +332,7 @@ impl Channel {
             }
 
             pending_count = queue.pending.len();
+            queue.accept_generation = queue.accept_generation.wrapping_add(1);
             if !queue.flushing {
                 queue.flushing = true;
                 start_worker = true;
@@ -376,6 +379,9 @@ impl Channel {
             } else {
                 still_pending = true;
             }
+            if queue.pending.is_empty() {
+                queue.coalesce_started_at = None;
+            }
             pending_count = queue.pending.len();
         }
         self.update_status(|status| {
@@ -386,10 +392,6 @@ impl Channel {
 
     async fn flush_loop(self) {
         loop {
-            if !self.inner.config.coalesce_window.is_zero() {
-                sleep(self.inner.config.coalesce_window).await;
-            }
-
             if let Err(error) = self.apply_quiet_guard().await {
                 let batch = self.drain_pending().await;
                 self.fail_batch(batch, error).await;
@@ -397,21 +399,39 @@ impl Channel {
                 return;
             }
 
-            let batch = match self.next_batch().await {
+            let mut batch = match self.next_batch().await {
                 Some(batch) => batch,
                 None => return,
             };
 
-            if batch.len() > 1 {
-                self.emit(DeliveryEvent::Coalesced {
-                    target: self.inner.key.clone(),
-                    message_ids: batch.iter().map(|segment| segment.message_id).collect(),
-                    segment_count: batch.len(),
-                });
-            }
-
-            match self.submit_batch(&batch).await {
-                Ok(result) => self.complete_batch(batch, result).await,
+            match self.submit_batch(&mut batch).await {
+                Ok(BatchSubmitAttempt::Submitted(result)) => {
+                    if batch.len() > 1 {
+                        self.emit(DeliveryEvent::Coalesced {
+                            target: self.inner.key.clone(),
+                            message_ids: batch.iter().map(|segment| segment.message_id).collect(),
+                            segment_count: batch.len(),
+                        });
+                    }
+                    self.complete_batch(batch, result).await;
+                }
+                Ok(BatchSubmitAttempt::Deferred {
+                    message_ids,
+                    reason,
+                    retry_after,
+                }) => {
+                    self.requeue_front(batch).await;
+                    self.update_status(|status| {
+                        status.last_defer_reason = Some(reason.clone());
+                    });
+                    self.emit(DeliveryEvent::Deferred {
+                        target: self.inner.key.clone(),
+                        message_ids,
+                        reason,
+                        retry_after,
+                    });
+                    sleep(retry_after).await;
+                }
                 Err(error) => self.fail_batch(batch, error).await,
             }
         }
@@ -436,16 +456,13 @@ impl Channel {
         }
 
         loop {
-            let activity = self
-                .inner
-                .host
-                .session_client_activity(self.inner.target.session_name())
-                .await
-                .map_err(|err| DeliveryError::tmux("session_client_activity", err))?;
+            let activity = self.quiet_guard_activity().await?;
             let Some(latest) = activity.latest_writable_client_activity else {
+                self.trace_quiet_guard_activity(&activity, None);
                 return Ok(());
             };
             let age = seconds_since_epoch(latest).unwrap_or(0);
+            self.trace_quiet_guard_activity(&activity, Some(age));
             if age >= self.inner.config.input_quiet_for.as_secs() {
                 return Ok(());
             }
@@ -475,6 +492,46 @@ impl Channel {
         }
     }
 
+    async fn quiet_guard_activity(&self) -> Result<SessionClientActivity, DeliveryError> {
+        let session_name = self.inner.target.session_name();
+        let primary_selector = self.inner.target.session_id().unwrap_or(session_name);
+        let mut activity = self
+            .inner
+            .host
+            .session_client_activity(primary_selector)
+            .await
+            .map_err(|err| DeliveryError::tmux("session_client_activity", err))?;
+
+        if primary_selector != session_name {
+            let by_name = self
+                .inner
+                .host
+                .session_client_activity(session_name)
+                .await
+                .map_err(|err| DeliveryError::tmux("session_client_activity", err))?;
+            merge_client_activity(&mut activity, by_name);
+        }
+
+        Ok(activity)
+    }
+
+    fn trace_quiet_guard_activity(&self, activity: &SessionClientActivity, age: Option<u64>) {
+        if std::env::var_os("MOTLIE_AGENT_QUIET_GUARD_TRACE").is_none() {
+            return;
+        }
+        eprintln!(
+            "motlie-agent quiet_guard target={} session={} attached={} writable={} latest={:?} latest_writable={:?} age={:?} quiet_for_secs={}",
+            self.inner.target_string,
+            activity.session,
+            activity.attached_clients,
+            activity.writable_clients,
+            activity.latest_client_activity,
+            activity.latest_writable_client_activity,
+            age,
+            self.inner.config.input_quiet_for.as_secs(),
+        );
+    }
+
     async fn mark_deferred(&self) -> Vec<MessageId> {
         let mut queue = self.inner.queue.lock().await;
         for segment in &mut queue.pending {
@@ -490,26 +547,156 @@ impl Channel {
     }
 
     async fn next_batch(&self) -> Option<Vec<PendingSegment>> {
-        let mut queue = self.inner.queue.lock().await;
-        if queue.pending.is_empty() {
-            queue.flushing = false;
+        loop {
+            let (observed_generation, sleep_for) = {
+                let mut queue = self.inner.queue.lock().await;
+                if queue.pending.is_empty() {
+                    queue.flushing = false;
+                    queue.coalesce_started_at = None;
+                    self.update_status(|status| {
+                        status.pending_count = 0;
+                        status.flushing = false;
+                    });
+                    return None;
+                }
+                if self.inner.config.coalesce_window.is_zero() {
+                    queue.coalesce_started_at = None;
+                    let batch = queue.pending.drain(..).collect::<Vec<_>>();
+                    self.update_status(|status| {
+                        status.pending_count = 0;
+                        status.flushing = true;
+                    });
+                    return Some(batch);
+                }
+
+                let started_at = *queue
+                    .coalesce_started_at
+                    .get_or_insert_with(TokioInstant::now);
+                let max_wait = self.effective_coalesce_max_wait();
+                let elapsed = started_at.elapsed();
+                if elapsed >= max_wait {
+                    queue.coalesce_started_at = None;
+                    let batch = queue.pending.drain(..).collect::<Vec<_>>();
+                    self.update_status(|status| {
+                        status.pending_count = 0;
+                        status.flushing = true;
+                    });
+                    return Some(batch);
+                }
+
+                let sleep_for = self
+                    .inner
+                    .config
+                    .coalesce_window
+                    .min(max_wait.saturating_sub(elapsed));
+                (queue.accept_generation, sleep_for)
+            };
+
+            sleep(sleep_for).await;
+
+            let mut queue = self.inner.queue.lock().await;
+            if queue.pending.is_empty() {
+                queue.flushing = false;
+                queue.coalesce_started_at = None;
+                self.update_status(|status| {
+                    status.pending_count = 0;
+                    status.flushing = false;
+                });
+                return None;
+            }
+
+            let max_wait = self.effective_coalesce_max_wait();
+            let cap_elapsed = queue
+                .coalesce_started_at
+                .map(|started_at| started_at.elapsed() >= max_wait)
+                .unwrap_or(false);
+            if queue.accept_generation != observed_generation && !cap_elapsed {
+                continue;
+            }
+            queue.coalesce_started_at = None;
+            let batch = queue.pending.drain(..).collect::<Vec<_>>();
             self.update_status(|status| {
                 status.pending_count = 0;
-                status.flushing = false;
+                status.flushing = true;
             });
-            return None;
+            return Some(batch);
         }
-        let batch = queue.pending.drain(..).collect::<Vec<_>>();
+    }
+
+    fn effective_coalesce_max_wait(&self) -> Duration {
+        self.inner
+            .config
+            .coalesce_max_wait
+            .max(self.inner.config.coalesce_window)
+    }
+
+    async fn quiet_guard_defer_decision_for_batch(
+        &self,
+        batch: &mut [PendingSegment],
+    ) -> Result<Option<(Vec<MessageId>, DeferReason, Duration)>, DeliveryError> {
+        if self.inner.config.input_quiet_for.is_zero()
+            || !batch
+                .iter()
+                .any(|segment| segment.quiet_guard == QuietGuardPolicy::Default)
+        {
+            return Ok(None);
+        }
+
+        let activity = self.quiet_guard_activity().await?;
+        let Some(latest) = activity.latest_writable_client_activity else {
+            self.trace_quiet_guard_activity(&activity, None);
+            return Ok(None);
+        };
+        let age = seconds_since_epoch(latest).unwrap_or(0);
+        self.trace_quiet_guard_activity(&activity, Some(age));
+        if age >= self.inner.config.input_quiet_for.as_secs() {
+            return Ok(None);
+        }
+
+        for segment in batch.iter_mut() {
+            if segment.quiet_guard == QuietGuardPolicy::Default {
+                segment.deferred_once = true;
+            }
+        }
+        let message_ids = batch
+            .iter()
+            .map(|segment| segment.message_id)
+            .collect::<Vec<_>>();
+        let retry_after =
+            Duration::from_secs((self.inner.config.input_quiet_for.as_secs() - age).max(1));
+        let reason = DeferReason::RecentWritableClientActivity {
+            latest_client_activity: latest,
+            latest_client_activity_age_secs: age,
+        };
+        Ok(Some((message_ids, reason, retry_after)))
+    }
+
+    async fn requeue_front(&self, batch: Vec<PendingSegment>) {
+        if batch.is_empty() {
+            return;
+        }
+        let pending_count;
+        {
+            let mut queue = self.inner.queue.lock().await;
+            for segment in batch.into_iter().rev() {
+                queue.pending.push_front(segment);
+            }
+            queue.coalesce_started_at = None;
+            queue.accept_generation = queue.accept_generation.wrapping_add(1);
+            queue.flushing = true;
+            pending_count = queue.pending.len();
+        }
         self.update_status(|status| {
-            status.pending_count = 0;
+            status.pending_count = pending_count;
             status.flushing = true;
+            status.last_deferred_at = Some(Instant::now());
         });
-        Some(batch)
     }
 
     async fn drain_pending(&self) -> Vec<PendingSegment> {
         let mut queue = self.inner.queue.lock().await;
         let batch = queue.pending.drain(..).collect::<Vec<_>>();
+        queue.coalesce_started_at = None;
         queue.flushing = false;
         self.update_status(|status| {
             status.pending_count = 0;
@@ -521,6 +708,7 @@ impl Channel {
     async fn finish_if_empty(&self) {
         let mut queue = self.inner.queue.lock().await;
         if queue.pending.is_empty() {
+            queue.coalesce_started_at = None;
             queue.flushing = false;
             self.update_status(|status| {
                 status.pending_count = 0;
@@ -531,8 +719,8 @@ impl Channel {
 
     async fn submit_batch(
         &self,
-        batch: &[PendingSegment],
-    ) -> Result<BatchSubmitResult, DeliveryError> {
+        batch: &mut [PendingSegment],
+    ) -> Result<BatchSubmitAttempt, DeliveryError> {
         let body = self.assemble_body(batch).await?;
         let paste_mode = batch.iter().fold(PasteMode::Literal, |mode, segment| {
             mode.merged(segment.paste_mode)
@@ -543,6 +731,16 @@ impl Channel {
                 policy.merged(segment.submit)
             });
 
+        if let Some((message_ids, reason, retry_after)) =
+            self.quiet_guard_defer_decision_for_batch(batch).await?
+        {
+            return Ok(BatchSubmitAttempt::Deferred {
+                message_ids,
+                reason,
+                retry_after,
+            });
+        }
+
         let payload = paste_mode.wrap_payload(&body);
         let literal = KeySequence::literal(&payload);
         self.inner
@@ -552,10 +750,10 @@ impl Channel {
             .map_err(|err| DeliveryError::tmux("send_payload", err))?;
 
         if !submit.prompt_submit {
-            return Ok(BatchSubmitResult {
+            return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                 submitted_at: Instant::now(),
                 verified: false,
-            });
+            }));
         }
 
         if !submit.settle.is_zero() {
@@ -578,10 +776,10 @@ impl Channel {
                 .await?
             {
                 SubmitVerification::Submitted => {
-                    return Ok(BatchSubmitResult {
+                    return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                         submitted_at,
                         verified: true,
-                    });
+                    }));
                 }
                 SubmitVerification::Unknown => {
                     if attempt == submit.retries {
@@ -593,10 +791,10 @@ impl Channel {
                                     .collect(),
                             });
                         }
-                        return Ok(BatchSubmitResult {
+                        return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                             submitted_at,
                             verified: false,
-                        });
+                        }));
                     }
                     if !submit.retry_delay.is_zero() {
                         sleep(submit.retry_delay).await;
@@ -710,6 +908,8 @@ impl Channel {
 struct QueueState {
     pending: VecDeque<PendingSegment>,
     flushing: bool,
+    accept_generation: u64,
+    coalesce_started_at: Option<TokioInstant>,
 }
 
 struct PendingSegment {
@@ -735,6 +935,15 @@ impl PendingSegment {
             self.sources.push(source);
         }
     }
+}
+
+enum BatchSubmitAttempt {
+    Submitted(BatchSubmitResult),
+    Deferred {
+        message_ids: Vec<MessageId>,
+        reason: DeferReason,
+        retry_after: Duration,
+    },
 }
 
 struct BatchSubmitResult {
@@ -1169,6 +1378,27 @@ fn format_segments(batch: &[PendingSegment]) -> String {
         .join("\n\n")
 }
 
+fn merge_client_activity(activity: &mut SessionClientActivity, other: SessionClientActivity) {
+    activity.attached_clients += other.attached_clients;
+    activity.writable_clients += other.writable_clients;
+    activity.latest_client_activity = max_option(
+        activity.latest_client_activity,
+        other.latest_client_activity,
+    );
+    activity.latest_writable_client_activity = max_option(
+        activity.latest_writable_client_activity,
+        other.latest_writable_client_activity,
+    );
+}
+
+fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 fn seconds_since_epoch(ts: u64) -> Option<u64> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     Some(now.saturating_sub(ts))
@@ -1185,6 +1415,7 @@ mod tests {
         ChannelConfig {
             input_quiet_for: Duration::ZERO,
             coalesce_window: Duration::ZERO,
+            coalesce_max_wait: Duration::ZERO,
             default_submit: SubmitPolicy::default(),
             default_ui_profile: UiProfile::Generic,
             event_capacity: 64,
@@ -1393,7 +1624,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let clients = format!("200 50 build {now} 1 /dev/ttys001\n");
+        let clients = format!("200 50 build $0 {now} 1 /dev/ttys001\n");
         let mock = MockTransport::new()
             .with_response("list-sessions", session_response())
             .with_response("list-clients", &clients)
@@ -1429,7 +1660,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let clients = format!("200 50 build {now} 0 /dev/ttys001\n");
+        let clients = format!("200 50 build $0 {now} 0 /dev/ttys001\n");
         let mock = MockTransport::new()
             .with_response("list-sessions", session_response())
             .with_response("list-clients", &clients);
@@ -1461,7 +1692,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let clients = format!("200 50 build {now} 0 /dev/ttys001\n");
+        let clients = format!("200 50 build $0 {now} 0 /dev/ttys001\n");
         let mock = MockTransport::new()
             .with_response("list-sessions", session_response())
             .with_response("list-clients", &clients);
@@ -1510,8 +1741,8 @@ mod tests {
             .unwrap()
             .as_secs();
         let old = now.saturating_sub(20);
-        let recent_clients = format!("200 50 build {now} 0 /dev/ttys001\n");
-        let old_clients = format!("200 50 build {old} 0 /dev/ttys001\n");
+        let recent_clients = format!("200 50 build $0 {now} 0 /dev/ttys001\n");
+        let old_clients = format!("200 50 build $0 {old} 0 /dev/ttys001\n");
         let mock = MockTransport::new()
             .with_response("list-sessions", session_response())
             .with_response("list-clients", &recent_clients)

@@ -630,10 +630,9 @@ impl HostHandle {
         let mut latest_client_activity = None;
         let mut latest_writable_client_activity = None;
 
-        for client in clients
-            .into_iter()
-            .filter(|client| client.session == session)
-        {
+        for client in clients.into_iter().filter(|client| {
+            client.session == session || client.session_id.as_deref() == Some(session)
+        }) {
             attached_clients += 1;
             if !client.readonly {
                 writable_clients += 1;
@@ -3460,9 +3459,9 @@ mod tests {
     async fn session_client_activity_summarizes_matching_clients() {
         let mock = MockTransport::new().with_response(
             "list-clients",
-            "200 50 build 100 0 /dev/ttys001\n\
-             180 40 build 120 1 /dev/ttys002\n\
-             160 30 other 300 0 /dev/ttys003\n",
+            "200 50 build $1 100 0 /dev/ttys001\n\
+             180 40 build $1 120 1 /dev/ttys002\n\
+             160 30 other $2 300 0 /dev/ttys003\n",
         );
         let host = mock_host(mock);
 
@@ -3476,9 +3475,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_client_activity_matches_stable_session_id() {
+        let mock = MockTransport::new().with_response(
+            "list-clients",
+            "200 50 renamed $1 100 0 /dev/ttys001
+180 40 other $2 300 0 /dev/ttys002
+",
+        );
+        let host = mock_host(mock);
+
+        let activity = host.session_client_activity("$1").await.unwrap();
+
+        assert_eq!(activity.session, "$1");
+        assert_eq!(activity.attached_clients, 1);
+        assert_eq!(activity.writable_clients, 1);
+        assert_eq!(activity.latest_client_activity, Some(100));
+        assert_eq!(activity.latest_writable_client_activity, Some(100));
+    }
+
+    #[tokio::test]
     async fn session_client_activity_handles_no_attached_clients() {
-        let mock =
-            MockTransport::new().with_response("list-clients", "200 50 other 100 0 /dev/ttys001\n");
+        let mock = MockTransport::new()
+            .with_response("list-clients", "200 50 other $2 100 0 /dev/ttys001\n");
         let host = mock_host(mock);
 
         let activity = host.session_client_activity("build").await.unwrap();
