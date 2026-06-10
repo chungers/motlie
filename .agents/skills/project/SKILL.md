@@ -81,12 +81,12 @@ Shared enums:
 | | `reclaim <target>` | Terminal teardown: kill tmux + deregister. **GATED**: requires `managed` + `quarantined` | |
 | | `session list` | List sessions | |
 | | `session mark <target> --state --summary` | Annotate session state | |
-| Messaging | `send <ws> <target> --text` | Send to one session | `--enter`/`--no-enter`, `--interrupt-first`, `--settle-ms` (500), `--submit-retries` (1), `--submit-retry-delay-ms` (750), `--paste-mode bracketed\|literal`, `--require-state`, `--set-state` |
-| | `broadcast <ws> --text` | Send to many | `--enter`/`--no-enter`, `--role`, `--state`, `--paste-mode`, `--settle-ms` (500), `--submit-retries` (1), `--submit-retry-delay-ms` (750) |
+| Messaging | `send <ws> <target> --text` | Send to one session | `--enter`/`--no-prompt-submit` (deprecated alias `--no-enter`), `--interrupt-first`, `--settle-ms` (500), `--submit-retries` (1), `--submit-retry-delay-ms` (750), `--paste-mode bracketed\|literal`, `--require-state`, `--set-state` |
+| | `broadcast <ws> --text` | Send to many | `--enter`/`--no-prompt-submit` (deprecated alias `--no-enter`), `--role`, `--state`, `--paste-mode`, `--settle-ms` (500), `--submit-retries` (1), `--submit-retry-delay-ms` (750) |
 | | `interrupt <target>` | Non-destructive interrupt | `--key esc\|ctrl-c` (esc) |
 | Handoff | `handoff arm <ws> --from --to --on <state> --task` | Conditional sequencing | `--only-on-transition` |
 | | `handoff list <ws>` / `handoff cancel ...` | Inspect/cancel armed handoffs | |
-| Timers | `timer start <name> --every <dur> --prompt <p>` | Self-wakeup timer | `--workstream`, `--self`/`--self-host` (local) or `--target`, `--enter`/`--no-enter`, `--submit-retries` (1), `--submit-retry-delay-ms` (750), `--input-quiet-for` (10s), `--no-input-guard` |
+| Timers | `timer start <name> --every <dur> --prompt <p>` | Self-wakeup timer | `--workstream`, `--self`/`--self-host` (local) or `--target`, `--enter`/`--no-prompt-submit` (deprecated alias `--no-enter`), `--submit-retries` (1), `--submit-retry-delay-ms` (750), `--input-quiet-for` (10s), `--no-input-guard` |
 | | `timer list` | List timers | `--workstream` |
 | | `timer stop <name>` / `timer fire <name>` | Stop / test-fire a timer | |
 | Observation | `status <ws>` | Liveness snapshot | `--active-window-secs` (30), `--idle-after-secs` (300) |
@@ -236,15 +236,17 @@ after daemon restart. Do not target collaborator sessions with orchestrator
 timers unless the user explicitly asks for that behavior.
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key. Retries send only extra Enter keys, not
-the prompt text; `--no-enter` disables retries. `send`/`broadcast` now carry the
+the prompt text; `--no-prompt-submit` disables retries (deprecated alias
+`--no-enter`, kept one release). `send`/`broadcast` now carry the
 same settle-delayed, retried prompt-submit knobs the timer path uses
 (`--settle-ms`/`--submit-retries`/`--submit-retry-delay-ms`): the Enter is
 decoupled from the payload (settle, then a separate Enter, retried on miss), so
 the glued-Enter submit-miss is handled on those paths too, not just timers.
-NOTE (outstanding directed change): a human-directed rename of `--no-enter` →
-`--no-prompt-submit` has not shipped in the installed binary, which still
-exposes `--no-enter`. Use `--no-enter` until the rename lands; this is a tracked
-divergence from a directive, not the intended final name (see Invariant 10). Timer delivery also defaults to
+NOTE: the directed rename `--no-enter` → `--no-prompt-submit` shipped in source
+(`bins/mstream/src/cli.rs`: `--no-prompt-submit` canonical, `--no-enter` a hidden
+alias). If a host's installed `mstream` still shows `--no-enter` in `--help`, its
+binary is **stale** — reinstall (`cargo install --path bins/mstream`); the alias
+keeps existing commands working meanwhile. Timer delivery also defaults to
 an input-quiet guard (`--input-quiet-for 10s`): if an attached client typed in
 the target session recently, mstream defers the timer and reports the deferral
 in `timer list` instead of interleaving prompt text with user input. Use
