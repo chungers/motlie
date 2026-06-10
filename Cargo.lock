@@ -5252,6 +5252,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-agent"
+version = "0.1.0"
+dependencies = [
+ "motlie-tmux",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "motlie-core"
 version = "0.1.0"
 dependencies = [
@@ -5549,6 +5559,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "motlie-agent",
  "motlie-tmux",
  "serde",
  "serde_json",

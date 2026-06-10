@@ -17,6 +17,7 @@ tokio.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 motlie-tmux = { path = "../../libs/tmux" }
+motlie-agent = { path = "../../libs/agent" }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5.58", features = ["derive"] }
