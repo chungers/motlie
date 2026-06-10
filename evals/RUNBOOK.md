@@ -20,6 +20,11 @@ Live operational log of the first distributed eval exercise (issue #399 v2). Doc
 - macOS: no global `[env] BINDGEN_EXTRA_CLANG_ARGS` (breaks llama-cpp-sys bindgen); Linux GGUF bindgen flows through driver child-build wiring + `tools/clang-compat/include` shims.
 - mistralrs cells on `apple-metal` record honest `blocked: accelerator_mismatch` (libs/models `metal = []` non-forwarding + upstream candle-metal M4 threadgroup limit) — backend-support gap, NOT a framework failure (see Platform Notes in the aggregate).
 
+## Pin & SHA-reporting policy (David, 2026-06-10)
+- **Re-pin on every landed fix:** when a fix PR lands on the coordination branch (or main is merged in), ALL runners re-pin to the LATEST branch head before any further runs. No runner may keep producing results from a pre-fix tree.
+- **Build-SHA in every report:** every runner reports the exact SHA its `evals` binary was built from as part of result reporting — in the results records (`identity.git_sha`), the results-PR body, and Discussion progress posts. For validation runs combining branches (e.g. harness branch + fix branch), report ALL constituent SHAs plus the merged-tree SHA.
+- Rationale: guarantees results are provably true to the current state of code and fixes; prevents silently-stale validation (see the stale-binary and 33/33-blocked incidents).
+
 ## Failure & incompatibility tracking (David's directive, 2026-06-10)
 Curated bundles are LOCAL models meant for CPU inference — failures and budget-exceeds are surprising and must never be lost. Capture structure:
 - **GitHub issue #435** = umbrella tracker for this cycle; one **sub-issue per failing/budget-exceeded model** (model, environment, platform profile, capability, exact results.jsonl record, child log, repro command) — filed by the orchestrator from merged per-cell records.
