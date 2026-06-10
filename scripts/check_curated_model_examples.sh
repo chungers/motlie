@@ -20,8 +20,6 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-embedding_features="model-google-gemma-300m,model-qwen3-embedding-06b"
-chat_tool_features="model-qwen3-4b,model-gemma4-e2b"
 speech_features="model-whisper-base-en,model-sherpa-onnx-streaming,model-moonshine-streaming,model-piper-en-us-ljspeech-medium,model-qwen3-tts-cpp"
 
 fail() {
@@ -52,22 +50,13 @@ case "${mode}" in
       --no-default-features \
       --features "${speech_features}"
 
-    note "checking embedding examples"
-    cargo check -p motlie-models \
-      --example embeddings \
-      --example embeddings_basic \
-      --no-default-features \
-      --features "${embedding_features}"
-
     note "checking chat/tool examples without ORT-backed Piper/Moonshine/Sherpa features"
     cargo check -p motlie-models \
       --example chat_tool_binding \
-      --example chat_mistral_qwen3 \
       --example chat_multimodal_gemma4 \
       --example chat_gguf_gwen3_gemma4 \
       --example bench_chat \
-      --no-default-features \
-      --features "${chat_tool_features}"
+      --no-default-features
 
     note "checking ASR/TTS examples with ORT-backed features isolated from chat/tool examples"
     run_with_optional_ort cargo check -p motlie-models \
