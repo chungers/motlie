@@ -160,10 +160,10 @@ usability across x86 CPU, GB10/CUDA, and Metal.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [x] Fix or document a durable repo-wired GGUF toolchain path for the `llama-cpp-sys` `stdbool.h` bindgen failure on Linux x86 and GB10.
   Implemented in `evals matrix` child builds by injecting repo-local `stdbool.h` plus host compiler builtin include dirs via `BINDGEN_EXTRA_CLANG_ARGS`; direct manual GGUF Cargo builds use the documented equivalent env command. DESIGN reference: Artifact Provisioning And Native Toolchains.
-- [ ] Add an explicit macOS/Metal GGUF build+verify task covering Apple clang, Metal backend feature flags, shader compilation, and runtime loading.
-  DESIGN reference: Artifact Provisioning And Native Toolchains.
-- [ ] If GGUF-on-Metal is unsupported for a snapshot, emit blocked Metal GGUF cells with `gguf_metal_unverified` or `native_toolchain_missing` instead of leaving the quant x platform row empty.
-  DESIGN reference: Artifact Provisioning And Native Toolchains.
+- [x] Add an explicit macOS/Metal GGUF build+verify task covering Apple clang, Metal backend feature flags, shader compilation, and runtime loading.
+  Implemented through `apple-metal` GGUF snapshot cells plus the matrix command documented in `evals/README.md`; those cells build/run the llama.cpp GGUF path on Apple Metal hosts. DESIGN reference: Artifact Provisioning And Native Toolchains.
+- [x] If GGUF-on-Metal is unsupported for a snapshot, emit blocked Metal GGUF cells with `gguf_metal_unverified` or `native_toolchain_missing` instead of leaving the quant x platform row empty.
+  Implemented by matrix preflight: Metal GGUF cells missing the `metal` profile feature marker emit blocked `gguf_metal_unverified` records, and Metal-specific GGUF child build failures are classified as `gguf_metal_unverified`. DESIGN reference: Artifact Provisioning And Native Toolchains.
 - [ ] Re-run GGUF feature builds on amd1, dgx/GB10, amd2, and mac/Metal after the platform-specific toolchain checks.
   DESIGN reference: Artifact Provisioning And Native Toolchains.
 

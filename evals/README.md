@@ -112,6 +112,17 @@ For CUDA-class hosts, pass the matching profile:
 cargo run -p evals --features "model-google-gemma-300m model-qwen3-embedding-06b" -- run --bundle embeddinggemma_300m --scenario embeddings_similarity --profile dgx-spark
 ```
 
+For Apple Metal GGUF verification, run the pinned matrix on the Metal host. The
+curated snapshot includes GGUF cells for `apple-metal`; those cells verify the
+Apple clang + llama.cpp Metal path by building and running with the profile's
+`metal` marker. If a GGUF Metal cell is not configured for that verification,
+the matrix emits a blocked `gguf_metal_unverified` record instead of leaving the
+quantization x platform row empty.
+
+```sh
+cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --profile apple-metal
+```
+
 When `nvidia-smi` is available, platform records include `gpu_backend =
 "nvidia"`, GPU identity, and driver/CUDA metadata. Resource acceptance uses
 process swap delta gates on Linux/CUDA profiles; `apple-metal` intentionally

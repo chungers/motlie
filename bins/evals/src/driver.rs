@@ -155,6 +155,29 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
             continue;
         }
 
+        if is_unverified_metal_gguf_cell(cell, &profile, requested) {
+            sink.emit(&pre_run_record(
+                &snapshot,
+                cell,
+                &profile,
+                &platform,
+                &cell_accelerator,
+                coverage.with_outcome(
+                    TerminalOutcome::Blocked,
+                    Some(OutcomeReason::GgufMetalUnverified),
+                ),
+                AcceptanceStatus::Blocked,
+                Some(
+                    "Metal GGUF cell is missing the apple-metal profile feature marker needed to verify Apple clang, Metal backend flags, shader build, and runtime loading"
+                        .to_owned(),
+                ),
+                &run_id,
+                &command_line,
+            ))?;
+            emitted_pre_run += 1;
+            continue;
+        }
+
         if options.dry_run {
             sink.emit(&pre_run_record(
                 &snapshot,
@@ -184,7 +207,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
             requested,
         )?;
         if !child.success {
-            let reason = classify_child_failure(&child.log_path);
+            let reason = classify_child_failure(cell, requested, &child.log_path);
             let child_coverage = coverage_for_cell(
                 &snapshot,
                 cell,
@@ -611,10 +634,20 @@ fn budget_map(cell: &SnapshotCell) -> BTreeMap<String, String> {
     budgets
 }
 
-fn classify_child_failure(log_path: &Path) -> OutcomeReason {
+fn classify_child_failure(
+    cell: &SnapshotCell,
+    requested: AcceleratorClass,
+    log_path: &Path,
+) -> OutcomeReason {
     let log = fs::read_to_string(log_path)
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if requested == AcceleratorClass::Metal
+        && is_gguf_cell(cell)
+        && (log.contains("metal") || log.contains("apple clang") || log.contains("shader"))
+    {
+        return OutcomeReason::GgufMetalUnverified;
+    }
     if log.contains("could not compile") || log.contains("failed to run custom build command") {
         if log.contains("stdbool.h") || log.contains("llama") || log.contains("gguf") {
             OutcomeReason::GgufToolchainFailed
@@ -626,6 +659,19 @@ fn classify_child_failure(log_path: &Path) -> OutcomeReason {
     } else {
         OutcomeReason::ChildRunFailed
     }
+}
+
+fn is_unverified_metal_gguf_cell(
+    cell: &SnapshotCell,
+    profile: &str,
+    requested: AcceleratorClass,
+) -> bool {
+    requested == AcceleratorClass::Metal
+        && is_gguf_cell(cell)
+        && !cell
+            .features_for_profile(profile)
+            .iter()
+            .any(|feature| feature == "metal")
 }
 
 fn gguf_bindgen_env(cell: &SnapshotCell) -> Option<GgufBindgenEnv> {
@@ -846,6 +892,31 @@ mod tests {
             merged,
             "--target=aarch64-unknown-linux-gnu -I/repo/tools/clang-compat/include -I/usr/lib/gcc/include"
         );
+    }
+
+    #[test]
+    fn metal_gguf_cells_require_metal_profile_feature_marker() {
+        let mut cell = test_snapshot_cell();
+        cell.checkpoint_format = "gguf".to_owned();
+        cell.profile_features.insert(
+            "apple-metal".to_owned(),
+            vec!["accelerate".to_owned(), "metal".to_owned()],
+        );
+
+        assert!(!is_unverified_metal_gguf_cell(
+            &cell,
+            "apple-metal",
+            AcceleratorClass::Metal
+        ));
+
+        cell.profile_features
+            .insert("apple-metal".to_owned(), vec!["accelerate".to_owned()]);
+
+        assert!(is_unverified_metal_gguf_cell(
+            &cell,
+            "apple-metal",
+            AcceleratorClass::Metal
+        ));
     }
 
     #[test]
