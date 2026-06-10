@@ -636,6 +636,7 @@ impl Channel {
                 }
                 // Keep this as peek-plus-pop instead of VecDeque::pop_front_if;
                 // pop_front_if is unavailable on some supported stable Rust hosts.
+                #[allow(unknown_lints)]
                 #[allow(clippy::manual_pop_if)]
                 if queue
                     .pending
