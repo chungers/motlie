@@ -399,26 +399,28 @@ impl StreamingSpeechTextPacker {
         } else {
             self.take_complete_segments()
         };
-        for segment in segments {
-            self.push_streaming_segment(&mut chunks, &segment);
-        }
+        self.push_streaming_segments(&mut chunks, &segments);
         chunks
     }
 
-    fn push_streaming_segment(&mut self, chunks: &mut Vec<String>, segment: &str) {
-        let text = segment.trim();
-        if text.is_empty() {
+    fn push_streaming_segments(&mut self, chunks: &mut Vec<String>, segments: &[String]) {
+        if segments.is_empty() {
             return;
         }
-        let limit = if !self.emitted_first_chunk && self.first_chunk_max_chars > 0 {
-            self.first_chunk_max_chars.max(1)
-        } else {
-            self.max_chars
-        };
+        let mut segment_index = 0;
+        if !self.emitted_first_chunk && self.first_chunk_max_chars > 0 {
+            segment_index = push_first_speech_chunk(chunks, segments, self.first_chunk_max_chars);
+            if segment_index > 0 {
+                self.emitted_first_chunk = true;
+            }
+        }
+        let before = chunks.len();
         let mut pending = String::new();
-        push_speech_segment(chunks, &mut pending, text, limit);
+        for segment in segments.iter().skip(segment_index) {
+            push_speech_segment(chunks, &mut pending, segment, self.max_chars);
+        }
         flush_speech_chunk(chunks, &mut pending);
-        if !chunks.is_empty() {
+        if chunks.len() > before {
             self.emitted_first_chunk = true;
         }
     }
@@ -812,6 +814,15 @@ mod tests {
         assert_eq!(
             packer.push_fragment("Second.", true),
             vec!["First. Second."]
+        );
+    }
+
+    #[test]
+    fn streaming_speech_packer_packs_short_sentences_from_one_fragment() {
+        let mut packer = StreamingSpeechTextPacker::new(true, 90, 0);
+        assert_eq!(
+            packer.push_fragment("Hi. Yes. OK. Sure.", false),
+            vec!["Hi. Yes. OK. Sure."]
         );
     }
 

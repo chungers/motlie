@@ -5,8 +5,9 @@ use uuid::Uuid;
 
 use crate::call_control::TelnyxMediaConfig;
 use crate::media::{
-    packetize_tts_samples, CallMediaHandle, OutboundFrameQualityContext, OutboundMediaCommand,
-    OutboundMediaFrame, SharedMediaRegistry, SpeechCancelToken, SpeechClearReason,
+    packetize_tts_samples, percentile_u64, CallMediaHandle, OutboundFrameQualityContext,
+    OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry, SpeechCancelToken,
+    SpeechClearReason,
 };
 use crate::operator::state::{LogLevel, QualitySpanEmission, SharedState};
 use crate::quality::RedactionMode;
@@ -587,7 +588,6 @@ async fn run_append_speech_job_inner(
                         "text_chunking_enabled": job.speech.tts_chunking_enabled,
                         "max_text_chunk_chars": job.speech.tts_max_text_chunk_chars,
                         "first_chunk_max_chars": job.speech.tts_first_chunk_max_chars,
-                        "prebuffer_chunks": job.speech.tts_prebuffer_chunks,
                         "append_stream": true,
                         "text_chars": text_chunk.chars().count(),
                         "audio_chunks": audio_chunks.len(),
@@ -662,7 +662,6 @@ async fn run_append_speech_job_inner(
                         "text_chunking_enabled": job.speech.tts_chunking_enabled,
                         "max_text_chunk_chars": job.speech.tts_max_text_chunk_chars,
                         "first_chunk_max_chars": job.speech.tts_first_chunk_max_chars,
-                        "prebuffer_chunks": job.speech.tts_prebuffer_chunks,
                     }),
                 )
                 .await;
@@ -694,7 +693,10 @@ async fn run_append_speech_job_inner(
                 empty: true,
             })
             .await;
-        let command = job.rx.recv().await;
+        let command = tokio::select! {
+            command = job.rx.recv() => command,
+            _ = job.speech.cancel.canceled() => None,
+        };
         stats.append_wait += wait_started_at.elapsed();
         let _ = job
             .speech
@@ -1178,17 +1180,6 @@ struct PreparedSpeechChunk {
     audio_chunk_count: usize,
     sample_rate_hz: u32,
     frames: Vec<Vec<u8>>,
-}
-
-fn percentile_u64(values: &[u64], percentile: u64) -> u64 {
-    if values.is_empty() {
-        return 0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
-    let percentile = percentile.min(100) as usize;
-    let index = ((sorted.len() - 1) * percentile) / 100;
-    sorted[index]
 }
 
 async fn emit_speech_span(

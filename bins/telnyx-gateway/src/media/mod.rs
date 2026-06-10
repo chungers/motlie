@@ -16,7 +16,7 @@ use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler}
 use motlie_voice::VoiceError;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{
@@ -198,15 +198,24 @@ impl OutboundMediaCommand {
 #[derive(Clone, Debug, Default)]
 pub struct SpeechCancelToken {
     canceled: Arc<AtomicBool>,
+    notify: Arc<Notify>,
 }
 
 impl SpeechCancelToken {
     pub fn cancel(&self) {
         self.canceled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 
     pub fn is_canceled(&self) -> bool {
         self.canceled.load(Ordering::SeqCst)
+    }
+
+    pub async fn canceled(&self) {
+        if self.is_canceled() {
+            return;
+        }
+        self.notify.notified().await;
     }
 }
 
@@ -1807,7 +1816,7 @@ fn map_from_value(value: Value) -> Map<String, Value> {
     }
 }
 
-fn percentile_u64(values: &[u64], percentile: u8) -> u64 {
+pub(crate) fn percentile_u64(values: &[u64], percentile: u64) -> u64 {
     if values.is_empty() {
         return 0;
     }
@@ -2062,9 +2071,10 @@ async fn finish_asr_session(
         let quality_session = media_state.active_quality_asr.take();
         let finish_pad_ms = media_state.quality_config.asr.finish_pad_ms;
         let pad_started_at = Instant::now();
-        let pad_events = ingest_asr_finish_silence(asr_session.as_mut(), finish_pad_ms).await?;
+        let mut transcript_events =
+            ingest_asr_finish_silence(asr_session.as_mut(), finish_pad_ms).await?;
         let pad_duration = pad_started_at.elapsed();
-        let pad_event_count = pad_events.len();
+        let pad_event_count = transcript_events.len();
         if let Some(session) = quality_session.as_ref() {
             let payload = map_from_value(json!({
                 "asr_session_id": session.asr_session_id.as_str(),
@@ -2087,20 +2097,10 @@ async fn finish_asr_session(
                 },
             );
         }
-        record_and_forward_asr_events(
-            state,
-            media_state,
-            call_id,
-            stream_id.as_deref(),
-            text_calls,
-            quality_session.as_ref(),
-            pad_events,
-        )
-        .await;
-
         let finish_started_at = Instant::now();
         let events = asr_session.finish().await?;
         let finish_event_count = events.len();
+        transcript_events.extend(events);
         if let Some(session) = quality_session.as_ref() {
             let payload = map_from_value(json!({
                 "asr_session_id": session.asr_session_id.as_str(),
@@ -2133,7 +2133,7 @@ async fn finish_asr_session(
             stream_id.as_deref(),
             text_calls,
             quality_session.as_ref(),
-            events,
+            transcript_events,
         )
         .await;
     }
@@ -2458,6 +2458,8 @@ mod tests {
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
     use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
+    use crate::text_calls::turns::GatewayTextFrame;
+    use crate::text_calls::SharedTextCallRegistry;
     use crate::tts::{
         LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
     };
@@ -3263,6 +3265,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finish_asr_session_coalesces_pad_and_finish_finals_into_one_caller_turn() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        let mut media_state = MediaSocketState::new();
+        media_state.media_format = Some(MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        });
+        media_state.session = Some(Box::new(PadFinishFinalAsrSession));
+
+        finish_asr_session(
+            &state,
+            &mut media_state,
+            Some(gateway_call_id.as_str()),
+            Some("stream-1".to_string()),
+            Some(&text_calls),
+        )
+        .await
+        .expect("finish should record and forward transcripts");
+
+        let frame = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            frame,
+            GatewayTextFrame::CallerTurn { text, .. } if text == "pad final finish final"
+        ));
+        assert!(text_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn speech_resume_before_local_endpoint_keeps_asr_session() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
@@ -3700,6 +3739,28 @@ mod tests {
                 ingests: Arc::clone(&self.ingests),
                 finishes: Arc::clone(&self.finishes),
             }))
+        }
+    }
+
+    struct PadFinishFinalAsrSession;
+
+    #[async_trait]
+    impl InboundAsrSession for PadFinishFinalAsrSession {
+        async fn ingest(
+            &mut self,
+            _audio: AudioBuf<i16, 16_000, Mono>,
+        ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+            Ok(vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "pad final".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })])
+        }
+
+        async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+            Ok(vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "finish final".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })])
         }
     }
 

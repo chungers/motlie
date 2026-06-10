@@ -270,6 +270,36 @@ impl Channel {
         })
     }
 
+    /// Accept a message and return a waiter registered before delivery can flush.
+    pub async fn enqueue_with_submission(
+        &self,
+        message: ManagedMessage,
+        options: EnqueueOptions,
+    ) -> Result<QueuedSubmission, DeliveryError> {
+        let accepted_at = Instant::now();
+        let (waiter_tx, waiter_rx) = oneshot::channel();
+        let waiter_id = WaiterId(self.inner.next_waiter_id.fetch_add(1, Ordering::Relaxed));
+        let message_id = self
+            .accept(
+                message,
+                options.submit,
+                options.quiet_guard,
+                Some(Waiter {
+                    id: waiter_id,
+                    tx: waiter_tx,
+                }),
+            )
+            .await?;
+        Ok(QueuedSubmission {
+            queued: QueuedDelivery {
+                message_id,
+                target: self.inner.key.clone(),
+                accepted_at,
+            },
+            rx: waiter_rx,
+        })
+    }
+
     pub fn subscribe(&self) -> DeliveryEvents {
         self.inner.event_tx.subscribe()
     }
@@ -604,11 +634,16 @@ impl Channel {
                     });
                     return None;
                 }
-                if let Some(segment) = queue
+                // Keep this as peek-plus-pop instead of VecDeque::pop_front_if;
+                // pop_front_if is unavailable on some supported stable Rust hosts.
+                #[allow(clippy::manual_pop_if)]
+                if queue
                     .pending
-                    .pop_front_if(|segment| segment.coalesce == CoalescePolicy::Disabled)
+                    .front()
+                    .is_some_and(|segment| segment.coalesce == CoalescePolicy::Disabled)
                 {
                     queue.coalesce_started_at = None;
+                    let segment = queue.pending.pop_front().expect("front exists");
                     let pending_count = queue.pending.len();
                     self.update_status(|status| {
                         status.pending_count = pending_count;
@@ -1276,6 +1311,25 @@ pub struct QueuedDelivery {
     pub accepted_at: Instant,
 }
 
+#[derive(Debug)]
+pub struct QueuedSubmission {
+    pub queued: QueuedDelivery,
+    rx: oneshot::Receiver<Result<SubmissionOutcome, DeliveryError>>,
+}
+
+impl QueuedSubmission {
+    pub fn message_id(&self) -> MessageId {
+        self.queued.message_id
+    }
+
+    pub async fn wait(self) -> Result<SubmissionOutcome, DeliveryError> {
+        match self.rx.await {
+            Ok(result) => result,
+            Err(_closed) => Err(DeliveryError::ChannelClosed),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MessageId(pub u64);
 
@@ -1793,6 +1847,75 @@ mod tests {
         .await
         .expect("coalesce-disabled message should submit without waiting");
         assert!(submitted);
+    }
+
+    #[tokio::test]
+    async fn enqueue_with_submission_observes_immediate_submit_without_event_race() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "");
+        let mut cfg = config();
+        cfg.coalesce_window = Duration::from_secs(60);
+        cfg.coalesce_max_wait = Duration::from_secs(60);
+        let (channel, _log) = mock_channel(mock, cfg).await;
+
+        let queued = channel
+            .enqueue_with_submission(
+                ManagedMessage::new(MessageSource::human("telnyx.turn"), "send now")
+                    .with_coalesce(CoalescePolicy::Disabled),
+                EnqueueOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                },
+            )
+            .await
+            .expect("message accepted");
+        let message_id = queued.message_id();
+
+        let outcome = timeout(Duration::from_secs(1), queued.wait())
+            .await
+            .expect("submission waiter should not miss fast submit")
+            .expect("submission should succeed");
+
+        assert_eq!(outcome.message_id(), message_id);
+    }
+
+    #[tokio::test]
+    async fn enqueue_with_submission_waiter_can_be_canceled_after_deadline() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let clients = format!("200 50 build $0 {now} 0 /dev/ttys001\n");
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("list-clients", &clients);
+        let mut cfg = config();
+        cfg.input_quiet_for = Duration::from_secs(60);
+        cfg.coalesce_window = Duration::ZERO;
+        let (channel, _log) = mock_channel(mock, cfg).await;
+
+        let queued = channel
+            .enqueue_with_submission(
+                ManagedMessage::new(MessageSource::human("telnyx.turn"), "wait for quiet"),
+                EnqueueOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                },
+            )
+            .await
+            .expect("message accepted");
+        let message_id = queued.message_id();
+
+        assert!(timeout(Duration::from_millis(25), queued.wait())
+            .await
+            .is_err());
+        assert!(
+            channel
+                .cancel_pending(message_id, "delivery deadline exceeded")
+                .await
+        );
+        assert_eq!(channel.status().pending_count, 0);
     }
 
     #[tokio::test]

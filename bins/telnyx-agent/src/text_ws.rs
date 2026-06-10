@@ -3,6 +3,8 @@ use futures_util::{SinkExt, StreamExt};
 use motlie_telnyx_gateway::text_calls::turns::{
     AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus,
 };
+use std::time::Duration;
+
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -136,7 +138,15 @@ fn cancel_matching_turn(active: &mut Option<ActiveBridgeTurn>, turn_id: &str) {
 fn cancel_active_turn(active: &mut Option<ActiveBridgeTurn>) {
     if let Some(turn) = active.take() {
         turn.abort.cancel();
-        turn.task.abort();
+        tokio::spawn(async move {
+            let mut task = turn.task;
+            tokio::select! {
+                _ = &mut task => {}
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                    task.abort();
+                }
+            }
+        });
     }
 }
 
@@ -147,4 +157,35 @@ async fn send_agent_frame(
     let encoded = serde_json::to_string(frame)?;
     write.send(Message::Text(encoded.into())).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+    use tokio::time::{self, Duration};
+
+    #[tokio::test]
+    async fn cancel_active_turn_signals_abort_before_hard_abort() {
+        let abort = BridgeAbortToken::default();
+        let task_abort = abort.clone();
+        let (observed_tx, observed_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            task_abort.canceled().await;
+            let _ = observed_tx.send(());
+            time::sleep(Duration::from_secs(5)).await;
+        });
+        let mut active = Some(ActiveBridgeTurn {
+            turn_id: "turn-test".to_string(),
+            abort,
+            task,
+        });
+
+        cancel_active_turn(&mut active);
+
+        time::timeout(Duration::from_secs(1), observed_rx)
+            .await
+            .expect("turn task should observe abort before hard abort")
+            .expect("observer should send");
+    }
 }
