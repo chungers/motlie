@@ -325,6 +325,12 @@ struct ChildOutcome {
     log_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct GgufBindgenEnv {
+    args: String,
+    repo_wired: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_child_cell(
     cell: &SnapshotCell,
@@ -343,6 +349,7 @@ fn run_child_cell(
         .open(&log_path)
         .with_context(|| format!("failed to open child log `{}`", log_path.display()))?;
     let stderr = log.try_clone()?;
+    let gguf_bindgen_env = gguf_bindgen_env(cell);
 
     let mut command = Command::new("cargo");
     command.current_dir(repo_root());
@@ -374,6 +381,15 @@ fn run_child_cell(
     command.args(["--backend", &cell.backend]);
     command.args(["--requested-accelerator", requested.as_str()]);
     command.arg("--quiet-backend-logs");
+    if let Some(bindgen_env) = &gguf_bindgen_env {
+        command.env("BINDGEN_EXTRA_CLANG_ARGS", &bindgen_env.args);
+        command.env(
+            "MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED",
+            bindgen_env.repo_wired.to_string(),
+        );
+    } else if is_gguf_cell(cell) {
+        command.env("MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED", "false");
+    }
     command.stdout(Stdio::from(log));
     command.stderr(Stdio::from(stderr));
 
@@ -612,6 +628,69 @@ fn classify_child_failure(log_path: &Path) -> OutcomeReason {
     }
 }
 
+fn gguf_bindgen_env(cell: &SnapshotCell) -> Option<GgufBindgenEnv> {
+    if !is_gguf_cell(cell) || std::env::consts::OS != "linux" {
+        return None;
+    }
+
+    let repo_include = repo_root().join("tools/clang-compat/include");
+    let repo_include = repo_include
+        .join("stdbool.h")
+        .is_file()
+        .then_some(repo_include);
+    let compiler_include = compiler_builtin_include_dir();
+
+    let repo_wired = repo_include.is_some() && compiler_include.is_some();
+    let args = merge_bindgen_args(
+        std::env::var("BINDGEN_EXTRA_CLANG_ARGS").ok().as_deref(),
+        repo_include.into_iter().chain(compiler_include),
+    );
+
+    (!args.is_empty()).then_some(GgufBindgenEnv { args, repo_wired })
+}
+
+fn is_gguf_cell(cell: &SnapshotCell) -> bool {
+    cell.checkpoint_format.eq_ignore_ascii_case("gguf")
+        || cell
+            .features_for_profile("")
+            .iter()
+            .any(|feature| feature.contains("gguf"))
+}
+
+fn compiler_builtin_include_dir() -> Option<PathBuf> {
+    let output = Command::new("cc")
+        .arg("-print-file-name=include")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let path = PathBuf::from(value.trim());
+    if path.as_os_str().is_empty() || path == Path::new("include") {
+        return None;
+    }
+    (path.join("stddef.h").is_file() && path.join("stdbool.h").is_file()).then_some(path)
+}
+
+fn merge_bindgen_args(
+    existing: Option<&str>,
+    include_dirs: impl IntoIterator<Item = PathBuf>,
+) -> String {
+    let mut args = existing
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .into_iter()
+        .collect::<Vec<_>>();
+    args.extend(
+        include_dirs
+            .into_iter()
+            .map(|path| format!("-I{}", path.display())),
+    );
+    args.join(" ")
+}
+
 fn requires_hf_token(cell: &SnapshotCell) -> bool {
     cell.artifact.requires_hf_token
 }
@@ -685,6 +764,27 @@ mod tests {
     use crate::result::EvalDepth;
     use crate::snapshot::EvalSnapshot;
 
+    fn test_snapshot_cell() -> SnapshotCell {
+        SnapshotCell {
+            id: "cell".to_owned(),
+            bundle_id: "bundle".to_owned(),
+            scenario: "chat_smoke".to_owned(),
+            capability: crate::scenario::CapabilityName::Chat,
+            depth: EvalDepth::Smoke,
+            model_family: "family".to_owned(),
+            checkpoint_format: "hf_safetensors".to_owned(),
+            quantization: "default".to_owned(),
+            backend: "mistralrs".to_owned(),
+            selector: None,
+            features: Vec::new(),
+            profile_features: BTreeMap::new(),
+            profiles: Vec::new(),
+            requested_accelerator: None,
+            artifact: Default::default(),
+            budgets: Default::default(),
+        }
+    }
+
     #[test]
     fn run_id_includes_portable_host_and_accelerator() {
         let platform = PlatformSnapshot {
@@ -718,6 +818,34 @@ mod tests {
         assert!(run_id.contains("curated-v2-smoke"));
         assert!(run_id.contains("dgx-spark"));
         assert!(run_id.ends_with("cuda"));
+    }
+
+    #[test]
+    fn gguf_cells_are_detected_by_checkpoint_format() {
+        let mut cell = test_snapshot_cell();
+        cell.checkpoint_format = "gguf".to_owned();
+
+        assert!(is_gguf_cell(&cell));
+
+        cell.checkpoint_format = "hf_safetensors".to_owned();
+
+        assert!(!is_gguf_cell(&cell));
+    }
+
+    #[test]
+    fn bindgen_args_preserve_existing_and_append_include_dirs() {
+        let merged = merge_bindgen_args(
+            Some("--target=aarch64-unknown-linux-gnu"),
+            [
+                PathBuf::from("/repo/tools/clang-compat/include"),
+                PathBuf::from("/usr/lib/gcc/include"),
+            ],
+        );
+
+        assert_eq!(
+            merged,
+            "--target=aarch64-unknown-linux-gnu -I/repo/tools/clang-compat/include -I/usr/lib/gcc/include"
+        );
     }
 
     #[test]

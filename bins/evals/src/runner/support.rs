@@ -707,6 +707,7 @@ fn runtime_env() -> BTreeMap<String, Option<String>> {
         "MOTLIE_MODEL_GPU_LAYERS",
         "MOTLIE_PAGED_ATTN_CONTEXT",
         "CUDA_VISIBLE_DEVICES",
+        "MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED",
     ]
     .into_iter()
     .map(|key| (key.to_owned(), std::env::var(key).ok()))

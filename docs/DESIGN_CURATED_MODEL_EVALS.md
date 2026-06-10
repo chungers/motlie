@@ -367,9 +367,12 @@ Provisioning rules:
   reviewed checkpoint precision or default label.
 
 The GGUF axis is blocked until native toolchain checks pass on every recruited
-platform that claims GGUF coverage. Linux x86 and GB10 must get a durable repo
-or documented fix for the `llama-cpp-sys` bindgen/toolchain `stdbool.h`
-failure. macOS/Metal must separately verify the Apple clang, Metal backend
+platform that claims GGUF coverage. Linux x86 and GB10 use driver-wired child
+build args for the `llama-cpp-sys` bindgen/toolchain `stdbool.h` failure: GGUF
+snapshot cells receive `BINDGEN_EXTRA_CLANG_ARGS` pointing at the repo-local
+`tools/clang-compat/include/stdbool.h` shim and the host compiler builtin
+include directory. The result record exposes only a boolean presence marker, not
+host paths. macOS/Metal must separately verify the Apple clang, Metal backend
 feature flags, shader compilation, and any codesign/runtime requirements. If
 GGUF-on-Metal is not supported for a snapshot, the Metal cells are emitted as
 structured `blocked` records with reason `gguf_metal_unverified` or
