@@ -278,6 +278,44 @@ impl Channel {
         lock_or_recover(&self.inner.status).clone()
     }
 
+    pub async fn cancel_pending(&self, message_id: MessageId, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        let (segment, pending_count) = {
+            let mut queue = self.inner.queue.lock().await;
+            let Some(position) = queue
+                .pending
+                .iter()
+                .position(|segment| segment.message_id == message_id)
+            else {
+                return false;
+            };
+            let segment = queue.pending.remove(position).expect("position exists");
+            let pending_count = queue.pending.len();
+            queue.accept_generation = queue.accept_generation.wrapping_add(1);
+            if queue.pending.is_empty() {
+                queue.coalesce_started_at = None;
+            }
+            (segment, pending_count)
+        };
+        self.update_status(|status| {
+            status.pending_count = pending_count;
+            status.flushing = pending_count > 0;
+        });
+        let error = DeliveryError::Canceled {
+            message_id,
+            reason: reason.clone(),
+        };
+        self.emit(DeliveryEvent::Failed {
+            target: self.inner.key.clone(),
+            message_ids: vec![message_id],
+            error: error.to_string(),
+        });
+        for waiter in segment.waiters {
+            let _ = waiter.tx.send(Err(error.clone()));
+        }
+        true
+    }
+
     async fn accept(
         &self,
         message: ManagedMessage,
@@ -292,23 +330,29 @@ impl Channel {
         }
 
         let source = message.source.clone();
-        let dedup_key = normalize_body(&message.body);
+        let dedup_key = match message.dedup {
+            DedupPolicy::Body => Some(normalize_body(&message.body)),
+            DedupPolicy::Unique => None,
+        };
+        let coalesce = message.coalesce;
         let mut start_worker = false;
         let has_async_source = waiter.is_none();
         let message_id;
         let pending_count;
         {
             let mut queue = self.inner.queue.lock().await;
-            if let Some(segment) = queue
-                .pending
-                .iter_mut()
-                .find(|segment| segment.dedup_key == dedup_key)
-            {
+            if let Some(segment) = dedup_key.as_ref().and_then(|dedup_key| {
+                queue
+                    .pending
+                    .iter_mut()
+                    .find(|segment| segment.dedup_key == *dedup_key)
+            }) {
                 message_id = segment.message_id;
                 segment.add_source(source.clone());
                 segment.submit = segment.submit.merged(submit);
                 segment.paste_mode = segment.paste_mode.merged(message.paste_mode);
                 segment.quiet_guard = segment.quiet_guard.merged(quiet_guard);
+                segment.coalesce = segment.coalesce.merged(coalesce);
                 if let Some(waiter) = waiter {
                     segment.waiters.push(waiter);
                 }
@@ -319,12 +363,13 @@ impl Channel {
                 message_id = MessageId(self.inner.next_message_id.fetch_add(1, Ordering::Relaxed));
                 queue.pending.push_back(PendingSegment {
                     message_id,
-                    dedup_key,
+                    dedup_key: dedup_key.unwrap_or_else(|| format!("__unique:{message_id}")),
                     body: message.body,
                     paste_mode: message.paste_mode,
                     sources: vec![source.clone()],
                     submit,
                     quiet_guard,
+                    coalesce,
                     waiters: waiter.into_iter().collect(),
                     has_async_source,
                     deferred_once: false,
@@ -558,6 +603,18 @@ impl Channel {
                         status.flushing = false;
                     });
                     return None;
+                }
+                if let Some(segment) = queue
+                    .pending
+                    .pop_front_if(|segment| segment.coalesce == CoalescePolicy::Disabled)
+                {
+                    queue.coalesce_started_at = None;
+                    let pending_count = queue.pending.len();
+                    self.update_status(|status| {
+                        status.pending_count = pending_count;
+                        status.flushing = true;
+                    });
+                    return Some(vec![segment]);
                 }
                 if self.inner.config.coalesce_window.is_zero() {
                     queue.coalesce_started_at = None;
@@ -920,6 +977,7 @@ struct PendingSegment {
     sources: Vec<MessageSource>,
     submit: SubmitPolicy,
     quiet_guard: QuietGuardPolicy,
+    coalesce: CoalescePolicy,
     waiters: Vec<Waiter>,
     has_async_source: bool,
     deferred_once: bool,
@@ -965,6 +1023,8 @@ pub struct ManagedMessage {
     pub source: MessageSource,
     pub body: String,
     pub paste_mode: PasteMode,
+    pub dedup: DedupPolicy,
+    pub coalesce: CoalescePolicy,
 }
 
 impl ManagedMessage {
@@ -973,12 +1033,45 @@ impl ManagedMessage {
             source,
             body: body.into(),
             paste_mode: PasteMode::Bracketed,
+            dedup: DedupPolicy::Body,
+            coalesce: CoalescePolicy::Enabled,
         }
     }
 
     pub fn with_paste_mode(mut self, paste_mode: PasteMode) -> Self {
         self.paste_mode = paste_mode;
         self
+    }
+
+    pub fn with_dedup(mut self, dedup: DedupPolicy) -> Self {
+        self.dedup = dedup;
+        self
+    }
+
+    pub fn with_coalesce(mut self, coalesce: CoalescePolicy) -> Self {
+        self.coalesce = coalesce;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DedupPolicy {
+    Body,
+    Unique,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoalescePolicy {
+    Enabled,
+    Disabled,
+}
+
+impl CoalescePolicy {
+    fn merged(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Disabled, _) | (_, Self::Disabled) => Self::Disabled,
+            (Self::Enabled, Self::Enabled) => Self::Enabled,
+        }
     }
 }
 
@@ -1323,6 +1416,11 @@ pub enum DeliveryError {
     },
     #[error("channel closed")]
     ChannelClosed,
+    #[error("delivery canceled for {message_id}: {reason}")]
+    Canceled {
+        message_id: MessageId,
+        reason: String,
+    },
     #[error("invalid message: {0}")]
     InvalidMessage(&'static str),
 }
@@ -1454,6 +1552,7 @@ mod tests {
                 sources: vec![MessageSource::broadcast("broadcast")],
                 submit: SubmitPolicy::default(),
                 quiet_guard: QuietGuardPolicy::Default,
+                coalesce: CoalescePolicy::Enabled,
                 waiters: Vec::new(),
                 has_async_source: false,
                 deferred_once: false,
@@ -1466,6 +1565,7 @@ mod tests {
                 sources: vec![MessageSource::timer("timer:poll")],
                 submit: SubmitPolicy::default(),
                 quiet_guard: QuietGuardPolicy::Default,
+                coalesce: CoalescePolicy::Enabled,
                 waiters: Vec::new(),
                 has_async_source: false,
                 deferred_once: false,
@@ -1496,6 +1596,7 @@ mod tests {
             sources: vec![MessageSource::broadcast("broadcast")],
             submit: SubmitPolicy::default(),
             quiet_guard: QuietGuardPolicy::Default,
+            coalesce: CoalescePolicy::Enabled,
             waiters: Vec::new(),
             deferred_once: false,
             has_async_source: false,
@@ -1616,6 +1717,117 @@ mod tests {
         let second = second.unwrap();
 
         assert_eq!(first.message_id(), second.message_id());
+    }
+
+    #[tokio::test]
+    async fn unique_dedup_keeps_same_body_as_separate_pending_segments() {
+        let mock = MockTransport::new().with_response("list-sessions", session_response());
+        let mut cfg = config();
+        cfg.coalesce_window = Duration::from_secs(60);
+        cfg.coalesce_max_wait = Duration::from_secs(60);
+        let (channel, _log) = mock_channel(mock, cfg).await;
+
+        let first = channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::human("telnyx.turn.one"), "same")
+                    .with_dedup(DedupPolicy::Unique),
+                EnqueueOptions::default(),
+            )
+            .await
+            .expect("first unique message accepted");
+        let second = channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::human("telnyx.turn.two"), "same")
+                    .with_dedup(DedupPolicy::Unique),
+                EnqueueOptions::default(),
+            )
+            .await
+            .expect("second unique message accepted");
+
+        assert_ne!(first.message_id, second.message_id);
+        assert_eq!(channel.status().pending_count, 2);
+        assert!(
+            channel
+                .cancel_pending(first.message_id, "test cleanup")
+                .await
+        );
+        assert!(
+            channel
+                .cancel_pending(second.message_id, "test cleanup")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn coalesce_disabled_bypasses_coalesce_window() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "");
+        let mut cfg = config();
+        cfg.coalesce_window = Duration::from_secs(60);
+        cfg.coalesce_max_wait = Duration::from_secs(60);
+        let (channel, _log) = mock_channel(mock, cfg).await;
+        let mut events = channel.subscribe();
+
+        let queued = channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::human("telnyx.turn"), "send now")
+                    .with_coalesce(CoalescePolicy::Disabled),
+                EnqueueOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                },
+            )
+            .await
+            .expect("message accepted");
+
+        let submitted = timeout(Duration::from_secs(1), async {
+            loop {
+                if let DeliveryEvent::Submitted { message_ids, .. } = events.recv().await.unwrap() {
+                    if message_ids.contains(&queued.message_id) {
+                        return true;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("coalesce-disabled message should submit without waiting");
+        assert!(submitted);
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_removes_segment_and_emits_failed() {
+        let mock = MockTransport::new().with_response("list-sessions", session_response());
+        let mut cfg = config();
+        cfg.coalesce_window = Duration::from_secs(60);
+        cfg.coalesce_max_wait = Duration::from_secs(60);
+        let (channel, _log) = mock_channel(mock, cfg).await;
+        let mut events = channel.subscribe();
+        let queued = channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::human("telnyx.turn"), "cancel me"),
+                EnqueueOptions::default(),
+            )
+            .await
+            .expect("message accepted");
+
+        assert!(channel.cancel_pending(queued.message_id, "barge-in").await);
+        assert_eq!(channel.status().pending_count, 0);
+        let failed = timeout(Duration::from_secs(1), async {
+            loop {
+                if let DeliveryEvent::Failed {
+                    message_ids, error, ..
+                } = events.recv().await.unwrap()
+                {
+                    if message_ids.contains(&queued.message_id) {
+                        return error;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("cancel should emit failed event");
+        assert!(failed.contains("barge-in"));
     }
 
     #[tokio::test]

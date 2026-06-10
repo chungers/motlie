@@ -1,22 +1,22 @@
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
-use motlie_voice::VoiceError;
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
-use motlie_voice::pipeline::resample::{WindowedSincResampler, resample_i16_mono};
+use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
+use motlie_voice::VoiceError;
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
-use tokio::sync::{Mutex, mpsc};
+use serde_json::{json, Map, Value};
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{
@@ -32,6 +32,8 @@ use crate::operator::state::{
 use crate::quality::{
     ActiveAsrQualitySession, RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
 };
+use crate::speech;
+use crate::text_calls::turns::PlaybackFinishedStatus;
 use crate::text_calls::SharedTextCallRegistry;
 use crate::tts::PIPER_SAMPLE_RATE_HZ;
 
@@ -175,13 +177,20 @@ pub enum OutboundMediaCommand {
     Mark {
         playback_id: String,
     },
+    AppendState {
+        playback_id: String,
+        open: bool,
+        empty: bool,
+    },
 }
 
 impl OutboundMediaCommand {
     fn playback_id(&self) -> &str {
         match self {
             Self::Frame(frame) => &frame.playback_id,
-            Self::Clear { playback_id, .. } | Self::Mark { playback_id } => playback_id,
+            Self::Clear { playback_id, .. }
+            | Self::Mark { playback_id }
+            | Self::AppendState { playback_id, .. } => playback_id,
         }
     }
 }
@@ -435,6 +444,7 @@ impl InboundTransportStats {
 struct OutboundPacingStats {
     frames_sent: u64,
     underrun_count: u64,
+    append_starvation_ticks: u64,
     pre_audio_wait_ticks: u64,
     inter_frame_gap_ms: Vec<u64>,
     queue_depth_samples: Vec<u64>,
@@ -449,8 +459,11 @@ impl OutboundPacingStats {
         self.queue_depth_samples.push(queue_depth as u64);
     }
 
-    fn observe_underrun(&mut self) {
+    fn observe_underrun(&mut self, append_starved: bool) {
         self.underrun_count = self.underrun_count.saturating_add(1);
+        if append_starved {
+            self.append_starvation_ticks = self.append_starvation_ticks.saturating_add(1);
+        }
     }
 
     fn observe_pre_audio_wait(&mut self) {
@@ -462,6 +475,8 @@ impl OutboundPacingStats {
             "playback_id": playback_id,
             "frames_sent": self.frames_sent,
             "underrun_count": self.underrun_count,
+            "append_starvation_ticks": self.append_starvation_ticks,
+            "append_starvation_ms_estimate": self.append_starvation_ticks.saturating_mul(20),
             "pre_audio_wait_ticks": self.pre_audio_wait_ticks,
             "pre_audio_wait_ms_estimate": self.pre_audio_wait_ticks.saturating_mul(20),
             "inter_frame_gap_ms_p50": percentile_u64(&self.inter_frame_gap_ms, 50),
@@ -501,6 +516,7 @@ struct MediaSocketState {
     first_frame_sent_playbacks: HashSet<String>,
     playback_started_at: HashMap<String, Instant>,
     playback_quality_contexts: HashMap<String, OutboundFrameQualityContext>,
+    append_open_empty_playbacks: HashSet<String>,
     rollups_emitted: bool,
 }
 
@@ -539,6 +555,7 @@ impl MediaSocketState {
             first_frame_sent_playbacks: HashSet::new(),
             playback_started_at: HashMap::new(),
             playback_quality_contexts: HashMap::new(),
+            append_open_empty_playbacks: HashSet::new(),
             rollups_emitted: false,
         }
     }
@@ -689,7 +706,10 @@ async fn send_outbound_or_silence(
         }
 
         media_state.outbound_underrun_ticks = media_state.outbound_underrun_ticks.saturating_add(1);
-        media_state.outbound_pacing.observe_underrun();
+        let append_starved = media_state
+            .append_open_empty_playbacks
+            .contains(playback_id.as_str());
+        media_state.outbound_pacing.observe_underrun(append_starved);
         if media_state.outbound_underrun_ticks <= 5
             || media_state.outbound_underrun_ticks.is_multiple_of(50)
         {
@@ -817,7 +837,29 @@ async fn send_outbound_command(
                 .write()
                 .await
                 .mark_tts_mark_sent(&call_id, &playback_id, &playback_id);
+            media_state.append_open_empty_playbacks.remove(&playback_id);
             tracing::info!(gateway_call_id = call_id, playback_id, "tts.mark.sent");
+            Ok(())
+        }
+        OutboundMediaCommand::AppendState {
+            playback_id,
+            open,
+            empty,
+        } => {
+            if open && empty {
+                media_state
+                    .append_open_empty_playbacks
+                    .insert(playback_id.clone());
+            } else {
+                media_state.append_open_empty_playbacks.remove(&playback_id);
+            }
+            tracing::debug!(
+                gateway_call_id = call_id,
+                playback_id,
+                open,
+                empty,
+                "tts.append.state"
+            );
             Ok(())
         }
     }
@@ -972,6 +1014,7 @@ async fn emit_playback_terminal_spans(
         }
     }
     media_state.playback_quality_contexts.remove(playback_id);
+    media_state.append_open_empty_playbacks.remove(playback_id);
 }
 
 fn log_outbound_frame_sent(media_state: &mut MediaSocketState, call_id: &str, playback_id: &str) {
@@ -1423,6 +1466,15 @@ async fn ingest_frame(
         AsrFrameDecision::Suppress => return Ok(()),
         AsrFrameDecision::Continue { speech_onset } => {
             if speech_onset {
+                if let Some(text_calls) = text_calls {
+                    cancel_text_call_speech_for_barge_in(
+                        state,
+                        &media_state.media_registry,
+                        text_calls,
+                        &gateway_call_id,
+                    )
+                    .await?;
+                }
                 if let Some(runtime) = media_state.conversation.as_ref() {
                     conversation::handle_speech_onset(
                         state,
@@ -1592,6 +1644,50 @@ fn record_transcript_capture(capture: &mut MediaCapture, kind: &str, text: &str,
     if let Err(error) = capture.record_transcript(kind, text, suppressed) {
         tracing::warn!(error = %error, "media.capture.transcript_failed");
     }
+}
+
+async fn cancel_text_call_speech_for_barge_in(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    text_calls: &SharedTextCallRegistry,
+    gateway_call_id: &str,
+) -> anyhow::Result<()> {
+    if !text_calls.contains(gateway_call_id).await {
+        return Ok(());
+    }
+    if media_registry
+        .active_speech_playback_id(gateway_call_id)
+        .await
+        .is_none()
+    {
+        return Ok(());
+    }
+    let playback_id = match speech::cancel_speech_with_reason(
+        state,
+        media_registry,
+        gateway_call_id,
+        "text-call speech-onset barge-in",
+        SpeechClearReason::BargeIn,
+    )
+    .await
+    {
+        Ok(playback_id) => playback_id,
+        Err(error) if format!("{error:#}").contains("no active speech job") => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    text_calls
+        .finish_playback(
+            gateway_call_id,
+            &playback_id,
+            PlaybackFinishedStatus::Canceled,
+        )
+        .await;
+    tracing::info!(
+        gateway_call_id,
+        playback_id,
+        "text_call.barge_in.cancel_requested"
+    );
+    Ok(())
 }
 
 async fn emit_quality_transport_rollups(state: &SharedState, media_state: &mut MediaSocketState) {
@@ -2139,7 +2235,36 @@ struct TranscriptRecordContext<'a> {
 struct FinalTurnCandidate {
     text: String,
     finalized_at: Instant,
-    transcript_event_id: Option<String>,
+    transcript_event_ids: Vec<String>,
+}
+
+fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCandidate> {
+    if final_turns.len() <= 1 {
+        return final_turns;
+    }
+    let mut text = String::new();
+    let mut finalized_at = None;
+    let mut transcript_event_ids = Vec::new();
+    for turn in final_turns {
+        let trimmed = turn.text.trim();
+        if !trimmed.is_empty() {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(trimmed);
+        }
+        finalized_at = Some(turn.finalized_at);
+        transcript_event_ids.extend(turn.transcript_event_ids);
+    }
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![FinalTurnCandidate {
+            text,
+            finalized_at: finalized_at.unwrap_or_else(Instant::now),
+            transcript_event_ids,
+        }]
+    }
 }
 
 async fn record_transcript_events(
@@ -2221,7 +2346,7 @@ async fn record_transcript_events(
             final_turns.push(FinalTurnCandidate {
                 text: text.clone(),
                 finalized_at: Instant::now(),
-                transcript_event_id,
+                transcript_event_ids: transcript_event_id.into_iter().collect(),
             });
         }
         let transcript_text = include_transcript_text.then_some(text.as_str());
@@ -2242,6 +2367,7 @@ async fn record_transcript_events(
         );
     }
     drop(guard);
+    let final_turns = coalesce_final_turns(final_turns);
     if let Some(text_calls) = context.text_calls {
         for final_turn in final_turns {
             match text_calls
@@ -2260,17 +2386,16 @@ async fn record_transcript_events(
                         &final_turn.text,
                         context.quality_session,
                     );
-                    if let (Some(session), Some(transcript_event_id)) = (
-                        context.quality_session,
-                        final_turn.transcript_event_id.as_deref(),
-                    ) {
-                        guard.emit_quality_asr_turn_mapped(
-                            gateway_call_id,
-                            session,
-                            &turn_id,
-                            transcript_event_id,
-                            true,
-                        );
+                    if let Some(session) = context.quality_session {
+                        for transcript_event_id in &final_turn.transcript_event_ids {
+                            guard.emit_quality_asr_turn_mapped(
+                                gateway_call_id,
+                                session,
+                                &turn_id,
+                                transcript_event_id,
+                                true,
+                            );
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -2322,8 +2447,8 @@ fn validate_media_format(format: &MediaFormat) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use motlie_model::typed::{AudioBuf, Mono};
@@ -2332,9 +2457,9 @@ mod tests {
     use crate::adapter::{
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
-    use crate::operator::state::{CallStatus, TelnyxIds, TtsPlaybackStatus, shared_state};
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
     use crate::tts::{
-        LiveTtsBackend, OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry,
+        LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
     };
 
     #[test]
@@ -2532,22 +2657,19 @@ mod tests {
         .expect("failed prebuffered chunk should release active playback");
 
         assert!(next_outbound_command(&mut media_state).is_none());
-        assert!(
-            media_registry
-                .active_speech_playback_id(&gateway_call_id)
-                .await
-                .is_none()
-        );
+        assert!(media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await
+            .is_none());
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         let tts = call.tts.as_ref().expect("TTS state should exist");
         assert_eq!(tts.status, TtsPlaybackStatus::Failed);
-        assert!(
-            tts.error
-                .as_deref()
-                .is_some_and(|error| error.contains("second chunk failed"))
-        );
+        assert!(tts
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("second chunk failed")));
         assert_eq!(call.status, CallStatus::MediaStarted);
         drop(guard);
 
@@ -2812,16 +2934,14 @@ mod tests {
         handle_text(&media_one, &state, &asr, &mut media_state)
             .await
             .expect("first non-one media chunk should establish reorder base");
-        assert!(
-            state
-                .read()
-                .await
-                .calls
-                .get(&gateway_call_id)
-                .expect("call exists")
-                .transcripts
-                .is_empty()
-        );
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .transcripts
+            .is_empty());
 
         let media_two = media_event("stream-1", "8", &chunk);
         handle_text(&media_two, &state, &asr, &mut media_state)
@@ -2954,16 +3074,14 @@ mod tests {
         )
         .await
         .expect("silence should be accepted by transport");
-        assert!(
-            state
-                .read()
-                .await
-                .calls
-                .get(&gateway_call_id)
-                .expect("call exists")
-                .transcripts
-                .is_empty()
-        );
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .transcripts
+            .is_empty());
 
         let speech = STANDARD.encode(l16_samples(16_000, 4_000));
         handle_text(
@@ -3004,12 +3122,15 @@ mod tests {
         let mut outbound = OutboundPacingStats::default();
         outbound.observe_frame(Some(20), 4);
         outbound.observe_frame(Some(50), 2);
-        outbound.observe_underrun();
+        outbound.observe_underrun(false);
+        outbound.observe_underrun(true);
         outbound.observe_pre_audio_wait();
         let payload = outbound.rollup_payload(Some("tts_test"));
         assert_eq!(payload["playback_id"], "tts_test");
         assert_eq!(payload["frames_sent"], 2);
-        assert_eq!(payload["underrun_count"], 1);
+        assert_eq!(payload["underrun_count"], 2);
+        assert_eq!(payload["append_starvation_ticks"], 1);
+        assert_eq!(payload["append_starvation_ms_estimate"], 20);
         assert_eq!(payload["pre_audio_wait_ticks"], 1);
         assert_eq!(payload["pre_audio_wait_ms_estimate"], 20);
         assert_eq!(payload["inter_frame_gap_ms_max"], 50);
@@ -3429,11 +3550,9 @@ mod tests {
         .await
         .expect_err("unsupported codec should fail at start");
 
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported inbound media encoding")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported inbound media encoding"));
         assert!(media_state.session.is_none());
         assert!(media_state.gateway_call_id.is_none());
         assert!(media_state.media_format.is_none());

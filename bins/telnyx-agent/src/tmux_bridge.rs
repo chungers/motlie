@@ -1,14 +1,26 @@
+#![cfg_attr(test, allow(dead_code))]
+#[cfg(test)]
 use std::future::Future;
+#[cfg(test)]
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use motlie_tmux::{
-    CaptureNormalizeMode, HistoryOptions, HostHandle, KeySequence, SessionWatchHandle,
-    SessionWatchOptions, Target,
+use motlie_agent::{
+    Channel, ChannelConfig, ChannelManager, CoalescePolicy, DedupPolicy, DeliveryEvent,
+    EnqueueOptions, ManagedMessage, MessageId, MessageSource, PasteMode, QuietGuardPolicy,
+    ResolvedSession, SessionKey, SubmitPolicy,
 };
-use tokio::sync::Mutex;
+use motlie_tmux::{
+    CaptureNormalizeMode, HistoryOptions, HostHandle, SessionWatchHandle, SessionWatchOptions,
+};
+#[cfg(test)]
+use motlie_tmux::{KeySequence, Target};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::{self, Instant};
 
 const DEFAULT_INPUT_QUIET_FOR: Duration = Duration::from_secs(10);
@@ -19,10 +31,8 @@ const DEFAULT_TRAILING_ENTER_DELAY: Duration = Duration::from_millis(750);
 
 #[derive(Clone)]
 pub struct TmuxBridge {
-    target: Target,
-    host: HostHandle,
-    session_name: String,
     watch: Arc<Mutex<SessionWatchHandle>>,
+    channel: Channel,
     reply_timeout: Duration,
     injection: KeystrokeInjectionConfig,
     send_lock: Arc<Mutex<()>>,
@@ -73,12 +83,114 @@ impl KeystrokeInjectionConfig {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct BridgeAbortToken {
+    canceled: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl BridgeAbortToken {
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::SeqCst)
+    }
+
+    pub async fn canceled(&self) {
+        if self.is_canceled() {
+            return;
+        }
+        self.notify.notified().await;
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BridgeTurnEvent {
+    Partial(String),
+    Final(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct StableLineEmission {
+    required_captures: usize,
+    emitted_lines: usize,
+    last_lines: Vec<String>,
+    stable_counts: Vec<usize>,
+}
+
+impl StableLineEmission {
+    fn new(required_captures: usize) -> Self {
+        Self {
+            required_captures: required_captures.max(1),
+            emitted_lines: 0,
+            last_lines: Vec::new(),
+            stable_counts: Vec::new(),
+        }
+    }
+
+    fn update(&mut self, lines: Vec<String>, final_marker_seen: bool) -> Vec<String> {
+        let mut counts = Vec::with_capacity(lines.len());
+        for (index, line) in lines.iter().enumerate() {
+            let count = if self.last_lines.get(index) == Some(line) {
+                self.stable_counts
+                    .get(index)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            } else {
+                1
+            };
+            counts.push(count);
+        }
+        self.last_lines = lines.clone();
+        self.stable_counts = counts;
+
+        let stable_limit = if final_marker_seen {
+            lines.len()
+        } else {
+            lines.len().saturating_sub(1)
+        };
+        let mut out = Vec::new();
+        while self.emitted_lines < stable_limit
+            && self
+                .stable_counts
+                .get(self.emitted_lines)
+                .copied()
+                .unwrap_or(0)
+                >= self.required_captures
+        {
+            out.push(lines[self.emitted_lines].clone());
+            self.emitted_lines += 1;
+        }
+        out
+    }
+
+    fn remaining_text(&self) -> String {
+        self.last_lines
+            .iter()
+            .skip(self.emitted_lines)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
+            .trim()
+            .to_string()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(test)]
 enum TargetActivity {
     Idle,
     Active { reason: &'static str },
 }
 
+#[cfg(test)]
 impl TargetActivity {
     fn reason(&self) -> Option<&'static str> {
         match self {
@@ -88,16 +200,20 @@ impl TargetActivity {
     }
 }
 
+#[cfg(test)]
 type BoxResultFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
+#[cfg(test)]
 trait ActivityProbe {
     fn check<'a>(&'a mut self) -> BoxResultFuture<'a, TargetActivity>;
 }
 
+#[cfg(test)]
 trait HistoryRenderer {
     fn render<'a>(&'a mut self) -> BoxResultFuture<'a, String>;
 }
 
+#[cfg(test)]
 trait KeySender {
     fn send<'a>(&'a mut self, keys: KeySequence) -> BoxResultFuture<'a, ()>;
 }
@@ -131,62 +247,191 @@ impl TmuxBridge {
             .await
             .with_context(|| format!("resolve tmux target {normalized}"))?
             .with_context(|| format!("tmux target not found: {normalized}"))?;
-        let session_name = target.session_name().to_string();
+        let channel_config = ChannelConfig {
+            input_quiet_for: injection.input_quiet_for,
+            ..ChannelConfig::default()
+        };
+        let channel_manager = ChannelManager::new(channel_config);
+        let key = SessionKey::from_target("local", "local", &target);
+        let channel =
+            channel_manager.get_or_bind(ResolvedSession::new(key, host.clone(), target.clone()))?;
         Ok(Self {
-            target,
-            host,
-            session_name,
             watch: Arc::new(Mutex::new(watch)),
+            channel,
             reply_timeout,
             injection,
             send_lock: Arc::new(Mutex::new(())),
         })
     }
 
+    #[cfg(test)]
     pub async fn send_turn(&self, turn_id: &str, caller_text: &str) -> anyhow::Result<String> {
+        let (tx, mut rx) = mpsc::channel(8);
+        let abort = BridgeAbortToken::default();
+        self.send_turn_streaming(turn_id, caller_text, tx, abort)
+            .await?;
+        let mut reply = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                BridgeTurnEvent::Partial(text) => {
+                    if !reply.is_empty() && !reply.ends_with('\n') {
+                        reply.push('\n');
+                    }
+                    reply.push_str(text.trim());
+                }
+                BridgeTurnEvent::Final(text) => {
+                    if !text.trim().is_empty() {
+                        if !reply.is_empty() && !reply.ends_with('\n') {
+                            reply.push('\n');
+                        }
+                        reply.push_str(text.trim());
+                    }
+                    return Ok(reply.trim().to_string());
+                }
+            }
+        }
+        Ok(reply.trim().to_string())
+    }
+
+    pub async fn send_turn_streaming(
+        &self,
+        turn_id: &str,
+        caller_text: &str,
+        events: mpsc::Sender<BridgeTurnEvent>,
+        abort: BridgeAbortToken,
+    ) -> anyhow::Result<()> {
         let _send_guard = self.send_lock.lock().await;
+        if abort.is_canceled() {
+            anyhow::bail!("bridge turn canceled before delivery");
+        }
         let marker = end_marker(turn_id);
         let prompt = format!(
             "[motlie-call turn={turn_id}] Caller: {caller_text}\nReply once, then end with {marker}"
         );
-        let mut activity = LiveActivityProbe {
-            host: &self.host,
-            watch: self.watch.clone(),
-            session_name: &self.session_name,
-            input_quiet_for: self.injection.input_quiet_for,
-        };
-        let mut history = LiveHistoryRenderer {
-            watch: self.watch.clone(),
-        };
-        let mut sender = LiveKeySender {
-            target: &self.target,
-        };
-        let baseline = deliver_prompt_after_idle(
-            &mut activity,
-            &mut history,
-            &mut sender,
-            &prompt,
-            &self.injection,
+        let baseline = self.watch.lock().await.render_text().await;
+        let message = ManagedMessage::new(
+            MessageSource::human(format!("telnyx.turn.{turn_id}")),
+            prompt.clone(),
         )
-        .await
-        .context("send caller turn to tmux")?;
+        .with_paste_mode(PasteMode::Bracketed)
+        .with_dedup(DedupPolicy::Unique)
+        .with_coalesce(CoalescePolicy::Disabled);
+        let submit = if self.injection.trailing_enter {
+            SubmitPolicy {
+                prompt_submit: true,
+                settle: self.injection.trailing_enter_delay,
+                retries: 1,
+                retry_delay: Duration::from_millis(250),
+                require_verification: false,
+            }
+        } else {
+            SubmitPolicy::typing_only()
+        };
+        let queued = self
+            .channel
+            .enqueue(
+                message,
+                EnqueueOptions {
+                    submit,
+                    quiet_guard: QuietGuardPolicy::Default,
+                },
+            )
+            .await
+            .context("enqueue caller turn through motlie-agent Channel")?;
+        wait_for_channel_submission(&self.channel, queued.message_id, &abort)
+            .await
+            .context("deliver caller turn through motlie-agent Channel")?;
 
         let deadline = Instant::now() + self.reply_timeout;
+        let mut stable = StableLineEmission::new(2);
         loop {
+            if abort.is_canceled() {
+                anyhow::bail!("bridge turn canceled while waiting for reply");
+            }
             let rendered = self.watch.lock().await.render_text().await;
-            if let Some(reply) =
-                extract_reply_from_rendered_delta(&baseline, &rendered, &prompt, &marker)
-            {
-                return Ok(reply);
+            let final_marker_seen = rendered.lines().any(|line| line.trim() == marker);
+            let lines = reply_lines_from_rendered_delta(&baseline, &rendered, &prompt, &marker);
+            for line in stable.update(lines, final_marker_seen) {
+                let text = line.trim();
+                if !text.is_empty() {
+                    let _ = events
+                        .send(BridgeTurnEvent::Partial(format!("{text}\n")))
+                        .await;
+                }
+            }
+            if final_marker_seen {
+                let final_text = stable.remaining_text();
+                let _ = events.send(BridgeTurnEvent::Final(final_text)).await;
+                return Ok(());
             }
             if Instant::now() >= deadline {
                 anyhow::bail!("timed out waiting for tmux reply marker {marker}");
             }
-            time::sleep(Duration::from_millis(250)).await;
+            tokio::select! {
+                _ = abort.canceled() => {
+                    anyhow::bail!("bridge turn canceled while waiting for reply");
+                }
+                _ = time::sleep(Duration::from_millis(250)) => {}
+            }
         }
     }
 }
 
+async fn wait_for_channel_submission(
+    channel: &Channel,
+    message_id: MessageId,
+    abort: &BridgeAbortToken,
+) -> anyhow::Result<()> {
+    let mut events = channel.subscribe();
+    loop {
+        tokio::select! {
+            _ = abort.canceled() => {
+                channel.cancel_pending(message_id, "telnyx turn canceled").await;
+                anyhow::bail!("bridge turn canceled before Channel submission");
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(DeliveryEvent::Submitted { message_ids, .. })
+                        if message_ids.contains(&message_id) => return Ok(()),
+                    Ok(DeliveryEvent::Failed { message_ids, error, .. })
+                        if message_ids.contains(&message_id) => anyhow::bail!(error),
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        anyhow::bail!("Channel event stream closed before submission");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn reply_lines_from_rendered_delta(
+    baseline: &str,
+    rendered: &str,
+    prompt: &str,
+    marker: &str,
+) -> Vec<String> {
+    let delta = rendered.strip_prefix(baseline).unwrap_or(rendered);
+    let lines = delta.lines().collect::<Vec<_>>();
+    let end = lines
+        .iter()
+        .position(|line| line.trim() == marker)
+        .unwrap_or(lines.len());
+    let start = lines[..end]
+        .iter()
+        .rposition(|line| line.contains(marker))
+        .map_or(0, |index| index + 1);
+    lines[start..end]
+        .iter()
+        .copied()
+        .filter(|line| !is_prompt_echo_line(line, prompt, marker))
+        .map(|line| line.trim_end().to_string())
+        .filter(|line| !line.trim().is_empty())
+        .collect()
+}
+
+#[cfg(test)]
 struct LiveActivityProbe<'a> {
     host: &'a HostHandle,
     watch: Arc<Mutex<SessionWatchHandle>>,
@@ -194,6 +439,7 @@ struct LiveActivityProbe<'a> {
     input_quiet_for: Duration,
 }
 
+#[cfg(test)]
 impl ActivityProbe for LiveActivityProbe<'_> {
     fn check<'a>(&'a mut self) -> BoxResultFuture<'a, TargetActivity> {
         Box::pin(async move {
@@ -208,26 +454,31 @@ impl ActivityProbe for LiveActivityProbe<'_> {
     }
 }
 
+#[cfg(test)]
 struct LiveHistoryRenderer {
     watch: Arc<Mutex<SessionWatchHandle>>,
 }
 
+#[cfg(test)]
 impl HistoryRenderer for LiveHistoryRenderer {
     fn render<'a>(&'a mut self) -> BoxResultFuture<'a, String> {
         Box::pin(async move { Ok(self.watch.lock().await.render_text().await) })
     }
 }
 
+#[cfg(test)]
 struct LiveKeySender<'a> {
     target: &'a Target,
 }
 
+#[cfg(test)]
 impl KeySender for LiveKeySender<'_> {
     fn send<'a>(&'a mut self, keys: KeySequence) -> BoxResultFuture<'a, ()> {
         Box::pin(async move { self.target.send_keys(&keys).await.map_err(Into::into) })
     }
 }
 
+#[cfg(test)]
 async fn deliver_prompt_after_idle<A, H, S>(
     activity: &mut A,
     history: &mut H,
@@ -252,6 +503,7 @@ where
     Ok(baseline)
 }
 
+#[cfg(test)]
 async fn wait_for_idle<A>(activity: &mut A, config: &KeystrokeInjectionConfig) -> anyhow::Result<()>
 where
     A: ActivityProbe,
@@ -291,6 +543,7 @@ where
     }
 }
 
+#[cfg(test)]
 async fn evaluate_live_target_activity(
     host: &HostHandle,
     watch: Arc<Mutex<SessionWatchHandle>>,
@@ -318,10 +571,12 @@ async fn evaluate_live_target_activity(
     Ok(TargetActivity::Idle)
 }
 
+#[cfg(test)]
 fn latest_client_activity_age(latest_client_activity_secs: u64, now_secs: u64) -> Duration {
     Duration::from_secs(now_secs.saturating_sub(latest_client_activity_secs))
 }
 
+#[cfg(test)]
 fn unix_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -329,10 +584,12 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+#[cfg(test)]
 fn next_backoff(current: Duration, max: Duration) -> Duration {
     current.saturating_mul(2).min(max)
 }
 
+#[cfg(test)]
 fn has_uncommitted_composer_text(rendered: &str) -> bool {
     let Some(last_line) = rendered.lines().rev().find(|line| !line.trim().is_empty()) else {
         return false;
@@ -361,6 +618,7 @@ fn end_marker(turn_id: &str) -> String {
     format!("[[motlie-call:end turn={turn_id}]]")
 }
 
+#[cfg(test)]
 pub fn extract_reply_from_rendered_delta(
     baseline: &str,
     rendered: &str,
@@ -382,7 +640,11 @@ pub fn extract_reply_from_rendered_delta(
         .join("\n")
         .trim()
         .to_string();
-    if reply.is_empty() { None } else { Some(reply) }
+    if reply.is_empty() {
+        None
+    } else {
+        Some(reply)
+    }
 }
 
 fn is_prompt_echo_line(line: &str, prompt: &str, marker: &str) -> bool {
@@ -399,6 +661,21 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+
+    #[test]
+    fn stable_line_emission_withholds_tail_until_later_line_or_final() {
+        let mut stable = StableLineEmission::new(2);
+        assert!(stable.update(vec!["draft".to_string()], false).is_empty());
+        assert!(stable.update(vec!["draft".to_string()], false).is_empty());
+        assert_eq!(
+            stable.update(vec!["draft".to_string(), "next".to_string()], false),
+            vec!["draft".to_string()]
+        );
+        assert_eq!(
+            stable.update(vec!["draft".to_string(), "next".to_string()], true),
+            vec!["next".to_string()]
+        );
+    }
 
     #[test]
     fn extracts_marker_delimited_reply_from_history_delta() {

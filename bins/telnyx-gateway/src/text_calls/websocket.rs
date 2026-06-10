@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -15,11 +15,11 @@ use crate::media::SharedMediaRegistry;
 use crate::operator::state::{CallStatus, LogLevel, SharedState, TtsPlaybackStatus};
 use crate::quality::TextCallQualityConfig;
 use crate::speech::{self, SpeechConflictPolicy, SpeechQueueRequest};
-use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
+use crate::tts::{LiveTtsBackend, SharedTtsRegistry, StreamingSpeechTextPacker};
 
 use super::offers::validate_call_url;
 use super::turns::{
-    AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus, TEXT_CALL_PROTOCOL, TextCallDirection,
+    AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_PROTOCOL,
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
@@ -43,6 +43,12 @@ enum AgentTurnDisposition {
     Accepted { timing: TextCallTurnTiming },
     Superseded,
     Invalid,
+}
+
+struct AgentAppendTurn {
+    packer: StreamingSpeechTextPacker,
+    speech: Option<speech::AppendSpeechHandle>,
+    timing: TextCallTurnTiming,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +98,7 @@ impl TextCallTurnTracker {
         finalized_at: Instant,
     ) -> anyhow::Result<TextCallTurnTiming> {
         self.ensure_caller_turn_capacity()?;
+        self.mark_pending_superseded();
         Ok(self.add_caller_turn_unchecked(turn_id, finalized_at))
     }
 
@@ -107,11 +114,6 @@ impl TextCallTurnTracker {
         turn_id: String,
         finalized_at: Instant,
     ) -> TextCallTurnTiming {
-        for state in self.turns.values_mut() {
-            if let TextCallTurnState::Pending { timing } = state {
-                *state = TextCallTurnState::Superseded { timing: *timing };
-            }
-        }
         let timing = TextCallTurnTiming {
             finalized_at,
             caller_turn_sent_at: Instant::now(),
@@ -121,18 +123,36 @@ impl TextCallTurnTracker {
         timing
     }
 
-    fn accept_agent_turn(&mut self, turn_id: &str) -> AgentTurnDisposition {
+    fn mark_pending_superseded(&mut self) -> Vec<String> {
+        let mut superseded = Vec::new();
+        for (turn_id, state) in &mut self.turns {
+            if let TextCallTurnState::Pending { timing } = state {
+                superseded.push(turn_id.clone());
+                *state = TextCallTurnState::Superseded { timing: *timing };
+            }
+        }
+        superseded
+    }
+
+    fn agent_turn_disposition(&self, turn_id: &str) -> AgentTurnDisposition {
         match self.turns.get(turn_id).cloned() {
             Some(TextCallTurnState::Pending { timing }) => {
-                self.turns.remove(turn_id);
                 AgentTurnDisposition::Accepted { timing }
             }
-            Some(TextCallTurnState::Superseded { .. }) => {
-                self.turns.remove(turn_id);
-                AgentTurnDisposition::Superseded
-            }
+            Some(TextCallTurnState::Superseded { .. }) => AgentTurnDisposition::Superseded,
             Some(TextCallTurnState::Playing { .. }) | None => AgentTurnDisposition::Invalid,
         }
+    }
+
+    fn accept_agent_turn(&mut self, turn_id: &str) -> AgentTurnDisposition {
+        let disposition = self.agent_turn_disposition(turn_id);
+        if matches!(
+            disposition,
+            AgentTurnDisposition::Accepted { .. } | AgentTurnDisposition::Superseded
+        ) {
+            self.turns.remove(turn_id);
+        }
+        disposition
     }
 
     fn start_playback(&mut self, turn_id: String, playback_id: String) {
@@ -191,6 +211,10 @@ impl SharedTextCallRegistry {
         self.inner.lock().await.remove(gateway_call_id);
     }
 
+    pub async fn contains(&self, gateway_call_id: &str) -> bool {
+        self.inner.lock().await.contains_key(gateway_call_id)
+    }
+
     pub async fn send_caller_turn(
         &self,
         gateway_call_id: &str,
@@ -204,6 +228,15 @@ impl SharedTextCallRegistry {
         let turn_id = format!("turn_{}", Uuid::new_v4().simple());
         let mut turns = handle.turns.lock().await;
         turns.ensure_caller_turn_capacity()?;
+        let superseded = turns.mark_pending_superseded();
+        for superseded_turn_id in superseded {
+            handle.try_send(GatewayTextFrame::TurnSuperseded {
+                turn_id: superseded_turn_id,
+                superseded_by_turn_id: turn_id.clone(),
+                reason: "new_caller_turn".to_string(),
+                sequence: handle.next_sequence(),
+            })?;
+        }
         handle.try_send(GatewayTextFrame::CallerTurn {
             turn_id: turn_id.clone(),
             sequence: handle.next_sequence(),
@@ -211,6 +244,24 @@ impl SharedTextCallRegistry {
         })?;
         turns.add_caller_turn(turn_id.clone(), finalized_at)?;
         Ok(Some(turn_id))
+    }
+
+    pub async fn finish_playback(
+        &self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        status: PlaybackFinishedStatus,
+    ) -> bool {
+        let handle = { self.inner.lock().await.get(gateway_call_id).cloned() };
+        let Some(handle) = handle else {
+            return false;
+        };
+        let turn_id = handle.turns.lock().await.close_playback(playback_id);
+        let Some(turn_id) = turn_id else {
+            return false;
+        };
+        let _ = send_playback_finished(&handle, turn_id, status).await;
+        true
     }
 
     pub async fn send_session_end(&self, gateway_call_id: &str, reason: impl Into<String>) {
@@ -231,6 +282,7 @@ struct TextCallSessionHandle {
     tx: mpsc::Sender<GatewayTextFrame>,
     sequence: Arc<AtomicU64>,
     turns: Arc<Mutex<TextCallTurnTracker>>,
+    append_turns: Arc<Mutex<BTreeMap<String, AgentAppendTurn>>>,
     config: TextCallSessionConfig,
 }
 
@@ -302,6 +354,7 @@ pub async fn connect_application_stream(
         turns: Arc::new(Mutex::new(TextCallTurnTracker::new(
             session_config.max_active_turns,
         ))),
+        append_turns: Arc::new(Mutex::new(BTreeMap::new())),
         config: session_config,
     };
     services
@@ -383,6 +436,7 @@ async fn run_text_call_session<W, R>(
         }
     }
 
+    handle.append_turns.lock().await.clear();
     handle.turns.lock().await.clear();
     services.registry.remove(&gateway_call_id).await;
     if !gateway_closed {
@@ -399,7 +453,67 @@ async fn handle_agent_message(
 ) -> anyhow::Result<()> {
     let frame: AgentTextFrame = serde_json::from_str(text).context("decode app text-call frame")?;
     match frame {
+        AgentTextFrame::AgentTurnPartial {
+            turn_id,
+            text,
+            append,
+        } => {
+            if !append {
+                send_error_frame(handle, "invalid_partial", "agent.turn.partial must append")
+                    .await?;
+                return Ok(());
+            }
+            let disposition = handle.turns.lock().await.agent_turn_disposition(&turn_id);
+            let timing = match disposition {
+                AgentTurnDisposition::Accepted { timing } => timing,
+                AgentTurnDisposition::Superseded => {
+                    send_playback_finished(handle, turn_id, PlaybackFinishedStatus::Superseded)
+                        .await?;
+                    return Ok(());
+                }
+                AgentTurnDisposition::Invalid => {
+                    send_error_frame(handle, "invalid_turn", "turn is not active").await?;
+                    return Ok(());
+                }
+            };
+            process_agent_turn_fragment(
+                services,
+                gateway_call_id,
+                handle,
+                turn_id,
+                text,
+                false,
+                timing,
+            )
+            .await?;
+        }
         AgentTextFrame::AgentTurn { turn_id, text } => {
+            if handle.append_turns.lock().await.contains_key(&turn_id) {
+                let disposition = handle.turns.lock().await.agent_turn_disposition(&turn_id);
+                let timing = match disposition {
+                    AgentTurnDisposition::Accepted { timing } => timing,
+                    AgentTurnDisposition::Superseded => {
+                        send_playback_finished(handle, turn_id, PlaybackFinishedStatus::Superseded)
+                            .await?;
+                        return Ok(());
+                    }
+                    AgentTurnDisposition::Invalid => {
+                        send_error_frame(handle, "invalid_turn", "turn is not active").await?;
+                        return Ok(());
+                    }
+                };
+                process_agent_turn_fragment(
+                    services,
+                    gateway_call_id,
+                    handle,
+                    turn_id,
+                    text,
+                    true,
+                    timing,
+                )
+                .await?;
+                return Ok(());
+            }
             let agent_turn_received_at = Instant::now();
             let disposition = handle.turns.lock().await.accept_agent_turn(&turn_id);
             let timing = match disposition {
@@ -446,29 +560,12 @@ async fn handle_agent_message(
                     sequence: handle.next_sequence(),
                 })
                 .await?;
-            let wait_services = services.clone();
-            let wait_handle = handle.clone();
-            let wait_call_id = gateway_call_id.to_string();
-            tokio::spawn(async move {
-                if let Some(status) = wait_for_playback_terminal(
-                    &wait_services.state,
-                    &wait_handle,
-                    &wait_call_id,
-                    &queued.playback_id,
-                    wait_handle.config.playback_wait_timeout,
-                )
-                .await
-                {
-                    let turn_id = wait_handle
-                        .turns
-                        .lock()
-                        .await
-                        .close_playback(&queued.playback_id);
-                    if let Some(turn_id) = turn_id {
-                        let _ = send_playback_finished(&wait_handle, turn_id, status).await;
-                    }
-                }
-            });
+            spawn_playback_terminal_waiter(
+                services.clone(),
+                gateway_call_id.to_string(),
+                handle.clone(),
+                queued.playback_id.clone(),
+            );
         }
         AgentTextFrame::AgentClose { reason } => {
             handle
@@ -481,6 +578,122 @@ async fn handle_agent_message(
         }
     }
     Ok(())
+}
+
+async fn process_agent_turn_fragment(
+    services: &TextCallStreamServices,
+    gateway_call_id: &str,
+    handle: &TextCallSessionHandle,
+    turn_id: String,
+    text: String,
+    final_fragment: bool,
+    timing: TextCallTurnTiming,
+) -> anyhow::Result<()> {
+    let existing = handle.append_turns.lock().await.remove(&turn_id);
+    let mut append_turn = if let Some(append_turn) = existing {
+        append_turn
+    } else {
+        emit_agent_turn_round_trip_span(
+            services,
+            gateway_call_id,
+            &turn_id,
+            timing,
+            Instant::now(),
+        )
+        .await;
+        let (chunking_enabled, max_chars, first_chunk_max_chars) = {
+            let guard = services.state.read().await;
+            (
+                guard.quality.config.tts.chunking_enabled,
+                guard.quality.config.tts.max_text_chunk_chars,
+                guard.quality.config.tts.first_chunk_max_chars,
+            )
+        };
+        AgentAppendTurn {
+            packer: StreamingSpeechTextPacker::new(
+                chunking_enabled,
+                max_chars,
+                first_chunk_max_chars,
+            ),
+            speech: None,
+            timing,
+        }
+    };
+
+    let chunks = append_turn.packer.push_fragment(&text, final_fragment);
+    if append_turn.speech.is_none() && !chunks.is_empty() {
+        let (speech_handle, queued) = queue_append_agent_speech_with_media_wait(
+            services,
+            gateway_call_id.to_string(),
+            chunks,
+            handle.config,
+            Some(append_turn.timing.finalized_at),
+        )
+        .await?;
+        if let Some(replaced_playback_id) = queued.replaced_playback_id.as_deref() {
+            send_replaced_playback_canceled(handle, replaced_playback_id).await?;
+        }
+        handle
+            .turns
+            .lock()
+            .await
+            .start_playback(turn_id.clone(), queued.playback_id.clone());
+        handle
+            .send(GatewayTextFrame::PlaybackStarted {
+                turn_id: turn_id.clone(),
+                sequence: handle.next_sequence(),
+            })
+            .await?;
+        spawn_playback_terminal_waiter(
+            services.clone(),
+            gateway_call_id.to_string(),
+            handle.clone(),
+            queued.playback_id.clone(),
+        );
+        if final_fragment {
+            speech_handle.finish().await?;
+        } else {
+            append_turn.speech = Some(speech_handle);
+        }
+    } else if let Some(speech) = append_turn.speech.as_ref() {
+        speech.append_chunks(chunks, final_fragment).await?;
+    } else if final_fragment {
+        handle.turns.lock().await.accept_agent_turn(&turn_id);
+        send_playback_finished(handle, turn_id.clone(), PlaybackFinishedStatus::Completed).await?;
+    }
+
+    if !final_fragment {
+        handle
+            .append_turns
+            .lock()
+            .await
+            .insert(turn_id, append_turn);
+    }
+    Ok(())
+}
+
+fn spawn_playback_terminal_waiter(
+    services: TextCallStreamServices,
+    gateway_call_id: String,
+    handle: TextCallSessionHandle,
+    playback_id: String,
+) {
+    tokio::spawn(async move {
+        if let Some(status) = wait_for_playback_terminal(
+            &services.state,
+            &handle,
+            &gateway_call_id,
+            &playback_id,
+            handle.config.playback_wait_timeout,
+        )
+        .await
+        {
+            let turn_id = handle.turns.lock().await.close_playback(&playback_id);
+            if let Some(turn_id) = turn_id {
+                let _ = send_playback_finished(&handle, turn_id, status).await;
+            }
+        }
+    });
 }
 
 async fn emit_agent_turn_round_trip_span(
@@ -564,6 +777,60 @@ async fn send_replaced_playback_canceled(
         .await?;
     }
     Ok(replaced_turn_id)
+}
+
+async fn queue_append_agent_speech_with_media_wait(
+    services: &TextCallStreamServices,
+    gateway_call_id: String,
+    initial_chunks: Vec<String>,
+    config: TextCallSessionConfig,
+    turn_finalized_at: Option<Instant>,
+) -> anyhow::Result<(speech::AppendSpeechHandle, speech::QueuedSpeech)> {
+    let media_ready_deadline = Instant::now() + config.media_ready_timeout;
+    let playback_ready_deadline = Instant::now() + config.playback_wait_timeout;
+    let conflict_policy = if config.latest_response_wins {
+        SpeechConflictPolicy::CancelAndReplace
+    } else {
+        SpeechConflictPolicy::Reject
+    };
+    let text = initial_chunks.join(" ");
+    loop {
+        match speech::queue_append_speech_with_request(
+            &services.state,
+            &services.media,
+            &services.tts,
+            SpeechQueueRequest {
+                tts_backend: LiveTtsBackend::default(),
+                gateway_call_id: gateway_call_id.clone(),
+                text: text.clone(),
+                source_label: "text-call agent.turn.partial".to_string(),
+                conflict_policy,
+                turn_finalized_at,
+            },
+            initial_chunks.clone(),
+        )
+        .await
+        {
+            Ok(queued) => return Ok(queued),
+            Err(error) => {
+                let detail = format!("{error:#}");
+                if detail.contains("media stream is not ready")
+                    && Instant::now() < media_ready_deadline
+                {
+                    time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                if !config.latest_response_wins
+                    && detail.contains("active speech job")
+                    && Instant::now() < playback_ready_deadline
+                {
+                    time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
 }
 
 async fn queue_agent_speech_with_media_wait(
@@ -802,6 +1069,11 @@ mod tests {
         ));
         assert!(matches!(
             rx.recv().await,
+            Some(GatewayTextFrame::TurnSuperseded { turn_id, superseded_by_turn_id, reason, .. })
+                if turn_id == first && superseded_by_turn_id == second && reason == "new_caller_turn"
+        ));
+        assert!(matches!(
+            rx.recv().await,
             Some(GatewayTextFrame::CallerTurn { text, .. }) if text == "second"
         ));
     }
@@ -967,6 +1239,7 @@ mod tests {
             tx,
             sequence: Arc::new(AtomicU64::new(1)),
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
+            append_turns: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
         }
     }

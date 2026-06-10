@@ -128,6 +128,13 @@ pub enum GatewayTextFrame {
         sequence: u64,
         status: PlaybackFinishedStatus,
     },
+    #[serde(rename = "turn.superseded")]
+    TurnSuperseded {
+        turn_id: String,
+        superseded_by_turn_id: String,
+        reason: String,
+        sequence: u64,
+    },
     #[serde(rename = "session.end")]
     SessionEnd { reason: String, sequence: u64 },
     #[serde(rename = "error")]
@@ -141,10 +148,21 @@ pub enum GatewayTextFrame {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AgentTextFrame {
+    #[serde(rename = "agent.turn.partial")]
+    AgentTurnPartial {
+        turn_id: String,
+        text: String,
+        #[serde(default = "default_true")]
+        append: bool,
+    },
     #[serde(rename = "agent.turn")]
     AgentTurn { turn_id: String, text: String },
     #[serde(rename = "agent.close")]
     AgentClose { reason: Option<String> },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -185,6 +203,22 @@ mod tests {
     }
 
     #[test]
+    fn app_agent_turn_partial_deserializes_with_append_default() {
+        let frame: AgentTextFrame = serde_json::from_str(
+            r#"{"type":"agent.turn.partial","turn_id":"turn-test","text":"hello"}"#,
+        )
+        .expect("partial frame deserializes");
+        assert_eq!(
+            frame,
+            AgentTextFrame::AgentTurnPartial {
+                turn_id: "turn-test".to_string(),
+                text: "hello".to_string(),
+                append: true,
+            }
+        );
+    }
+
+    #[test]
     fn playback_finished_serializes_terminal_status() {
         let frame = GatewayTextFrame::PlaybackFinished {
             turn_id: "turn-test".to_string(),
@@ -196,5 +230,21 @@ mod tests {
         assert_eq!(encoded["turn_id"], "turn-test");
         assert_eq!(encoded["sequence"], 3);
         assert_eq!(encoded["status"], "canceled");
+    }
+
+    #[test]
+    fn turn_superseded_serializes_as_control_frame() {
+        let frame = GatewayTextFrame::TurnSuperseded {
+            turn_id: "turn-old".to_string(),
+            superseded_by_turn_id: "turn-new".to_string(),
+            reason: "new_caller_turn".to_string(),
+            sequence: 7,
+        };
+        let encoded = serde_json::to_value(frame).expect("frame serializes");
+        assert_eq!(encoded["type"], "turn.superseded");
+        assert_eq!(encoded["turn_id"], "turn-old");
+        assert_eq!(encoded["superseded_by_turn_id"], "turn-new");
+        assert_eq!(encoded["reason"], "new_caller_turn");
+        assert_eq!(encoded["sequence"], 7);
     }
 }
