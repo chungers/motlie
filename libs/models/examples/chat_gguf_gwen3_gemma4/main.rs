@@ -27,15 +27,15 @@ mod gguf_example {
     feature = "model-gemma4-12b-qat-q4-0-gguf",
 ))]
 mod gguf_example {
-    use anyhow::{Context, Result, bail};
+    use anyhow::{bail, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, BundleId, ChatMessage, ChatModel, ChatRequest, ChatRole,
         CompletionModel, GenerationParams, QuantizationBits, StartOptions, ThinkingMode,
     };
     use motlie_model_llama_cpp::LlamaCppTextSpec;
     use motlie_models::{
-        BundleDescriptor, CuratedBundle, ModelSelector, chat::ChatModels, default_artifact_root,
-        quantization_label_gguf,
+        chat::ChatModels, default_artifact_root, quantization_label_gguf, BundleDescriptor,
+        CuratedBundle, ModelSelector,
     };
     use std::time::Instant;
 

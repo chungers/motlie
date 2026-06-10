@@ -41,13 +41,13 @@ mod bench_chat_example {
     feature = "model-gemma4-12b-qat-q4-0-gguf",
 ))]
 mod bench_chat_example {
-    use anyhow::{Context, Result, bail};
+    use anyhow::{bail, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole,
         QuantizationBits, StartOptions,
     };
     use motlie_models::{
-        CuratedBundle, default_artifact_root, quantization_label_gguf, quantization_label_isq,
+        default_artifact_root, quantization_label_gguf, quantization_label_isq, CuratedBundle,
     };
     use std::time::Instant;
 
@@ -286,7 +286,7 @@ mod bench_chat_example {
     }
 
     fn current_rss_mib() -> f64 {
-        use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+        use sysinfo::{get_current_pid, ProcessesToUpdate, System};
         let pid = match get_current_pid() {
             Ok(pid) => pid,
             Err(_) => return 0.0,

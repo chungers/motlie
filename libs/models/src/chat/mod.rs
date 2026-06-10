@@ -35,7 +35,7 @@ use crate::{BundleFamily, BundleRequirements, PlatformConstraint};
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
 ))]
-use motlie_model::BundleId;
+use motlie_model::eval::EvalTrack;
 #[cfg(any(
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
@@ -47,7 +47,7 @@ use motlie_model::BundleId;
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
 ))]
-use motlie_model::eval::EvalTrack;
+use motlie_model::BundleId;
 
 pub const QWEN3_4B_SELECTOR: &str = "qwen/qwen3_4b";
 pub const GEMMA4_E2B_SELECTOR: &str = "google/gemma4_e2b";

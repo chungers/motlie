@@ -14,15 +14,15 @@ mod gemma4_multimodal_example {
 #[cfg(any(feature = "model-gemma4-e2b", feature = "model-gemma4-e4b",))]
 mod gemma4_multimodal_example {
 
-    use anyhow::{Context, Result, bail, ensure};
+    use anyhow::{bail, ensure, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart,
         QuantizationBits, StartOptions,
     };
     use motlie_model_mistral::MistralMultimodalSpec;
     use motlie_models::{
-        BundleDescriptor, CuratedBundle, chat::ChatModels, default_artifact_root,
-        quantization_label_isq,
+        chat::ChatModels, default_artifact_root, quantization_label_isq, BundleDescriptor,
+        CuratedBundle,
     };
     use std::path::{Path, PathBuf};
     use std::time::Instant;

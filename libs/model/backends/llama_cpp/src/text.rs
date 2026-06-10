@@ -19,11 +19,12 @@ use motlie_model::{
     ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
     ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::common::{
-    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
-    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
+    TextMetricState,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];

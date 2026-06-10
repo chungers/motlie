@@ -12,15 +12,13 @@ path = "src/lib.rs"
 
 [features]
 default = []
-cuda = ["motlie-model-ort/cuda", "ort/cuda"]
+# Upstream sherpa-onnx currently publishes CPU static archives through the Rust crate.
+cuda = []
 
 [dependencies]
 async-trait = "0.1.89"
-kaldi-native-fbank = "0.1.0"
 motlie-model = { path = "../..", features = ["metrics-runtime"] }
-motlie-model-ort = { path = "../ort" }
-ndarray = "0.17"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray"] }
+sherpa-onnx = "1.13.2"
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"
 
