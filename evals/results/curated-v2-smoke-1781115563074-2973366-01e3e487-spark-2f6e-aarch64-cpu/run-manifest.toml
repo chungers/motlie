@@ -1,0 +1,7 @@
+snapshot_id = "curated-v2-smoke"
+run_id = "curated-v2-smoke-1781115563074-2973366-01e3e487-spark-2f6e-aarch64-cpu"
+profile = "local-cpu-aarch64"
+host = "spark-2f6e"
+arch = "aarch64"
+command_arg_count = 8
+hf_token_present = true
