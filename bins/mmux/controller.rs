@@ -505,6 +505,9 @@ pub(crate) async fn handle_key(
         (KeyCode::Char('g'), _) if app.layout.focus == Focus::List => {
             toggle_session_grouping(fleet, app).await?;
         }
+        (KeyCode::Char('s'), _) if app.layout.focus == Focus::List => {
+            sort_sessions_by_name(fleet, app).await?;
+        }
         (KeyCode::Char('n'), _) => {
             app.modal = Some(new_session_modal_state(fleet, app));
         }
@@ -745,6 +748,23 @@ async fn toggle_session_grouping(fleet: &HostFleet, app: &mut AppState) -> Resul
     }
     app.status = StatusBanner::info(match mode {
         SessionSortMode::Activity => "sort: activity",
+        SessionSortMode::Name => "sort: name",
+        SessionSortMode::TagGroup => "group: tag",
+    });
+    Ok(())
+}
+
+async fn sort_sessions_by_name(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
+    let previous = current_selection_key(app);
+    let mode = app.session_list.sort_by_name();
+    app.session_list.resort(fleet);
+    app.session_list.select_first();
+    if previous != current_selection_key(app) {
+        refresh_selected_detail(fleet, app).await?;
+    }
+    app.status = StatusBanner::info(match mode {
+        SessionSortMode::Activity => "sort: activity",
+        SessionSortMode::Name => "sort: name",
         SessionSortMode::TagGroup => "group: tag",
     });
     Ok(())

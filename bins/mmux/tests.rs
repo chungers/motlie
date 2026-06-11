@@ -856,6 +856,25 @@ fn activity_sort_is_stable_within_visible_recency_bucket() {
 }
 
 #[test]
+fn session_list_sorts_by_session_name() {
+    let mut app = AppState::new(LayoutMode::Normal);
+
+    app.session_list.set_rows_sorted_by_name(vec![
+        make_row_at(session_with_times("zeta", "$1", 10, 300), 1_000),
+        make_row_at(session_with_times("alpha", "$2", 20, 100), 1_000),
+        make_row_at(session_with_times("beta", "$3", 30, 200), 1_000),
+    ]);
+
+    let names = app
+        .session_list
+        .rows
+        .iter()
+        .map(|row| row.session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["alpha", "beta", "zeta"]);
+}
+
+#[test]
 fn session_list_tag_group_orders_groups_by_recent_activity() {
     let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
@@ -1043,6 +1062,61 @@ async fn g_toggles_tag_grouping_from_list_focus_and_selects_top_row() {
         app.selected_session()
             .map(|session| session.name().to_string()),
         Some("other".to_string())
+    );
+}
+
+#[tokio::test]
+async fn s_sorts_sessions_by_name_from_list_focus_and_selects_top_row() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.session_list.rows = vec![
+        make_row_at(session_with_times("zeta", "$1", 10, 300), 1_000),
+        make_row_at(session_with_times("alpha", "$2", 20, 100), 1_000),
+        make_row_at(session_with_times("beta", "$3", 30, 200), 1_000),
+    ];
+    app.session_list.selected = 0;
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta", "alpha", "beta"]
+    );
+
+    app.layout.focus = Focus::List;
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Name);
+    assert_eq!(app.status.text(), "sort: name");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta", "zeta"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("alpha".to_string())
     );
 }
 
@@ -1784,6 +1858,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains("  m modify focused tag"));
     assert!(body.contains("  x unset focused tag"));
     assert!(body.contains("  c toggle sort tag"));
+    assert!(body.contains("s sort sessions by name (list pane)"));
     assert!(!body.contains("PgUp/PgDn page current pane"));
     assert!(!body.contains("Home/End jump current pane"));
     assert!(body.contains(&format!("Version: {}", env!("CARGO_PKG_VERSION"))));

@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-11 | @mstream453-impl | Added `SessionSortMode::Name` for list-pane `s` sorting and Help shortcut coverage. |
 | 2026-05-20 | @codex | Added `Cli.alias` and host-label override behavior so mmux can display operator-provided labels without changing host routing identity. |
 | 2026-05-16 | @codex-tmux-tl | Added insertion-point cursor state for mmux modal text fields so focused Left/Right edit inside the field, with single-line and wrapped Send Keys rendering keeping the terminal cursor aligned. |
 | 2026-05-03 | @codex | Added `SendKeys` modal state and documented the `s` send-keys flow through `Target::send_keys`. |
@@ -333,10 +334,12 @@ values before rows without a displayed tag. Tag groups are ordered by the most
 recent activity in each group, and rows within a group then sort by activity
 time, host order, and session name. Empty checked-tag values sort with rows that
 have no displayed tag. The `g` toggle selects the first row in the new order;
-pressing `g` again restores `SessionSortMode::Activity`. `preserve_selection()` re-finds
-the highlighted row by stable session id after refreshes. A single quiet
-one-second `list_sessions()` refresh keeps the active ordering current and
-notices structural session changes. Recency text is observer-relative
+pressing `g` again restores `SessionSortMode::Activity`. Pressing `s` with the
+list focused selects `SessionSortMode::Name`, sorts by session name, and selects
+the first row in name order. `preserve_selection()` re-finds the highlighted row
+by stable session id after refreshes. A single quiet one-second
+`list_sessions()` refresh keeps the active ordering current and notices
+structural session changes. Recency text is observer-relative
 for the activity column (`local_now − activity_observed_at_local`) and
 `local_now − session.created` for the age column under an NTP-synced
 clock assumption — see `DESIGN.md` §Clock Handling for the rationale.

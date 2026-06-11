@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-11 | @mstream453-impl | Added list-pane `s` name sorting and documented the Help shortcut. |
 | 2026-05-30 | @codex | Added the local macOS release-build install sequence, including re-signing `/usr/local/bin/mmux` before ForceCommand use. |
 | 2026-05-28 | @gpt55-342-og | Removed positional `--alias` overrides; SSH targets now use endpoint identity labels including user, host, non-default port, and non-default tmux socket. |
 | 2026-05-20 | @codex | Added `--alias` host-label overrides for the top status host legend, with positional mapping across localhost and SSH URI targets and empty-entry fallback to discovered labels. |
@@ -303,6 +304,7 @@ Main-view keys:
 | `r` | Open Rename Session modal | No-op |
 | `t` | Open Session Tags modal | Open Session Tags modal |
 | `g` | Toggle activity/tag grouping | No-op |
+| `s` | Sort sessions by name | No-op |
 | `h` | Open Help modal | Open Help modal |
 | `a` | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach |
@@ -335,7 +337,9 @@ one, tag groups are ordered by the most recent activity in each group, and rows
 inside each group are ordered by activity time, host order, and session name.
 Empty checked-tag values are treated like no displayed tag. The toggle selects
 the first row in the new order so the grouped top is visible immediately.
-Pressing `g` again restores activity sort. The recency column is formatted as
+Pressing `g` again restores activity sort. Pressing `s` while the list pane is
+focused sorts sessions by session name and selects the first row in name order.
+The recency column is formatted as
 `  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`
 advance — so it is immune to operator-vs-host clock skew. The right value
