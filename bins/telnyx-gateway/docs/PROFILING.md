@@ -17,9 +17,10 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-11 | @codex-366-impl | Captured live-call quality fixes: effective two-chunk prebuffer for multi-chunk TTS, deterministic assistant-echo transcript suppression before `caller.turn`, text-call ownership gating for manual `speak`, and call/TUI diagnostics for first-audio, buffer, underrun, and echo-suppression counters. |
+| 2026-06-11 PDT | @codex-366-impl | Captured live-call audio stabilization for PR #464: live TTS synthesis is isolated onto blocking threads, chunked TTS uses the two-chunk prebuffer default for smoother playback, and smoke-test enablement turns barge-in off for deterministic echo validation. |
+| 2026-06-11 | @codex-366-impl | Captured live-call quality fixes: deterministic assistant-echo transcript suppression before `caller.turn`, text-call ownership gating for manual `speak`, and call/TUI diagnostics for first-audio, buffer, underrun, and echo-suppression counters. |
 | 2026-06-09 | @codex-m6-ds-rv | Resolved #427 pluggability follow-up: separated generic handler dispatch from smoke final coalescing, added `tts.first_chunk_max_chars` for sentence-boundary first-audio ramp experiments, and documented streaming-agent partial/voice-response contract notes. |
-| 2026-06-09 | @codex-m6-ds-rv | Resolved #427 review: smoke-test final coalescing is handler-local and keyed by the ASR-session config snapshot, ASR finish padding is a separate `asr.finish_pad_ms` knob, first-audio critical-path spans include handler/TTS time, and smoke-test mode no longer mutates global barge-in. |
+| 2026-06-09 | @codex-m6-ds-rv | Resolved #427 review: smoke-test final coalescing is handler-local and keyed by the ASR-session config snapshot, ASR finish padding is a separate `asr.finish_pad_ms` knob, and first-audio critical-path spans include handler/TTS time. |
 | 2026-06-09 | @codex-m6-ds-rv | Updated live-call tuned defaults and TTS chunking guidance after M6 smoke-call trials: 650 ms endpoint tail, stricter speech gate, 90-char sentence-packed TTS chunks, and one-chunk prebuffer. |
 | 2026-06-09 | @codex-367-design | Added M6 gap implementation notes: deferred ASR/TTS/media/barge-in spans, inbound/outbound transport rollups, live call-bound tuning commands, and operator TUI command-history recall through `motlie-driver::HistoryBuffer`. |
 | 2026-06-08 | @codex-367-design | Revised after the first M6 review pass: added call-level config snapshots, monotonic/non-blocking span emission, critical-path latency accounting, pre-turn ASR join keys, privacy defaults, typed config validation, existing line-oriented socket reuse, normalized artifacts, and judge reproducibility requirements. |
@@ -886,7 +887,7 @@ Prompt requirements:
 | Replay ASR | `--trailing-silence-pad-ms` | CLI implemented | `800` | finalization behavior |
 | ASR backend | `--backend`, `asr use` | CLI/REPL implemented | selected backend | backend comparison |
 | Codec eval | `--codec` in golden A/B | CLI implemented | selected matrix | Telnyx format comparison |
-| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` | interruption realism |
+| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` for normal conversation; smoke-test enablement sets `off` | interruption realism vs deterministic echo validation |
 | Text-call | `quality text-call max-active-turns <n>` | REPL/socket/TUI implemented | `32` | runaway app-agent lag |
 | Text-call | `quality text-call media-ready-timeout-ms <ms>` | REPL/socket/TUI implemented | `20000 ms` | setup reliability |
 | Text-call | `quality text-call playback-wait-timeout-ms <ms>` | REPL/socket/TUI implemented | `180000 ms` | hung playback detection |
