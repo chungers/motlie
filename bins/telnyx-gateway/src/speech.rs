@@ -36,6 +36,7 @@ pub struct SpeechQueueRequest {
     pub source_label: String,
     pub conflict_policy: SpeechConflictPolicy,
     pub turn_finalized_at: Option<Instant>,
+    pub turn_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +102,7 @@ pub async fn queue_speech(
             source_label: source_label.to_string(),
             conflict_policy: SpeechConflictPolicy::Reject,
             turn_finalized_at: None,
+            turn_id: None,
         },
     )
     .await
@@ -119,6 +121,7 @@ pub async fn queue_speech_with_request(
         source_label,
         conflict_policy,
         turn_finalized_at,
+        turn_id,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
@@ -207,6 +210,7 @@ pub async fn queue_speech_with_request(
         tts_prebuffer_chunks,
         request_started_at,
         turn_finalized_at,
+        turn_id,
         cancel,
     };
     tokio::spawn(async move {
@@ -236,6 +240,7 @@ pub async fn queue_append_speech_with_request(
         source_label,
         conflict_policy,
         turn_finalized_at,
+        turn_id,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
@@ -328,6 +333,7 @@ pub async fn queue_append_speech_with_request(
             tts_prebuffer_chunks,
             request_started_at,
             turn_finalized_at,
+            turn_id,
             cancel,
         },
         rx,
@@ -401,6 +407,7 @@ struct SpeechJob {
     tts_prebuffer_chunks: usize,
     request_started_at: Instant,
     turn_finalized_at: Option<Instant>,
+    turn_id: Option<String>,
     cancel: SpeechCancelToken,
 }
 
@@ -1214,6 +1221,7 @@ async fn enqueue_prepared_chunks(
                 redaction_mode: job.quality_redaction_mode,
                 request_started_at: job.request_started_at,
                 turn_finalized_at: job.turn_finalized_at,
+                turn_id: job.turn_id.clone(),
                 queued_at: Instant::now(),
                 first_for_playback: *first_packet_for_playback,
             };
@@ -1709,6 +1717,7 @@ mod tests {
                 source_label: "test end".to_string(),
                 conflict_policy: SpeechConflictPolicy::Reject,
                 turn_finalized_at: None,
+                turn_id: None,
             },
         )
         .await
@@ -1813,6 +1822,7 @@ mod tests {
                 source_label: "test replace".to_string(),
                 conflict_policy: SpeechConflictPolicy::CancelAndReplace,
                 turn_finalized_at: None,
+                turn_id: None,
             },
         )
         .await

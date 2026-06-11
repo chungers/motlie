@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 |---|---|---|
 | 2026-06-10 | @codex-m6-ds-rv | Added live-call evidence, qualitative transcript notes, latency budget analysis, and scoped fix plan for issue 457. |
+| 2026-06-10 | @codex-m6-ds-rv | Added round-1 review dispositions: quality joins, stale ASR partial fix, endpoint-gate diagnostics, text-call backend routing, terminal-call conversation status, and non-closing issue status. |
 
 ## Context
 
@@ -77,7 +78,8 @@ Assessment:
 - TTS first-audio responsiveness is materially better after switching conversation replies to Piper.
 - Endpointing/final ASR text is now the primary UX blocker.
 - The issue is intermittent: some later turns were sufficiently complete, but short turns and tail words are still clipped.
-- The current logs do not yet distinguish whether tail loss came from media/audio capture, local endpoint timing, ASR finalization, or final-turn selection.
+- Round-1 review added endpoint-gate diagnostics so the next run can distinguish gate-suppressed tail frames from ASR finalize/flush loss.
+- This PR does not claim endpoint clipping is fully fixed; it makes the live failure mode joinable and measurable, and keeps #457 open for the remaining endpointing/default-tuning work.
 
 ## Agent Latency Budget
 
@@ -133,7 +135,8 @@ Immediate code fixes:
    - whether the emitted caller turn used the ASR final or a conservative partial extension
 
 2. Conservatively reconcile final text with the latest partial:
-   - only use the partial when it is a strict normalized extension of the final in the same call state
+   - only use the partial when it is a strict normalized extension of the final in the same ASR finish batch
+   - normalize case and trailing final punctuation for prefix comparison only
    - otherwise keep the backend final unchanged and log the divergence
 
 3. Increase ASR final-flush evidence:
@@ -147,8 +150,31 @@ Immediate code fixes:
 Implemented in this pass:
 
 - Added `asr.final_text_reconciliation` trace/quality-span diagnostics with `asr_session_id`, `utterance_id`, selected source, char counts, word counts, common-prefix count, strict-extension flag, and tail-word length.
-- Reconciled final ASR text only when the latest partial is a strict normalized extension of the final; divergent partials leave the ASR final unchanged.
-- Added regression tests for strict-extension replacement and divergent-partial preservation.
+- Reconciled final ASR text only when the current ASR finish batch contains a latest partial that is a strict normalized extension of the final; stale call-wide partials are not used.
+- Added endpoint-gate payload fields to `asr.endpoint_wait`: `suppressed_tail_frames`, `low_energy_run_ms`, endpoint-frame RMS/peak, last-speech RMS/peak, and configured thresholds.
+- Added local conversation/smoke quality join records when no text-call session exists: `text_call.caller_turn.sent`, `asr.turn_mapped`, and `turn_id` on first-audio playback spans.
+- Routed text-call agent speech through the same selected gateway conversation TTS backend so the Piper selection applies to real agent-path replies as well as smoke/conversation replies.
+- Guarded normal terminal-call races so a queued/deferred conversation response after hangup does not mark the conversation as failed.
+- Added regression tests for strict-extension replacement, punctuation/case-normalized comparison, divergent-partial preservation, stale-partial isolation, local smoke join records, endpoint-gate metrics, and terminal-call queue failure classification.
+
+## Round-1 Review Dispositions
+
+| Problem | Disposition |
+|---|---|
+| 1. Selected TTS backend ignored by conversation replies | Fixed. Smoke/conversation replies and text-call agent replies now use the selected gateway conversation TTS backend at queue time. |
+| 2. Choppy/slow TTS | Fixed for the observed root cause. The live run showed Piper first-audio around 227 ms average once routing was corrected; no pacing/prebuffer surgery was needed. |
+| 3. Kokoro CPU RTF dominates first response | Fixed by routing selected Piper for conversation and agent-path replies; warmup remains operator-controlled. |
+| 4. Runtime pane/operator visibility | Fixed in the earlier #457 pass; selected conversation backend and warm status are visible. |
+| 5. Duplex/smoke self-echo policy | Not fixed as UX behavior in this PR. This remains an evaluation limitation of the smoke harness, not the target agent contract. The issue stays open. |
+| 6. ASR tail clipping/root cause | Partially fixed and data-gated. Stale partial use is fixed, conservative same-batch reconciliation is safer, and endpoint-gate diagnostics were added. The documented clipped examples are not claimed fixed until a follow-up run proves the gate/ASR cause and tuned defaults. |
+| 7. Endpoint debounce/defaults | Data-gated. Current 650 ms tail remains unchanged; new gate metrics decide whether to tune thresholds/hysteresis next. |
+| 8. Smoke long self-echo dominates playback | Documented as smoke-harness behavior. Real streaming-agent path should speak short semantic clauses rather than echo full transcripts. |
+| 9. Smoke-only quality joins absent | Fixed. Non-text-call conversation turns emit joinable local turn records with ASR session/utterance IDs and playback spans carry `turn_id`. |
+| 10. Transcript text privacy | Preserved. Transcript text remains opt-in; live run explicitly enabled it. |
+| 11. Normal hangup marks failed | Fixed for both speech-job media-close and conversation queue/deferred hangup races. |
+| 12. Live-test report | Fixed. This document captures quantitative metrics, qualitative transcript feedback, remaining gaps, and non-closing issue status. |
+
+The debug/agent socket streaming protocol is not part of this PR. It is tracked separately in #460.
 
 Regression watch:
 

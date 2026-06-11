@@ -14,7 +14,9 @@ use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
-use crate::operator::state::{ConversationMode, LogLevel, QualitySpanEmission, SharedState};
+use crate::operator::state::{
+    CallStatus, ConversationMode, LogLevel, QualitySpanEmission, SharedState,
+};
 use crate::quality::{BargeInQualityConfig, RedactionMode, VoiceQualityConfig};
 use crate::speech;
 use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
@@ -123,6 +125,7 @@ struct SmokeTestFinalInput {
     quality_config: Option<VoiceQualityConfig>,
     final_transcript_at: Instant,
     debounce: Duration,
+    turn_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +134,13 @@ struct PendingSmokeTestFinal {
     quality_config: Option<VoiceQualityConfig>,
     final_transcript_at: Instant,
     generation: u64,
+    turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ConversationTurnContext {
+    finalized_at: Option<Instant>,
+    turn_id: Option<String>,
 }
 
 pub fn default_conversation_handler() -> SharedConversationHandler {
@@ -167,6 +177,27 @@ pub async fn handle_transcript_event(
     gateway_call_id: &str,
     event: TranscriptEvent,
     quality_config: Option<&VoiceQualityConfig>,
+) -> anyhow::Result<()> {
+    handle_transcript_event_with_turn(
+        state,
+        media_registry,
+        runtime,
+        gateway_call_id,
+        event,
+        quality_config,
+        None,
+    )
+    .await
+}
+
+pub async fn handle_transcript_event_with_turn(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    event: TranscriptEvent,
+    quality_config: Option<&VoiceQualityConfig>,
+    turn_id: Option<&str>,
 ) -> anyhow::Result<()> {
     let transcript_text = event.text().trim().to_string();
     if transcript_text.is_empty() {
@@ -237,7 +268,10 @@ pub async fn handle_transcript_event(
             gateway_call_id,
             event,
             quality_config.as_ref(),
-            final_transcript_at,
+            ConversationTurnContext {
+                finalized_at: Some(final_transcript_at),
+                turn_id: turn_id.map(str::to_string),
+            },
         )
         .await;
     }
@@ -252,6 +286,7 @@ pub async fn handle_transcript_event(
             quality_config,
             final_transcript_at,
             debounce: Duration::from_millis(snapshot.endpoint_merge_window_ms),
+            turn_id: turn_id.map(str::to_string),
         },
     )
     .await;
@@ -281,6 +316,7 @@ async fn schedule_smoke_test_final(
                 quality_config: input.quality_config.clone(),
                 final_transcript_at: input.final_transcript_at,
                 generation: 0,
+                turn_id: input.turn_id.clone(),
             });
         if entry.generation == 0 {
             entry.event = input.event;
@@ -289,6 +325,9 @@ async fn schedule_smoke_test_final(
         }
         if entry.quality_config.is_none() {
             entry.quality_config = input.quality_config;
+        }
+        if entry.turn_id.is_none() {
+            entry.turn_id = input.turn_id;
         }
         entry.generation = entry.generation.saturating_add(1);
         entry.generation
@@ -317,7 +356,10 @@ async fn schedule_smoke_test_final(
             &gateway_call_id,
             pending.event,
             pending.quality_config.as_ref(),
-            pending.final_transcript_at,
+            ConversationTurnContext {
+                finalized_at: Some(pending.final_transcript_at),
+                turn_id: pending.turn_id,
+            },
         )
         .await
         {
@@ -410,7 +452,7 @@ async fn dispatch_final_transcript_to_handler(
     gateway_call_id: &str,
     event: TranscriptEvent,
     quality_config: Option<&VoiceQualityConfig>,
-    final_transcript_at: Instant,
+    turn_context: ConversationTurnContext,
 ) -> anyhow::Result<()> {
     if !runtime.handler_enabled() {
         return Ok(());
@@ -454,7 +496,7 @@ async fn dispatch_final_transcript_to_handler(
             barge_in: snapshot.barge_in,
         },
         command,
-        Some(final_transcript_at),
+        turn_context,
     )
     .await
 }
@@ -689,7 +731,7 @@ async fn apply_conversation_command(
         gateway_call_id,
         target,
         command,
-        None,
+        ConversationTurnContext::default(),
     )
     .await
 }
@@ -701,7 +743,7 @@ async fn apply_conversation_command_with_timing(
     gateway_call_id: &str,
     target: ConversationCommandTarget,
     command: ConversationCommand,
-    turn_finalized_at: Option<Instant>,
+    turn_context: ConversationTurnContext,
 ) -> anyhow::Result<()> {
     match command {
         ConversationCommand::Noop => {
@@ -749,7 +791,7 @@ async fn apply_conversation_command_with_timing(
                             runtime,
                             gateway_call_id,
                             response_text,
-                            turn_finalized_at,
+                            turn_context.clone(),
                         )
                         .await;
                         return Ok(());
@@ -761,7 +803,7 @@ async fn apply_conversation_command_with_timing(
                         gateway_call_id,
                         response_text,
                         SpeechConflictPolicy::CancelAndReplace,
-                        turn_finalized_at,
+                        turn_context.clone(),
                     )
                     .await;
                     Ok(())
@@ -801,7 +843,7 @@ async fn spawn_deferred_conversation_say(
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
     response_text: String,
-    turn_finalized_at: Option<Instant>,
+    turn_context: ConversationTurnContext,
 ) {
     let generation = next_deferred_say_generation(runtime, gateway_call_id).await;
     let state = state.clone();
@@ -816,7 +858,7 @@ async fn spawn_deferred_conversation_say(
             &gateway_call_id,
             generation,
             response_text,
-            turn_finalized_at,
+            turn_context,
         )
         .await;
     });
@@ -864,7 +906,7 @@ async fn wait_and_queue_deferred_conversation_say(
     gateway_call_id: &str,
     generation: u64,
     response_text: String,
-    turn_finalized_at: Option<Instant>,
+    turn_context: ConversationTurnContext,
 ) {
     let timeout_ms = state
         .read()
@@ -891,10 +933,16 @@ async fn wait_and_queue_deferred_conversation_say(
             let error = format!(
                 "deferred conversation response timed out after {timeout_ms}ms waiting for active playback"
             );
-            state
-                .write()
-                .await
-                .record_conversation_failed(gateway_call_id, error.clone());
+            if record_conversation_failed_unless_terminal(
+                state,
+                gateway_call_id,
+                error.clone(),
+                "conversation.say.deferred_timeout_after_call_end",
+            )
+            .await
+            {
+                return;
+            }
             tracing::warn!(gateway_call_id, error, "conversation.say.deferred_timeout");
             return;
         }
@@ -916,7 +964,7 @@ async fn wait_and_queue_deferred_conversation_say(
         gateway_call_id,
         response_text,
         SpeechConflictPolicy::Reject,
-        turn_finalized_at,
+        turn_context,
     )
     .await;
 }
@@ -928,7 +976,7 @@ async fn queue_conversation_speech(
     gateway_call_id: &str,
     response_text: String,
     conflict_policy: SpeechConflictPolicy,
-    turn_finalized_at: Option<Instant>,
+    turn_context: ConversationTurnContext,
 ) {
     let tts_backend = state.read().await.conversation_tts_backend;
     let queued = speech::queue_speech_with_request(
@@ -941,7 +989,8 @@ async fn queue_conversation_speech(
             text: response_text.clone(),
             source_label: "conversation say".to_string(),
             conflict_policy,
-            turn_finalized_at,
+            turn_finalized_at: turn_context.finalized_at,
+            turn_id: turn_context.turn_id,
         },
     )
     .await
@@ -969,12 +1018,49 @@ async fn queue_conversation_speech(
         }
         Err(error) => {
             let error = format!("{error:#}");
+            if record_conversation_failed_unless_terminal(
+                state,
+                gateway_call_id,
+                error.clone(),
+                "conversation.say.canceled_after_call_end",
+            )
+            .await
+            {
+                return;
+            }
+            tracing::warn!(gateway_call_id, error, "conversation.say.failed");
+        }
+    }
+}
+
+async fn record_conversation_failed_unless_terminal(
+    state: &SharedState,
+    gateway_call_id: &str,
+    error: String,
+    terminal_event: &'static str,
+) -> bool {
+    let call_status = {
+        let guard = state.read().await;
+        guard.calls.get(gateway_call_id).map(|call| call.status)
+    };
+    if matches!(
+        call_status,
+        None | Some(CallStatus::Ended | CallStatus::Failed)
+    ) {
+        if matches!(call_status, Some(CallStatus::Ended)) {
             state
                 .write()
                 .await
-                .record_conversation_failed(gateway_call_id, error.clone());
-            tracing::warn!(gateway_call_id, error, "conversation.say.failed");
+                .record_conversation_idle(gateway_call_id);
         }
+        tracing::info!(gateway_call_id, error, terminal_event);
+        true
+    } else {
+        state
+            .write()
+            .await
+            .record_conversation_failed(gateway_call_id, error);
+        false
     }
 }
 
@@ -1678,6 +1764,40 @@ mod tests {
             call.conversation.last_assistant_text.as_deref(),
             Some("I heard: hello there")
         );
+    }
+
+    #[tokio::test]
+    async fn queue_failure_after_call_end_does_not_mark_conversation_failed() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        state
+            .write()
+            .await
+            .calls
+            .get_mut(&gateway_call_id)
+            .unwrap()
+            .status = CallStatus::Ended;
+        let runtime = test_runtime_with_tts();
+
+        queue_conversation_speech(
+            &state,
+            &SharedMediaRegistry::default(),
+            &runtime,
+            &gateway_call_id,
+            "normal hangup race".to_string(),
+            SpeechConflictPolicy::Reject,
+            ConversationTurnContext {
+                finalized_at: None,
+                turn_id: Some("turn_test".to_string()),
+            },
+        )
+        .await;
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.status, CallStatus::Ended);
+        assert_ne!(call.conversation.status, ConversationStatus::Failed);
+        assert!(call.conversation.last_error.is_none());
     }
 
     #[tokio::test]

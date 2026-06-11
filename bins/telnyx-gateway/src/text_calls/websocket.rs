@@ -15,7 +15,7 @@ use crate::media::SharedMediaRegistry;
 use crate::operator::state::{CallStatus, LogLevel, SharedState, TtsPlaybackStatus};
 use crate::quality::TextCallQualityConfig;
 use crate::speech::{self, SpeechConflictPolicy, SpeechQueueRequest};
-use crate::tts::{LiveTtsBackend, SharedTtsRegistry, StreamingSpeechTextPacker};
+use crate::tts::{SharedTtsRegistry, StreamingSpeechTextPacker};
 
 use super::offers::validate_call_url;
 use super::turns::{
@@ -597,6 +597,7 @@ async fn handle_agent_message(
                 text,
                 handle.config,
                 Some(timing.finalized_at),
+                Some(turn_id.clone()),
             )
             .await?;
             if let Some(replaced_playback_id) = queued.replaced_playback_id.as_deref() {
@@ -682,6 +683,7 @@ async fn process_agent_turn_fragment(
             chunks,
             handle.config,
             Some(append_turn.timing.finalized_at),
+            Some(turn_id.clone()),
         )
         .await?;
         if let Some(replaced_playback_id) = queued.replaced_playback_id.as_deref() {
@@ -871,6 +873,7 @@ async fn queue_append_agent_speech_with_media_wait(
     initial_chunks: Vec<String>,
     config: TextCallSessionConfig,
     turn_finalized_at: Option<Instant>,
+    turn_id: Option<String>,
 ) -> anyhow::Result<(speech::AppendSpeechHandle, speech::QueuedSpeech)> {
     let media_ready_deadline = Instant::now() + config.media_ready_timeout;
     let playback_ready_deadline = Instant::now() + config.playback_wait_timeout;
@@ -880,18 +883,20 @@ async fn queue_append_agent_speech_with_media_wait(
         SpeechConflictPolicy::Reject
     };
     let text = initial_chunks.join(" ");
+    let tts_backend = services.state.read().await.conversation_tts_backend;
     loop {
         match speech::queue_append_speech_with_request(
             &services.state,
             &services.media,
             &services.tts,
             SpeechQueueRequest {
-                tts_backend: LiveTtsBackend::default(),
+                tts_backend,
                 gateway_call_id: gateway_call_id.clone(),
                 text: text.clone(),
                 source_label: "text-call agent.turn.partial".to_string(),
                 conflict_policy,
                 turn_finalized_at,
+                turn_id: turn_id.clone(),
             },
             initial_chunks.clone(),
         )
@@ -925,6 +930,7 @@ async fn queue_agent_speech_with_media_wait(
     text: String,
     config: TextCallSessionConfig,
     turn_finalized_at: Option<Instant>,
+    turn_id: Option<String>,
 ) -> anyhow::Result<speech::QueuedSpeech> {
     let media_ready_deadline = Instant::now() + config.media_ready_timeout;
     let playback_ready_deadline = Instant::now() + config.playback_wait_timeout;
@@ -933,18 +939,20 @@ async fn queue_agent_speech_with_media_wait(
     } else {
         SpeechConflictPolicy::Reject
     };
+    let tts_backend = services.state.read().await.conversation_tts_backend;
     loop {
         match speech::queue_speech_with_request(
             &services.state,
             &services.media,
             &services.tts,
             SpeechQueueRequest {
-                tts_backend: LiveTtsBackend::default(),
+                tts_backend,
                 gateway_call_id: gateway_call_id.clone(),
                 text: text.clone(),
                 source_label: "text-call agent.turn".to_string(),
                 conflict_policy,
                 turn_finalized_at,
+                turn_id: turn_id.clone(),
             },
         )
         .await
@@ -980,9 +988,15 @@ pub async fn queue_fallback_and_wait(
         let guard = services.state.read().await;
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
-    let queued =
-        queue_agent_speech_with_media_wait(services, gateway_call_id.clone(), text, config, None)
-            .await?;
+    let queued = queue_agent_speech_with_media_wait(
+        services,
+        gateway_call_id.clone(),
+        text,
+        config,
+        None,
+        None,
+    )
+    .await?;
     wait_for_playback_terminal_without_turn(
         &services.state,
         &gateway_call_id,
