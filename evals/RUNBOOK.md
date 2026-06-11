@@ -52,6 +52,20 @@ failures.
 records only token presence as a boolean and must never log or serialize the
 token value.
 
+## General process (David, 2026-06-11 — the standing model for eval cycles)
+1. **All cycle work merges into the `evals/<cycle>` branch first** — framework code, per-host results PRs, fixes, the coverage-report PR. The branch is the coordination + data substrate.
+2. **Single merge to `main`** (David) after the coverage-report PR — code, data, RUNBOOK, and report land together.
+3. **Close the tracking issue (#399-class) only after the full merge into main**, with the cycle closeout.
+4. **The `evals/<cycle>` branch is LEFT in place as the historical snapshot** — do not delete it.
+5. **Naming:** run-data dirs are chrono/ID-named by design (immutable records; the name is the identity: ts-pid-SHA-host-arch-accel). Files that represent CURRENT state in main (the coverage report, RUNBOOK) use STABLE names with dates inside the document; history is git + the run dirs.
+
+## CYCLE COMPLETE (2026-06-11 ~02:5x PDT) — final summary
+- **Final coverage:** `evals/results/final-coverage-2026-06-11.md` — 143 records over 8 final-pin + supplement runs: **95 passed / 43 blocked / 4 failed / 1 skipped**. Every blocked/failed row carries a structured reason + committed failure doc; the dominant blocked class is the documented `apple-metal` mistralrs platform gap (honest CPU-fallback) and the dgx `-lcudnn` host issue.
+- **Previously-working-models-GREEN evidence (David's gate):** vs the original run legs — x86: 3→29 passed; aarch64-CPU: 0→29; Metal: 12→16+2 supplements (incl. all gemma4-GGUF chat with real content + 27B first-ever green); CUDA: 0→16 (GB10-verified). Zero previously-green cells lost at any step.
+- **Fixes landed in-cycle:** #452 gemma4 answer-first (main), #458 quant-label, #462 harness batch (swap-gate, preflights, RELEASE children), #454 ORT static linkage, #469 TTFT two-number instrumentation (schema v3), #470 artifact patterns, CI split-matrix fix. 19 issues filed, 16 closed, all per-model failures documented.
+- **Pin lineage:** 01e3e487 → 167f5d89 (post-#452/#458) → 99ac891d (final: +#462+#454+#469) → e14eaa7e (supplements, #470).
+- **Run protocol:** full SHA discipline (pin = build = every record's identity.git_sha), release children, env-only token (zero leaks across 14 results PRs), per-host results PRs, orchestrator outcome-gated merges.
+
 ## Process steps (as executed)
 1. `@ops48-orchestrator 2026-06-10 PDT` — Merged framework PR #424 (`43c6ce39`, all-3-approved x86/CUDA/Metal) into `evals/2026-06-infra` -> head `e722d23d`. Seeded this runbook.
 2. _(pending)_ HF_TOKEN provisioning via SSH-written env file outside the repo checkout (`<work-root>/issue-399-eval-suite/.hf-env`, chmod 600); runners `source` it before `evals matrix`.
