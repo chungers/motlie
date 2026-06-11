@@ -273,7 +273,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = false
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -296,7 +296,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = false
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -319,7 +319,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = false
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -342,7 +342,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = false
-patterns = ["*.gguf"]
+patterns = ["Qwen3.6-27B-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -365,7 +365,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = false
-patterns = ["*.gguf"]
+patterns = ["Qwen3.6-27B-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -388,7 +388,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -411,7 +411,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -434,7 +434,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -457,7 +457,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -480,7 +480,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -503,7 +503,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["*-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -526,7 +526,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["gemma-4-12b-it-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -549,7 +549,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["gemma-4-12b-it-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -572,7 +572,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["gemma-4-12b-it-Q4_K_M.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -595,7 +595,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["gemma-4-12b-it-qat-q4_0.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -618,7 +618,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["gemma-4-12b-it-qat-q4_0.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
@@ -641,7 +641,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "llama-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = true
-patterns = ["*.gguf"]
+patterns = ["gemma-4-12b-it-qat-q4_0.gguf"]
 [cells.budgets]
 max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]

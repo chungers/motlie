@@ -340,6 +340,7 @@ max_process_swap_delta_bytes = 0
                 command_line: Vec::new(),
                 download_artifacts: false,
                 precision: None,
+                artifact_quantization: None,
                 quiet_backend_logs: false,
                 run_id: None,
             },

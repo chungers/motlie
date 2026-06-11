@@ -91,6 +91,7 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
             command_line,
             download_artifacts: options.download_artifacts,
             precision: options.precision,
+            artifact_quantization: options.artifact_quantization,
             quiet_backend_logs: options.quiet_backend_logs,
             run_id: options.run_id,
         },

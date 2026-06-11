@@ -33,6 +33,7 @@ pub struct RuntimeFlags {
     pub command_line: Vec<String>,
     pub download_artifacts: bool,
     pub precision: Option<String>,
+    pub artifact_quantization: Option<String>,
     pub quiet_backend_logs: bool,
     pub run_id: Option<String>,
 }

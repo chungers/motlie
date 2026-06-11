@@ -7,8 +7,8 @@ use motlie_model::{
     ArtifactPolicy, BundleHandle, BundleId, CapabilityKind, QuantizationBits, StartOptions,
 };
 use motlie_models::{
-    download_bundle_artifacts_with_options, ArtifactDownloadOptions, BundleDescriptor, Catalog,
-    CuratedBundle,
+    download_bundle_artifacts_with_options, ArtifactDownloadOptions, BackendKind, BundleDescriptor,
+    Catalog, CheckpointFormat, CuratedBundle,
 };
 
 use crate::accelerator;
@@ -74,9 +74,11 @@ pub fn prepare_bundle(
         );
     }
 
+    let quantization = parse_quantization(context.runtime_flags.precision.as_deref())?;
     let downloaded_artifacts = if context.runtime_flags.download_artifacts {
         let download_options = ArtifactDownloadOptions {
             hf_token: hf_token_from_env(),
+            quantization: artifact_download_quantization(&descriptor, quantization),
         };
         download_bundle_artifacts_with_options(
             &catalog,
@@ -96,7 +98,6 @@ pub fn prepare_bundle(
     let bundle = catalog
         .instantiate(&bundle_id)
         .with_context(|| format!("bundle `{bundle_id}` is not available in this build"))?;
-    let quantization = parse_quantization(context.runtime_flags.precision.as_deref())?;
 
     Ok(PreparedBundle {
         bundle_id,
@@ -105,6 +106,35 @@ pub fn prepare_bundle(
         downloaded_artifacts,
         quantization,
     })
+}
+
+fn artifact_download_quantization(
+    descriptor: &BundleDescriptor,
+    quantization: Option<QuantizationBits>,
+) -> Option<QuantizationBits> {
+    let artifacts = descriptor.artifacts.as_ref()?;
+    if descriptor.backend == BackendKind::LlamaCpp && artifacts.format == CheckpointFormat::Gguf {
+        quantization
+    } else {
+        None
+    }
+}
+
+fn artifact_patterns_for_record(
+    descriptor: &BundleDescriptor,
+    quantization: Option<QuantizationBits>,
+) -> Vec<String> {
+    descriptor
+        .artifacts
+        .as_ref()
+        .map(|artifacts| {
+            artifacts
+                .include_for_quantization(artifact_download_quantization(descriptor, quantization))
+                .iter()
+                .map(|rule| format!("{rule:?}"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn hf_token_from_env() -> Option<String> {
@@ -463,10 +493,16 @@ pub fn build_record(
     let checkpoint_format = checkpoint
         .as_ref()
         .map(|checkpoint| format!("{:?}", checkpoint.format));
-    let artifact_quantization = artifact_quantization_label(
-        checkpoint_format.as_deref(),
-        context.runtime_flags.precision.as_deref(),
-    );
+    let artifact_quantization = context
+        .runtime_flags
+        .artifact_quantization
+        .clone()
+        .unwrap_or_else(|| {
+            artifact_quantization_label(
+                checkpoint_format.as_deref(),
+                context.runtime_flags.precision.as_deref(),
+            )
+        });
     let host_id = platform
         .host_id
         .clone()
@@ -521,16 +557,10 @@ pub fn build_record(
             checkpoint_format,
             artifact_quantization: Some(artifact_quantization),
             artifact_snapshot: None,
-            artifact_patterns: checkpoint
-                .as_ref()
-                .map(|checkpoint| {
-                    checkpoint
-                        .include
-                        .iter()
-                        .map(|rule| format!("{rule:?}"))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
+            artifact_patterns: artifact_patterns_for_record(
+                &prepared.descriptor,
+                prepared.quantization,
+            ),
             artifact_files: prepared.downloaded_artifacts.clone(),
             scenario: context.scenario.id.clone(),
             capability: context.scenario.capability().as_str().to_owned(),
@@ -1096,6 +1126,7 @@ max_process_swap_delta_bytes = 0
                 command_line: Vec::new(),
                 download_artifacts: false,
                 precision: None,
+                artifact_quantization: None,
                 quiet_backend_logs: false,
                 run_id: None,
             },
