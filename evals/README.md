@@ -127,7 +127,11 @@ When `nvidia-smi` is available, platform records include `gpu_backend =
 "nvidia"`, GPU identity, and driver/CUDA metadata. Resource acceptance uses
 process swap delta gates on Linux CPU/CUDA smoke profiles with a 4 GiB per-cell
 process-swap delta ceiling; this catches runaway paging while allowing known
-large model-load paging that still passes behavior. `apple-metal` intentionally
+large model-load paging that still passes behavior. CUDA peak VRAM is currently
+recorded as an unavailable `gpu_memory_peak_bytes` metric with reason
+`metric_not_instrumented` when the sampler is absent; that gap is advisory
+and does not block a CUDA cell that otherwise proves accelerator use and passes
+behavior, performance, and resource gates. `apple-metal` intentionally
 does not gate on machine-wide swap because macOS reports system swap rather
 than per-process bundle swap through the current sampler. Performance output
 keeps common latency fields plus a nested `capability_metrics` object tagged by

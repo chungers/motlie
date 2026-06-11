@@ -368,4 +368,18 @@ mod tests {
 
         assert_eq!(parse_linux_status_vm_swap_bytes(status), None);
     }
+
+    #[test]
+    fn gpu_memory_gap_is_recorded_as_not_instrumented() {
+        let mut sampler = MetricsSampler::new();
+
+        let resources = sampler.finish();
+
+        assert_eq!(resources.gpu_memory_peak_bytes, None);
+        assert!(resources.unavailable_metrics.iter().any(|metric| {
+            metric.metric == "gpu_memory_peak_bytes"
+                && metric.reason == "metric_not_instrumented"
+                && metric.source.as_deref() == Some("accelerator_sampler")
+        }));
+    }
 }

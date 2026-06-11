@@ -315,15 +315,7 @@ fn evaluate_accelerator_memory_gate(
         .unwrap_or_else(|| accelerator::requested_for_profile(&context.profile.name));
 
     match requested {
-        AcceleratorClass::Cuda if resources.gpu_memory_peak_bytes.is_none() => {
-            Some(SectionEvaluation {
-                status: AcceptanceStatus::Blocked,
-                failure_reason: Some(
-                    "resource metric gpu_memory_peak_bytes blocked: CUDA peak VRAM sampler not instrumented"
-                        .to_owned(),
-                ),
-            })
-        }
+        AcceleratorClass::Cuda => None,
         AcceleratorClass::Metal if !has_metal_unified_memory_peak(resources) => {
             Some(SectionEvaluation {
                 status: AcceptanceStatus::Blocked,
@@ -962,6 +954,21 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("max_process_swap_delta_bytes=4294967296 exceeded"));
+    }
+
+    #[test]
+    fn cuda_gpu_memory_sampler_gap_is_advisory() {
+        let context = test_context("dgx-spark");
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            gpu_memory_peak_bytes: None,
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status(&resources, &context);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Pass);
+        assert_eq!(evaluation.failure_reason, None);
     }
 
     #[test]
