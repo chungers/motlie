@@ -312,6 +312,8 @@ pub struct TimerStartRequest {
     pub every_secs: u64,
     pub target: String,
     pub prompt: String,
+    #[serde(default = "default_paste_mode")]
+    pub paste_mode: PasteMode,
     pub enter: bool,
     #[serde(default = "default_timer_submit_retries")]
     pub submit_retries: u8,
@@ -360,6 +362,10 @@ fn default_timer_submit_retry_delay_ms() -> u64 {
 
 fn default_timer_input_quiet_for() -> Option<u64> {
     Some(DEFAULT_TIMER_INPUT_QUIET_FOR_SECS)
+}
+
+fn default_paste_mode() -> PasteMode {
+    PasteMode::Bracketed
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

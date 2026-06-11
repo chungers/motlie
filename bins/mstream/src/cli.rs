@@ -567,6 +567,8 @@ pub struct TimerStartArgs {
     pub self_host: String,
     #[arg(long)]
     pub prompt: String,
+    #[arg(long, value_enum, default_value_t = PasteMode::Bracketed)]
+    pub paste_mode: PasteMode,
     #[arg(long, hide = true)]
     pub enter: bool,
     #[arg(
@@ -610,6 +612,7 @@ impl TimerStartArgs {
             every_secs: self.every_secs,
             target,
             prompt: self.prompt,
+            paste_mode: self.paste_mode,
             enter,
             submit_retries: if enter { self.submit_retries } else { 0 },
             submit_retry_delay_ms: self.submit_retry_delay_ms,
@@ -1151,6 +1154,7 @@ mod tests {
         assert_eq!(request.every_secs, 300);
         assert_eq!(request.target, "local::orchestrator");
         assert_eq!(request.prompt, "Wake up and poll.");
+        assert_eq!(request.paste_mode, PasteMode::Bracketed);
         assert!(request.enter);
         assert_eq!(request.submit_retries, 1);
         assert_eq!(request.submit_retry_delay_ms, 750);
@@ -1186,6 +1190,31 @@ mod tests {
         };
         assert_eq!(request.submit_retries, 2);
         assert_eq!(request.submit_retry_delay_ms, 1000);
+    }
+
+    #[test]
+    fn timer_start_command_allows_literal_paste_mode() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "start",
+            "issue-337-poll",
+            "--every",
+            "5m",
+            "--target",
+            "local::orchestrator",
+            "--prompt",
+            "Wake up and poll.",
+            "--paste-mode",
+            "literal",
+        ])
+        .expect("timer command parses");
+
+        let request = cli.command.into_request().expect("timer request");
+        let ClientRequest::TimerStart(request) = request else {
+            panic!("expected timer start request");
+        };
+        assert_eq!(request.paste_mode, PasteMode::Literal);
     }
 
     #[test]

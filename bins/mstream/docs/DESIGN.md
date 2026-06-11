@@ -691,6 +691,7 @@ mstream timer start issue-337-poll \
   --every 5m \
   --target local::codex-orchestrator \
   --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize material changes, and decide whether to keep, change, or stop this timer." \
+  --paste-mode bracketed \
   --submit-retries 1 \
   --submit-retry-delay-ms 750
 
@@ -703,7 +704,8 @@ Timer names are daemon-unique and should describe their purpose. `--every`
 accepts seconds or minutes. `--target` uses `<host-alias>::<session>` and must
 resolve when the timer starts. `--prompt` is not persisted outside daemon
 memory. The default behavior submits the prompt with Enter; `--no-enter` leaves
-the text in the pane and disables submit retries.
+the text in the pane and disables submit retries. `--paste-mode
+bracketed|literal` matches `send`/`broadcast` and defaults to bracketed.
 
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key after pasted text. The retry policy is

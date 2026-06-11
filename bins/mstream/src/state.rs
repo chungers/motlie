@@ -443,6 +443,7 @@ struct TimerRecord {
     tmux_session_created: Option<u64>,
     every_secs: u64,
     prompt: String,
+    paste_mode: PasteMode,
     enter: bool,
     submit_retries: u8,
     submit_retry_delay_ms: u64,
@@ -702,6 +703,7 @@ struct TimerFireSnapshot {
     tmux_session_created: Option<u64>,
     handle: HostHandle,
     prompt: String,
+    paste_mode: PasteMode,
     enter: bool,
     submit_retries: u8,
     submit_retry_delay_ms: u64,
@@ -2529,6 +2531,7 @@ impl DaemonState {
                     tmux_session_created,
                     every_secs: request.every_secs,
                     prompt: request.prompt,
+                    paste_mode: request.paste_mode,
                     enter: request.enter,
                     submit_retries,
                     submit_retry_delay_ms: request.submit_retry_delay_ms,
@@ -2573,6 +2576,7 @@ impl DaemonState {
             "workstream": request.workstream,
             "target": stable_target.to_string(),
             "every_secs": request.every_secs,
+            "paste_mode": request.paste_mode.as_str(),
             "enter": request.enter,
             "submit_retries": submit_retries,
             "submit_retry_delay_ms": request.submit_retry_delay_ms,
@@ -2643,6 +2647,7 @@ impl DaemonState {
                 tmux_session_created: timer.tmux_session_created,
                 handle: state.host_handle(timer.target.host_alias())?,
                 prompt: timer.prompt.clone(),
+                paste_mode: timer.paste_mode,
                 enter: timer.enter,
                 submit_retries: timer.submit_retries,
                 submit_retry_delay_ms: timer.submit_retry_delay_ms,
@@ -2687,7 +2692,7 @@ impl DaemonState {
                     Self::agent_message(
                         agent::MessageSource::timer(format!("mstream.timer:{}", snapshot.name)),
                         snapshot.prompt.clone(),
-                        PasteMode::Bracketed,
+                        snapshot.paste_mode,
                     ),
                     agent::EnqueueOptions {
                         submit: Self::agent_submit_policy(
@@ -5204,6 +5209,7 @@ impl TimerRecord {
             "target": self.target.to_string(),
             "tmux_session_created": self.tmux_session_created,
             "every_secs": self.every_secs,
+            "paste_mode": self.paste_mode.as_str(),
             "enter": self.enter,
             "submit_retries": self.submit_retries,
             "submit_retry_delay_ms": self.submit_retry_delay_ms,
@@ -5592,6 +5598,7 @@ fn timer_fire_outcome_json(outcome: TimerFireOutcome) -> Value {
             "name": snapshot.name,
             "target": snapshot.target.to_string(),
             "generation": snapshot.generation,
+            "paste_mode": snapshot.paste_mode.as_str(),
             "input_quiet_for_secs": option_u64_json(snapshot.input_quiet_for_secs),
             "message_id": snapshot.message_id,
         }),
@@ -6026,6 +6033,7 @@ mod tests {
             tmux_session_created: created,
             every_secs: 60,
             prompt: "Wake up.".to_string(),
+            paste_mode: PasteMode::Bracketed,
             enter: true,
             submit_retries: 0,
             submit_retry_delay_ms: 0,
@@ -8510,6 +8518,7 @@ mod tests {
             tmux_session_created: None,
             every_secs: 60,
             prompt: "Wake up.".to_string(),
+            paste_mode: PasteMode::Bracketed,
             enter: true,
             submit_retries: 1,
             submit_retry_delay_ms: 750,
@@ -8552,6 +8561,7 @@ mod tests {
             every_secs: 60,
             target: "local::$1".to_string(),
             prompt: prompt.to_string(),
+            paste_mode: PasteMode::Bracketed,
             enter: true,
             submit_retries: 1,
             submit_retry_delay_ms: 750,
@@ -8566,6 +8576,7 @@ mod tests {
             .expect("second timer upsert");
 
         assert_eq!(first[0]["upserted"], false);
+        assert_eq!(first[0]["paste_mode"], "bracketed");
         assert_eq!(second[0]["upserted"], true);
         assert_eq!(second[0]["previous_generation"], 1);
         let state = shared.lock().await;
@@ -8573,6 +8584,55 @@ mod tests {
         let timer = state.timers.get("poll").expect("timer");
         assert_eq!(timer.generation, 2);
         assert_eq!(timer.prompt, "second");
+        assert_eq!(timer.paste_mode, PasteMode::Bracketed);
+    }
+
+    #[tokio::test]
+    async fn timer_fire_uses_configured_literal_paste_mode() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ worker $1 100 0 1  150\n")
+            .with_response("send-keys", "")
+            .with_default("");
+        let commands = mock.command_log();
+        let mut state = DaemonState::default();
+        state.channel_manager = agent::ChannelManager::new(agent::ChannelConfig {
+            coalesce_window: Duration::ZERO,
+            coalesce_max_wait: Duration::ZERO,
+            preserve_composer: false,
+            ..agent::ChannelConfig::default()
+        });
+        register_mock_host(&mut state, "local", mock);
+        let mut timer = timer_record("poll", target, Some(100));
+        timer.prompt = "Line one\nLine two".to_string();
+        timer.paste_mode = PasteMode::Literal;
+        timer.enter = false;
+        timer.input_quiet_for_secs = None;
+        state.timers.insert("poll".to_string(), timer);
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::timer_fire_shared(shared, "poll".to_string())
+            .await
+            .expect("timer fire");
+
+        assert_eq!(records[0]["paste_mode"], "literal");
+        for _ in 0..20 {
+            if commands
+                .lock()
+                .expect("command log")
+                .iter()
+                .any(|command| command.contains("send-keys") && command.contains("Line one"))
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        let rendered = commands.lock().expect("command log").join("\n");
+        assert!(rendered.contains("Line one"));
+        assert!(rendered.contains("Line two"));
+        assert!(!rendered.contains("\u{1b}[200~"));
+        assert!(!rendered.contains("\\033[200~"));
+        assert!(!rendered.contains("\\x1b[200~"));
     }
 
     #[test]
@@ -8593,6 +8653,7 @@ mod tests {
                     tmux_session_created: None,
                     every_secs: 60,
                     prompt: "Wake up.".to_string(),
+                    paste_mode: PasteMode::Bracketed,
                     enter: true,
                     submit_retries: 1,
                     submit_retry_delay_ms: 750,
@@ -8637,6 +8698,7 @@ mod tests {
                     tmux_session_created: None,
                     every_secs: 60,
                     prompt: "Wake up.".to_string(),
+                    paste_mode: PasteMode::Bracketed,
                     enter: true,
                     submit_retries: 1,
                     submit_retry_delay_ms: 750,

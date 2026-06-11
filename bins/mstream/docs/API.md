@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, and timer start upsert behavior. |
+| 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, timer start upsert behavior, and timer paste-mode selection. |
 | 2026-06-07 | @codex-401-impl | Clarified issue #409 audit durability: non-`agent_output` events are lossless-enqueued, high-volume `agent_output` is best-effort with observable degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
 | 2026-06-06 | @codex-401-impl | Added issue #409 durable audit call-log events: redacted `to_agent`/`from_agent` text, OutputBus agent output capture, socket-adjacent JSONL replay, and readable transcripts that survive daemon restart. |
 | 2026-06-06 | @codex-401-impl | Added issue #410 `new`/`recruit --agent-arg` passthrough for agent argv flags such as Claude `--permission-mode auto`. |
@@ -284,6 +284,7 @@ mstream timer start issue-337-poll \
   --workstream issue-337-tmux-fleet-api \
   --self \
   --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize only material changes, then decide whether to keep, change, or stop this timer." \
+  --paste-mode bracketed \
   --submit-retries 1 \
   --submit-retry-delay-ms 750
 
@@ -292,6 +293,7 @@ mstream timer start issue-337-poll \
   --workstream issue-337-tmux-fleet-api \
   --target local::codex-orchestrator \
   --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize only material changes, then decide whether to keep, change, or stop this timer." \
+  --paste-mode literal \
   --submit-retries 1 \
   --submit-retry-delay-ms 750
 
@@ -321,6 +323,10 @@ orchestrator self-prompt use case. They also default to one extra Enter after
 `--submit-retries` and `--submit-retry-delay-ms`; retries send only extra Enter
 keys and never re-send prompt text. Use `--no-enter` when the text should be
 placed in the pane without submission; this disables submit retries.
+`--paste-mode bracketed|literal` matches `send`/`broadcast` and defaults to
+`bracketed`; choose `literal` when the target TUI mishandles bracketed paste, or
+keep `bracketed` for long orchestrator self-reminders that should enter the
+composer as a paste block rather than raw typed lines.
 
 Timer delivery also defaults to `--input-quiet-for 10s`. When attached-client
 input in the target session is newer than that quiet window, the timer defers
