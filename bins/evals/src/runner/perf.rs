@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
-use motlie_model::{BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole};
+use motlie_model::{BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, GenerationTiming};
 
 use crate::metrics::{
     CapabilityPerformanceMetrics, MetricUnavailable, PerfPerformanceMetrics, PerformanceMetrics,
@@ -72,12 +72,31 @@ impl ScenarioRunner for PerfRunner {
         let mut successful_iterations = 0_u64;
         let mut failed_iterations = 0_u64;
         let mut total_output_words = 0_u64;
+        let mut total_output_tokens = 0_u64;
+        let mut output_token_samples = 0_u64;
+        let mut ttft_first_token_ms = Vec::new();
+        let mut ttft_first_answer_token_ms = Vec::new();
+        let mut decode_ms = Vec::new();
+        let mut decode_tokens_per_second = Vec::new();
         for _ in 0..perf_scenario.input.iterations {
             match run_one(chat, &prompt).await {
-                Ok((latency_ms, words)) => {
-                    request_latencies_ms.push(latency_ms);
+                Ok(iteration) => {
+                    request_latencies_ms.push(iteration.latency_ms);
                     successful_iterations += 1;
-                    total_output_words += words;
+                    total_output_words += iteration.output_words;
+                    if let Some(output_tokens) = iteration.output_tokens {
+                        total_output_tokens = total_output_tokens.saturating_add(output_tokens);
+                        output_token_samples += 1;
+                    }
+                    push_if_some(&mut ttft_first_token_ms, iteration.ttft_first_token_ms);
+                    push_if_some(
+                        &mut ttft_first_answer_token_ms,
+                        iteration.ttft_first_answer_token_ms,
+                    );
+                    push_if_some(&mut decode_ms, iteration.decode_ms);
+                    if let Some(value) = iteration.decode_tokens_per_second {
+                        decode_tokens_per_second.push(value);
+                    }
                 }
                 Err(_) => {
                     failed_iterations += 1;
@@ -99,13 +118,21 @@ impl ScenarioRunner for PerfRunner {
             failed_iterations: Some(failed_iterations),
             mean_latency_ms,
             p95_latency_ms,
+            mean_ttft_first_token_ms: mean(&ttft_first_token_ms),
+            p95_ttft_first_token_ms: percentile(&ttft_first_token_ms, 0.95),
+            mean_ttft_first_answer_token_ms: mean(&ttft_first_answer_token_ms),
+            p95_ttft_first_answer_token_ms: percentile(&ttft_first_answer_token_ms, 0.95),
+            mean_decode_ms: mean(&decode_ms),
+            p95_decode_ms: percentile(&decode_ms, 0.95),
+            mean_decode_tokens_per_second: mean_f64(&decode_tokens_per_second),
+            total_output_tokens: (output_token_samples > 0).then_some(total_output_tokens),
             total_output_words: Some(total_output_words),
         };
         let performance = PerformanceMetrics {
             startup_ms: Some(startup_ms),
             warmup_ms: Some(warmup_ms),
             request_latencies_ms,
-            unavailable: required_perf_metric_gaps(),
+            unavailable: required_perf_metric_gaps(&perf_metrics),
             capability_metrics: CapabilityPerformanceMetrics::Perf(perf_metrics),
         };
         let resources = context.metrics_sampler.finish();
@@ -137,7 +164,18 @@ impl ScenarioRunner for PerfRunner {
     }
 }
 
-async fn run_one<C: ChatModel + ?Sized>(chat: &C, prompt: &str) -> Result<(u64, u64)> {
+#[derive(Clone, Debug, Default)]
+struct PerfIterationMetrics {
+    latency_ms: u64,
+    output_words: u64,
+    output_tokens: Option<u64>,
+    ttft_first_token_ms: Option<u64>,
+    ttft_first_answer_token_ms: Option<u64>,
+    decode_ms: Option<u64>,
+    decode_tokens_per_second: Option<f64>,
+}
+
+async fn run_one<C: ChatModel + ?Sized>(chat: &C, prompt: &str) -> Result<PerfIterationMetrics> {
     let started_at = std::time::Instant::now();
     let response = chat
         .generate(ChatRequest {
@@ -150,8 +188,53 @@ async fn run_one<C: ChatModel + ?Sized>(chat: &C, prompt: &str) -> Result<(u64, 
         .await
         .context("chat generation failed")?;
     let latency_ms = elapsed_ms(started_at.elapsed());
-    let words = response.content.split_whitespace().count() as u64;
-    Ok((latency_ms, words))
+    let timing = timing_metrics(response.timing.as_ref());
+    Ok(PerfIterationMetrics {
+        latency_ms,
+        output_words: response.content.split_whitespace().count() as u64,
+        output_tokens: response
+            .timing
+            .as_ref()
+            .map(|timing| u64::from(timing.generated_tokens)),
+        ttft_first_token_ms: timing.ttft_first_token_ms,
+        ttft_first_answer_token_ms: timing.ttft_first_answer_token_ms,
+        decode_ms: timing.decode_ms,
+        decode_tokens_per_second: timing.decode_tokens_per_second,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TimingMetrics {
+    ttft_first_token_ms: Option<u64>,
+    ttft_first_answer_token_ms: Option<u64>,
+    decode_ms: Option<u64>,
+    decode_tokens_per_second: Option<f64>,
+}
+
+fn timing_metrics(timing: Option<&GenerationTiming>) -> TimingMetrics {
+    let Some(timing) = timing else {
+        return TimingMetrics::default();
+    };
+
+    TimingMetrics {
+        ttft_first_token_ms: timing.time_to_first_token().map(elapsed_ms),
+        ttft_first_answer_token_ms: timing.time_to_first_answer_token().map(elapsed_ms),
+        decode_ms: timing.decode_duration().map(elapsed_ms),
+        decode_tokens_per_second: timing.decode_tokens_per_second(),
+    }
+}
+
+fn push_if_some(values: &mut Vec<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        values.push(value);
+    }
+}
+
+fn mean_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
 }
 
 fn resolve_prompt(prompt: Option<&str>, dataset: Option<&str>) -> Result<String> {
@@ -230,29 +313,44 @@ fn evaluate_assertions(
     outcomes
 }
 
-fn required_perf_metric_gaps() -> Vec<MetricUnavailable> {
-    vec![
-        MetricUnavailable::new(
-            "time_to_first_token_ms",
-            "metric_not_instrumented",
-            "perf_runner_streaming_callback",
-        ),
-        MetricUnavailable::new(
-            "decode_ms",
-            "metric_not_instrumented",
-            "perf_runner_streaming_callback",
-        ),
-        MetricUnavailable::new(
+fn required_perf_metric_gaps(metrics: &PerfPerformanceMetrics) -> Vec<MetricUnavailable> {
+    let mut gaps = Vec::new();
+    if metrics.mean_ttft_first_token_ms.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "mean_ttft_first_token_ms",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.first_token_at",
+        ));
+    }
+    if metrics.mean_ttft_first_answer_token_ms.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "mean_ttft_first_answer_token_ms",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.first_answer_token_at",
+        ));
+    }
+    if metrics.mean_decode_ms.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "mean_decode_ms",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.last_token_at",
+        ));
+    }
+    if metrics.total_output_tokens.is_none() {
+        gaps.push(MetricUnavailable::new(
             "output_tokens",
-            "metric_not_instrumented",
-            "perf_runner_tokenizer",
-        ),
-        MetricUnavailable::new(
-            "tokens_per_second",
-            "metric_not_instrumented",
-            "perf_runner_decode_interval",
-        ),
-    ]
+            "metric_not_reported_by_backend",
+            "chat_response.timing.generated_tokens",
+        ));
+    }
+    if metrics.mean_decode_tokens_per_second.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "mean_decode_tokens_per_second",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.decode_tokens_per_second",
+        ));
+    }
+    gaps
 }
 
 fn evaluate_performance_status(
@@ -323,6 +421,32 @@ fn format_optional(value: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timing_metrics_compute_ttft_and_decode_rate() {
+        let request_at = std::time::Instant::now();
+        let first_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(10))
+            .unwrap();
+        let first_answer_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(25))
+            .unwrap();
+        let last_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(110))
+            .unwrap();
+        let metrics = timing_metrics(Some(&GenerationTiming {
+            request_at,
+            first_token_at: Some(first_token_at),
+            first_answer_token_at: Some(first_answer_token_at),
+            last_token_at: Some(last_token_at),
+            generated_tokens: 5,
+        }));
+
+        assert_eq!(metrics.ttft_first_token_ms, Some(10));
+        assert_eq!(metrics.ttft_first_answer_token_ms, Some(25));
+        assert_eq!(metrics.decode_ms, Some(100));
+        assert_eq!(metrics.decode_tokens_per_second, Some(50.0));
+    }
 
     #[test]
     fn performance_failure_names_mean_gate() {

@@ -16,9 +16,9 @@ use mistralrs::{CalledFunction, ToolCallType};
 use motlie_model::{
     ArtifactPolicy, ArtifactSource, Bytes, CapabilityKind, ChatFinishReason, ChatMessage,
     ChatRequest, ChatResponse, ChatRole, CheckpointFormat, ContentPart, EmbeddingMetrics,
-    GenerationParams, GenerationUsage, Milliseconds, ModelError, ModelMetricSnapshot,
-    QuantizationBits, ResolvedCheckpoint, RuntimeAcceleratorObservation, RuntimeMetrics,
-    StartOptions, TextGenerationMetrics, Tokens, TokensPerSecond,
+    GenerationParams, GenerationTiming, GenerationUsage, Milliseconds, ModelError,
+    ModelMetricSnapshot, QuantizationBits, ResolvedCheckpoint, RuntimeAcceleratorObservation,
+    RuntimeMetrics, StartOptions, TextGenerationMetrics, Tokens, TokensPerSecond,
 };
 use serde_json::Value;
 
@@ -605,6 +605,7 @@ pub(crate) fn mistral_response_to_chat_response(
     message: ResponseMessage,
     finish_reason: String,
     usage: &Usage,
+    timing: Option<GenerationTiming>,
 ) -> Result<ChatResponse, ModelError> {
     let tool_calls = message
         .tool_calls
@@ -646,6 +647,7 @@ pub(crate) fn mistral_response_to_chat_response(
             completion_tokens: Some(usage_count_to_u32(usage.completion_tokens)),
             total_tokens: Some(usage_count_to_u32(usage.total_tokens)),
         }),
+        timing,
     })
 }
 
@@ -1072,8 +1074,9 @@ mod tests {
             reasoning_content: Some("thinking".to_string()),
         };
 
-        let response = mistral_response_to_chat_response(message, "length".to_string(), &usage())
-            .expect("reasoning-only response should map");
+        let response =
+            mistral_response_to_chat_response(message, "length".to_string(), &usage(), None)
+                .expect("reasoning-only response should map");
 
         assert_eq!(response.content, "");
         assert!(response.tool_calls.is_empty());
@@ -1103,7 +1106,7 @@ mod tests {
         };
 
         let response =
-            mistral_response_to_chat_response(message, "tool_calls".to_string(), &usage())
+            mistral_response_to_chat_response(message, "tool_calls".to_string(), &usage(), None)
                 .expect("response should map");
 
         assert_eq!(response.finish_reason, Some(ChatFinishReason::ToolCalls));

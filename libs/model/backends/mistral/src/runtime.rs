@@ -1,15 +1,15 @@
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities, ChatMessage,
     ChatModel, ChatRequest, ChatResponse, CheckpointFormat, CompletionModel, CompletionRequest,
-    CompletionResponse, EmbeddingModel, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint,
-    StartOptions, UnsupportedCompletion, UnsupportedEmbeddings,
+    CompletionResponse, EmbeddingModel, GenerationTiming, LoadedBundleDescriptor, ModelBundle,
+    ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport,
+    ResolvedCheckpoint, StartOptions, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 
 use crate::common::{
@@ -400,7 +400,7 @@ impl RealChatRuntime {
         request: ChatRequest,
     ) -> Result<ChatResponse, ModelError> {
         let builder = chat_request_to_builder(&request, P::collect_message)?;
-        let started_at = Instant::now();
+        let request_at = Instant::now();
 
         let response = self.model.send_chat_request(builder).await.map_err(|err| {
             ModelError::BackendExecution {
@@ -409,7 +409,8 @@ impl RealChatRuntime {
                 message: err.to_string(),
             }
         })?;
-        let elapsed = started_at.elapsed();
+        let response_at = Instant::now();
+        let elapsed = response_at.duration_since(request_at);
 
         let usage = response.usage.clone();
         let choice =
@@ -422,8 +423,13 @@ impl RealChatRuntime {
                     operation: "send_chat_request",
                     message: "response contained no choices".into(),
                 })?;
-        let response =
-            mistral_response_to_chat_response(choice.message, choice.finish_reason, &usage)?;
+        let timing = generation_timing_from_usage(request_at, response_at, &usage, &choice.message);
+        let response = mistral_response_to_chat_response(
+            choice.message,
+            choice.finish_reason,
+            &usage,
+            Some(timing),
+        )?;
 
         {
             let mut metrics = lock_metrics(&self.metrics, P::CHAT_METRIC_CONTEXT);
@@ -433,6 +439,56 @@ impl RealChatRuntime {
 
         Ok(response)
     }
+}
+
+fn generation_timing_from_usage(
+    request_at: Instant,
+    response_at: Instant,
+    usage: &mistralrs::core::Usage,
+    message: &mistralrs::ResponseMessage,
+) -> GenerationTiming {
+    let first_token_at = usage_duration(usage.total_prompt_time_sec)
+        .and_then(|duration| request_at.checked_add(duration))
+        .map(|instant| instant.min(response_at))
+        .unwrap_or(response_at);
+    let completion_duration = usage_duration(usage.total_completion_time_sec);
+    let last_token_at = completion_duration
+        .and_then(|duration| first_token_at.checked_add(duration))
+        .map(|instant| instant.min(response_at))
+        .unwrap_or(response_at);
+    let first_answer_token_at = if message
+        .reasoning_content
+        .as_deref()
+        .is_some_and(|reasoning| !reasoning.trim().is_empty())
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|content| !content.trim().is_empty())
+    {
+        last_token_at
+    } else {
+        first_token_at
+    };
+
+    GenerationTiming {
+        request_at,
+        first_token_at: Some(first_token_at),
+        first_answer_token_at: Some(first_answer_token_at),
+        last_token_at: Some(last_token_at),
+        generated_tokens: usage_count_to_u32(usage.completion_tokens),
+    }
+}
+
+fn usage_duration(seconds: f32) -> Option<Duration> {
+    if seconds.is_finite() && seconds >= 0.0 {
+        Some(Duration::from_secs_f64(f64::from(seconds)))
+    } else {
+        None
+    }
+}
+
+fn usage_count_to_u32(count: usize) -> u32 {
+    count.min(u32::MAX as usize) as u32
 }
 
 #[cfg(test)]

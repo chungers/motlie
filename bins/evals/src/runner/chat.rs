@@ -2,8 +2,8 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use motlie_model::{
     BundleHandle, CapabilityKind, ChatMessage, ChatModel, ChatRequest, ChatResponse, ChatRole,
-    CompletionModel, CompletionRequest, GenerationParams, ToolChoice, ToolInputSchema, ToolName,
-    ToolSpec,
+    CompletionModel, CompletionRequest, GenerationParams, GenerationTiming, ToolChoice,
+    ToolInputSchema, ToolName, ToolSpec,
 };
 
 use crate::metrics::{
@@ -167,16 +167,22 @@ impl ScenarioRunner for ChatRunner {
             .and_then(|usage| usage.prompt_tokens)
             .map(u64::from);
         let model_text_metrics = model_metrics.and_then(|snapshot| snapshot.text_generation);
-        let tokens_per_second = model_text_metrics
-            .as_ref()
-            .and_then(|metrics| metrics.avg_generated_tokens_per_sec)
-            .map(|tokens| tokens.0 as f64);
+        let timing = response_timing_metrics(primary.timing.as_ref());
+        let tokens_per_second = timing.tokens_per_second.or_else(|| {
+            model_text_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.avg_generated_tokens_per_sec)
+                .map(|tokens| tokens.0 as f64)
+        });
         let chat_metrics = ChatPerformanceMetrics {
             prompt_tokens,
             completion_tokens,
-            time_to_first_token_ms: None,
-            decode_ms: None,
+            time_to_first_token_ms: timing.ttft_first_token_ms,
+            ttft_first_token_ms: timing.ttft_first_token_ms,
+            ttft_first_answer_token_ms: timing.ttft_first_answer_token_ms,
+            decode_ms: timing.decode_ms,
             tokens_per_second,
+            decode_tokens_per_second: timing.decode_tokens_per_second,
             response_chars: Some(char_count(&primary.content)),
             followup_response_chars: followup
                 .as_ref()
@@ -260,6 +266,29 @@ fn weather_tool_spec(tool_name: Option<&str>) -> Result<ToolSpec> {
     })
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ResponseTimingMetrics {
+    ttft_first_token_ms: Option<u64>,
+    ttft_first_answer_token_ms: Option<u64>,
+    decode_ms: Option<u64>,
+    tokens_per_second: Option<f64>,
+    decode_tokens_per_second: Option<f64>,
+}
+
+fn response_timing_metrics(timing: Option<&GenerationTiming>) -> ResponseTimingMetrics {
+    let Some(timing) = timing else {
+        return ResponseTimingMetrics::default();
+    };
+
+    ResponseTimingMetrics {
+        ttft_first_token_ms: timing.time_to_first_token().map(elapsed_ms),
+        ttft_first_answer_token_ms: timing.time_to_first_answer_token().map(elapsed_ms),
+        decode_ms: timing.decode_duration().map(elapsed_ms),
+        tokens_per_second: timing.total_tokens_per_second(),
+        decode_tokens_per_second: timing.decode_tokens_per_second(),
+    }
+}
+
 fn required_chat_metric_gaps(
     metrics: &ChatPerformanceMetrics,
     warmup_ms: Option<u64>,
@@ -272,18 +301,25 @@ fn required_chat_metric_gaps(
             "chat_runner",
         ));
     }
-    if metrics.time_to_first_token_ms.is_none() {
+    if metrics.ttft_first_token_ms.is_none() {
         gaps.push(MetricUnavailable::new(
-            "time_to_first_token_ms",
-            "metric_not_instrumented",
-            "chat_runner_streaming_callback",
+            "ttft_first_token_ms",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.first_token_at",
+        ));
+    }
+    if metrics.ttft_first_answer_token_ms.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "ttft_first_answer_token_ms",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.first_answer_token_at",
         ));
     }
     if metrics.decode_ms.is_none() {
         gaps.push(MetricUnavailable::new(
             "decode_ms",
-            "metric_not_instrumented",
-            "chat_runner_streaming_callback",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.last_token_at",
         ));
     }
     if metrics.completion_tokens.is_none() {
@@ -293,11 +329,18 @@ fn required_chat_metric_gaps(
             "chat_response_usage",
         ));
     }
+    if metrics.decode_tokens_per_second.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "decode_tokens_per_second",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.decode_tokens_per_second",
+        ));
+    }
     if metrics.tokens_per_second.is_none() {
         gaps.push(MetricUnavailable::new(
             "tokens_per_second",
             "metric_unsupported_by_backend",
-            "model_metric_snapshot.text_generation.avg_generated_tokens_per_sec",
+            "chat_response.timing.total_tokens_per_second",
         ));
     }
     gaps
@@ -427,6 +470,34 @@ mod tests {
 
         assert_eq!(outcomes[0].name, "min_completion_chars");
         assert_eq!(outcomes[0].status, AcceptanceStatus::Fail);
+    }
+
+    #[test]
+    fn response_timing_metrics_compute_ttft_and_decode_rate() {
+        let request_at = std::time::Instant::now();
+        let first_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(10))
+            .unwrap();
+        let first_answer_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(25))
+            .unwrap();
+        let last_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(110))
+            .unwrap();
+        let metrics = response_timing_metrics(Some(&GenerationTiming {
+            request_at,
+            first_token_at: Some(first_token_at),
+            first_answer_token_at: Some(first_answer_token_at),
+            last_token_at: Some(last_token_at),
+            generated_tokens: 5,
+        }));
+
+        assert_eq!(metrics.ttft_first_token_ms, Some(10));
+        assert_eq!(metrics.ttft_first_answer_token_ms, Some(25));
+        assert_eq!(metrics.decode_ms, Some(100));
+        assert!(metrics
+            .decode_tokens_per_second
+            .is_some_and(|decode| decode > metrics.tokens_per_second.unwrap()));
     }
 
     #[test]

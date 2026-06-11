@@ -49,8 +49,14 @@ pub struct ChatPerformanceMetrics {
     #[serde(default)]
     pub time_to_first_token_ms: Option<u64>,
     #[serde(default)]
+    pub ttft_first_token_ms: Option<u64>,
+    #[serde(default)]
+    pub ttft_first_answer_token_ms: Option<u64>,
+    #[serde(default)]
     pub decode_ms: Option<u64>,
     pub tokens_per_second: Option<f64>,
+    #[serde(default)]
+    pub decode_tokens_per_second: Option<f64>,
     pub response_chars: Option<u64>,
     pub followup_response_chars: Option<u64>,
     pub completion_chars: Option<u64>,
@@ -99,6 +105,22 @@ pub struct PerfPerformanceMetrics {
     pub failed_iterations: Option<u64>,
     pub mean_latency_ms: Option<f64>,
     pub p95_latency_ms: Option<f64>,
+    #[serde(default)]
+    pub mean_ttft_first_token_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_ttft_first_token_ms: Option<f64>,
+    #[serde(default)]
+    pub mean_ttft_first_answer_token_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_ttft_first_answer_token_ms: Option<f64>,
+    #[serde(default)]
+    pub mean_decode_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_decode_ms: Option<f64>,
+    #[serde(default)]
+    pub mean_decode_tokens_per_second: Option<f64>,
+    #[serde(default)]
+    pub total_output_tokens: Option<u64>,
     pub total_output_words: Option<u64>,
 }
 

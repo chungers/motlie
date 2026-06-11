@@ -21,6 +21,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
 speech_features="model-whisper-base-en,model-sherpa-onnx-streaming,model-moonshine-streaming,model-piper-en-us-ljspeech-medium,model-qwen3-tts-cpp"
+chat_tool_features="model-qwen3-4b,model-gemma4-e2b"
 
 fail() {
   echo "ERROR: $*" >&2
@@ -56,7 +57,8 @@ case "${mode}" in
       --example chat_multimodal_gemma4 \
       --example chat_gguf_gwen3_gemma4 \
       --example bench_chat \
-      --no-default-features
+      --no-default-features \
+      --features "${chat_tool_features}"
 
     note "checking ASR/TTS examples with ORT-backed features isolated from chat/tool examples"
     run_with_optional_ort cargo check -p motlie-models \
