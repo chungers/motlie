@@ -2164,6 +2164,8 @@ async fn record_and_forward_asr_events(
     quality_session: Option<&ActiveAsrQualitySession>,
     events: Vec<AsrTranscriptEvent>,
 ) {
+    let events =
+        reconcile_asr_final_events(state, call_id, stream_id, quality_session, events).await;
     let conversation_events = conversation_events_from_transcripts(&events);
     let _ = record_transcript_events(
         state,
@@ -2187,6 +2189,244 @@ async fn record_and_forward_asr_events(
         Some(&media_state.quality_config),
     )
     .await;
+}
+
+async fn reconcile_asr_final_events(
+    state: &SharedState,
+    gateway_call_id: &str,
+    stream_id: Option<&str>,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    events: Vec<AsrTranscriptEvent>,
+) -> Vec<AsrTranscriptEvent> {
+    let (mut latest_partial, include_transcript_text) = {
+        let guard = state.read().await;
+        let call_partial = guard
+            .calls
+            .get(gateway_call_id)
+            .and_then(|call| call.current_partial.clone());
+        (
+            call_partial,
+            guard.quality.config.logging.include_transcript_text,
+        )
+    };
+    let mut reconciled = Vec::with_capacity(events.len());
+    for event in events {
+        if event.is_suppressed() {
+            reconciled.push(event);
+            continue;
+        }
+
+        let AsrTranscriptEvent { event, decision } = event;
+        match event {
+            TranscriptEvent::Partial { text, update } => {
+                latest_partial = Some(text.clone());
+                reconciled.push(AsrTranscriptEvent {
+                    event: TranscriptEvent::Partial { text, update },
+                    decision,
+                });
+            }
+            TranscriptEvent::Final { text, update } => {
+                let reconciliation = reconcile_final_text(&text, latest_partial.as_deref());
+                emit_asr_final_reconciliation(
+                    state,
+                    gateway_call_id,
+                    stream_id,
+                    quality_session,
+                    include_transcript_text,
+                    &reconciliation,
+                )
+                .await;
+                latest_partial = None;
+                reconciled.push(AsrTranscriptEvent {
+                    event: TranscriptEvent::Final {
+                        text: reconciliation.selected_text,
+                        update,
+                    },
+                    decision,
+                });
+            }
+        }
+    }
+    reconciled
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FinalTextReconciliation {
+    selected_text: String,
+    selected_source: FinalTextSource,
+    final_text: String,
+    latest_partial_text: Option<String>,
+    final_chars: usize,
+    latest_partial_chars: usize,
+    selected_chars: usize,
+    final_words: usize,
+    latest_partial_words: usize,
+    selected_words: usize,
+    common_prefix_chars: usize,
+    partial_is_strict_extension: bool,
+    final_tail_word_chars: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinalTextSource {
+    AsrFinal,
+    LatestPartialExtension,
+}
+
+impl FinalTextSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AsrFinal => "asr_final",
+            Self::LatestPartialExtension => "latest_partial_extension",
+        }
+    }
+}
+
+fn reconcile_final_text(final_text: &str, latest_partial: Option<&str>) -> FinalTextReconciliation {
+    let final_text = final_text.trim().to_string();
+    let latest_partial_text = latest_partial.map(str::trim).and_then(|text| {
+        if text.is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        }
+    });
+    let final_normalized = normalize_transcript_whitespace(&final_text);
+    let partial_normalized = latest_partial_text
+        .as_deref()
+        .map(normalize_transcript_whitespace)
+        .unwrap_or_default();
+    let partial_is_strict_extension = !final_normalized.is_empty()
+        && partial_normalized.chars().count() > final_normalized.chars().count()
+        && partial_normalized.starts_with(&final_normalized);
+    let (selected_text, selected_source) = if partial_is_strict_extension {
+        (
+            latest_partial_text
+                .clone()
+                .unwrap_or_else(|| final_text.clone()),
+            FinalTextSource::LatestPartialExtension,
+        )
+    } else {
+        (final_text.clone(), FinalTextSource::AsrFinal)
+    };
+
+    FinalTextReconciliation {
+        final_chars: final_text.chars().count(),
+        latest_partial_chars: latest_partial_text
+            .as_deref()
+            .map(|text| text.chars().count())
+            .unwrap_or(0),
+        selected_chars: selected_text.chars().count(),
+        final_words: final_text.split_whitespace().count(),
+        latest_partial_words: latest_partial_text
+            .as_deref()
+            .map(|text| text.split_whitespace().count())
+            .unwrap_or(0),
+        selected_words: selected_text.split_whitespace().count(),
+        common_prefix_chars: common_prefix_chars(&final_normalized, &partial_normalized),
+        partial_is_strict_extension,
+        final_tail_word_chars: trailing_word_chars(&final_text),
+        selected_text,
+        selected_source,
+        final_text,
+        latest_partial_text,
+    }
+}
+
+fn normalize_transcript_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn common_prefix_chars(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn trailing_word_chars(text: &str) -> usize {
+    text.trim_end()
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_alphanumeric() || *ch == '\'')
+        .count()
+}
+
+async fn emit_asr_final_reconciliation(
+    state: &SharedState,
+    gateway_call_id: &str,
+    stream_id: Option<&str>,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    include_transcript_text: bool,
+    reconciliation: &FinalTextReconciliation,
+) {
+    tracing::info!(
+        gateway_call_id,
+        stream_id,
+        selected_source = reconciliation.selected_source.label(),
+        final_chars = reconciliation.final_chars,
+        latest_partial_chars = reconciliation.latest_partial_chars,
+        selected_chars = reconciliation.selected_chars,
+        final_words = reconciliation.final_words,
+        latest_partial_words = reconciliation.latest_partial_words,
+        selected_words = reconciliation.selected_words,
+        common_prefix_chars = reconciliation.common_prefix_chars,
+        partial_is_strict_extension = reconciliation.partial_is_strict_extension,
+        final_tail_word_chars = reconciliation.final_tail_word_chars,
+        asr_final_text = include_transcript_text.then_some(reconciliation.final_text.as_str()),
+        latest_partial_text = include_transcript_text
+            .then_some(reconciliation.latest_partial_text.as_deref())
+            .flatten(),
+        selected_text = include_transcript_text.then_some(reconciliation.selected_text.as_str()),
+        "asr.final_text_reconciled"
+    );
+    let Some(session) = quality_session else {
+        return;
+    };
+    let mut payload = map_from_value(json!({
+        "asr_session_id": session.asr_session_id.as_str(),
+        "utterance_id": session.utterance_id.as_str(),
+        "stream_id": stream_id,
+        "selected_source": reconciliation.selected_source.label(),
+        "final_chars": reconciliation.final_chars,
+        "latest_partial_chars": reconciliation.latest_partial_chars,
+        "selected_chars": reconciliation.selected_chars,
+        "final_words": reconciliation.final_words,
+        "latest_partial_words": reconciliation.latest_partial_words,
+        "selected_words": reconciliation.selected_words,
+        "common_prefix_chars": reconciliation.common_prefix_chars,
+        "partial_is_strict_extension": reconciliation.partial_is_strict_extension,
+        "final_tail_word_chars": reconciliation.final_tail_word_chars,
+    }));
+    if include_transcript_text {
+        payload.insert(
+            "asr_final_text".to_string(),
+            Value::String(reconciliation.final_text.clone()),
+        );
+        if let Some(partial) = &reconciliation.latest_partial_text {
+            payload.insert(
+                "latest_partial_text".to_string(),
+                Value::String(partial.clone()),
+            );
+        }
+        payload.insert(
+            "selected_text".to_string(),
+            Value::String(reconciliation.selected_text.clone()),
+        );
+    }
+    state.write().await.emit_quality_span_finished(
+        gateway_call_id,
+        QualitySpanEmission {
+            config_id: session.config_id.clone(),
+            redaction_mode: session.redaction_mode,
+            span_name: "asr.final_text_reconciliation",
+            category: "asr_generation",
+            duration: Duration::ZERO,
+            critical_path: false,
+            concurrent: false,
+            payload,
+        },
+    );
 }
 
 fn conversation_events_from_transcripts(events: &[AsrTranscriptEvent]) -> Vec<TranscriptEvent> {
@@ -2853,7 +3093,12 @@ mod tests {
             .expect("register active speech");
         {
             let mut guard = state.write().await;
-            guard.start_tts_job(&gateway_call_id, "tts_test".to_string(), "hello");
+            guard.start_tts_job(
+                &gateway_call_id,
+                "tts_test".to_string(),
+                LiveTtsBackend::default(),
+                "hello",
+            );
             guard.mark_tts_mark_sent(&gateway_call_id, "tts_test", "tts_test");
         }
         let asr = registry_with_factory(Arc::new(EchoAsrFactory));
@@ -3302,6 +3547,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finish_asr_session_uses_latest_partial_when_final_is_strict_prefix() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        state.write().await.add_transcript(
+            &gateway_call_id,
+            TranscriptKind::Partial,
+            "hello world".to_string(),
+        );
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        let mut media_state = MediaSocketState::new();
+        media_state.media_format = Some(MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        });
+        media_state.session = Some(Box::new(FinalOnlyAsrSession::new("hello wor")));
+
+        finish_asr_session(
+            &state,
+            &mut media_state,
+            Some(gateway_call_id.as_str()),
+            Some("stream-1".to_string()),
+            Some(&text_calls),
+        )
+        .await
+        .expect("finish should record and forward transcripts");
+
+        let frame = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            frame,
+            GatewayTextFrame::CallerTurn { text, .. } if text == "hello world"
+        ));
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.final_transcript, "hello world");
+        assert_eq!(call.current_partial, None);
+    }
+
+    #[tokio::test]
+    async fn finish_asr_session_keeps_final_when_latest_partial_diverges() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        state.write().await.add_transcript(
+            &gateway_call_id,
+            TranscriptKind::Partial,
+            "endpointing seems to be a real trouble".to_string(),
+        );
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        let mut media_state = MediaSocketState::new();
+        media_state.media_format = Some(MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        });
+        media_state.session = Some(Box::new(FinalOnlyAsrSession::new(
+            "endpointing seems to be a real cha",
+        )));
+
+        finish_asr_session(
+            &state,
+            &mut media_state,
+            Some(gateway_call_id.as_str()),
+            Some("stream-1".to_string()),
+            Some(&text_calls),
+        )
+        .await
+        .expect("finish should record and forward transcripts");
+
+        let frame = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            frame,
+            GatewayTextFrame::CallerTurn { text, .. } if text == "endpointing seems to be a real cha"
+        ));
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.final_transcript, "endpointing seems to be a real cha");
+        assert_eq!(call.current_partial, None);
+    }
+
+    #[tokio::test]
     async fn speech_resume_before_local_endpoint_keeps_asr_session() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
@@ -3739,6 +4076,35 @@ mod tests {
                 ingests: Arc::clone(&self.ingests),
                 finishes: Arc::clone(&self.finishes),
             }))
+        }
+    }
+
+    struct FinalOnlyAsrSession {
+        final_text: String,
+    }
+
+    impl FinalOnlyAsrSession {
+        fn new(final_text: &str) -> Self {
+            Self {
+                final_text: final_text.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl InboundAsrSession for FinalOnlyAsrSession {
+        async fn ingest(
+            &mut self,
+            _audio: AudioBuf<i16, 16_000, Mono>,
+        ) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn finish(self: Box<Self>) -> anyhow::Result<Vec<AsrTranscriptEvent>> {
+            Ok(vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: self.final_text,
+                update: motlie_model::TranscriptionUpdate::default(),
+            })])
         }
     }
 

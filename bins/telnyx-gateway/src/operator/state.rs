@@ -205,6 +205,7 @@ impl TtsPlaybackStatus {
 pub struct TtsPlaybackState {
     pub playback_id: String,
     pub status: TtsPlaybackStatus,
+    pub backend: LiveTtsBackend,
     pub text_preview: String,
     pub frames_queued: usize,
     pub frames_sent: usize,
@@ -502,6 +503,7 @@ pub struct GatewayState {
     pub config: GatewayConfig,
     pub inbound_mode: InboundMode,
     pub started_at: DateTime<Utc>,
+    pub conversation_tts_backend: LiveTtsBackend,
     pub calls: BTreeMap<String, CallSession>,
     pub call_control_index: BTreeMap<String, String>,
     pub stream_index: BTreeMap<String, String>,
@@ -543,6 +545,7 @@ impl GatewayState {
             },
             inbound_mode: InboundMode::Disabled,
             started_at: Utc::now(),
+            conversation_tts_backend: LiveTtsBackend::default(),
             calls: BTreeMap::new(),
             call_control_index: BTreeMap::new(),
             stream_index: BTreeMap::new(),
@@ -1073,12 +1076,19 @@ impl GatewayState {
         }
     }
 
-    pub fn start_tts_job(&mut self, gateway_call_id: &str, playback_id: String, text: &str) {
+    pub fn start_tts_job(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: String,
+        backend: LiveTtsBackend,
+        text: &str,
+    ) {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.status = CallStatus::Speaking;
             call.tts = Some(TtsPlaybackState {
                 playback_id: playback_id.clone(),
                 status: TtsPlaybackStatus::Queued,
+                backend,
                 text_preview: preview_text(text),
                 frames_queued: 0,
                 frames_sent: 0,
@@ -1322,8 +1332,18 @@ mod tests {
             None,
             CallStatus::MediaStarted,
         );
-        state.start_tts_job(&call_id, "tts_old".to_string(), "old reply");
-        state.start_tts_job(&call_id, "tts_new".to_string(), "new reply");
+        state.start_tts_job(
+            &call_id,
+            "tts_old".to_string(),
+            LiveTtsBackend::default(),
+            "old reply",
+        );
+        state.start_tts_job(
+            &call_id,
+            "tts_new".to_string(),
+            LiveTtsBackend::Piper,
+            "new reply",
+        );
 
         state.mark_tts_canceled(&call_id, "tts_old");
 

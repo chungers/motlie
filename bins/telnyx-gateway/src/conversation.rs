@@ -1,16 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use async_trait::async_trait;
 use motlie_voice::app::{
     CallContext, CallIds, ConversationCommand, ConversationHandler, TranscriptEvent, VoiceAppError,
 };
 use motlie_voice::telephony::CallAction;
 use tokio::sync::Mutex;
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
@@ -18,7 +18,7 @@ use crate::operator::state::{ConversationMode, LogLevel, QualitySpanEmission, Sh
 use crate::quality::{BargeInQualityConfig, RedactionMode, VoiceQualityConfig};
 use crate::speech;
 use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
-use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
+use crate::tts::SharedTtsRegistry;
 
 const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
 
@@ -99,7 +99,11 @@ impl ConversationRuntime {
     }
 
     pub fn barge_in_label(&self) -> &'static str {
-        if self.barge_in_enabled() { "on" } else { "off" }
+        if self.barge_in_enabled() {
+            "on"
+        } else {
+            "off"
+        }
     }
 
     pub fn handler_label(&self) -> &'static str {
@@ -926,12 +930,13 @@ async fn queue_conversation_speech(
     conflict_policy: SpeechConflictPolicy,
     turn_finalized_at: Option<Instant>,
 ) {
+    let tts_backend = state.read().await.conversation_tts_backend;
     let queued = speech::queue_speech_with_request(
         state,
         media_registry,
         &runtime.tts,
         SpeechQueueRequest {
-            tts_backend: LiveTtsBackend::default(),
+            tts_backend,
             gateway_call_id: gateway_call_id.to_string(),
             text: response_text.clone(),
             source_label: "conversation say".to_string(),
@@ -958,6 +963,7 @@ async fn queue_conversation_speech(
                 gateway_call_id,
                 playback_id = queued.playback_id,
                 replaced_playback_id = queued.replaced_playback_id.as_deref(),
+                tts_backend = tts_backend.label(),
                 "conversation.say.queued"
             );
         }
@@ -976,8 +982,8 @@ async fn queue_conversation_speech(
 mod tests {
     use super::*;
     use crate::media::SpeechCancelToken;
-    use crate::operator::state::{CallStatus, ConversationStatus, TelnyxIds, shared_state};
-    use crate::tts::{OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry};
+    use crate::operator::state::{shared_state, CallStatus, ConversationStatus, TelnyxIds};
+    use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
@@ -1272,12 +1278,10 @@ mod tests {
         .expect("partial barge-in should cancel active speech");
 
         assert!(cancel.is_canceled());
-        assert!(
-            media_registry
-                .active_speech_playback_id(&gateway_call_id)
-                .await
-                .is_none()
-        );
+        assert!(media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await
+            .is_none());
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.conversation.status, ConversationStatus::Interrupted);
@@ -1313,12 +1317,10 @@ mod tests {
             .expect("speech onset barge-in should cancel active speech");
 
         assert!(cancel.is_canceled());
-        assert!(
-            media_registry
-                .active_speech_playback_id(&gateway_call_id)
-                .await
-                .is_none()
-        );
+        assert!(media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await
+            .is_none());
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.conversation.status, ConversationStatus::Interrupted);
