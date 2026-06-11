@@ -792,6 +792,7 @@ pub(crate) struct SessionListState {
 pub(crate) enum SessionSortMode {
     #[default]
     Activity,
+    Name,
     TagGroup,
 }
 
@@ -812,8 +813,14 @@ impl SessionListState {
     pub(crate) fn set_rows_sorted(&mut self, rows: Vec<SessionRow>, fleet: &HostFleet) {
         match self.sort_mode {
             SessionSortMode::Activity => self.set_rows_sorted_by_activity(rows),
+            SessionSortMode::Name => self.set_rows_sorted_by_name(rows),
             SessionSortMode::TagGroup => self.set_rows_grouped_by_tag(rows, fleet),
         }
+    }
+
+    pub(crate) fn set_rows_sorted_by_name(&mut self, mut rows: Vec<SessionRow>) {
+        sort_rows_by_name(&mut rows);
+        self.rows = rows;
     }
 
     pub(crate) fn set_rows_grouped_by_tag(&mut self, mut rows: Vec<SessionRow>, fleet: &HostFleet) {
@@ -824,8 +831,14 @@ impl SessionListState {
     pub(crate) fn toggle_sort_mode(&mut self) -> SessionSortMode {
         self.sort_mode = match self.sort_mode {
             SessionSortMode::Activity => SessionSortMode::TagGroup,
+            SessionSortMode::Name => SessionSortMode::TagGroup,
             SessionSortMode::TagGroup => SessionSortMode::Activity,
         };
+        self.sort_mode
+    }
+
+    pub(crate) fn sort_by_name(&mut self) -> SessionSortMode {
+        self.sort_mode = SessionSortMode::Name;
         self.sort_mode
     }
 
@@ -883,6 +896,18 @@ impl SessionListState {
 
 fn sort_rows_by_activity(rows: &mut [SessionRow]) {
     rows.sort_by(activity_sort_order);
+}
+
+fn sort_rows_by_name(rows: &mut [SessionRow]) {
+    rows.sort_by(name_sort_order);
+}
+
+fn name_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
+    left.session
+        .name
+        .cmp(&right.session.name)
+        .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
+        .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
 }
 
 fn activity_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {

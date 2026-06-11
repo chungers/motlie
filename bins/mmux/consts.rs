@@ -127,6 +127,7 @@ t manage highlighted session tags
   x unset focused tag
   c toggle sort tag
 g group sessions by tag (list pane)
+s sort sessions by name (list pane)
 h help
 a attach highlighted session
 mod-←/→ resize L/R in landscape
