@@ -1,8 +1,6 @@
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use motlie_telnyx_gateway::text_calls::turns::{
-    AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus,
-};
+use motlie_agent::voice::telnyx::text::{AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus};
 use std::time::Duration;
 
 use tokio::sync::mpsc;

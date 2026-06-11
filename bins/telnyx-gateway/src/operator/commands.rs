@@ -18,6 +18,7 @@ use crate::operator::state::{
 };
 use crate::quality::{QualityEventSink, QualityProfile, RedactionMode, VoiceQualityConfig};
 use crate::speech;
+use crate::text_calls::{SharedTextCallRegistry, TextCallStreamServices};
 use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -31,6 +32,7 @@ pub struct GatewayContext {
     pub media: SharedMediaRegistry,
     pub tts: SharedTtsRegistry,
     pub conversation: ConversationRuntime,
+    pub text_calls: SharedTextCallRegistry,
     pub session: OperatorSession,
 }
 
@@ -73,7 +75,23 @@ impl GatewayContext {
             media,
             tts,
             conversation,
+            text_calls: SharedTextCallRegistry::default(),
             session: OperatorSession::new(next_asr_backend),
+        }
+    }
+
+    pub fn with_text_calls(mut self, text_calls: SharedTextCallRegistry) -> Self {
+        self.text_calls = text_calls;
+        self
+    }
+
+    pub fn text_call_services(&self) -> TextCallStreamServices {
+        TextCallStreamServices {
+            registry: self.text_calls.clone(),
+            state: self.state.clone(),
+            media: self.media.clone(),
+            tts: self.tts.clone(),
+            telnyx: self.telnyx.clone(),
         }
     }
 
@@ -86,7 +104,8 @@ impl GatewayContext {
             self.tts.clone(),
             self.conversation.clone(),
             self.session.next_asr_backend,
-        );
+        )
+        .with_text_calls(self.text_calls.clone());
         context.session.next_tts_backend = self.session.next_tts_backend;
         context
     }
@@ -3530,6 +3549,12 @@ fn socket_help() -> String {
         "  Receive one JSON object per command:",
         "    {\"ok\":true,\"lines\":[...],\"data\":{...},\"effects\":[...],\"error\":null}",
         "  `data` is present for status, calls, call show, tts list, and tts status polling.",
+        "",
+        "Debug text stream mode:",
+        "  stream attach <call-id>",
+        "  {\"type\":\"debug.attach\",\"protocol\":\"motlie.telnyx.text.v1\",\"extension\":\"motlie.telnyx.text.debug.v1\",\"call_id\":\"<call-id>\"}",
+        "  Stream mode sends motlie.telnyx.text.v1 JSONL frames and accepts agent frames.",
+        "  Send {\"type\":\"debug.detach\",\"reason\":\"done\"} to return to command mode.",
         "",
         "Discovery:",
         "  help",

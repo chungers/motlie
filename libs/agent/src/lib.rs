@@ -3,6 +3,8 @@
 //! The first surface is managed prompt delivery through a process-local
 //! [`Channel`] keyed by a stable tmux session identity.
 
+pub mod voice;
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::error::Error as StdError;

@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
@@ -19,7 +21,8 @@ use crate::tts::{SharedTtsRegistry, StreamingSpeechTextPacker};
 
 use super::offers::validate_call_url;
 use super::turns::{
-    AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_PROTOCOL,
+    AgentTextFrame, DebugTextStreamFrame, GatewayTextFrame, PlaybackFinishedStatus,
+    TextCallDirection, TEXT_CALL_PROTOCOL,
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
@@ -246,6 +249,19 @@ impl SharedTextCallRegistry {
         self.inner.lock().await.insert(gateway_call_id, handle);
     }
 
+    async fn insert_if_absent(
+        &self,
+        gateway_call_id: String,
+        handle: TextCallSessionHandle,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.inner.lock().await;
+        if guard.contains_key(&gateway_call_id) {
+            anyhow::bail!("text-call stream already attached for {gateway_call_id}");
+        }
+        guard.insert(gateway_call_id, handle);
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) async fn insert_test_session(
         &self,
@@ -383,6 +399,28 @@ pub struct TextCallSetup {
     pub direction: TextCallDirection,
 }
 
+#[derive(Clone, Debug)]
+pub struct DebugTextCallSetup {
+    pub gateway_call_id: String,
+    pub direction: TextCallDirection,
+}
+
+fn text_call_session_handle(
+    session_config: TextCallSessionConfig,
+) -> (TextCallSessionHandle, mpsc::Receiver<GatewayTextFrame>) {
+    let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+    let handle = TextCallSessionHandle {
+        tx,
+        sequence: Arc::new(AtomicU64::new(1)),
+        turns: Arc::new(Mutex::new(TextCallTurnTracker::new(
+            session_config.max_active_turns,
+        ))),
+        append_turns: Arc::new(Mutex::new(BTreeMap::new())),
+        config: session_config,
+    };
+    (handle, rx)
+}
+
 pub async fn connect_application_stream(
     services: TextCallStreamServices,
     setup: TextCallSetup,
@@ -404,16 +442,7 @@ pub async fn connect_application_stream(
         let guard = services.state.read().await;
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
-    let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
-    let handle = TextCallSessionHandle {
-        tx,
-        sequence: Arc::new(AtomicU64::new(1)),
-        turns: Arc::new(Mutex::new(TextCallTurnTracker::new(
-            session_config.max_active_turns,
-        ))),
-        append_turns: Arc::new(Mutex::new(BTreeMap::new())),
-        config: session_config,
-    };
+    let (handle, rx) = text_call_session_handle(session_config);
     services
         .registry
         .insert(setup.gateway_call_id.clone(), handle.clone())
@@ -427,6 +456,153 @@ pub async fn connect_application_stream(
         write,
         rx,
     ));
+    Ok(())
+}
+
+pub async fn run_debug_text_stream<R, W>(
+    services: TextCallStreamServices,
+    setup: DebugTextCallSetup,
+    read: R,
+    write: W,
+) -> anyhow::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let session_config = {
+        let guard = services.state.read().await;
+        TextCallSessionConfig::from(&guard.quality.config.text_call)
+    };
+    let (handle, rx) = text_call_session_handle(session_config);
+    services
+        .registry
+        .insert_if_absent(setup.gateway_call_id.clone(), handle.clone())
+        .await?;
+
+    let result = run_debug_text_call_session(
+        services.clone(),
+        setup.gateway_call_id.clone(),
+        setup.direction,
+        handle.clone(),
+        read,
+        write,
+        rx,
+    )
+    .await;
+
+    handle.append_turns.lock().await.clear();
+    handle.turns.lock().await.clear();
+    services.registry.remove(&setup.gateway_call_id).await;
+    result
+}
+
+async fn run_debug_text_call_session<R, W>(
+    services: TextCallStreamServices,
+    gateway_call_id: String,
+    direction: TextCallDirection,
+    handle: TextCallSessionHandle,
+    mut read: R,
+    mut write: W,
+    mut rx: mpsc::Receiver<GatewayTextFrame>,
+) -> anyhow::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    write_json_line(
+        &mut write,
+        &DebugTextStreamFrame::attached(gateway_call_id.clone()),
+    )
+    .await?;
+    write_json_line(
+        &mut write,
+        &GatewayTextFrame::SessionStart {
+            protocol: TEXT_CALL_PROTOCOL.to_string(),
+            call_id: gateway_call_id.clone(),
+            direction,
+        },
+    )
+    .await?;
+
+    let mut line = String::new();
+    loop {
+        tokio::select! {
+            frame = rx.recv() => {
+                let Some(frame) = frame else {
+                    break;
+                };
+                let gateway_closed = matches!(frame, GatewayTextFrame::SessionEnd { .. });
+                write_json_line(&mut write, &frame).await?;
+                if gateway_closed {
+                    break;
+                }
+            }
+            read = read.read_line(&mut line) => {
+                let read = read?;
+                if read == 0 {
+                    break;
+                }
+                let message = line.trim();
+                if message.is_empty() {
+                    line.clear();
+                    continue;
+                }
+                if let Ok(debug) = serde_json::from_str::<DebugTextStreamFrame>(message) {
+                    match debug {
+                        DebugTextStreamFrame::Detach { reason } => {
+                            write_json_line(
+                                &mut write,
+                                &DebugTextStreamFrame::detached(
+                                    reason.unwrap_or_else(|| "debug.detach".to_string()),
+                                ),
+                            )
+                            .await?;
+                            break;
+                        }
+                        DebugTextStreamFrame::Attach { .. } => {
+                            write_json_line(
+                                &mut write,
+                                &DebugTextStreamFrame::error(
+                                    "already_attached",
+                                    "debug stream is already attached",
+                                ),
+                            )
+                            .await?;
+                        }
+                        DebugTextStreamFrame::Attached { .. }
+                        | DebugTextStreamFrame::Detached { .. }
+                        | DebugTextStreamFrame::Error { .. } => {
+                            write_json_line(
+                                &mut write,
+                                &DebugTextStreamFrame::error(
+                                    "invalid_debug_frame",
+                                    "client debug stream frame is not valid in stream mode",
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
+                    line.clear();
+                    continue;
+                }
+
+                if let Err(error) =
+                    handle_agent_message(&services, &gateway_call_id, &handle, message).await
+                {
+                    log_text_call_error(&services.state, &gateway_call_id, error).await;
+                    write_json_line(
+                        &mut write,
+                        &DebugTextStreamFrame::error(
+                            "protocol_error",
+                            "invalid text-call agent frame",
+                        ),
+                    )
+                    .await?;
+                }
+                line.clear();
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1115,6 +1291,18 @@ where
         .send(Message::Text(encoded.into()))
         .await
         .context("send text-call websocket frame")
+}
+
+async fn write_json_line<W, T>(write: &mut W, frame: &T) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let encoded = serde_json::to_string(frame).context("encode text-call JSONL frame")?;
+    write.write_all(encoded.as_bytes()).await?;
+    write.write_all(b"\n").await?;
+    write.flush().await?;
+    Ok(())
 }
 
 async fn log_text_call_error(state: &SharedState, gateway_call_id: &str, error: anyhow::Error) {

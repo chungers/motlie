@@ -4,11 +4,16 @@ use std::sync::Arc;
 use motlie_driver::{CommandEffect, CommandEngine};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
 use crate::operator::script::run_operator_line;
+use crate::operator::state::CallDirection;
+use crate::text_calls::turns::{
+    DebugTextStreamFrame, TextCallDirection, TEXT_CALL_DEBUG_EXTENSION, TEXT_CALL_PROTOCOL,
+};
+use crate::text_calls::websocket::{run_debug_text_stream, DebugTextCallSetup};
 
 pub type SharedCommandContext = Arc<GatewayContext>;
 
@@ -93,7 +98,9 @@ async fn handle_connection(
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.for_new_source());
+    let connection_context = context.for_new_source();
+    let mut engine =
+        CommandEngine::<GatewayContext, GatewayCommand>::new(connection_context.clone());
     let mut line = String::new();
 
     loop {
@@ -107,15 +114,137 @@ async fn handle_connection(
             continue;
         }
 
+        match parse_debug_stream_attach(command) {
+            Ok(Some(call_id)) => {
+                if let Err(error) = run_attached_debug_stream(
+                    &connection_context,
+                    &mut reader,
+                    &mut writer,
+                    call_id,
+                )
+                .await
+                {
+                    let response = SocketCommandResponse::error(error.to_string());
+                    write_socket_response(&mut writer, &response).await?;
+                }
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let response = SocketCommandResponse::error(error);
+                write_socket_response(&mut writer, &response).await?;
+                continue;
+            }
+        }
+
         let response = match run_operator_line(&mut engine, command).await {
             Ok(output) => SocketCommandResponse::ok(command, output.lines, output.effects),
             Err(error) => SocketCommandResponse::error(error.to_string()),
         };
-        let encoded = serde_json::to_string(&response)?;
-        writer.write_all(encoded.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
-        writer.flush().await?;
+        write_socket_response(&mut writer, &response).await?;
     }
+}
+
+async fn write_socket_response<W>(
+    writer: &mut W,
+    response: &SocketCommandResponse,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let encoded = serde_json::to_string(response)?;
+    writer.write_all(encoded.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+fn parse_debug_stream_attach(command: &str) -> Result<Option<String>, String> {
+    if command.trim_start().starts_with('{') {
+        let Ok(frame) = serde_json::from_str::<DebugTextStreamFrame>(command) else {
+            return Ok(None);
+        };
+        return match frame {
+            DebugTextStreamFrame::Attach {
+                protocol,
+                extension,
+                call_id,
+            } => {
+                if protocol != TEXT_CALL_PROTOCOL {
+                    return Err(format!(
+                        "unsupported text stream protocol {protocol}; expected {TEXT_CALL_PROTOCOL}"
+                    ));
+                }
+                if extension != TEXT_CALL_DEBUG_EXTENSION {
+                    return Err(format!(
+                        "unsupported debug stream extension {extension}; expected {TEXT_CALL_DEBUG_EXTENSION}"
+                    ));
+                }
+                Ok(Some(call_id))
+            }
+            DebugTextStreamFrame::Detach { .. } => {
+                Err("debug.detach is only valid after stream attach".to_string())
+            }
+            DebugTextStreamFrame::Attached { .. }
+            | DebugTextStreamFrame::Detached { .. }
+            | DebugTextStreamFrame::Error { .. } => {
+                Err("client debug stream control frame is not valid in command mode".to_string())
+            }
+        };
+    }
+
+    let Some(argv) = shlex::split(command) else {
+        return if command.starts_with("stream") {
+            Err("invalid stream command".to_string())
+        } else {
+            Ok(None)
+        };
+    };
+    if argv.first().map(String::as_str) != Some("stream") {
+        return Ok(None);
+    }
+    if argv.get(1).map(String::as_str) != Some("attach") || argv.len() != 3 {
+        return Err("usage: stream attach <call-id>".to_string());
+    }
+    Ok(argv.get(2).cloned())
+}
+
+async fn run_attached_debug_stream<R, W>(
+    context: &GatewayContext,
+    reader: &mut R,
+    writer: &mut W,
+    call_id: String,
+) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let direction = text_call_direction_for(context, &call_id).await?;
+    run_debug_text_stream(
+        context.text_call_services(),
+        DebugTextCallSetup {
+            gateway_call_id: call_id,
+            direction,
+        },
+        reader,
+        writer,
+    )
+    .await
+}
+
+async fn text_call_direction_for(
+    context: &GatewayContext,
+    call_id: &str,
+) -> anyhow::Result<TextCallDirection> {
+    let guard = context.state.read().await;
+    let call = guard
+        .calls
+        .get(call_id)
+        .ok_or_else(|| anyhow::anyhow!("call {call_id} not found"))?;
+    Ok(match call.direction {
+        CallDirection::Inbound => TextCallDirection::Inbound,
+        CallDirection::Outbound => TextCallDirection::Outbound,
+    })
 }
 
 fn structured_data(command: &str, lines: &[String]) -> Option<Value> {
@@ -379,7 +508,70 @@ mod tests {
 
         assert!(lines.contains("Agent socket interface"));
         assert!(lines.contains("Receive one JSON object"));
+        assert!(lines.contains("stream attach <call-id>"));
+        assert!(lines.contains("debug.detach"));
         assert!(lines.contains("Operational parity"));
+
+        socket_task.abort();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn command_socket_debug_stream_detaches_back_to_commands() {
+        let path = std::env::temp_dir().join(format!(
+            "motlie-telnyx-gateway-test-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid address"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_test_call(&mut guard, "call-1")
+        };
+        let telnyx = TelnyxClient::new("https://api.example.test".to_string(), None, true);
+        let gateway_context = GatewayContext::new(state, telnyx);
+        let text_calls = gateway_context.text_calls.clone();
+        let socket_task = tokio::spawn(run_command_socket(path.clone(), Arc::new(gateway_context)));
+
+        let mut client = SocketTestClient::connect(&path).await;
+        client.write_line(&format!("stream attach {call_id}")).await;
+
+        let attached = client.read_json().await;
+        assert_eq!(attached["type"], "debug.attached");
+        assert_eq!(attached["protocol"], TEXT_CALL_PROTOCOL);
+        assert_eq!(attached["extension"], TEXT_CALL_DEBUG_EXTENSION);
+        assert_eq!(attached["call_id"], call_id);
+
+        let session_start = client.read_json().await;
+        assert_eq!(session_start["type"], "session.start");
+        assert_eq!(session_start["protocol"], TEXT_CALL_PROTOCOL);
+        assert_eq!(session_start["call_id"], call_id);
+        assert_eq!(session_start["direction"], "inbound");
+
+        let turn_id = text_calls
+            .send_caller_turn(
+                &call_id,
+                "hello from caller".to_string(),
+                std::time::Instant::now(),
+            )
+            .await
+            .expect("caller turn should send")
+            .expect("debug stream should be attached");
+        let caller_turn = client.read_json().await;
+        assert_eq!(caller_turn["type"], "caller.turn");
+        assert_eq!(caller_turn["turn_id"], turn_id);
+        assert_eq!(caller_turn["text"], "hello from caller");
+
+        client
+            .write_line(r#"{"type":"debug.detach","reason":"done"}"#)
+            .await;
+        let detached = client.read_json().await;
+        assert_eq!(detached["type"], "debug.detached");
+        assert_eq!(detached["reason"], "done");
+
+        let response = client.command("calls").await;
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["kind"], "calls");
+        assert_eq!(response["data"]["calls"][0]["call"], call_id);
 
         socket_task.abort();
         let _ = std::fs::remove_file(path);
@@ -554,10 +746,18 @@ mod tests {
         }
 
         async fn command(&mut self, command: &str) -> serde_json::Value {
+            self.write_line(command).await;
+            self.read_json().await
+        }
+
+        async fn write_line(&mut self, line: &str) {
             self.writer
-                .write_all(format!("{command}\n").as_bytes())
+                .write_all(format!("{line}\n").as_bytes())
                 .await
-                .expect("write socket command");
+                .expect("write socket line");
+        }
+
+        async fn read_json(&mut self) -> serde_json::Value {
             let mut response = String::new();
             self.reader
                 .read_line(&mut response)

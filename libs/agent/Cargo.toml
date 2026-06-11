@@ -10,8 +10,10 @@ description = "Agent interaction policy over motlie-tmux"
 [dependencies]
 motlie-tmux = { path = "../tmux" }
 tokio = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = "0.1"
 
 [dev-dependencies]
+serde_json = "1.0.149"
 tokio = { workspace = true, features = ["full", "test-util"] }
