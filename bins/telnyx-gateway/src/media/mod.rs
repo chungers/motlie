@@ -1483,7 +1483,7 @@ async fn ingest_frame(
         &stats,
         samples.len(),
     );
-    match media_state.asr_gate.accept(
+    let partial_speech_state = match media_state.asr_gate.accept(
         media_state.decoded_frame_count,
         stream_id,
         frame_duration_ms,
@@ -1491,7 +1491,10 @@ async fn ingest_frame(
         &media_state.quality_config,
     ) {
         AsrFrameDecision::Suppress => return Ok(()),
-        AsrFrameDecision::Continue { speech_onset } => {
+        AsrFrameDecision::Continue {
+            speech_onset,
+            speech_state,
+        } => {
             if speech_onset {
                 if should_defer_speech_onset_barge_in(&media_state.media_registry, &gateway_call_id)
                     .await
@@ -1523,6 +1526,7 @@ async fn ingest_frame(
                     }
                 }
             }
+            speech_state
         }
         AsrFrameDecision::Finalize {
             trailing_silence_ms,
@@ -1560,7 +1564,7 @@ async fn ingest_frame(
             media_state.asr_gate.wait_for_next_speech();
             return Ok(());
         }
-    }
+    };
     if media_state.session.is_none() {
         open_asr_session(
             state,
@@ -1598,6 +1602,7 @@ async fn ingest_frame(
             capture: media_state.capture.as_mut(),
             text_calls,
             quality_session: media_state.active_quality_asr.as_ref(),
+            partial_speech_state,
         },
     )
     .await;
@@ -1934,6 +1939,7 @@ enum AsrFrameDecision {
     Suppress,
     Continue {
         speech_onset: bool,
+        speech_state: CallerSpeechState,
     },
     Finalize {
         trailing_silence_ms: u64,
@@ -1976,7 +1982,10 @@ impl AsrGate {
                     "media.speech.detected"
                 );
             }
-            return AsrFrameDecision::Continue { speech_onset };
+            return AsrFrameDecision::Continue {
+                speech_onset,
+                speech_state: CallerSpeechState::Speaking,
+            };
         }
 
         if self.speech_started {
@@ -1987,6 +1996,7 @@ impl AsrGate {
             if self.low_energy_run_ms <= quality.endpoint.trailing_silence_ms {
                 return AsrFrameDecision::Continue {
                     speech_onset: false,
+                    speech_state: CallerSpeechState::EndpointCandidate,
                 };
             }
             self.suppressed_tail_frames = self.suppressed_tail_frames.saturating_add(1);
@@ -2273,6 +2283,7 @@ async fn record_and_forward_asr_events(
             capture: media_state.capture.as_mut(),
             text_calls,
             quality_session,
+            partial_speech_state: CallerSpeechState::Finalizing,
         },
     )
     .await;
@@ -2567,6 +2578,7 @@ struct TranscriptRecordContext<'a> {
     capture: Option<&'a mut MediaCapture>,
     text_calls: Option<&'a SharedTextCallRegistry>,
     quality_session: Option<&'a ActiveAsrQualitySession>,
+    partial_speech_state: CallerSpeechState,
 }
 
 struct TranscriptRecordOutcome {
@@ -2841,7 +2853,7 @@ async fn record_transcript_events(
             partial_turns.push(PartialTurnCandidate {
                 utterance_id: session.utterance_id.clone(),
                 text: text.clone(),
-                speech_state: CallerSpeechState::Speaking,
+                speech_state: context.partial_speech_state,
             });
         }
         conversation_events.push(ConversationTranscriptEvent {
@@ -3024,6 +3036,13 @@ mod tests {
     use crate::tts::{
         LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
     };
+
+    fn continue_decision(speech_onset: bool, speech_state: CallerSpeechState) -> AsrFrameDecision {
+        AsrFrameDecision::Continue {
+            speech_onset,
+            speech_state,
+        }
+    }
 
     #[test]
     fn pcma_and_pcmu_decode_to_i16_audio() {
@@ -3722,13 +3741,11 @@ mod tests {
 
         assert_eq!(
             gate.accept(1, "stream-1", 20, &speech, &quality),
-            AsrFrameDecision::Continue { speech_onset: true }
+            continue_decision(true, CallerSpeechState::Speaking)
         );
         assert_eq!(
             gate.accept(2, "stream-1", 20, &silence, &quality),
-            AsrFrameDecision::Continue {
-                speech_onset: false,
-            }
+            continue_decision(false, CallerSpeechState::EndpointCandidate)
         );
         match gate.accept(3, "stream-1", 20, &silence, &quality) {
             AsrFrameDecision::Finalize {
@@ -3767,13 +3784,11 @@ mod tests {
 
         assert_eq!(
             gate.accept(1, "stream-1", 20, &speech, &quality),
-            AsrFrameDecision::Continue { speech_onset: true }
+            continue_decision(true, CallerSpeechState::Speaking)
         );
         assert_eq!(
             gate.accept(2, "stream-1", 20, &silence, &quality),
-            AsrFrameDecision::Continue {
-                speech_onset: false,
-            }
+            continue_decision(false, CallerSpeechState::EndpointCandidate)
         );
         match gate.accept(3, "stream-1", 20, &silence, &quality) {
             AsrFrameDecision::Finalize { endpoint_gate, .. } => {
@@ -3786,13 +3801,11 @@ mod tests {
 
         assert_eq!(
             gate.accept(4, "stream-1", 20, &speech, &quality),
-            AsrFrameDecision::Continue { speech_onset: true }
+            continue_decision(true, CallerSpeechState::Speaking)
         );
         assert_eq!(
             gate.accept(5, "stream-1", 20, &silence, &quality),
-            AsrFrameDecision::Continue {
-                speech_onset: false,
-            }
+            continue_decision(false, CallerSpeechState::EndpointCandidate)
         );
         match gate.accept(6, "stream-1", 20, &silence, &quality) {
             AsrFrameDecision::Finalize { endpoint_gate, .. } => {
@@ -3819,25 +3832,21 @@ mod tests {
 
         assert_eq!(
             gate.accept(1, "stream-1", 20, &speech, &quality),
-            AsrFrameDecision::Continue { speech_onset: true }
+            continue_decision(true, CallerSpeechState::Speaking)
         );
         for frame_index in 2..=10 {
             assert_eq!(
                 gate.accept(frame_index, "stream-1", 20, &silence, &quality),
-                AsrFrameDecision::Continue {
-                    speech_onset: false,
-                }
+                continue_decision(false, CallerSpeechState::EndpointCandidate)
             );
         }
         assert_eq!(
             gate.accept(11, "stream-1", 20, &speech, &quality),
-            AsrFrameDecision::Continue { speech_onset: true }
+            continue_decision(true, CallerSpeechState::Speaking)
         );
         assert_eq!(
             gate.accept(12, "stream-1", 20, &speech, &quality),
-            AsrFrameDecision::Continue {
-                speech_onset: false,
-            }
+            continue_decision(false, CallerSpeechState::Speaking)
         );
     }
 
@@ -4103,6 +4112,7 @@ mod tests {
                 capture: None,
                 text_calls: Some(&text_calls),
                 quality_session: Some(&quality_session),
+                partial_speech_state: CallerSpeechState::Speaking,
             },
         )
         .await;
@@ -4135,6 +4145,64 @@ mod tests {
                 ..
             } if utterance_id == quality_session.utterance_id && text == "hello world"
         ));
+    }
+
+    #[tokio::test]
+    async fn opted_in_text_call_receives_endpoint_and_finalizing_partial_states() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session_with_partials(gateway_call_id.clone(), true)
+            .await;
+        let quality_session = {
+            let mut guard = state.write().await;
+            guard.start_quality_asr_session(&gateway_call_id, Some("stream-1"), "test")
+        };
+        let format = MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        };
+        for (text, partial_speech_state) in [
+            ("endpoint soon", CallerSpeechState::EndpointCandidate),
+            ("finalizing now", CallerSpeechState::Finalizing),
+        ] {
+            let outcome = record_transcript_events(
+                &state,
+                &gateway_call_id,
+                vec![AsrTranscriptEvent::emit(TranscriptEvent::Partial {
+                    text: text.to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                })],
+                TranscriptRecordContext {
+                    stream_id: Some("stream-1"),
+                    media_format: Some(&format),
+                    capture: None,
+                    text_calls: Some(&text_calls),
+                    quality_session: Some(&quality_session),
+                    partial_speech_state,
+                },
+            )
+            .await;
+            assert!(!outcome.reset_requested);
+            let partial = time::timeout(Duration::from_secs(1), text_rx.recv())
+                .await
+                .expect("caller.partial should be emitted")
+                .expect("text-call session should stay open");
+            assert!(matches!(
+                partial,
+                GatewayTextFrame::CallerPartial {
+                    utterance_id,
+                    text: emitted_text,
+                    speech_state,
+                    reply_allowed: false,
+                    ..
+                } if utterance_id == quality_session.utterance_id
+                    && emitted_text == text
+                    && speech_state == partial_speech_state
+            ));
+        }
     }
 
     #[tokio::test]
@@ -4174,6 +4242,7 @@ mod tests {
                 capture: None,
                 text_calls: Some(&text_calls),
                 quality_session: None,
+                partial_speech_state: CallerSpeechState::Speaking,
             },
         )
         .await;
@@ -4397,6 +4466,7 @@ mod tests {
                 capture: None,
                 text_calls: None,
                 quality_session: None,
+                partial_speech_state: CallerSpeechState::Speaking,
             },
         )
         .await;
@@ -4434,6 +4504,7 @@ mod tests {
                 capture: None,
                 text_calls: None,
                 quality_session: None,
+                partial_speech_state: CallerSpeechState::Speaking,
             },
         )
         .await;
