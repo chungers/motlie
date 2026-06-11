@@ -234,7 +234,7 @@ impl Channel {
             .accept(
                 message,
                 options.submit,
-                QuietGuardPolicy::Default,
+                options.quiet_guard,
                 Some(Waiter {
                     id: waiter_id,
                     tx: waiter_tx,
@@ -381,6 +381,7 @@ impl Channel {
                 segment.add_source(source.clone());
                 segment.submit = segment.submit.merged(submit);
                 segment.paste_mode = segment.paste_mode.merged(message.paste_mode);
+                segment.verify_delivery |= message.verify_delivery;
                 segment.quiet_guard = segment.quiet_guard.merged(quiet_guard);
                 segment.coalesce = segment.coalesce.merged(coalesce);
                 if let Some(waiter) = waiter {
@@ -396,6 +397,7 @@ impl Channel {
                     dedup_key: dedup_key.unwrap_or_else(|| format!("__unique:{message_id}")),
                     body: message.body,
                     paste_mode: message.paste_mode,
+                    verify_delivery: message.verify_delivery,
                     sources: vec![source.clone()],
                     submit,
                     quiet_guard,
@@ -516,33 +518,29 @@ impl Channel {
         if self.inner.config.input_quiet_for.is_zero() {
             return Ok(());
         }
-        let should_guard = {
+        let quiet_for = {
             let queue = self.inner.queue.lock().await;
             if queue.pending.is_empty() {
                 return Ok(());
             }
-            queue
-                .pending
-                .iter()
-                .any(|segment| segment.quiet_guard == QuietGuardPolicy::Default)
+            self.quiet_guard_duration(queue.pending.iter())
         };
-        if !should_guard {
+        let Some(quiet_for) = quiet_for else {
             return Ok(());
-        }
+        };
 
         loop {
             let activity = self.quiet_guard_activity().await?;
             let Some(latest) = activity.latest_writable_client_activity else {
-                self.trace_quiet_guard_activity(&activity, None);
+                self.trace_quiet_guard_activity(&activity, quiet_for, None);
                 return Ok(());
             };
             let age = seconds_since_epoch(latest).unwrap_or(0);
-            self.trace_quiet_guard_activity(&activity, Some(age));
-            if age >= self.inner.config.input_quiet_for.as_secs() {
+            self.trace_quiet_guard_activity(&activity, quiet_for, Some(age));
+            if age >= quiet_for.as_secs() {
                 return Ok(());
             }
-            let retry_after =
-                Duration::from_secs((self.inner.config.input_quiet_for.as_secs() - age).max(1));
+            let retry_after = Duration::from_secs((quiet_for.as_secs() - age).max(1));
             let message_ids = self.mark_deferred().await;
             if message_ids.is_empty() {
                 return Ok(());
@@ -590,7 +588,12 @@ impl Channel {
         Ok(activity)
     }
 
-    fn trace_quiet_guard_activity(&self, activity: &SessionClientActivity, age: Option<u64>) {
+    fn trace_quiet_guard_activity(
+        &self,
+        activity: &SessionClientActivity,
+        quiet_for: Duration,
+        age: Option<u64>,
+    ) {
         if std::env::var_os("MOTLIE_AGENT_QUIET_GUARD_TRACE").is_none() {
             return;
         }
@@ -603,14 +606,18 @@ impl Channel {
             activity.latest_client_activity,
             activity.latest_writable_client_activity,
             age,
-            self.inner.config.input_quiet_for.as_secs(),
+            quiet_for.as_secs(),
         );
     }
 
     async fn mark_deferred(&self) -> Vec<MessageId> {
         let mut queue = self.inner.queue.lock().await;
         for segment in &mut queue.pending {
-            if segment.quiet_guard == QuietGuardPolicy::Default {
+            if segment
+                .quiet_guard
+                .duration(self.inner.config.input_quiet_for)
+                .is_some()
+            {
                 segment.deferred_once = true;
             }
         }
@@ -727,27 +734,27 @@ impl Channel {
         &self,
         batch: &mut [PendingSegment],
     ) -> Result<Option<(Vec<MessageId>, DeferReason, Duration)>, DeliveryError> {
-        if self.inner.config.input_quiet_for.is_zero()
-            || !batch
-                .iter()
-                .any(|segment| segment.quiet_guard == QuietGuardPolicy::Default)
-        {
+        let Some(quiet_for) = self.quiet_guard_duration(batch.iter()) else {
             return Ok(None);
-        }
+        };
 
         let activity = self.quiet_guard_activity().await?;
         let Some(latest) = activity.latest_writable_client_activity else {
-            self.trace_quiet_guard_activity(&activity, None);
+            self.trace_quiet_guard_activity(&activity, quiet_for, None);
             return Ok(None);
         };
         let age = seconds_since_epoch(latest).unwrap_or(0);
-        self.trace_quiet_guard_activity(&activity, Some(age));
-        if age >= self.inner.config.input_quiet_for.as_secs() {
+        self.trace_quiet_guard_activity(&activity, quiet_for, Some(age));
+        if age >= quiet_for.as_secs() {
             return Ok(None);
         }
 
         for segment in batch.iter_mut() {
-            if segment.quiet_guard == QuietGuardPolicy::Default {
+            if segment
+                .quiet_guard
+                .duration(self.inner.config.input_quiet_for)
+                .is_some()
+            {
                 segment.deferred_once = true;
             }
         }
@@ -755,13 +762,25 @@ impl Channel {
             .iter()
             .map(|segment| segment.message_id)
             .collect::<Vec<_>>();
-        let retry_after =
-            Duration::from_secs((self.inner.config.input_quiet_for.as_secs() - age).max(1));
+        let retry_after = Duration::from_secs((quiet_for.as_secs() - age).max(1));
         let reason = DeferReason::RecentWritableClientActivity {
             latest_client_activity: latest,
             latest_client_activity_age_secs: age,
         };
         Ok(Some((message_ids, reason, retry_after)))
+    }
+
+    fn quiet_guard_duration<'a>(
+        &self,
+        segments: impl Iterator<Item = &'a PendingSegment>,
+    ) -> Option<Duration> {
+        segments
+            .filter_map(|segment| {
+                segment
+                    .quiet_guard
+                    .duration(self.inner.config.input_quiet_for)
+            })
+            .max()
     }
 
     async fn requeue_front(&self, batch: Vec<PendingSegment>) {
@@ -841,11 +860,15 @@ impl Channel {
             .send_keys(&literal)
             .await
             .map_err(|err| DeliveryError::tmux("send_payload", err))?;
+        let delivery_verified = self
+            .verify_delivered_payload(batch, &body, paste_mode)
+            .await?;
 
         if !submit.prompt_submit {
             return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                 submitted_at: Instant::now(),
                 verified: false,
+                delivery_verified,
             }));
         }
 
@@ -872,6 +895,7 @@ impl Channel {
                     return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                         submitted_at,
                         verified: true,
+                        delivery_verified,
                     }));
                 }
                 SubmitVerification::Unknown => {
@@ -887,6 +911,7 @@ impl Channel {
                         return Ok(BatchSubmitAttempt::Submitted(BatchSubmitResult {
                             submitted_at,
                             verified: false,
+                            delivery_verified,
                         }));
                     }
                     if !submit.retry_delay.is_zero() {
@@ -931,6 +956,52 @@ impl Channel {
         Ok(body)
     }
 
+    async fn verify_delivered_payload(
+        &self,
+        batch: &[PendingSegment],
+        body: &str,
+        paste_mode: PasteMode,
+    ) -> Result<bool, DeliveryError> {
+        if !batch.iter().any(|segment| segment.verify_delivery) {
+            return Ok(false);
+        }
+        let message_ids = batch
+            .iter()
+            .map(|segment| segment.message_id)
+            .collect::<Vec<_>>();
+        let Some(probe) = delivery_probe(body) else {
+            return Ok(true);
+        };
+
+        if self.delivery_probe_visible(&probe).await? {
+            return Ok(true);
+        }
+        if paste_mode == PasteMode::Bracketed {
+            let literal = KeySequence::literal(body);
+            self.inner
+                .target
+                .send_keys(&literal)
+                .await
+                .map_err(|err| DeliveryError::tmux("send_payload_literal_retry", err))?;
+            if self.delivery_probe_visible(&probe).await? {
+                return Ok(true);
+            }
+        }
+
+        Err(DeliveryError::DeliveryNotConfirmed { message_ids })
+    }
+
+    async fn delivery_probe_visible(&self, probe: &str) -> Result<bool, DeliveryError> {
+        sleep(Duration::from_millis(100)).await;
+        let capture = self
+            .inner
+            .target
+            .capture()
+            .await
+            .map_err(|err| DeliveryError::tmux("capture_delivery_ack", err))?;
+        Ok(capture.contains(probe))
+    }
+
     async fn complete_batch(&self, batch: Vec<PendingSegment>, result: BatchSubmitResult) {
         let ids = batch
             .iter()
@@ -941,17 +1012,20 @@ impl Channel {
             message_ids: ids,
             submitted_at: result.submitted_at,
             verified: result.verified,
+            delivery_verified: result.delivery_verified,
         });
         for segment in batch {
             let outcome = if result.verified {
                 SubmissionOutcome::SubmittedVerified {
                     message_id: segment.message_id,
                     submitted_at: result.submitted_at,
+                    delivery_verified: result.delivery_verified,
                 }
             } else {
                 SubmissionOutcome::SubmittedUnverified {
                     message_id: segment.message_id,
                     submitted_at: result.submitted_at,
+                    delivery_verified: result.delivery_verified,
                 }
             };
             for waiter in segment.waiters {
@@ -1010,6 +1084,7 @@ struct PendingSegment {
     dedup_key: String,
     body: String,
     paste_mode: PasteMode,
+    verify_delivery: bool,
     sources: Vec<MessageSource>,
     submit: SubmitPolicy,
     quiet_guard: QuietGuardPolicy,
@@ -1043,6 +1118,7 @@ enum BatchSubmitAttempt {
 struct BatchSubmitResult {
     submitted_at: Instant,
     verified: bool,
+    delivery_verified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1059,6 +1135,7 @@ pub struct ManagedMessage {
     pub source: MessageSource,
     pub body: String,
     pub paste_mode: PasteMode,
+    pub verify_delivery: bool,
     pub dedup: DedupPolicy,
     pub coalesce: CoalescePolicy,
 }
@@ -1069,6 +1146,7 @@ impl ManagedMessage {
             source,
             body: body.into(),
             paste_mode: PasteMode::Bracketed,
+            verify_delivery: false,
             dedup: DedupPolicy::Body,
             coalesce: CoalescePolicy::Enabled,
         }
@@ -1076,6 +1154,11 @@ impl ManagedMessage {
 
     pub fn with_paste_mode(mut self, paste_mode: PasteMode) -> Self {
         self.paste_mode = paste_mode;
+        self
+    }
+
+    pub fn with_delivery_verification(mut self, verify: bool) -> Self {
+        self.verify_delivery = verify;
         self
     }
 
@@ -1237,6 +1320,7 @@ impl Default for SubmitPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendOptions {
     pub submit: SubmitPolicy,
+    pub quiet_guard: QuietGuardPolicy,
     pub timeout: Duration,
 }
 
@@ -1244,6 +1328,7 @@ impl Default for SendOptions {
     fn default() -> Self {
         Self {
             submit: SubmitPolicy::default(),
+            quiet_guard: QuietGuardPolicy::Default,
             timeout: Duration::from_secs(120),
         }
     }
@@ -1268,6 +1353,7 @@ impl Default for EnqueueOptions {
 pub enum QuietGuardPolicy {
     #[default]
     Default,
+    For(Duration),
     Disabled,
 }
 
@@ -1275,7 +1361,19 @@ impl QuietGuardPolicy {
     fn merged(self, other: Self) -> Self {
         match (self, other) {
             (Self::Disabled, _) | (_, Self::Disabled) => Self::Disabled,
+            (Self::For(left), Self::For(right)) => Self::For(left.max(right)),
+            (Self::For(duration), Self::Default) | (Self::Default, Self::For(duration)) => {
+                Self::For(duration)
+            }
             (Self::Default, Self::Default) => Self::Default,
+        }
+    }
+
+    fn duration(self, default: Duration) -> Option<Duration> {
+        match self {
+            Self::Default if !default.is_zero() => Some(default),
+            Self::For(duration) if !duration.is_zero() => Some(duration),
+            Self::Default | Self::For(_) | Self::Disabled => None,
         }
     }
 }
@@ -1285,10 +1383,12 @@ pub enum SubmissionOutcome {
     SubmittedVerified {
         message_id: MessageId,
         submitted_at: Instant,
+        delivery_verified: bool,
     },
     SubmittedUnverified {
         message_id: MessageId,
         submitted_at: Instant,
+        delivery_verified: bool,
     },
 }
 
@@ -1302,6 +1402,17 @@ impl SubmissionOutcome {
 
     pub fn verified(&self) -> bool {
         matches!(self, Self::SubmittedVerified { .. })
+    }
+
+    pub fn delivery_verified(&self) -> bool {
+        match self {
+            Self::SubmittedVerified {
+                delivery_verified, ..
+            }
+            | Self::SubmittedUnverified {
+                delivery_verified, ..
+            } => *delivery_verified,
+        }
     }
 }
 
@@ -1431,6 +1542,7 @@ pub enum DeliveryEvent {
         message_ids: Vec<MessageId>,
         submitted_at: Instant,
         verified: bool,
+        delivery_verified: bool,
     },
     Failed {
         target: SessionKey,
@@ -1461,6 +1573,8 @@ pub enum DeliveryError {
     VerificationUnavailable { message_ids: Vec<MessageId> },
     #[error("submit not confirmed for {message_ids:?}")]
     SubmitNotConfirmed { message_ids: Vec<MessageId> },
+    #[error("delivery not confirmed for {message_ids:?}")]
+    DeliveryNotConfirmed { message_ids: Vec<MessageId> },
     #[error(
         "delivery timed out after {timeout:?} for {message_id}; still_pending={still_pending}"
     )]
@@ -1506,6 +1620,14 @@ impl StdError for TmuxErrorSource {
 
 fn normalize_body(body: &str) -> String {
     body.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn delivery_probe(body: &str) -> Option<String> {
+    body.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(24).collect())
 }
 
 fn format_segments(batch: &[PendingSegment]) -> String {
@@ -1604,6 +1726,7 @@ mod tests {
                 dedup_key: "first".to_string(),
                 body: "first".to_string(),
                 paste_mode: PasteMode::Bracketed,
+                verify_delivery: false,
                 sources: vec![MessageSource::broadcast("broadcast")],
                 submit: SubmitPolicy::default(),
                 quiet_guard: QuietGuardPolicy::Default,
@@ -1617,6 +1740,7 @@ mod tests {
                 dedup_key: "second".to_string(),
                 body: "second".to_string(),
                 paste_mode: PasteMode::Bracketed,
+                verify_delivery: false,
                 sources: vec![MessageSource::timer("timer:poll")],
                 submit: SubmitPolicy::default(),
                 quiet_guard: QuietGuardPolicy::Default,
@@ -1648,6 +1772,7 @@ mod tests {
             dedup_key: "same".to_string(),
             body: "same".to_string(),
             paste_mode: PasteMode::Bracketed,
+            verify_delivery: false,
             sources: vec![MessageSource::broadcast("broadcast")],
             submit: SubmitPolicy::default(),
             quiet_guard: QuietGuardPolicy::Default,
@@ -1684,6 +1809,7 @@ mod tests {
                         require_verification: false,
                         prompt_submit: true,
                     },
+                    quiet_guard: QuietGuardPolicy::Default,
                     timeout: Duration::from_secs(1),
                 },
             )
@@ -1722,6 +1848,7 @@ mod tests {
                         require_verification: false,
                         prompt_submit: true,
                     },
+                    quiet_guard: QuietGuardPolicy::Default,
                     timeout: Duration::from_secs(1),
                 },
             )
@@ -1735,6 +1862,88 @@ mod tests {
             .filter(|command| command.contains("send-keys") && command.contains("Enter"))
             .count();
         assert_eq!(enter_sends, 3);
+    }
+
+    #[tokio::test]
+    async fn delivery_verification_confirms_visible_payload() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "composer has hello\n");
+        let (channel, _log) = mock_channel(mock, config()).await;
+
+        let outcome = channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "hello")
+                    .with_delivery_verification(true),
+                SendOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.delivery_verified());
+    }
+
+    #[tokio::test]
+    async fn bracketed_delivery_verification_retries_literal_before_failing() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "")
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "")
+            .with_response("capture-pane", "composer has hello\n");
+        let (channel, log) = mock_channel(mock, config()).await;
+
+        let outcome = channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "hello")
+                    .with_delivery_verification(true),
+                SendOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.delivery_verified());
+        let commands = log.lock().unwrap();
+        let payload_sends = commands
+            .iter()
+            .filter(|command| command.contains("send-keys") && command.contains("hello"))
+            .count();
+        assert_eq!(payload_sends, 2);
+    }
+
+    #[tokio::test]
+    async fn delivery_verification_reports_missing_payload() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("send-keys", "")
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "")
+            .with_response("capture-pane", "");
+        let (channel, _log) = mock_channel(mock, config()).await;
+
+        let error = channel
+            .send(
+                ManagedMessage::new(MessageSource::human("mstream.send"), "hello")
+                    .with_delivery_verification(true),
+                SendOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    quiet_guard: QuietGuardPolicy::Default,
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .expect_err("missing payload should fail verification");
+
+        assert!(matches!(error, DeliveryError::DeliveryNotConfirmed { .. }));
     }
 
     #[tokio::test]
@@ -1754,6 +1963,7 @@ mod tests {
                 require_verification: false,
                 prompt_submit: true,
             },
+            quiet_guard: QuietGuardPolicy::Default,
             timeout: Duration::from_secs(1),
         };
 
@@ -1920,6 +2130,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_quiet_guard_duration_overrides_channel_default() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let recent = now.saturating_sub(20);
+        let clients = format!("200 50 build $0 {recent} 0 /dev/ttys001\n");
+        let mock = MockTransport::new()
+            .with_response("list-sessions", session_response())
+            .with_response("list-clients", &clients);
+        let mut cfg = config();
+        cfg.input_quiet_for = Duration::from_secs(10);
+        cfg.coalesce_window = Duration::ZERO;
+        let (channel, _log) = mock_channel(mock, cfg).await;
+        let mut events = channel.subscribe();
+
+        let queued = channel
+            .enqueue(
+                ManagedMessage::new(MessageSource::timer("mstream.timer:poll"), "wait 30s"),
+                EnqueueOptions {
+                    submit: SubmitPolicy::typing_only(),
+                    quiet_guard: QuietGuardPolicy::For(Duration::from_secs(30)),
+                },
+            )
+            .await
+            .expect("message accepted");
+
+        let retry_after = timeout(Duration::from_secs(1), async {
+            loop {
+                if let DeliveryEvent::Deferred {
+                    message_ids,
+                    retry_after,
+                    ..
+                } = events.recv().await.unwrap()
+                {
+                    if message_ids.contains(&queued.message_id) {
+                        return retry_after;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("explicit guard should defer beyond channel default");
+
+        assert!((1..=10).contains(&retry_after.as_secs()));
+        assert!(
+            channel
+                .cancel_pending(queued.message_id, "test cleanup")
+                .await
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_pending_removes_segment_and_emits_failed() {
         let mock = MockTransport::new().with_response("list-sessions", session_response());
         let mut cfg = config();
@@ -1981,6 +2244,7 @@ mod tests {
                         require_verification: false,
                         prompt_submit: true,
                     },
+                    quiet_guard: QuietGuardPolicy::Default,
                     timeout: Duration::from_secs(1),
                 },
             )
@@ -2009,6 +2273,7 @@ mod tests {
                 ManagedMessage::new(MessageSource::human("mstream.send"), "hello"),
                 SendOptions {
                     submit: SubmitPolicy::default(),
+                    quiet_guard: QuietGuardPolicy::Default,
                     timeout: Duration::from_millis(10),
                 },
             )
@@ -2043,6 +2308,7 @@ mod tests {
                     ManagedMessage::new(MessageSource::human("mstream.send"), "shared"),
                     SendOptions {
                         submit: SubmitPolicy::default(),
+                        quiet_guard: QuietGuardPolicy::Default,
                         timeout: Duration::from_millis(50),
                     },
                 )
@@ -2103,6 +2369,7 @@ mod tests {
                             require_verification: false,
                             prompt_submit: true,
                         },
+                        quiet_guard: QuietGuardPolicy::Default,
                         timeout: Duration::from_secs(20),
                     },
                 )
