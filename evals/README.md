@@ -88,8 +88,10 @@ cargo run -p evals --features "model-qwen3-4b" -- run --bundle qwen3_4b --scenar
 
 The commands parse scenario TOML, start one compiled bundle from local
 artifacts, emit a sectioned JSONL result record, and apply capability-specific
-assertions. Use `--artifact-root ~/.cache/huggingface/hub` when the default
-repo-local artifact cache does not contain the bundle artifacts.
+assertions. Result schema v3 adds chat/perf TTFT split into first generated token
+and first answer token, plus decode tokens/second. Use
+`--artifact-root ~/.cache/huggingface/hub` when the default repo-local artifact
+cache does not contain the bundle artifacts.
 
 On GB10/Linux AArch64, the repo `.cargo/config.toml` wires the required
 `+fp16,+fhm` target features, so no manual `RUSTFLAGS` are needed for the

@@ -15,8 +15,8 @@ use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatFinishReason, ChatModel, ChatRequest, ChatResponse, ChatRole,
     CheckpointFormat, CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
-    GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
-    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint,
+    GenerationTiming, GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError,
+    ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint,
     RuntimeAcceleratorObservation, StartOptions, ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
 use serde_json::{json, Value};
@@ -532,7 +532,12 @@ impl LlamaCppRuntime {
         let generated = self
             .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new())
             .await?;
-        Ok(ChatResponse::text(generated.text))
+        Ok(ChatResponse {
+            content: generated.text,
+            usage: Some(generated.usage),
+            timing: Some(generated.timing),
+            ..ChatResponse::default()
+        })
     }
 
     async fn generate_rendered_chat(
@@ -556,7 +561,7 @@ impl LlamaCppRuntime {
                 message: err.to_string(),
             })?;
 
-        openai_response_json_to_chat_response(message_json, generated.usage)
+        openai_response_json_to_chat_response(message_json, generated.usage, Some(generated.timing))
     }
 
     async fn generate_text_inner(
@@ -577,7 +582,7 @@ impl LlamaCppRuntime {
 
         // Run inference on a blocking thread — llama.cpp is synchronous.
         tokio::task::spawn_blocking(move || {
-            let started_at = Instant::now();
+            let request_at = Instant::now();
 
             let ctx_params =
                 LlamaContextParams::default().with_n_ctx(std::num::NonZeroU32::new(context_length));
@@ -635,6 +640,9 @@ impl LlamaCppRuntime {
 
             let mut generated_token_count: u32 = 0;
             let mut generated_text = String::new();
+            let mut first_token_at = None;
+            let mut first_answer_token_at = None;
+            let mut last_token_at = None;
             let prompt_position_start =
                 i32::try_from(tokens.len()).map_err(|_| ModelError::BackendExecution {
                     backend: "llama-cpp",
@@ -659,10 +667,22 @@ impl LlamaCppRuntime {
                         message: e.to_string(),
                     })?;
 
+                let token_at = Instant::now();
+                if first_token_at.is_none() {
+                    first_token_at = Some(token_at);
+                }
+                last_token_at = Some(token_at);
                 generated_text.push_str(&piece);
                 generated_token_count += 1;
 
-                if truncate_on_stop_sequence(&mut generated_text, &stop_sequences) {
+                let stop_triggered =
+                    truncate_on_stop_sequence(&mut generated_text, &stop_sequences);
+                if first_answer_token_at.is_none()
+                    && has_visible_answer_text_for_timing(&generated_text)
+                {
+                    first_answer_token_at = Some(token_at);
+                }
+                if stop_triggered {
                     break;
                 }
 
@@ -697,7 +717,7 @@ impl LlamaCppRuntime {
                     })?;
             }
 
-            let elapsed = started_at.elapsed();
+            let elapsed = request_at.elapsed();
 
             {
                 let mut m = lock_metrics(&metrics, "llama-cpp-text-generate");
@@ -716,6 +736,13 @@ impl LlamaCppRuntime {
                     prompt_tokens: Some(prompt_token_count),
                     completion_tokens: Some(generated_token_count),
                     total_tokens: Some(prompt_token_count.saturating_add(generated_token_count)),
+                },
+                timing: GenerationTiming {
+                    request_at,
+                    first_token_at,
+                    first_answer_token_at,
+                    last_token_at,
+                    generated_tokens: generated_token_count,
                 },
             })
         })
@@ -737,10 +764,31 @@ struct RenderedChatPrompt {
 struct GeneratedText {
     text: String,
     usage: GenerationUsage,
+    timing: GenerationTiming,
 }
 
 fn token_count_to_u32(count: usize) -> u32 {
     count.min(u32::MAX as usize) as u32
+}
+
+fn has_visible_answer_text_for_timing(generated_text: &str) -> bool {
+    !strip_leading_reasoning_for_timing(generated_text)
+        .trim()
+        .is_empty()
+}
+
+fn strip_leading_reasoning_for_timing(generated_text: &str) -> &str {
+    let generated_text = generated_text.trim_start_matches([' ', '\n', '\r', '\t']);
+    if let Some(rest) = generated_text.strip_prefix("<think>") {
+        return rest
+            .find("</think>")
+            .map(|end| &rest[end + "</think>".len()..])
+            .unwrap_or_default();
+    }
+    if let Some(rest) = generated_text.strip_prefix("</think>") {
+        return rest;
+    }
+    strip_empty_gemma4_channel_prefix(generated_text)
 }
 
 fn truncate_on_stop_sequence(generated_text: &mut String, stop_sequences: &[String]) -> bool {
@@ -955,6 +1003,7 @@ fn build_sampler(
 fn openai_response_json_to_chat_response(
     message_json: String,
     usage: GenerationUsage,
+    timing: Option<GenerationTiming>,
 ) -> Result<ChatResponse, ModelError> {
     let value: Value =
         serde_json::from_str(&message_json).map_err(|err| ModelError::BackendExecution {
@@ -997,6 +1046,7 @@ fn openai_response_json_to_chat_response(
         finish_reason,
         reasoning,
         usage: Some(usage),
+        timing,
     })
 }
 
@@ -1659,7 +1709,7 @@ mod tests {
         .expect("schema should be valid");
 
         assert_eq!(
-            openai_tool_choice(Some(&ToolChoice::Required), &[tool.clone()])
+            openai_tool_choice(Some(&ToolChoice::Required), std::slice::from_ref(&tool))
                 .expect("required should map"),
             Some("required".to_string())
         );
@@ -1696,6 +1746,7 @@ mod tests {
                 completion_tokens: Some(4),
                 total_tokens: Some(7),
             },
+            None,
         )
         .expect("response should map");
 
@@ -1721,7 +1772,7 @@ mod tests {
         })
         .to_string();
 
-        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default())
+        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default(), None)
             .expect("response should map");
 
         assert_eq!(response.content, "The answer is 68.0 degrees Fahrenheit.");
@@ -1745,12 +1796,26 @@ mod tests {
         })
         .to_string();
 
-        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default())
+        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default(), None)
             .expect("response should map");
 
         assert_eq!(response.content, "");
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.finish_reason, Some(ChatFinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn timing_answer_visibility_skips_leading_thinking_blocks() {
+        assert!(!has_visible_answer_text_for_timing("<think>reasoning"));
+        assert!(!has_visible_answer_text_for_timing(
+            "<think>reasoning</think>  "
+        ));
+        assert!(has_visible_answer_text_for_timing(
+            "<think>reasoning</think> final answer"
+        ));
+        assert!(has_visible_answer_text_for_timing(
+            "<|channel>thought\n<channel|>The answer is 42"
+        ));
     }
 
     #[tokio::test]

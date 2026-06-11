@@ -431,9 +431,9 @@ scenario TOML rather than embedded in code.
 
 Accuracy and performance are captured together:
 
-- chat/LLM: scored correctness, warm-up time, time-to-first-token,
-  tokens/second, output tokens, context length, peak memory, accelerator use,
-  and resource gates
+- chat/LLM: scored correctness, warm-up time, first-token TTFT,
+  first-answer-token TTFT, decode tokens/second, output tokens, context length,
+  peak memory, accelerator use, and resource gates
 - tool-use: tool-selection and argument precision/recall, round-trip latency,
   repair turns, final-answer correctness, and CEL assertion outcomes
 - ASR: real-time factor, WER, transcript length, segment count, and peak memory
@@ -446,8 +446,11 @@ Accuracy and performance are captured together:
 
 LLM metric collection has an explicit observation boundary. Runners should
 prefer streaming/token callback instrumentation for TTFT and output-token count.
-When a backend cannot stream, it may expose backend-specific timing hooks or
-usage counters. If neither is available, the metric is recorded as unavailable
+Chat records carry both `ttft_first_token_ms` and
+`ttft_first_answer_token_ms`; thinking-capable models must not report the first
+reasoning token as the user-visible answer latency. When a backend cannot
+stream, it may expose backend-specific timing hooks or usage counters. If
+neither is available, the metric is recorded as unavailable
 with a reason such as `metric_unsupported_by_backend` or
 `metric_not_instrumented`. Tokens/second is computed only from a collected
 output-token count and decode interval; it is not inferred from character count
@@ -518,9 +521,9 @@ Every eval result should include these sections:
   runtime budgets
 - `performance`: startup, warmup, common request latency, and a nested
   `capability_metrics` object tagged by capability for embedding vectors per
-  second, chat token throughput and TTFT where available, tool-use precision and
-  round-trip latency, ASR/TTS real-time factor, or perf summaries. Each metric
-  has source and unavailable-reason metadata when needed.
+  second, chat first-token TTFT, first-answer-token TTFT, decode throughput,
+  tool-use precision and round-trip latency, ASR/TTS real-time factor, or perf
+  summaries. Each metric has source and unavailable-reason metadata when needed.
 - `resources`: RSS, peak RSS, CPU time, page faults, process swap delta where
   available, source-tagged memory peaks, GPU utilization where available, and
   unavailable reasons
@@ -529,7 +532,7 @@ Every eval result should include these sections:
   reason.
 
 Unknown platform fields are represented as `null` or `unavailable`, not omitted.
-Unknown coverage fields are not allowed in v2 records; if the driver cannot
+Unknown coverage fields are not allowed in v3 records; if the driver cannot
 resolve a coverage key, it emits a `blocked` record that names the missing key.
 
 Acceptance failure reasons must name the section and gate that failed. A resource

@@ -784,7 +784,7 @@ mod tests {
 
     fn test_record() -> ResultRecord {
         ResultRecord {
-            schema_version: 2,
+            schema_version: 3,
             identity: IdentitySection {
                 run_id: "run".to_owned(),
                 git_sha: None,
