@@ -61,6 +61,26 @@ pub async fn capture_pane_history_with_prefix(
     transport.exec(&cmd).await
 }
 
+/// Capture a bounded pane-history range using tmux `-S` / `-E` offsets.
+pub async fn capture_pane_history_range_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    start: i32,
+    end: Option<i32>,
+) -> Result<String> {
+    let mut cmd = format!(
+        "{} capture-pane -p -t '{}' -S {}",
+        prefix,
+        shell_escape_arg(target),
+        start,
+    );
+    if let Some(end) = end {
+        cmd.push_str(&format!(" -E {}", end));
+    }
+    transport.exec(&cmd).await
+}
+
 /// Capture all panes in a session (using bare "tmux" prefix).
 pub async fn capture_session(
     transport: &TransportKind,
@@ -135,6 +155,24 @@ pub async fn sample_text_with_tmux_prefix(
             }
             Ok(content)
         }
+        ScrollbackQuery::LinesRange {
+            older_than_lines,
+            count,
+        } => {
+            if *count == 0 {
+                return Ok(String::new());
+            }
+            let start = -((older_than_lines.saturating_add(*count)) as i32);
+            let end = if *older_than_lines == 0 {
+                None
+            } else {
+                Some(-((*older_than_lines as i32) + 1))
+            };
+            let content =
+                capture_pane_history_range_with_prefix(transport, prefix, target, start, end)
+                    .await?;
+            Ok(content.trim_end().to_string())
+        }
     }
 }
 
@@ -188,6 +226,32 @@ pub async fn capture_pane_escape_history_with_prefix(
         shell_escape_arg(target),
         start,
     );
+    transport.exec(&cmd).await
+}
+
+async fn raw_capture_range_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    start: i32,
+    end: Option<i32>,
+    normalize: CaptureNormalizeMode,
+) -> Result<String> {
+    let flag = if normalize == CaptureNormalizeMode::ScreenStable {
+        "-ep"
+    } else {
+        "-p"
+    };
+    let mut cmd = format!(
+        "{} capture-pane {} -t '{}' -S {}",
+        prefix,
+        flag,
+        shell_escape_arg(target),
+        start,
+    );
+    if let Some(end) = end {
+        cmd.push_str(&format!(" -E {}", end));
+    }
     transport.exec(&cmd).await
 }
 
@@ -485,9 +549,34 @@ pub async fn sample_text_with_options_prefix(
             overlap_lines: opts.overlap_lines,
             detect_reflow: false,
         },
+        ScrollbackQuery::LinesRange {
+            older_than_lines,
+            count,
+        } => CaptureOptions {
+            history_start: Some(-((older_than_lines.saturating_add(*count)) as i32)),
+            normalize: opts.normalize,
+            overlap_lines: opts.overlap_lines,
+            detect_reflow: false,
+        },
     };
 
-    let raw = raw_capture_with_prefix(transport, prefix, target, &effective_opts).await?;
+    let raw = match query {
+        ScrollbackQuery::LinesRange {
+            older_than_lines,
+            count,
+        } if *count > 0 => {
+            let start = -((older_than_lines.saturating_add(*count)) as i32);
+            let end = if *older_than_lines == 0 {
+                None
+            } else {
+                Some(-((*older_than_lines as i32) + 1))
+            };
+            raw_capture_range_with_prefix(transport, prefix, target, start, end, opts.normalize)
+                .await?
+        }
+        ScrollbackQuery::LinesRange { .. } => String::new(),
+        _ => raw_capture_with_prefix(transport, prefix, target, &effective_opts).await?,
+    };
 
     let mut fidelity = finalize_fidelity_with_prefix(transport, prefix, target, pre_snapshot).await;
 
@@ -523,6 +612,7 @@ pub async fn sample_text_with_options_prefix(
                 None => text,
             }
         }
+        ScrollbackQuery::LinesRange { .. } => text.trim_end().to_string(),
     };
 
     let final_text = if let Some(prev) = previous_text {
@@ -723,6 +813,34 @@ mod tests {
             .unwrap();
         assert!(result.starts_with("--- marker ---"));
         assert!(result.contains("wanted line 1"));
+    }
+
+    #[tokio::test]
+    async fn sample_text_lines_range_uses_start_and_end_offsets() {
+        let mock = MockTransport::new().with_response("-S -30 -E -11", "older\nwindow\n");
+        let transport = TransportKind::Mock(mock);
+        let query = ScrollbackQuery::LinesRange {
+            older_than_lines: 10,
+            count: 20,
+        };
+        let result = sample_text(&transport, None, "test:0.0", &query)
+            .await
+            .unwrap();
+        assert_eq!(result, "older\nwindow");
+    }
+
+    #[tokio::test]
+    async fn sample_text_lines_range_zero_count_is_empty() {
+        let mock = MockTransport::new().with_error("capture-pane", "should not capture");
+        let transport = TransportKind::Mock(mock);
+        let query = ScrollbackQuery::LinesRange {
+            older_than_lines: 10,
+            count: 0,
+        };
+        let result = sample_text(&transport, None, "test:0.0", &query)
+            .await
+            .unwrap();
+        assert_eq!(result, "");
     }
 
     // --- Normalization unit tests ---
@@ -1023,7 +1141,7 @@ mod tests {
         // Pre and post snapshots are identical → clean fidelity
         let mock = MockTransport::new()
             .with_response("capture-pane", "content\n")
-            .with_response("list-clients", "200\t50\tbuild\n")
+            .with_response("list-clients", "200 50 build $1 100 0 /dev/ttys001\n")
             .with_response("display-message", "80\t24\t100\t2000\n");
         let transport = TransportKind::Mock(mock);
         let opts = CaptureOptions {

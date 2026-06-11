@@ -1,22 +1,17 @@
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::future::Future;
 
-use async_trait::async_trait;
-use image::DynamicImage;
-use mistralrs::{ModelBuilder, RequestBuilder};
+use mistralrs::ModelBuilder;
 use motlie_model::{
-    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, ChatRequest, ChatResponse, CheckpointFormat, CompletionModel,
-    ContentPart, EmbeddingModel, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
-    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, GenerationParams,
+    ModelError, QuantizationBits, QuantizationSupport, StartOptions, UnsupportedCompletion,
+    UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    apply_generation_params, configure_artifact_policy, lock_metrics, map_chat_role,
-    map_quantization_bits, observe_latency, observe_memory, observe_text_usage,
-    paged_attn_context_size, resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics,
-    RuntimeMetricState, TextMetricState,
+    MistralMessageParts, configure_artifact_policy, map_quantization_bits,
+    multimodal_message_parts, paged_attn_context_size, should_force_cpu,
 };
+use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 
 const MISTRAL_MULTIMODAL_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
 
@@ -33,6 +28,8 @@ pub struct MistralMultimodalSpec {
     pub arch: MistralMultimodalArch,
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
+    pub recommended_generation_params: GenerationParams,
+    pub recommended_system_prompt: Option<&'static str>,
 }
 
 impl MistralMultimodalSpec {
@@ -42,7 +39,9 @@ impl MistralMultimodalSpec {
             display_name: "Gemma 4 E2B-it",
             model_id: "google/gemma-4-E2B-it",
             arch: MistralMultimodalArch::Gemma4,
-            capabilities: Capabilities::multimodal_chat_and_vision(),
+            // ToolUse relies on the shared template-compatible transcript
+            // adapter in common.rs, not mistralrs::RequestBuilder's tool replay.
+            capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Four,
@@ -54,304 +53,102 @@ impl MistralMultimodalSpec {
                     QuantizationBits::Eight,
                 ])
             }),
+            recommended_generation_params: GenerationParams::default(),
+            recommended_system_prompt: None,
+        }
+    }
+
+    pub fn gemma4_e4b() -> Self {
+        Self {
+            id: BundleId::new("gemma4_e4b"),
+            display_name: "Gemma 4 E4B-it",
+            model_id: "google/gemma-4-E4B-it",
+            arch: MistralMultimodalArch::Gemma4,
+            // Same safetensors Gemma 4 template family and adapter path as E2B.
+            capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationBits::Four, QuantizationBits::Eight],
+                QuantizationBits::Eight,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("curated quantization construction failed (this is a bug): {e}");
+                QuantizationSupport::without_recommended([
+                    QuantizationBits::Four,
+                    QuantizationBits::Eight,
+                ])
+            }),
+            recommended_generation_params: GenerationParams {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
         }
     }
 }
 
-/// Backend adapter for `mistralrs` multimodal chat over safetensors checkpoints.
-#[derive(Clone, Debug)]
-pub struct MistralMultimodalAdapter {
-    arch: MistralMultimodalArch,
-    capabilities: Capabilities,
-    quantization: QuantizationSupport,
-}
+pub struct MultimodalProfile;
 
-impl MistralMultimodalAdapter {
+pub type MistralMultimodalAdapter = MistralAdapter<MultimodalProfile>;
+pub type MistralMultimodalBundle = MistralBundle<MultimodalProfile>;
+pub type MistralMultimodalHandle = MistralHandle<MultimodalProfile>;
+
+impl MistralAdapter<MultimodalProfile> {
     pub fn gemma4() -> Self {
         let spec = MistralMultimodalSpec::gemma4_e2b();
-        Self {
-            arch: spec.arch,
-            capabilities: spec.capabilities,
-            quantization: spec.quantization,
-        }
+        Self::from_parts(spec.arch, spec.capabilities, spec.quantization)
     }
 }
 
-#[async_trait]
-impl BackendAdapter for MistralMultimodalAdapter {
-    fn supported_formats(&self) -> &[CheckpointFormat] {
-        &MISTRAL_MULTIMODAL_FORMATS
-    }
-
-    fn backend_kind(&self) -> BackendKind {
-        BackendKind::MistralRs
-    }
-
-    fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
-    }
-
-    fn quantization(&self) -> &QuantizationSupport {
-        &self.quantization
-    }
-
-    async fn start(
-        &self,
-        identity: &ModelIdentity,
-        checkpoint: &ResolvedCheckpoint,
-        options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let resolved_quantization = self
-            .quantization
-            .resolve(options.quantization, &identity.id)?;
-        let (model_id, options) =
-            resolve_local_checkpoint(checkpoint, CheckpointFormat::Safetensors, options)?;
-        let model =
-            build_multimodal_model(model_id, self.arch, resolved_quantization, options).await?;
-
-        Ok(new_multimodal_handle(
-            identity.id.clone(),
-            identity.display_name.clone(),
-            self.capabilities.clone(),
-            self.quantization.clone(),
-            resolved_quantization,
-            model,
-        ))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct MistralMultimodalBundle {
-    metadata: BundleMetadata,
-    arch: MistralMultimodalArch,
-    model_id: &'static str,
-}
-
-impl MistralMultimodalBundle {
+impl MistralBundle<MultimodalProfile> {
     pub fn new(spec: MistralMultimodalSpec) -> Self {
-        Self {
-            metadata: BundleMetadata {
-                id: spec.id,
-                display_name: spec.display_name.into(),
-                capabilities: spec.capabilities,
-                quantization: spec.quantization,
-            },
-            arch: spec.arch,
-            model_id: spec.model_id,
-        }
+        Self::from_parts(
+            spec.id,
+            spec.display_name,
+            spec.model_id,
+            spec.arch,
+            spec.capabilities,
+            spec.quantization,
+        )
     }
 }
 
-#[async_trait]
-impl ModelBundle for MistralMultimodalBundle {
-    fn id(&self) -> &BundleId {
-        &self.metadata.id
+impl MistralProfile for MultimodalProfile {
+    type Arch = MistralMultimodalArch;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = UnsupportedEmbeddings;
+
+    const FORMATS: &'static [CheckpointFormat] = &MISTRAL_MULTIMODAL_FORMATS;
+    const START_METRIC_CONTEXT: &'static str = "mistral-multimodal-start";
+    const CHAT_METRIC_CONTEXT: &'static str = "mistral-multimodal-chat";
+    const SNAPSHOT_METRIC_CONTEXT: &'static str = "mistral-multimodal-metric-snapshot";
+
+    fn build_model(
+        model_id: &str,
+        arch: Self::Arch,
+        resolved_quantization: Option<QuantizationBits>,
+        options: StartOptions,
+    ) -> impl Future<Output = Result<mistralrs::Model, ModelError>> + Send {
+        build_multimodal_model(model_id, arch, resolved_quantization, options)
     }
 
-    fn metadata(&self) -> &BundleMetadata {
-        &self.metadata
+    fn collect_message(message: &ChatMessage) -> Result<MistralMessageParts, ModelError> {
+        multimodal_message_parts(message)
     }
 
-    fn capabilities(&self) -> &Capabilities {
-        &self.metadata.capabilities
-    }
-
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let resolved_quantization = self
-            .metadata
-            .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
-        let model =
-            build_multimodal_model(self.model_id, self.arch, resolved_quantization, options)
-                .await?;
-
-        Ok(new_multimodal_handle(
-            self.metadata.id.clone(),
-            self.metadata.display_name.clone(),
-            self.metadata.capabilities.clone(),
-            self.metadata.quantization.clone(),
-            resolved_quantization,
-            model,
-        ))
-    }
-}
-
-#[async_trait]
-trait MultimodalRuntime: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError>;
-}
-
-struct MistralMultimodalRuntime {
-    model: mistralrs::Model,
-    metrics: Arc<Mutex<MultimodalMetrics>>,
-}
-
-#[async_trait]
-impl MultimodalRuntime for MistralMultimodalRuntime {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        let builder = to_request_builder(&request)?;
-        let started_at = Instant::now();
-
-        let response = self.model.send_chat_request(builder).await.map_err(|err| {
-            ModelError::BackendExecution {
-                backend: "mistralrs",
-                operation: "send_chat_request",
-                message: err.to_string(),
-            }
-        })?;
-        let elapsed = started_at.elapsed();
-
-        let usage = response.usage.clone();
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|choice| choice.message.content)
-            .ok_or_else(|| ModelError::BackendExecution {
-                backend: "mistralrs",
-                operation: "send_chat_request",
-                message: "response contained no text content".into(),
-            })?;
-
-        {
-            let mut metrics = lock_metrics(&self.metrics, "mistral-multimodal-chat");
-            observe_latency(&mut metrics.runtime, elapsed);
-            observe_text_usage(&mut metrics.text, &usage);
-        }
-
-        Ok(ChatResponse { content })
-    }
-}
-
-fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelError> {
-    let mut builder = RequestBuilder::new();
-    for msg in &request.messages {
-        let (text, images) = collect_multimodal_parts(msg)?;
-        if images.is_empty() {
-            builder = builder.add_message(map_chat_role(msg.role), text);
-        } else {
-            builder = builder.add_image_message(map_chat_role(msg.role), text, images);
-        }
-    }
-    Ok(apply_generation_params(builder, &request.params))
-}
-
-fn collect_multimodal_parts(
-    message: &motlie_model::ChatMessage,
-) -> Result<(String, Vec<DynamicImage>), ModelError> {
-    let mut text = String::new();
-    let mut images = Vec::new();
-
-    for part in &message.content {
-        match part {
-            ContentPart::Text(part) => text.push_str(part),
-            ContentPart::Image { data, media_type } => {
-                if !media_type.starts_with("image/") {
-                    return Err(ModelError::InvalidConfiguration(format!(
-                        "mistralrs multimodal chat requires image/* media types, got `{media_type}`"
-                    )));
-                }
-                let image = image::load_from_memory(data).map_err(|err| {
-                    ModelError::InvalidConfiguration(format!(
-                        "failed to decode image content part: {err}"
-                    ))
-                })?;
-                images.push(image);
-            }
-            ContentPart::ImageUrl { url } => {
-                return Err(ModelError::InvalidConfiguration(format!(
-                    "mistralrs multimodal chat does not support `ContentPart::ImageUrl` yet (`{url}`); provide inline image bytes instead"
-                )));
-            }
-        }
-    }
-
-    Ok((text, images))
-}
-
-struct MistralMultimodalHandle {
-    descriptor: LoadedBundleDescriptor,
-    runtime: Box<dyn MultimodalRuntime>,
-    metrics: Arc<Mutex<MultimodalMetrics>>,
-}
-
-#[async_trait]
-impl BundleHandle for MistralMultimodalHandle {
-    fn descriptor(&self) -> &LoadedBundleDescriptor {
-        &self.descriptor
-    }
-
-    fn capabilities(&self) -> &Capabilities {
-        &self.descriptor.capabilities
-    }
-
-    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
-        let metrics = lock_metrics(&self.metrics, "mistral-multimodal-metric-snapshot").clone();
-        Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
-    }
-
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
-        Ok(self)
-    }
-
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(handle: &MistralMultimodalHandle) -> Result<&Self::Completion, ModelError> {
+        let _ = handle.unsupported_completion();
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(handle: &MistralMultimodalHandle) -> Result<&Self::Embeddings, ModelError> {
+        let _ = handle.unsupported_embeddings();
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
     }
-
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl ChatModel for MistralMultimodalHandle {
-    async fn generate(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        self.runtime.chat(request).await
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct MultimodalMetrics {
-    runtime: RuntimeMetricState,
-    text: TextMetricState,
-}
-
-fn new_multimodal_handle(
-    id: BundleId,
-    display_name: String,
-    capabilities: Capabilities,
-    quantization: QuantizationSupport,
-    resolved_quantization: Option<QuantizationBits>,
-    model: mistralrs::Model,
-) -> Box<dyn BundleHandle> {
-    let metrics = Arc::new(Mutex::new(MultimodalMetrics::default()));
-    {
-        let mut metrics = lock_metrics(&metrics, "mistral-multimodal-start");
-        observe_memory(&mut metrics.runtime);
-    }
-
-    Box::new(MistralMultimodalHandle {
-        descriptor: LoadedBundleDescriptor {
-            id,
-            display_name,
-            capabilities,
-            quantization,
-            resolved_quantization,
-        },
-        runtime: Box::new(MistralMultimodalRuntime {
-            model,
-            metrics: Arc::clone(&metrics),
-        }),
-        metrics,
-    })
 }
 
 async fn build_multimodal_model(
@@ -386,7 +183,7 @@ async fn build_multimodal_model(
     // `ModelBuilder`, and that path preserves multimodal chat-template discovery.
     let mut builder = ModelBuilder::new(model_target);
     if let Some(bits) = resolved_quantization {
-        builder = builder.with_auto_isq(map_quantization_bits(bits));
+        builder = builder.with_auto_isq(map_quantization_bits(bits)?);
     }
     if should_force_cpu() {
         builder = builder.with_force_cpu();
@@ -406,7 +203,9 @@ async fn build_multimodal_model(
                 builder = builder.with_paged_attn(pa_config);
             }
             Err(err) => {
-                tracing::warn!("failed to configure PagedAttention with context size {context_size}, continuing without it: {err}");
+                tracing::warn!(
+                    "failed to configure PagedAttention with context size {context_size}, continuing without it: {err}"
+                );
             }
         }
     }
@@ -423,31 +222,11 @@ async fn build_multimodal_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::{BackendAdapter, BackendKind, ChatMessage, ChatRole, ContentPart};
-
-    struct StubMultimodalRuntime;
-
-    #[async_trait]
-    impl MultimodalRuntime for StubMultimodalRuntime {
-        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-            let last_text = request
-                .messages
-                .last()
-                .map(|m| {
-                    m.content
-                        .iter()
-                        .filter_map(|part| match part {
-                            ContentPart::Text(text) => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<String>()
-                })
-                .unwrap_or_default();
-            Ok(ChatResponse {
-                content: format!("multimodal stub response to: {last_text}"),
-            })
-        }
-    }
+    use crate::runtime::MistralStubKind;
+    use motlie_model::{
+        BackendAdapter, BackendKind, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole,
+        ContentPart,
+    };
 
     #[test]
     fn gemma4_spec_has_expected_identity() {
@@ -459,7 +238,30 @@ mod tests {
         assert_eq!(spec.arch, MistralMultimodalArch::Gemma4);
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Vision));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
         assert!(!spec.capabilities.supports(CapabilityKind::Completion));
+    }
+
+    #[test]
+    fn gemma4_e4b_spec_uses_model_card_defaults() {
+        let spec = MistralMultimodalSpec::gemma4_e4b();
+
+        assert_eq!(spec.id.as_str(), "gemma4_e4b");
+        assert_eq!(spec.display_name, "Gemma 4 E4B-it");
+        assert_eq!(spec.model_id, "google/gemma-4-E4B-it");
+        assert_eq!(
+            spec.quantization.recommended(),
+            Some(QuantizationBits::Eight)
+        );
+        assert_eq!(spec.recommended_generation_params.temperature, Some(1.0));
+        assert_eq!(spec.recommended_generation_params.top_p, Some(0.95));
+        assert_eq!(
+            spec.recommended_system_prompt,
+            Some("You are Gemma, a helpful assistant.")
+        );
+        assert!(spec.capabilities.supports(CapabilityKind::Chat));
+        assert!(spec.capabilities.supports(CapabilityKind::Vision));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
     }
 
     #[test]
@@ -473,7 +275,7 @@ mod tests {
         assert_eq!(adapter.backend_kind(), BackendKind::MistralRs);
         assert_eq!(
             adapter.capabilities(),
-            &Capabilities::multimodal_chat_and_vision()
+            &Capabilities::multimodal_chat_vision_and_tool_use()
         );
         assert_eq!(
             adapter.quantization().recommended(),
@@ -483,24 +285,22 @@ mod tests {
 
     #[tokio::test]
     async fn multimodal_handle_exposes_chat_only() {
-        let handle = MistralMultimodalHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: BundleId::new("gemma4_e2b"),
-                display_name: "Gemma 4 E2B-it".into(),
-                capabilities: Capabilities::multimodal_chat_and_vision(),
-                quantization: QuantizationSupport::with_recommended(
-                    [QuantizationBits::Four, QuantizationBits::Eight],
-                    QuantizationBits::Four,
-                )
-                .expect("test quantization support is valid"),
-                resolved_quantization: Some(QuantizationBits::Four),
-            },
-            runtime: Box::new(StubMultimodalRuntime),
-            metrics: Arc::new(Mutex::new(MultimodalMetrics::default())),
-        };
+        let handle = MistralMultimodalHandle::stub(
+            BundleId::new("gemma4_e2b"),
+            "Gemma 4 E2B-it".into(),
+            Capabilities::multimodal_chat_vision_and_tool_use(),
+            QuantizationSupport::with_recommended(
+                [QuantizationBits::Four, QuantizationBits::Eight],
+                QuantizationBits::Four,
+            )
+            .expect("test quantization support is valid"),
+            Some(QuantizationBits::Four),
+            MistralStubKind::Multimodal,
+        );
 
         assert!(handle.supports(CapabilityKind::Chat));
         assert!(handle.supports(CapabilityKind::Vision));
+        assert!(handle.supports(CapabilityKind::ToolUse));
         assert!(!handle.supports(CapabilityKind::Completion));
         assert!(matches!(
             handle.completion(),
@@ -541,7 +341,7 @@ mod tests {
             vec![ContentPart::image_url("https://example.com/cat.jpg")],
         );
 
-        let error = collect_multimodal_parts(&message)
+        let error = multimodal_message_parts(&message)
             .expect_err("image urls should be rejected for local mistral runtime");
         assert!(matches!(error, ModelError::InvalidConfiguration(_)));
     }

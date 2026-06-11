@@ -1,0 +1,61 @@
+name: curated model build
+
+on:
+  pull_request:
+    paths:
+      - "libs/model/src/**"
+      - "libs/model/backends/**"
+      - "libs/models/**"
+      - "scripts/check_models_build_prereqs.sh"
+      - "scripts/check_curated_model_examples.sh"
+      - ".github/workflows/models-build.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  push:
+    branches:
+      - main
+    paths:
+      - "libs/model/src/**"
+      - "libs/model/backends/**"
+      - "libs/models/**"
+      - "scripts/check_models_build_prereqs.sh"
+      - "scripts/check_curated_model_examples.sh"
+      - ".github/workflows/models-build.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+jobs:
+  curated-model-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libespeak-ng-dev pkg-config
+
+      - name: Check curated model build prerequisites
+        run: ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule
+
+      - name: Check curated model examples
+        run: ./scripts/check_curated_model_examples.sh --mode check
+
+      # @claude-opus-47 2026-04-27 -- The CUDA feature pulls in cudarc whose build
+      # script requires nvcc, which the standard ubuntu-latest runner does not have.
+      # Drop --features cuda here so the gate stays green; the cuda-path strict
+      # clippy is run on the GB10 host before merge until a runner with the CUDA
+      # toolkit is available (or this step is split into a conditional cuda step).
+      - name: Strict clippy for curated model feature bundle
+        run: >-
+          cargo clippy --tests --release -p motlie-models
+          --features model-piper-en-us-ljspeech-medium,model-whisper-base-en,model-moonshine-streaming,model-sherpa-onnx-streaming,model-qwen3-tts-cpp
+          --no-deps -- -D warnings

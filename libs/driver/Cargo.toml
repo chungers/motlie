@@ -38,7 +38,6 @@ motlie-tmux = { path = "../tmux", optional = true }
 ansi-to-tui = { version = "8", optional = true }
 
 [dev-dependencies]
-anyhow.workspace = true
 
 [[example]]
 name = "tmux_repl"

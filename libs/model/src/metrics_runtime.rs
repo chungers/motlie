@@ -6,8 +6,10 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
+use crate::metrics::{
+    EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics,
+};
 use crate::units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
-use crate::metrics::{ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics, EmbeddingMetrics};
 
 // ---------------------------------------------------------------------------
 // Metric state types (mutable, backend-internal)
@@ -182,7 +184,7 @@ pub fn should_force_cpu() -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn current_resident_memory_bytes() -> Option<u64> {
-    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
 
     let pid = get_current_pid().ok()?;
     let mut system = System::new();
@@ -200,8 +202,8 @@ fn average_latency(runtime: &RuntimeMetricState) -> Option<Milliseconds> {
         return None;
     }
     Some(Milliseconds(
-        (runtime.total_latency_msec / runtime.request_count as u128)
-            .min(u128::from(u64::MAX)) as u64,
+        (runtime.total_latency_msec / runtime.request_count as u128).min(u128::from(u64::MAX))
+            as u64,
     ))
 }
 
@@ -209,10 +211,7 @@ fn aggregate_tokens_per_second(tokens: u64, total_time_msec: u128) -> Option<u64
     if tokens == 0 || total_time_msec == 0 {
         return None;
     }
-    Some(
-        ((tokens as u128 * 1000) / total_time_msec)
-            .min(u128::from(u64::MAX)) as u64,
-    )
+    Some(((tokens as u128 * 1000) / total_time_msec).min(u128::from(u64::MAX)) as u64)
 }
 
 fn max_opt_u64(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {

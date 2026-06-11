@@ -8,9 +8,9 @@
 //! with DC11 and DC32.
 
 use motlie_tmux::{
-    has_visible_text, overlap_deduplicate, CaptureNormalizeMode, CaptureOptions,
-    FidelityIssue, HistoryHandle, HistoryOptions, HostHandle, KeySequence, LabelFormat,
-    MonitorHealth, ScrollbackQuery, SessionMonitorHandle, SinkFilter, TargetSpec,
+    has_visible_text, overlap_deduplicate, CaptureNormalizeMode, CaptureOptions, FidelityIssue,
+    HistoryHandle, HistoryOptions, HostHandle, KeySequence, LabelFormat, MonitorHealth,
+    ScrollbackQuery, SessionMonitorHandle, SinkFilter, TargetSpec,
 };
 
 use crossterm::{
@@ -169,9 +169,8 @@ pub async fn run(host: &HostHandle, host_uri: &str) -> anyhow::Result<TuiAction>
     // succeeds here because the panic hook closure (the other Arc ref)
     // was just removed by take_hook().
     let _ = std::panic::take_hook();
-    match std::sync::Arc::try_unwrap(original_hook) {
-        Ok(hook) => std::panic::set_hook(hook),
-        Err(_) => {} // Should not happen; fall back to default hook.
+    if let Ok(hook) = std::sync::Arc::try_unwrap(original_hook) {
+        std::panic::set_hook(hook);
     }
 
     // Tear down any active watch.
@@ -221,29 +220,23 @@ async fn event_loop(
                     state.input.insert(state.cursor_pos, c);
                     state.cursor_pos += 1;
                 }
-                KeyCode::Backspace => {
-                    if state.cursor_pos > 0 {
-                        state.cursor_pos -= 1;
-                        state.input.remove(state.cursor_pos);
-                    }
+                KeyCode::Backspace if state.cursor_pos > 0 => {
+                    state.cursor_pos -= 1;
+                    state.input.remove(state.cursor_pos);
                 }
                 // Any modifier + Arrow resizes the pane split.
                 // (Ctrl+Arrow is often captured by macOS Mission Control,
                 //  so Shift+Arrow and Alt+Arrow also work.)
                 KeyCode::Left
                     if key.modifiers.intersects(
-                        KeyModifiers::CONTROL
-                            | KeyModifiers::ALT
-                            | KeyModifiers::SHIFT,
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
                     ) =>
                 {
                     state.split_pct = state.split_pct.saturating_sub(5).max(10);
                 }
                 KeyCode::Right
                     if key.modifiers.intersects(
-                        KeyModifiers::CONTROL
-                            | KeyModifiers::ALT
-                            | KeyModifiers::SHIFT,
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
                     ) =>
                 {
                     state.split_pct = (state.split_pct + 5).min(90);
@@ -251,10 +244,8 @@ async fn event_loop(
                 KeyCode::Left => {
                     state.cursor_pos = state.cursor_pos.saturating_sub(1);
                 }
-                KeyCode::Right => {
-                    if state.cursor_pos < state.input.len() {
-                        state.cursor_pos += 1;
-                    }
+                KeyCode::Right if state.cursor_pos < state.input.len() => {
+                    state.cursor_pos += 1;
                 }
                 KeyCode::Up => {
                     if state.cmd_history.is_empty() {
@@ -363,9 +354,7 @@ async fn tick_stream(state: &mut TuiState) {
                 let mut trim = state.mirror_text.len() - MAX_MIRROR * 3 / 4;
                 // Advance to a char boundary to avoid slicing inside a
                 // multi-byte UTF-8 sequence (e.g. box-drawing '─').
-                while trim < state.mirror_text.len()
-                    && !state.mirror_text.is_char_boundary(trim)
-                {
+                while trim < state.mirror_text.len() && !state.mirror_text.is_char_boundary(trim) {
                     trim += 1;
                 }
                 let boundary = state.mirror_text[trim..]
@@ -375,10 +364,7 @@ async fn tick_stream(state: &mut TuiState) {
                 state.mirror_text = state.mirror_text[boundary..].to_string();
             }
         }
-        StreamMode::Until {
-            pattern,
-            max_lines,
-        } => {
+        StreamMode::Until { pattern, max_lines } => {
             let query = ScrollbackQuery::Until {
                 pattern: pattern.clone(),
                 max_lines: *max_lines,
@@ -465,7 +451,7 @@ async fn process_command(
 
     match parts[0] {
         "tui" => {
-            if parts.get(1).map(|s| *s) == Some("off") {
+            if parts.get(1).copied() == Some("off") {
                 return Ok(Some(TuiAction::TuiOff));
             }
             state.push_output("already in tui mode; use 'tui off' to exit");
@@ -501,10 +487,8 @@ async fn process_command(
                             // mirror frame so render_text() cost stays
                             // proportional to the terminal, not the total
                             // session output.
-                            let (cols, rows) =
-                                crossterm::terminal::size().unwrap_or((120, 40));
-                            let mirror_chars =
-                                (cols as usize) * (rows as usize * 3 / 4) * 2;
+                            let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
+                            let mirror_chars = (cols as usize) * (rows as usize * 3 / 4) * 2;
                             let history = sub.history(HistoryOptions {
                                 max_entries: 500,
                                 max_render_chars: mirror_chars,
@@ -535,10 +519,7 @@ async fn process_command(
                 state.push_output("usage: create <name>");
                 return Ok(None);
             }
-            match host
-                .create_session(parts[1], &Default::default())
-                .await
-            {
+            match host.create_session(parts[1], &Default::default()).await {
                 Ok(_) => state.push_output(&format!("created: {}", parts[1])),
                 Err(e) => state.push_output(&format!("error: {}", e)),
             }
@@ -608,8 +589,7 @@ async fn process_command(
                             if panes.len() == 1 { "" } else { "s" }
                         ));
                         for p in &panes {
-                            let pid =
-                                p.pane_address().map(|a| a.pane_id.as_str()).unwrap_or("?");
+                            let pid = p.pane_address().map(|a| a.pane_id.as_str()).unwrap_or("?");
                             state.push_output(&format!(
                                 "      {:<16} ({})",
                                 p.target_string(),
@@ -705,7 +685,7 @@ async fn process_command(
                 let _ = prev.history_handle.join().await;
                 let _ = prev.monitor_handle.shutdown().await;
             }
-            let words: Vec<&str> = cmd.trim().split_whitespace().collect();
+            let words: Vec<&str> = cmd.split_whitespace().collect();
             if words.len() < 2 {
                 state.push_output("usage: history <session> [session...]");
                 return Ok(None);
@@ -723,10 +703,7 @@ async fn process_command(
                                 if !has_visible_text(content) {
                                     continue;
                                 }
-                                output.push_str(&format!(
-                                    "--- {}({}) ---\n",
-                                    name, addr.pane_id
-                                ));
+                                output.push_str(&format!("--- {}({}) ---\n", name, addr.pane_id));
                                 output.push_str(content);
                                 if !content.ends_with('\n') {
                                     output.push('\n');
@@ -759,7 +736,7 @@ async fn process_command(
             }
         }
         "stream" => {
-            let words: Vec<&str> = cmd.trim().split_whitespace().collect();
+            let words: Vec<&str> = cmd.split_whitespace().collect();
             if words.len() < 2 {
                 state.push_output(
                     "usage: stream <target> [--mode visible|tail|until|fidelity|monitor|render] \
@@ -885,8 +862,7 @@ async fn process_command(
                         last_tick: tokio::time::Instant::now(),
                     });
                     state.mirror_text = initial;
-                    state.mirror_label =
-                        format!("stream: {} [{}]", target_str, mode_str);
+                    state.mirror_label = format!("stream: {} [{}]", target_str, mode_str);
                     state.mirror_ansi = mode_str == "visible";
                     state.mirror_auto_refresh = false;
                     state.push_output(&format!(
@@ -908,10 +884,10 @@ async fn process_command(
                         state.mirror_text.clear();
                     }
 
-                    match host.start_monitoring_session(&session_name).await {
+                    match host.start_monitoring_session(session_name).await {
                         Ok(monitor_handle) => {
                             let bus = host.output_bus();
-                            let filter = SinkFilter::for_session(&session_name);
+                            let filter = SinkFilter::for_session(session_name);
                             match bus.subscribe(vec![filter], 64) {
                                 Ok(sub) => {
                                     let (cols, rows) =
@@ -1008,8 +984,12 @@ fn show_help(topic: Option<&str>, state: &mut TuiState) {
             state.push_output("");
             state.push_output("OPTIONS:");
             state.push_output("  --mode MODE       Capture strategy [default: tail]");
-            state.push_output("  --lines N         Scrollback line count (tail/until) [default: 50]");
-            state.push_output("  --interval MS     Poll interval in ms (polling modes) [default: 200]");
+            state.push_output(
+                "  --lines N         Scrollback line count (tail/until) [default: 50]",
+            );
+            state.push_output(
+                "  --interval MS     Poll interval in ms (polling modes) [default: 200]",
+            );
             state.push_output("  --pattern REGEX   Regex for until mode [default: ^\\$ ]");
             state.push_output("");
             state.push_output("MODES (polling — output refreshes at --interval):");
@@ -1176,7 +1156,10 @@ fn show_help(topic: Option<&str>, state: &mut TuiState) {
             state.push_output("  With a command name, show detailed usage for that command.");
         }
         Some(other) => {
-            state.push_output(&format!("no help for '{}'; type 'help' for command list", other));
+            state.push_output(&format!(
+                "no help for '{}'; type 'help' for command list",
+                other
+            ));
         }
     }
 }

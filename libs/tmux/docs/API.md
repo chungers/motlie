@@ -18,6 +18,33 @@ All examples assume an async context (`#[tokio::main]` or `#[tokio::test]`).
 **Runnable examples** are in [`examples/`](../examples/) with full instructions
 in [`examples/README.md`](../examples/README.md).
 
+## Changelog
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-05-30 | @codex-359-og | Added explicit session-id sink filters, documented that session-name filters no longer match stable `$N` ids, and clarified scoped discontinuity delivery. |
+| 2026-05-30 | @codex-355-rv | Added stable session-id target specs and documented that resolved `Target::target_string()` uses tmux ids while names remain display metadata. |
+| 2026-05-28 | @gpt55-342-og | Added `SshConfig::endpoint_alias()` and `connect_with_endpoint_alias()` for stable SSH endpoint display and HostHandle aliases. |
+| 2026-05-28 | @codex | Added attached-client activity fields to `ClientInfo` and `HostHandle::session_client_activity()` for policy-light input-recency consumers such as mstream timer guards. |
+| 2026-05-28 | @codex | Added `SshConfig::connect_with_alias()` and `Fleet::unregister()` so higher-level orchestrators can use stable routing aliases while keeping Fleet as the host registry; kept timeline lifecycle methods on `OutputBus` instead of duplicating them on `Fleet`; removed historical workstream/short-name aliases in favor of explicit target-alias APIs. |
+| 2026-05-27 | @gpt55-337-og | Added Fleet target APIs for issue #337: `FleetTargetSpec`, target aliases, cross-host session inventory with tags, batch `SessionTags` writes/removals, idempotent target monitoring, and timeline filter/scope helpers. |
+| 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` for variables that must be visible to the first pane process, and documented that `SessionEnvironment::set/unset` only affects future tmux-spawned processes. |
+| 2026-05-02 | @codex | Added scoped session environment APIs: `Target::environment()`, `SessionEnvironment::{set,unset,read,list}`, public `SessionEnvVar`, and `SESSION_ENV_VAR_VALUE_MAX_BYTES`. Tags and environment variables now use scoped helper handles only; the one-off tag wrapper methods were removed from the public `Target` API. |
+| 2026-05-02 | @codex | Replaced direct `Target` status option methods with `Target::status() -> SessionStatus`, plus `SessionStatusSnapshot` / `SessionStatusOverrides` for attach-time snapshot/apply/restore flows. |
+| 2026-05-02 | @codex | Added narrow session-local status-left/status-style value types and scoped status APIs for temporary attach display overrides. |
+| 2026-05-02 | @codex | Added `HostHandle::list_tags_for_session_infos(prefix, sessions)` to batch-read session metadata tags for a fresh session listing in one tmux command. |
+| 2026-05-01 | @codex | Added `HostHandle::target_for_session_info()` so consumers enriching a fresh `list_sessions()` result can build a session `Target` without issuing a second session-discovery query. |
+| 2026-05-01 | @codex | Added session metadata tag deletion: `SessionTags::unset(key)` removes a user-defined session option with tmux `set-option -u` while preserving session-only scope, stable-session-id dispatch, and prefix/key validation. |
+| 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::tags(prefix)`, scoped `SessionTags`, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
+| 2026-04-29 | @opus47-macos-tmux | Removed `HostHandle::list_sessions_now()` and `SessionListing`. There is no portable, side-effect-free way to read the host clock across tmux versions (`run-shell` corrupts the operator's attached pane on tmux ≤ 3.4). Recency math moves to the consumer: `list_sessions()` already aggregates `window_activity` into `SessionInfo.activity`, and binaries that need observer-relative recency keep their own per-session tracker. `mod discovery` is now private — all access flows through `HostHandle::*`. |
+| 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
+| 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
+| 2026-04-28 | @gpt55-dgx | Replaced the selector-oriented host shell hook note with bounded `HostHandle::read_text_file`, documented `SessionId` as the stable non-empty session id type, and clarified that host events are currently polling-backed. |
+| 2026-04-26 | @gpt55-dgx | Document that current-PTY attach restores the parent foreground process group through a `SIGTTOU`-safe path so selector/dashboard callers do not remain stopped after detach. |
+| 2026-04-26 | @gpt55-dgx | Document `SessionWatchOptions::normalize`, available to watch-session consumers that need to strip raw ANSI/control bytes before text rendering. |
+| 2026-04-26 | @gpt55-dgx | Document selector support APIs including host metadata reads, `HostHandle::watch_host_events`, `HostEventStream`, and `ScrollbackQuery::LinesRange`. |
+| 2026-04-26 | @gpt55-dgx | Document `HostHandle::session_by_id`, `AttachExit`, and `Target::attach_current_pty` added for tmux selector Phase 1.1 / 1.4. |
+
 ---
 
 ## Table of Contents
@@ -33,7 +60,10 @@ in [`examples/README.md`](../examples/README.md).
 5. [HostHandle](#5-hosthandle)
 6. [Session Lifecycle](#6-session-lifecycle)
 7. [Discovery](#7-discovery)
+   - 7a. [Host Event Stream](#host-event-stream)
 8. [Target and Navigation](#8-target-and-navigation)
+   - 8a. [Current PTY Attach](#current-pty-attach)
+   - 8b. [Session Tags](#session-tags)
 9. [Sending Input](#9-sending-input)
 10. [Capturing Output](#10-capturing-output)
 11. [Structured Command Execution](#11-structured-command-execution)
@@ -53,6 +83,7 @@ in [`examples/README.md`](../examples/README.md).
 **Part II-c — External-Agent Substrate (Track B)**
 21. [Predicate Filtering — filter_fn](#21-predicate-filtering--filter_fn)
 22. [Rolling Transcript / History (DC28)](#22-rolling-transcript--history-dc28)
+22b. [OutputBus Timelines](#22b-outputbus-timelines)
 23. [Fleet — Multi-Host Coordination (DC27)](#23-fleet--multi-host-coordination-dc27)
 
 **Part II-d — TUI (DC32)**
@@ -402,6 +433,21 @@ Transport selection is automatic:
 The `connect()` method consumes `self`. Socket configuration is propagated to
 the `HostHandle` for tmux commands (`-L` or `-S` flags).
 
+`connect()` keeps the historical host-only alias. Binaries that need endpoint
+identity for display or routing can use `endpoint_alias()` and
+`connect_with_endpoint_alias()`:
+
+```rust
+let cfg = SshConfig::parse("ssh://david;socket-name=build@amd1:2222")?;
+assert_eq!(cfg.endpoint_alias(), "david@amd1:2222/socket:build");
+
+let host = cfg.connect_with_endpoint_alias().await?;
+assert_eq!(host.host_alias(), "david@amd1:2222/socket:build");
+```
+
+Endpoint aliases include SSH user, host, non-default port, and non-default
+tmux socket identity. They intentionally omit `identity-file`.
+
 ---
 
 ## 3. MockTransport
@@ -555,6 +601,16 @@ let host = HostHandle::new(
 let host2 = host.clone();
 ```
 
+### Hostname From Tmux
+
+```rust
+let tmux_host = host.tmux_hostname().await?;
+```
+
+`tmux_hostname()` returns the value tmux reports for `#{host}` on the
+configured transport/socket. It runs `start-server ; display-message -p
+'#{host}'`, so it starts the tmux server if one is not already running.
+
 ---
 
 ## 6. Session Lifecycle
@@ -584,6 +640,19 @@ let opts = CreateSessionOptions {
 let target = host.create_session("automation", &opts).await?;
 // Sets -x 200 -y 50 on new-session, then set-option history-limit 50000
 // on both the session (future panes) and initial pane (tmux 3.1+)
+
+// With variables visible to the initial shell or command
+let opts = CreateSessionOptions {
+    initial_environment: vec![
+        SessionEnvVar::new("MOTLIE", "enabled")?,
+        SessionEnvVar::new("BUILD_ID", "42")?,
+    ],
+    ..Default::default()
+};
+let target = host.create_session("with-env", &opts).await?;
+// Emits tmux new-session -e MOTLIE=enabled -e BUILD_ID=42 before the command,
+// so the first pane process inherits those values.
+// Duplicate names are emitted in Vec order; tmux applies the last value.
 ```
 
 ### Kill
@@ -599,16 +668,17 @@ target.kill().await?;
 
 ```rust
 // rename() returns a new Target with the updated address.
-// For session rename this is critical — the old handle has a stale name.
+// For session rename this refreshes the display name carried by the handle.
 let target = target.rename("new_name").await?;
-target.kill().await?; // uses the renamed handle
+target.kill().await?; // targets the same stable session id
 ```
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10h)*: `rename()` now returns
 > `Result<Target>` with the updated address. The impact by level:
 >
-> - **Session rename** — correctness-significant. `target_string()` uses the
->   session name, so callers **must** use the returned handle.
+> - **Session rename** — id-stable for commands. `target_string()` uses the
+>   stable tmux session id, so the old handle can still target the session;
+>   callers displaying session names should use the returned handle.
 > - **Window rename** — metadata drift only. `target_string()` uses
 >   `session:index` (not the window name), so commands continue to work.
 >   However, the cached `WindowInfo.name` becomes stale — callers displaying
@@ -635,12 +705,46 @@ tmux server running or no entities exist.
 ```rust
 let sessions = host.list_sessions().await?;
 for s in &sessions {
-    println!("{} (id={}, windows={}, attached={})",
-        s.name, s.id, s.window_count, s.attached);
+    println!("{} (id={}, windows={}, attached_clients={}, active={})",
+        s.name, s.id, s.window_count, s.attached_count, s.is_attached());
 }
 ```
 
 > See [`examples/list_sessions.rs`](../examples/list_sessions.rs) for a runnable version.
+
+### List sessions with recency data
+
+`list_sessions()` returns rows whose `SessionInfo.activity` is the
+**aggregated** activity timestamp: `max(session_activity, max(window_activity
+across the session's windows))`. The chained `list-windows -a` query and
+aggregation are internal to the lib; callers see a single field. See issue
+#237 for why aggregation is necessary (tmux's `session_activity` only tracks
+attached-client input, not program output).
+
+```rust
+let sessions = host.list_sessions().await?;
+let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or(0);
+for session in &sessions {
+    let active_secs = now.saturating_sub(session.activity);
+    let age_secs = now.saturating_sub(session.created);
+    println!(
+        "{} active={}s age={}s",
+        session.name, active_secs, age_secs
+    );
+}
+```
+
+The lib does not ship a host-clock probe. There is no portable,
+side-effect-free way to read the host's wall clock across tmux versions
+(`#{epoch}` is tmux 3.7+; `run-shell 'date +%s'` corrupts the operator's
+attached pane on tmux ≤ 3.4). Consumers that need true skew-free recency
+should keep an observer-relative tracker — see the mmux selector for an
+example. Under the typical NTP-synced clock assumption, comparing
+`session.activity` against an operator-side `time(NULL)` is correct to
+within sub-second drift.
 
 ### Find a session by name
 
@@ -651,6 +755,38 @@ match host.session("build").await? {
 }
 ```
 
+### Find a session by stable id
+
+```rust
+let sessions = host.list_sessions().await?;
+let selected_id = sessions[0].id.as_str().to_string();
+
+match host.session_by_id(&selected_id).await? {
+    Some(target) => target.kill().await?,
+    None => eprintln!("session disappeared before dispatch"),
+}
+```
+
+`SessionInfo.id` is a non-empty `SessionId` parsed from tmux `#{session_id}`.
+`session_by_id()` is useful when a UI stores that stable id at selection time
+and later needs to dispatch against the same tmux session after a display-name
+rename.
+
+### Build a target from a fresh session row
+
+```rust
+let sessions = host.list_sessions().await?;
+for session in sessions {
+    let target = host.target_for_session_info(session);
+    let tags = target.tags("mmux").await?.list().await?;
+    println!("{} tags", tags.len());
+}
+```
+
+`target_for_session_info()` does not revalidate that the session still exists.
+It is intended for enrichment passes that already hold a just-fetched
+`SessionInfo` and want to avoid a second session-discovery query per row.
+
 ### Find by TargetSpec
 
 ```rust
@@ -658,10 +794,12 @@ use motlie_tmux::TargetSpec;
 
 // Session only
 let t = host.target(&TargetSpec::session("build")).await?;
+let t = host.target(&TargetSpec::session_id("$7")?).await?;
 
 // Session + window (by index or name)
 let t = host.target(&TargetSpec::session("build").window(0)).await?;
 let t = host.target(&TargetSpec::session("build").window_name("editor")).await?;
+let t = host.target(&TargetSpec::session_id("$7")?.window(0)).await?;
 
 // Session + window + pane (pane() returns Result)
 let t = host.target(&TargetSpec::session("build").window(0).pane(1)?).await?;
@@ -672,8 +810,12 @@ let t = host.target(&spec).await?;
 
 // Parse from string
 let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
+let t = host.target(&TargetSpec::parse("$7:0.1")?).await?;
 // Returns Option<Target> — None if the entity doesn't exist.
 ```
+
+Name specs remain accepted for operator-facing input. Resolved targets carry
+both display metadata and stable ids; command routing uses tmux ids when known.
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10f)*: `TargetSpec::pane()` now returns
 > `Result<Self>` instead of panicking. Missing `.window()` returns an error:
@@ -689,10 +831,67 @@ let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
 ```rust
 let clients = host.list_clients().await?;
 for c in &clients {
-    println!("{}x{} on '{}'", c.width, c.height, c.session);
+    println!(
+        "{}x{} on '{}' activity={} readonly={} tty={:?}",
+        c.width, c.height, c.session, c.activity, c.readonly, c.tty
+    );
 }
-// Useful for geometry/reflow detection (section 15).
+// Useful for geometry/reflow detection and attached-client input recency.
 ```
+
+For one session, use the policy-light summary helper:
+
+```rust
+let activity = host.session_client_activity("build").await?;
+println!(
+    "attached={} writable={} latest={:?}",
+    activity.attached_clients,
+    activity.writable_clients,
+    activity.latest_client_activity
+);
+```
+
+### Host text file read
+
+```rust
+use std::path::Path;
+
+let motd = host.read_text_file(Path::new("/etc/motd"), 64 * 1024).await?;
+```
+
+`read_text_file()` reads UTF-8 host metadata through a typed, bounded API. Local
+hosts use the local filesystem path directly; SSH/mock hosts use the existing
+file-transfer path and then enforce the caller's byte cap before returning the
+string. This keeps selector code free of shell syntax such as `cat` and
+redirection while still supporting `/etc/motd`.
+
+### Host Event Stream
+
+```rust
+use motlie_tmux::{HostEvent, HostHandle};
+
+let mut events = host.watch_host_events().await?;
+while let Some(event) = events.recv().await {
+    match event {
+        HostEvent::SessionsChanged => println!("session list changed"),
+        HostEvent::SessionAdded { id, name } => println!("added {name} ({id})"),
+        HostEvent::SessionClosed { id, name } => println!("closed {name} ({id})"),
+        HostEvent::SessionRenamed { id, old, new } => {
+            println!("renamed {old} -> {new} ({id})");
+        }
+        HostEvent::ClientAttached { session_id } => println!("client attached to {session_id}"),
+        HostEvent::ClientDetached { session_id } => println!("client detached from {session_id}"),
+        HostEvent::Disconnect { reason } => eprintln!("event stream degraded: {reason}"),
+    }
+}
+```
+
+`watch_host_events()` currently polls `list_sessions()` once per second and
+derives events by diffing stable `SessionId` keys. The tmux control-mode
+notification parser remains reserved for a future event-driven watcher path.
+
+This gives selector UIs a stable event API without forcing callers to implement
+their own name-vs-id reconciliation.
 
 ---
 
@@ -706,8 +905,9 @@ It is **not `Clone`**; to share, use `HostHandle::session()` or
 
 ```rust
 target.level();          // TargetLevel::Session | Window | Pane
-target.target_string();  // "build", "build:0", "build:0.1"
-target.session_name();   // available at every level
+target.target_string();  // "$7", "$7:0", "%12" once resolved
+target.session_name();   // display name, available at every level
+target.session_id();     // Some("$7") for resolved session/window/pane targets
 target.session_info();   // Some(&SessionInfo) — session level only
 target.window_info();    // Some(&WindowInfo) — window level only
 target.pane_address();   // Some(&PaneAddress) — pane level only
@@ -716,6 +916,183 @@ target.address();        // &TargetAddress enum
 
 > See [`examples/target_navigate.rs`](../examples/target_navigate.rs) for a runnable hierarchy walk
 > and [`examples/target_spec.rs`](../examples/target_spec.rs) for TargetSpec resolution.
+
+### Current PTY Attach
+
+```rust
+let target = host
+    .session_by_id(&selected_id)
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("selected session disappeared".into()))?;
+
+let exit = target.attach_current_pty().await?;
+std::process::exit(exit.shell_status());
+```
+
+`attach_current_pty()` is session-target only. Local targets spawn
+`tmux attach-session -t <target>` with inherited stdio. SSH targets spawn an
+interactive `ssh -t ... tmux attach-session -t <target>` command using the
+`SshConfig` already owned by the `HostHandle`. The child runs in its own process
+group; on Unix the current terminal foreground process group is transferred to
+the child and restored after `wait()`.
+
+The Unix restore path ignores `SIGTTOU` only around `tcsetpgrp()`. This matters
+because the selector parent is briefly a background process group after the
+attach child exits; without that guard, shells can leave dashboard callers in a
+stopped-job state after `Ctrl-b d`.
+
+Selector-style applications that redraw their own UI after detach can use
+explicit attach options:
+
+```rust
+use motlie_tmux::AttachOptions;
+
+let exit = target
+    .attach_current_pty_with_options(&AttachOptions {
+        suppress_transition_output: true,
+    })
+    .await?;
+```
+
+`suppress_transition_output` keeps inherited interactive stdio while the child
+is attached. After the child exits, the library best-effort clears the terminal
+line used by tmux/SSH detach status text. For SSH targets, it also adds `ssh -q`
+to suppress client-side connection diagnostics.
+
+`AttachExit::shell_status()` maps normal exits to their exit code and Unix
+signal exits to `128 + signal`, which is the value CLI callers should return.
+
+### Session Status Bar Overrides
+
+```rust
+use motlie_tmux::{
+    SessionStatusOverrides, StatusLeft, StatusLeftLength, StatusStyle,
+};
+
+let status = target.status().await?;
+let snapshot = status.snapshot().await?;
+let overrides = SessionStatusOverrides {
+    style: Some(StatusStyle::new("bg=blue,fg=white")?),
+    left: Some(StatusLeft::new("#{=40:session_name}")?),
+    left_length: Some(StatusLeftLength::new(40)?),
+};
+status.apply(&overrides).await?;
+
+// ... attach or otherwise run with temporary status overrides ...
+
+status.restore(&snapshot).await?;
+
+// Low-level scoped operations are also available:
+status.set_style(&StatusStyle::new("bg=black,fg=white")?).await?;
+let local_style = status.read_local_style().await?;
+status.unset_style().await?;
+```
+
+`Target::status()` is session-target only and captures the stable session id.
+The scoped operations use tmux `set-option -t <session-id> ...` /
+`set-option -u`. The read paths use `show-option -q -t <session-id> ...` and
+return only session-local overrides; inherited/global values return `Ok(None)`.
+`SessionStatus::snapshot()` records local `status-style`, `status-left`, and
+`status-left-length`; `restore()` writes present values back and unsets absent
+ones. `StatusStyle` rejects empty strings; `StatusLeft` accepts empty strings
+because tmux treats an empty left format as "render nothing". `StatusLeftLength`
+is validated and capped at `STATUS_LEFT_LENGTH_MAX`. tmux remains responsible
+for style and format syntax.
+
+### Session Tags
+
+Session tags store small metadata values on tmux sessions using user-defined
+session options. The API is session-target only:
+
+```rust
+let session = host
+    .session("build")
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("build not found".into()))?;
+
+let tags = session.tags("mmux").await?;
+tags.set("owner", "david").await?;
+tags.set("role", "worker").await?;
+tags.unset("role").await?;
+
+assert_eq!(
+    tags.read("owner").await?,
+    Some("david".to_string())
+);
+
+let all = tags.list().await?;
+```
+
+For `prefix = "mmux"` and `key = "owner"`, the tmux option is stored as
+`@mmux/owner`. `SessionTag` carries the namespace prefix, key, and value with
+validated private fields; use `prefix()`, `key()`, `value()`, and
+`option_name()` to inspect it.
+
+Contract:
+- `tags(prefix)` validates the namespace once, captures the stable session id
+  and tmux command prefix, and returns a scoped `SessionTags` helper.
+- `SessionTags::set(key, value)` writes one tag.
+- `SessionTags::unset(key)` removes one tag from the namespace.
+- `SessionTags::read(key)` returns `Ok(Some(value))` or `Ok(None)` when missing.
+- `SessionTags::list()` returns every valid tag under that namespace.
+- `HostHandle::list_tags_for_session_infos(prefix, sessions)` batch-lists tags
+  for a session listing in one tmux command and returns an entry for every
+  provided stable session id.
+- Prefixes and keys must be non-empty ASCII letters, digits, `.`, `_`, or `-`.
+- Values are UTF-8 strings, may be empty, must not contain control characters,
+  and are capped at 2 KiB.
+- These methods return `UnsupportedTarget` for window and pane targets.
+
+## Session Environment Variables
+
+Session environment variables are session-target only and use tmux
+`set-environment` / `show-environment` under the same stable-session-id dispatch
+boundary as tags. This is a post-creation API: writes update tmux's session
+environment for processes tmux starts later, such as new panes or windows. They
+cannot mutate shell processes already running in existing panes. Use
+`CreateSessionOptions::initial_environment` for variables that must be visible to
+the first pane process created by `new-session`.
+
+```rust
+let session = host
+    .session("build")
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("build not found".into()))?;
+
+let env = session.environment().await?;
+env.set("BUILD_ID", "42").await?;
+
+assert_eq!(
+    env.read("BUILD_ID").await?,
+    Some("42".to_string())
+);
+
+let all = env.list().await?;
+env.unset("BUILD_ID").await?;
+```
+
+Contract:
+- `environment()` captures the stable session id and tmux command prefix, and
+  returns a scoped `SessionEnvironment` helper.
+- `SessionEnvironment::set(name, value)` writes one variable for future
+  tmux-spawned processes.
+- `SessionEnvironment::unset(name)` removes one variable for future
+  tmux-spawned processes.
+- `SessionEnvironment::read(name)` returns `Ok(Some(value))` or `Ok(None)` when
+  missing.
+- `SessionEnvironment::list()` returns valid set variables and skips tmux unset
+  markers such as `-NAME`.
+- Names must be ASCII environment identifiers: first byte letter or `_`, then
+  letters, digits, or `_`.
+- Values are UTF-8 strings, may be empty, must not contain control characters,
+  and are capped at 8 KiB.
+- These methods return `UnsupportedTarget` for window and pane targets.
+
+The implementation targets the stable tmux `SessionId` held by `SessionInfo`,
+not the mutable display name. Tag reads use `show-option -q` so missing and empty
+values remain distinct; deletion uses `set-option -u -t <session-id>
+@<prefix>/<key>`. Listing uses `show-options` and filters for the requested
+namespace without shell pipelines.
 
 ### Create child windows and panes
 
@@ -732,7 +1109,8 @@ let logs = session
         ..Default::default()
     })
     .await?;
-assert_eq!(logs.target_string(), "build:1");
+assert_eq!(logs.session_name(), "build");
+// target_string() is the stable session id plus window index, e.g. "$7:1".
 
 let tail = logs
     .split_pane(&SplitPaneOptions {
@@ -1116,6 +1494,22 @@ let query = ScrollbackQuery::LastLinesUntil {
 let text = target.sample_text(&query).await?;
 ```
 
+### Windowed older range
+
+```rust
+let older = target
+    .sample_text(&ScrollbackQuery::LinesRange {
+        older_than_lines: 80,
+        count: 40,
+    })
+    .await?;
+```
+
+`LinesRange` captures a bounded scrollback window older than the most recent
+`older_than_lines`. It maps to tmux `capture-pane -S/-E` offsets instead of
+rebuilding the full scrollback buffer, making it suitable for paged TUI
+back-scroll over local and SSH transports.
+
 ### Incremental sampling with overlap dedup
 
 For polling workflows, overlap-aware dedup merges consecutive captures
@@ -1450,6 +1844,9 @@ let sub_all = bus.subscribe(vec![], 64)?;
 // Subscribe filtered to a specific session (exact match constructor)
 let sub_build = bus.subscribe(vec![SinkFilter::for_session("build")], 64)?;
 
+// Subscribe filtered to a stable tmux session id
+let sub_id = bus.subscribe(vec![SinkFilter::for_session_id("$1")], 64)?;
+
 // Subscribe filtered to a specific pane (exact match constructor)
 let sub_pane = bus.subscribe(vec![SinkFilter::for_pane("%5")], 64)?;
 
@@ -1493,6 +1890,10 @@ All filter fields are optional regex strings. A filter matches when **all**
 non-None fields match (AND logic). Multiple filters in a subscription are
 OR'd — an event matches if **any** filter matches.
 
+Use `session` for display-name matching and `session_id` for stable tmux
+`$N` identity matching. This keeps an id-addressed filter such as `$1` from
+matching an unrelated session literally named `$1`.
+
 The `pane` filter matches against both the `pane_id` (e.g. `%5`) and the
 tmux target string (e.g. `build:0.1`). Control mode only provides `pane_id`,
 so pane-level filtering by `pane_id` is the canonical approach.
@@ -1501,12 +1902,15 @@ so pane-level filtering by `pane_id` is the canonical approach.
 // Exact-match constructors (preferred for common routing):
 let filter = SinkFilter::for_host("web-1");
 let filter = SinkFilter::for_session("build");
+let filter = SinkFilter::for_session_id("$1");
 let filter = SinkFilter::for_pane("%5");
 let filter = SinkFilter::for_host_session("web-1", "build");
+let filter = SinkFilter::for_host_session_id("web-1", "$1");
 
 // Raw regex fields for advanced routing:
 let filter = SinkFilter {
     session: Some("build|deploy".to_string()),
+    session_id: Some("^\\$[0-9]+$".to_string()),
     window: Some("^build:0$".to_string()),
     ..Default::default()
 };
@@ -1522,7 +1926,7 @@ output.raw_content       // Some(...) when normalization changed content
 output.sequence          // Per-source sequence number (monotonic within a
                          // continuous stream segment; resets on Discontinuity)
 output.fidelity          // OutputFidelity (clean for control mode)
-output.timestamp         // std::time::Instant of emission
+output.timestamp         // std::time::Instant of daemon-side receipt
 
 // Accessors:
 output.session_name()    // Session name at any source level
@@ -1554,8 +1958,11 @@ match event {
 }
 ```
 
-The `OutputBus` broadcasts discontinuity to all subscribers regardless of
-source-routing filters (system-level signal, not content):
+The `OutputBus` broadcasts global discontinuities to all subscribers regardless
+of source-routing filters (system-level signal, not content). Scoped
+discontinuities created with `publish_discontinuity_for()` are delivered only to
+unfiltered subscribers and subscribers whose source filters match the marker
+scope:
 
 ```rust
 bus.publish_discontinuity("stream interrupted: control channel lost");
@@ -1794,6 +2201,27 @@ let history = sub.history(HistoryOptions {
 | `label_format` | `LabelFormat` | `Bracketed` | Source label format for rendering |
 | `include_omission_marker` | `bool` | true | Prepend `[... N earlier entries omitted ...]` on trimming |
 
+`HostHandle::watch_session()` also accepts `SessionWatchOptions`, which wraps a
+`HistoryOptions` plus queue sizing and a monitor normalization mode:
+
+```rust
+use motlie_tmux::{CaptureNormalizeMode, HistoryOptions, SessionWatchOptions};
+
+let watch = host
+    .watch_session(
+        "build",
+        &SessionWatchOptions {
+            queue_capacity: 256,
+            normalize: CaptureNormalizeMode::PlainText,
+            history: HistoryOptions::default(),
+        },
+    )
+    .await?;
+```
+
+Use `PlainText` for ratatui/text UIs that cannot render ANSI escape sequences;
+use the default `Raw` mode when consumers need the original control-mode bytes.
+
 ### Snapshot for structured access
 
 ```rust
@@ -1873,11 +2301,142 @@ bus.unsubscribe(history.id())?;
 let snapshot = history.join().await?;
 ```
 
+
+## 22b. OutputBus Timelines
+
+`OutputBus` can retain named, bus-owned timelines for supervisor loops that
+need durable-enough multi-agent context without creating their own local event
+store. A bus can host multiple timelines at once; each timeline has independent
+filters, retention, rendering, and ordering policy.
+
+```rust
+use std::time::Duration;
+use motlie_tmux::{
+    LabelFormat, LateEventPolicy, RenderMode, RenderOptions, SinkFilter,
+    TimelineCursor, TimelineMarkerScope, TimelineOptions, TimelineOrdering,
+};
+
+let timeline = bus.open_timeline(
+    "review-round-17",
+    TimelineOptions {
+        filters: vec![
+            SinkFilter::for_host_session("amd1", "codex-submit"),
+            SinkFilter::for_host_session("amd1", "claude-review"),
+        ],
+        max_entries: 10_000,
+        max_render_chars: 200_000,
+        ordering: TimelineOrdering::TimestampMerge {
+            reorder_window: Duration::from_millis(500),
+            late_event_policy: LateEventPolicy::AppendWithMarker,
+        },
+        render_mode: RenderMode::Interleaved,
+        label_format: LabelFormat::Prompt,
+        ..Default::default()
+    },
+)?;
+
+let mut cursor = TimelineCursor::default();
+let page = timeline.entries_after(cursor, 200).await?;
+cursor = page.cursor;
+
+let rendered = timeline
+    .render_after(cursor, RenderOptions { max_chars: 20_000 })
+    .await?;
+```
+
+Timeline management lives on the bus:
+
+```rust
+let handle = bus.timeline("review-round-17")?.expect("timeline exists");
+let same = bus.open_timeline("review-round-17", TimelineOptions::default())?;
+// Existing timelines are returned unchanged; create_or_get opts apply only on create.
+let names = bus.timelines()?;
+let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
+bus.remove_timeline("review-round-17")?;
+```
+
+`TimelineHandle` supports dynamic workstreams without dropping buffered output:
+
+```rust
+handle.add_filter(SinkFilter::for_host_session("amd1", "new-agent")).await?;
+handle.set_filters(vec![SinkFilter::for_host_session("amd1", "codex-submit")]).await?;
+handle.ingest_historical(rebuilt_entries).await?;
+handle.detach().await?;
+```
+
+Historical entries are appended in caller order even when the timeline uses
+`TimestampMerge`; their process-local `received_at` instants are cleared during
+backfill, so persisted history should use wall-clock metadata instead.
+
+Removing or detaching a timeline marks outstanding handles stale; subsequent
+`entries_after`, `latest`, `render_after`, filter mutation, or backfill calls on
+that old generation return an error instead of silently polling a frozen buffer.
+
+Timeline lifecycle methods stay on `OutputBus`. `Fleet` exposes the shared bus
+and target-derived filter helpers, but does not duplicate timeline storage APIs:
+
+```rust
+let bus = fleet.output_bus();
+let timeline = bus.open_timeline("all-agents", TimelineOptions::default())?;
+let same = bus.timeline("all-agents")?;
+let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
+bus.remove_timeline("all-agents")?;
+```
+
+`TimelineEntry` preserves source metadata for prompt summaries and handoff
+detection: host alias, session name, pane id/target identity, `SourceLabel`,
+content, per-source output sequence, the `TargetOutput` daemon-side receipt
+`Instant`, estimated wall-clock receipt time and ingest wall-clock time for
+JSONL-friendly consumers, timeline sequence, discontinuity epoch, and a `late`
+flag. `TimelineEntryKind`
+distinguishes normal output, gap markers, and upstream monitor discontinuities.
+
+Ordering modes:
+
+| Mode | Behavior |
+|------|----------|
+| `TimelineOrdering::Arrival` | Preserve bus ingest order. This matches existing subscription behavior. |
+| `TimelineOrdering::TimestampMerge` | Insert output by daemon-side receipt `TargetOutput.timestamp` within a bounded reorder window. Events older than the newest observed receipt timestamp by more than the window are appended and marked `late`. |
+
+Queries return stable cursors for incremental polling. `TimelineCursor` carries
+`next_sequence` plus out-of-order `seen_sequences`, so bounded pages over
+timestamp-merged timelines can return timestamp-sorted entries without skipping
+lower sequence numbers that sort after a higher sequence. `entries_after(cursor,
+limit)` fetches retained entries at or after the cursor that have not already
+been seen by that cursor. `latest(limit)` returns the newest retained entries
+and returns a cursor positioned after the full snapshot watermark, so the next
+`entries_after()` poll only returns future entries. `render_after(cursor, opts)`
+returns prompt-ready text in `Interleaved` or
+`PerSource` mode and only advances the cursor through entries represented in
+the rendered text, so a character cap cannot skip unrendered entries. Pages
+include `omitted_entries` so callers can detect when ring retention has dropped
+older entries.
+
+`OutputBus::publish_discontinuity()` and `publish_gap()` record global markers
+only in unfiltered timelines. Use scoped marker APIs for per-workstream
+continuity so unrelated timelines and filtered subscribers do not receive
+reconnect or gap markers:
+
+```rust
+bus.publish_discontinuity_for(
+    TimelineMarkerScope::for_host_session("amd1", "codex-submit"),
+    "stream resumed after reconnect",
+);
+bus.publish_gap_for(
+    TimelineMarkerScope::for_host_session("amd1", "codex-submit"),
+    12,
+);
+```
+
+Subscriber-local backpressure still uses `SinkEvent::Gap` on the subscription
+channel.
+
 ## 23. Fleet — Multi-Host Coordination (DC27)
 
 `Fleet` is a programmatic registry of `HostHandle`s with a shared `OutputBus`,
-workstream bindings, and convenience routing. Fleet-level actions are wrappers
-over `HostHandle` / `Target` operations, not a separate action system.
+target aliases, cross-host target specs, session inventory helpers, and
+convenience routing. Fleet-level actions are wrappers over `HostHandle` /
+`Target` operations, not a separate action system.
 
 ### Create and register hosts
 
@@ -1886,17 +2445,24 @@ use motlie_tmux::{Fleet, SshConfig};
 
 let mut fleet = Fleet::new();
 
-// Hosts must be created with the fleet alias via with_alias()
+// Hosts must be created with the fleet alias.
 let web = SshConfig::parse("ssh://deploy@web-1")?.connect().await?;
-// ^ SshConfig::connect() returns HostHandle with host_alias matching the URI host
+// ^ connect() returns HostHandle with host_alias matching the URI host
 fleet.register("web-1", web)?;
 
-let db = SshConfig::parse("ssh://admin@db-1")?.connect().await?;
-fleet.register("db-1", db)?;
+let local = SshConfig::parse("ssh://localhost")?
+    .connect_with_alias("local")
+    .await?;
+fleet.register("local", local)?;
+
+fleet.unregister("local")?;
 ```
 
 Fleet enforces that the registration alias matches `host.host_alias()`, so output
-labels and routing names stay consistent in external-agent workflows.
+labels and routing names stay consistent in external-agent workflows. Use
+`connect_with_alias()` when the transport host name is not the stable Fleet
+alias. `unregister()` removes the host plus Fleet-owned monitor and target-alias
+bookkeeping for that host.
 
 ### Shared OutputBus
 
@@ -1926,26 +2492,100 @@ fleet.stop_monitoring_host("web-1")?;
 fleet.shutdown();
 ```
 
-### Workstream bindings
-
-Workstreams map stable names to host + target combinations for alias-based routing:
+Target specs can also drive monitoring. Window and pane specs monitor their
+containing session. Repeated starts/stops are idempotent.
 
 ```rust
-use motlie_tmux::TargetSpec;
+use motlie_tmux::{FleetTargetSpec, TargetSpec};
 
-fleet.bind("ci", "web-1", TargetSpec::session("build").window(0).pane(0))?;
-fleet.bind("db", "db-1", TargetSpec::session("migration"))?;
+let pane = FleetTargetSpec::new(
+    "web-1",
+    TargetSpec::session("build").window(0).pane(0)?,
+)?;
 
-// Route actions by workstream name
+fleet.ensure_monitoring_session(&FleetTargetSpec::session("web-1", "build")?).await?;
+fleet.stop_monitoring_session_target(&FleetTargetSpec::session("web-1", "build")?)?;
+```
+
+### Target specs and aliases
+
+`FleetTargetSpec` is the cross-host address form: a host alias plus a
+`TargetSpec`. Target aliases map stable caller-owned names to these specs for
+alias-based routing:
+
+```rust
+use motlie_tmux::{FleetTargetSpec, TargetSpec};
+
+let ci = FleetTargetSpec::new("web-1", TargetSpec::session("build").window(0).pane(0)?)?;
+let db = FleetTargetSpec::session("db-1", "migration")?;
+
+fleet.bind_target_alias("ci", ci.clone())?;
+fleet.bind_target_alias("db", db.clone())?;
+
+// Route actions by target alias
 fleet.send_text("ci", "cargo test\n").await?;
 let output = fleet.capture("db").await?;
+
+// Or route directly by spec without binding an alias
+fleet.send_text_to(&ci, "cargo nextest run\n").await?;
+let current = fleet.capture_target(&db).await?;
 
 // Resolve to a Target for direct control
 let target = fleet.target("ci").await?;
 target.send_keys(&KeySequence::from_str("C-c")).await?;
 
 // Unbind when done
-fleet.unbind("ci")?;
+fleet.unbind_target_alias("ci")?;
+```
+
+Fleet intentionally avoids application-specific terms such as workstreams.
+Use target aliases for stable routed control and keep higher-level workflow
+names in the caller.
+
+### Cross-host session inventory and tags
+
+Fleet can enumerate sessions across registered hosts and batch-read tags under a
+caller-owned prefix without encoding application concepts in `libs/tmux`:
+
+```rust
+let snapshots = fleet
+    .snapshot_sessions(FleetSnapshotOptions {
+        hosts: None,
+        tag_prefixes: vec!["app".to_string()],
+    })
+    .await?;
+
+for item in snapshots {
+    println!(
+        "{}:{} tags={:?}",
+        item.host_alias,
+        item.session.name,
+        item.tags.get("app").cloned().unwrap_or_default()
+    );
+}
+```
+
+For per-session writes, `SessionTags` supports batch helpers:
+
+```rust
+let target = fleet.require_target(&FleetTargetSpec::session("web-1", "build")?).await?.target;
+let tags = target.tags("app").await?;
+tags.set_many([("role", "builder"), ("group", "frontend")]).await?;
+tags.unset_many(["group"]).await?;
+```
+
+### Timeline filter helpers
+
+Fleet does not own timeline storage. It can build the generic filters and marker
+scope that a timeline/history consumer needs for a target:
+
+```rust
+let spec = FleetTargetSpec::session("web-1", "build")?;
+let resolved = fleet.require_target(&spec).await?;
+let timeline = fleet.timeline_options_for_targets(&[resolved], TimelineOptions::default());
+
+let sub = fleet.output_bus().subscribe(timeline.filters, 256)?;
+let history = sub.history(HistoryOptions::default());
 ```
 
 ### Host status
@@ -2073,6 +2713,7 @@ assert!(issues.is_empty());
 |------|-------------|-------|
 | `HostHandle` | Entry point — one per tmux host | Yes (Arc) |
 | `Target` | Unified session/window/pane handle | No |
+| `HostEventStream` | Async stream of host-level session events | No |
 
 ### Target addressing
 
@@ -2087,10 +2728,17 @@ assert!(issues.is_empty());
 
 | Type | Key fields |
 |------|-----------|
-| `SessionInfo` | name, id, attached, window_count, group |
+| `SessionId` | non-empty stable tmux `#{session_id}` string, e.g. `$7` |
+| `SessionInfo` | name, id (`SessionId`), created, activity (aggregated `max(session_activity, max(window_activity))` per issue #237), attached_count, window_count, group |
+| `SessionTags` | prefix-scoped session metadata helper returned by `Target::tags(prefix)` |
+| `SessionTag` | validated prefix, key, value for one namespaced session metadata tag |
+| `SessionStatus` / `SessionStatusSnapshot` / `SessionStatusOverrides` | Scoped session-local tmux status-bar API and temporary override state |
+| `StatusStyle` / `StatusLeft` / `StatusLeftLength` | Validated tmux status-bar override values used by `SessionStatus` |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
-| `ClientInfo` | width, height, session |
+| `ClientInfo` | width, height, session, activity, readonly, tty |
+| `SessionClientActivity` | session, attached_clients, writable_clients, latest_client_activity |
+| `HostEvent` | SessionsChanged, SessionAdded, SessionClosed, SessionRenamed, ClientAttached, ClientDetached, Disconnect |
 
 ### Input
 
@@ -2108,7 +2756,7 @@ assert!(issues.is_empty());
 | `CaptureResult` | text, raw_text (Option), fidelity |
 | `OutputFidelity` | degraded (bool), issues (Option<Vec>) — None on clean hot path |
 | `FidelityIssue` | Enum: ClientResize, PaneResize, HistoryTruncated, OverlapResync |
-| `ScrollbackQuery` | Enum: LastLines(n), Until { pattern, max_lines }, LastLinesUntil { lines, stop_pattern } |
+| `ScrollbackQuery` | Enum: LastLines(n), Until { pattern, max_lines }, LastLinesUntil { lines, stop_pattern }, LinesRange { older_than_lines, count } |
 | `ExecOutput` | stdout, exit_code, success() |
 
 ### Geometry
@@ -2125,7 +2773,7 @@ assert!(issues.is_empty());
 | `TransportKind` | Enum: Local, Ssh, Mock — static dispatch |
 | `LocalTransport` | Subprocess exec, configurable timeout |
 | `SshTransport` | russh 0.46, ssh-agent or key-file auth (DC26); `connect()`, `is_closed()` |
-| `SshConfig` | host, port, user, host_key_policy, timeout, inactivity_timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
+| `SshConfig` | host, port, user, host_key_policy, timeout, inactivity_timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `connect_with_alias()`, `Display`/`FromStr` |
 | `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()`, `with_shell_sequence()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
 | `TmuxSocket` | Enum: Name(String), Path(String) |
@@ -2140,12 +2788,13 @@ assert!(issues.is_empty());
 | `MonitorHandle` | Aggregate handle — `shutdown()`, `get()`, `get_by_spec()`, `stop_session()`, `active_sessions()`, `all_sessions()` |
 | `MonitorHealth` | Enum: `Streaming`, `Reconnecting`, `Failed`, `Stopped` — per-session ground truth (DC29) |
 | `MonitorExitReason` | Enum: `Stopped`, `ConnectionLost` — returned by `SessionMonitor::run()` |
-| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `publish_discontinuity()`, `unsubscribe()`, `shutdown()` |
+| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `publish_discontinuity()`, timeline management, `unsubscribe()`, `shutdown()` |
 | `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()`, `.filter_fn()`, `.history()` |
+| `TimelineHandle` | Bus-owned retained timeline — fallible `entries_after()`, `latest()`, `render_after()` |
 | `PipeHandle` | Lifecycle handle from `pipe()` — `id()` for bus control, `join()` for awaited teardown |
 | `TargetOutput` | Output event — `source_key()` (canonical identity), `target_string()` (display), content, fidelity |
 | `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }`, `Discontinuity { reason }` |
-| `SinkFilter` | Source routing — `for_session()`, `for_pane()`, `for_host()` exact constructors; raw regex fields for power |
+| `SinkFilter` | Source routing — `for_session()`, `for_session_id()`, `for_pane()`, `for_host()` exact constructors; raw regex fields for power |
 | `SinkId` | Opaque subscription identifier |
 | `SinkKind` | Enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — static dispatch |
 | `CallbackSink` | User sink — name, state (`Arc<dyn Any>`), on_output, on_flush |
@@ -2164,7 +2813,7 @@ assert!(issues.is_empty());
 | `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `render_mode`, `global_max_render_chars`, `include_omission_marker` |
 | `HistorySnapshot` | Point-in-time snapshot — `entries`, `rendered_chars`, `omitted_entries` |
 | `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }`, `Discontinuity { reason }` |
-| `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, workstreams, routing |
+| `Fleet` | Multi-host registry — `register()`, `unregister()`, `host()`, `hosts()`, `output_bus()`, monitoring, target aliases, routing |
 | `HostStatus` | Enum: `Connected`, `Monitoring { sessions: Vec<SessionMonitorStatus> }`, `Error(String)` |
 | `SessionMonitorStatus` | Per-session status: `name`, `health: MonitorHealth` |
 | `RenderMode` | Enum: `Interleaved` (default), `PerSource` — controls how `render_text()` groups entries |

@@ -4,6 +4,13 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-359-og | Updated sink routing plan notes for the explicit `session_id` filter field added in issue #359 follow-up work. |
+| 2026-05-02 | @codex | Addressed PR API feedback by replacing direct `Target` status methods with `Target::status() -> SessionStatus`, adding snapshot/apply/restore helpers, and making `StatusLeftLength` validated. |
+| 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` as the lifecycle-correct API for env vars visible to the initial pane, and documented post-creation session env writes as future-process only. |
+| 2026-05-02 | @codex | Added narrow `StatusStyle` and session-local status APIs for tmux status bar styling without exposing a generic arbitrary-option API. |
+| 2026-05-02 | @codex | Added the host-level batch session tag read API used by mmux to avoid per-session metadata round trips during refresh. |
+| 2026-05-01 | @codex | Added Phase 1.17 for issue #241 follow-up: expose session tag deletion via `SessionTags::unset(key)` backed by tmux `set-option -u`. |
+| 2026-04-30 | @codex | Implement Phase 1.16 / DC34: session metadata tags via tmux user-defined session options. Added scoped `SessionTags`, validated self-describing `SessionTag`, `Target::tags()`, session-only level gating, stable-session-id dispatch, namespace/key/value validation, parser coverage for tmux option output, and API/DESIGN docs. |
 | 2026-04-09 | @claude | Update Conventions section: library error handling migrated from `anyhow` to `thiserror`-based typed `Error` enum (PR #145). `anyhow` retained as dev-dependency only. |
 | 2026-03-22 | @claude | Implement Phase 5.1 and 5.2: split-screen TUI REPL mode (`tui on`/`tui off`) with binary-local `tui_mirror` consumer using `HistoryHandle` for bounded mirror frame. Restructured `examples/repl.rs` → `examples/repl/main.rs` + `examples/repl/tui_mirror.rs`. Added `ratatui`/`crossterm` dev-dependencies. |
 | 2026-03-22 | @codex | Expand Phase 5 into a concrete first TUI slice: split-screen REPL mirror mode (`tui on` / `tui off`) using a binary-local consumer on top of `Subscription` / `HistoryHandle`, followed later by deeper full terminal-state mirroring if needed. |
@@ -848,6 +855,86 @@ and `handle.authenticate_publickey()` already in the crate's dependency tree.
 
 ---
 
+## Phase 1.16: Session Metadata Tags — DC34
+
+Add a small session-only metadata API on `Target` backed by tmux user-defined
+session options. For `prefix = "mmux"` and `key = "owner"`, the stored option is
+`@mmux/owner`.
+
+### 1.16a — Public types and exports (`src/types.rs`, `src/lib.rs`)
+
+- [x] Add validated self-describing `SessionTag` with private prefix/key/value fields
+- [x] Add root `SESSION_TAG_VALUE_MAX_BYTES` const
+- [x] Re-export `SessionTag`, `SessionTags`, and `SESSION_TAG_VALUE_MAX_BYTES`
+
+### 1.16b — Control-layer option helpers (`src/control.rs`)
+
+- [x] Add `set_session_tag_with_prefix(...)`
+- [x] Add `read_session_tag_with_prefix(...) -> Result<Option<String>>`
+- [x] Add `list_session_tags_with_prefix(...) -> Result<Vec<SessionTag>>`
+- [x] Store as `@prefix/key`
+- [x] Use `show-option -q` for single reads so missing tags return `Ok(None)`
+- [x] Use `show-options` and prefix filtering for list calls; no shell pipelines
+- [x] Validate prefix/key as non-empty ASCII letters, digits, `.`, `_`, `-`
+- [x] Reject control characters and values over 2 KiB
+
+### 1.16c — `Target` API wiring (`src/host.rs`)
+
+- [x] Add async `Target::tags(prefix) -> Result<SessionTags<'_>>`
+- [x] Add `SessionTags::set(key, value) -> Result<()>`
+- [x] Add `SessionTags::read(key) -> Result<Option<String>>`
+- [x] Add `SessionTags::list() -> Result<Vec<SessionTag>>`
+- [x] Restrict all tag methods to session targets with `UnsupportedTarget`
+- [x] Dispatch using stable `SessionInfo.id`, not mutable session display name
+- [x] Validate prefix once and capture tmux command prefix once in `SessionTags`
+
+### 1.16d — Tests and docs
+
+- [x] Unit tests for option-name validation and tmux option-output parsing
+- [x] Unit tests for set/read/list command construction and missing-tag behavior
+- [x] Unit tests for `Target` level gating, validation-before-exec, and stable-id dispatch
+- [x] Update `docs/API.md` with examples and contract
+- [x] Update `docs/DESIGN.md` with DC34 rationale
+
+**Command boundary**: This slice follows the existing `control.rs` transport
+command boundary and avoids shell pipelines or pane-local shell execution. It
+does not add a persistent `tmux -C attach-session` command client because that
+would create an attached tmux client and perturb session client state for
+metadata polling.
+
+---
+
+## Phase 1.17: Session Metadata Tag Delete — issue #241
+
+Add explicit deletion for session metadata tags. tmux supports unsetting
+user-defined options with `set-option -u`; the library should expose that rather
+than making callers shell out or encode deletion as an empty value.
+
+### 1.17a — Control-layer unset helper (`src/control.rs`)
+
+- [x] Add `unset_session_tag_with_prefix(...) -> Result<()>`
+- [x] Build command as `set-option -u -t <stable-session-id> @<prefix>/<key>`
+  with no value argument
+- [x] Reuse validated `SessionTagPrefix::option_name(key)` for key validation
+- [x] Avoid shell pipelines and pane-local shell execution
+
+### 1.17b — `Target` API wiring (`src/host.rs`)
+
+- [x] Add `SessionTags::unset(key) -> Result<()>`
+- [x] Preserve session-only level gating with `UnsupportedTarget`
+- [x] Dispatch by stable `SessionInfo.id`, not display name
+
+### 1.17c — Tests and docs
+
+- [x] Unit tests for unset command construction
+- [x] Unit tests for validation-before-exec
+- [x] Unit tests for non-session target rejection
+- [x] Update `docs/API.md` and `docs/DESIGN.md`
+- [x] Validate with `cargo test -p motlie-tmux` and
+  `cargo clippy -p motlie-tmux -- -D warnings`
+
+---
+
 ## Phase 2a: SSH Transport + Minimal Monitoring
 
 Add `SshTransport` and a thin monitoring vertical slice with control mode parsing.
@@ -963,7 +1050,7 @@ via JoinedStream — with no matcher or action dispatch dependency.
 - [x] `SinkEvent` enum: `Data(TargetOutput)` and `Gap { dropped, timestamp }`
 - [x] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
 - [x] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
-- [x] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings)
+- [x] `SinkFilter`: `host`, `session`, `session_id`, `window`, `pane` (all optional regex strings)
   — routing only, no `content` / `MatcherKind` / `MatcherInput` fields yet
 - [x] `CompiledSinkFilter`: compiled regexes,
   `matches(&self, output: &TargetOutput) -> bool`
@@ -1070,12 +1157,13 @@ consumption and routed control pleasant for external LLM/classifier workflows.
 - [x] `Fleet::output_bus()` accessor (owns `OutputBus`, shares via `Arc`)
 - [x] Aggregate monitoring lifecycle: `start_monitoring_session()`, `start_monitoring_host()`,
   `stop_monitoring_host()`, `shutdown()`
-- [x] Workstream registry: `bind()`, `unbind()`, `find()`, `workstreams()`
+- [x] Target-alias registry: `bind_target_alias()`, `unbind_target_alias()`,
+  `resolve_target_alias()`, `require_target_alias()`, `target_aliases()`
 - [x] Convenience routed actions: `send_text`, `send_keys`, `capture`, `target`
 - [x] `HostStatus` enum: `Connected`, `Monitoring { sessions }`, `Error(String)`
 - [x] Delegation contract documented in module-level rustdoc
 - [x] Unit tests: alias conflict detection (`fleet_alias_conflict_detection`),
-  workstream bind/find/unbind (`fleet_workstream_bind_find_unbind`),
+  target alias bind/unbind (`fleet_target_alias_bind_find_unbind`),
   shared bus (`fleet_output_bus_is_shared`), shutdown (`fleet_shutdown_clears_state`)
 
 **Depends on**: 2c.4a ✓

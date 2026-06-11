@@ -9,6 +9,9 @@ use std::path::PathBuf;
 pub struct PaneAddress {
     /// Stable tmux pane id, e.g. "%12"
     pub pane_id: String,
+    /// Stable tmux session id, e.g. "$3", when known.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
     /// Session name (display)
     pub session: String,
     /// Window index (display)
@@ -49,6 +52,7 @@ impl PaneAddress {
 
         Ok(PaneAddress {
             pane_id: pane_id.to_string(),
+            session_id: None,
             session,
             window,
             pane,
@@ -62,14 +66,410 @@ impl fmt::Display for PaneAddress {
     }
 }
 
+/// Stable tmux session identifier using tmux's `#{session_id}` (`$<id>`).
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// Create a non-empty session id.
+    pub fn new(id: impl Into<String>) -> Result<Self> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(Error::Parse("empty session id".to_string()));
+        }
+        Ok(Self(id))
+    }
+
+    /// Return the tmux id string for dispatch and stable keying.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(id: &str) -> Self {
+        Self::new(id).expect("test session id must be non-empty")
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for SessionId {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for SessionId {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionInfo {
     pub name: String,
-    pub id: String,
+    pub id: SessionId,
     pub created: u64,
-    pub attached: bool,
+    pub attached_count: u32,
     pub window_count: u32,
     pub group: Option<String>,
+    pub activity: u64,
+}
+
+impl SessionInfo {
+    /// Return true when one or more tmux clients are attached to this session.
+    pub fn is_attached(&self) -> bool {
+        self.attached_count > 0
+    }
+}
+
+/// Maximum supported value size for a session metadata tag.
+///
+/// tmux user-defined options can hold larger strings, but keeping the public
+/// helper capped makes tags safe to poll and avoids accidentally putting large
+/// blobs into option-format paths.
+pub const SESSION_TAG_VALUE_MAX_BYTES: usize = 2 * 1024;
+
+/// Maximum supported value size for a session environment variable.
+///
+/// tmux environment values are regular command arguments in this API. Keeping
+/// them bounded avoids accidentally piping large blobs through command
+/// construction paths.
+pub const SESSION_ENV_VAR_VALUE_MAX_BYTES: usize = 8 * 1024;
+
+/// Maximum supported tmux style string size.
+///
+/// Styles are passed as one tmux option value. Keeping them bounded avoids
+/// accidentally piping large content through command construction paths.
+pub const TMUX_STYLE_MAX_BYTES: usize = 512;
+pub const STATUS_STYLE_MAX_BYTES: usize = TMUX_STYLE_MAX_BYTES;
+pub const STATUS_LEFT_MAX_BYTES: usize = 512;
+pub const STATUS_LEFT_LENGTH_MAX: u32 = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TmuxStyle(String);
+
+impl TmuxStyle {
+    /// Create a validated tmux style value, for example
+    /// `bg=blue,fg=white`.
+    ///
+    /// Empty styles are rejected; use the relevant unset operation to remove a
+    /// local style override.
+    ///
+    /// This intentionally validates only transport-safety properties and lets
+    /// tmux validate style syntax.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_tmux_style(&value)?;
+        Ok(Self(value))
+    }
+
+    pub(crate) fn from_tmux_value(value: String) -> Result<Self> {
+        validate_tmux_style(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub type StatusStyle = TmuxStyle;
+pub type WindowStyle = TmuxStyle;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatusLeft(String);
+
+impl StatusLeft {
+    /// Create a validated tmux status-left format string.
+    ///
+    /// Empty values are accepted because tmux uses an empty `status-left` as a
+    /// valid "render no left status text" format. Use the session status API's
+    /// unset operation when the inherited/global format should apply instead.
+    ///
+    /// This intentionally validates only transport-safety properties and lets
+    /// tmux validate format syntax.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_status_left(&value)?;
+        Ok(Self(value))
+    }
+
+    pub(crate) fn from_tmux_value(value: String) -> Result<Self> {
+        validate_status_left(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatusLeftLength(u32);
+
+impl StatusLeftLength {
+    /// Create a validated tmux `status-left-length` value.
+    ///
+    /// tmux accepts a numeric cell budget. This API allows `0` so callers can
+    /// intentionally hide the left status area, and caps values at
+    /// [`STATUS_LEFT_LENGTH_MAX`] to avoid pathological option values.
+    pub fn new(value: u32) -> Result<Self> {
+        validate_status_left_length(value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SessionTagPrefix(String);
+
+impl SessionTagPrefix {
+    pub(crate) fn new(prefix: impl Into<String>) -> Result<Self> {
+        let prefix = prefix.into();
+        validate_session_tag_component("tag prefix", &prefix)?;
+        Ok(Self(prefix))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn option_prefix(&self) -> String {
+        format!("@{}/", self.0)
+    }
+
+    pub(crate) fn option_name(&self, key: &str) -> Result<String> {
+        validate_session_tag_component("tag key", key)?;
+        Ok(format!("@{}/{key}", self.0))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionTag {
+    prefix: String,
+    key: String,
+    value: String,
+}
+
+impl SessionTag {
+    /// Create a validated session metadata tag.
+    ///
+    /// For `prefix = "mmux"` and `key = "role"`, the tmux option name is
+    /// `@mmux/role`.
+    pub fn new(
+        prefix: impl Into<String>,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self> {
+        let prefix = prefix.into();
+        let key = key.into();
+        let value = value.into();
+        validate_session_tag_component("tag prefix", &prefix)?;
+        validate_session_tag_component("tag key", &key)?;
+        validate_session_tag_value(&value)?;
+        Ok(Self { prefix, key, value })
+    }
+
+    pub(crate) fn from_parts(prefix: &SessionTagPrefix, key: &str, value: String) -> Result<Self> {
+        validate_session_tag_component("tag key", key)?;
+        validate_session_tag_value(&value)?;
+        Ok(Self {
+            prefix: prefix.as_str().to_string(),
+            key: key.to_string(),
+            value,
+        })
+    }
+
+    /// Namespace prefix, for example `mmux` in `@mmux/role`.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Tag key without the namespace prefix, for example `role` in `@mmux/role`.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Raw user-defined option value.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Full tmux user-defined option name, for example `@mmux/role`.
+    pub fn option_name(&self) -> String {
+        format!("@{}/{}", self.prefix, self.key)
+    }
+
+    pub(crate) fn into_value(self) -> String {
+        self.value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionEnvVar {
+    name: String,
+    value: String,
+}
+
+impl SessionEnvVar {
+    /// Create a validated session environment variable.
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        let value = value.into();
+        validate_session_env_var_name(&name)?;
+        validate_session_env_var_value(&value)?;
+        Ok(Self { name, value })
+    }
+
+    pub(crate) fn from_parts(name: &str, value: String) -> Result<Self> {
+        validate_session_env_var_name(name)?;
+        validate_session_env_var_value(&value)?;
+        Ok(Self {
+            name: name.to_string(),
+            value,
+        })
+    }
+
+    /// Environment variable name, for example `PATH`.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Raw environment variable value.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub(crate) fn into_value(self) -> String {
+        self.value
+    }
+}
+
+pub(crate) fn validate_session_tag_component(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::Parse(format!("{kind} cannot be empty")));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(Error::Parse(format!(
+            "{kind} must contain only ASCII letters, digits, '.', '_' or '-': {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_session_tag_value(value: &str) -> Result<()> {
+    if value.len() > SESSION_TAG_VALUE_MAX_BYTES {
+        return Err(Error::Parse(format!(
+            "tag value is {} bytes, exceeding {} byte limit",
+            value.len(),
+            SESSION_TAG_VALUE_MAX_BYTES
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Parse(
+            "tag value cannot contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_session_env_var_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::Parse(
+            "environment variable name cannot be empty".to_string(),
+        ));
+    }
+    let mut bytes = name.bytes();
+    let first = bytes.next().expect("name is not empty");
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return Err(Error::Parse(format!(
+            "environment variable name must start with an ASCII letter or '_': {name:?}"
+        )));
+    }
+    if !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        return Err(Error::Parse(format!(
+            "environment variable name must contain only ASCII letters, digits or '_': {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_session_env_var_value(value: &str) -> Result<()> {
+    if value.len() > SESSION_ENV_VAR_VALUE_MAX_BYTES {
+        return Err(Error::Parse(format!(
+            "environment variable value is {} bytes, exceeding {} byte limit",
+            value.len(),
+            SESSION_ENV_VAR_VALUE_MAX_BYTES
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Parse(
+            "environment variable value cannot contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_tmux_style(value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::Parse("tmux style cannot be empty".to_string()));
+    }
+    if value.len() > TMUX_STYLE_MAX_BYTES {
+        return Err(Error::Parse(format!(
+            "tmux style is {} bytes, exceeding {} byte limit",
+            value.len(),
+            TMUX_STYLE_MAX_BYTES
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Parse(
+            "tmux style cannot contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_status_left(value: &str) -> Result<()> {
+    if value.len() > STATUS_LEFT_MAX_BYTES {
+        return Err(Error::Parse(format!(
+            "status-left is {} bytes, exceeding {} byte limit",
+            value.len(),
+            STATUS_LEFT_MAX_BYTES
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Parse(
+            "status-left cannot contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_status_left_length(value: u32) -> Result<()> {
+    if value > STATUS_LEFT_LENGTH_MAX {
+        return Err(Error::Parse(format!(
+            "status-left-length {value} exceeds maximum {STATUS_LEFT_LENGTH_MAX}"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -109,13 +509,49 @@ pub enum TargetLevel {
     Pane,
 }
 
+impl fmt::Display for TargetLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TargetLevel::Session => f.write_str("session"),
+            TargetLevel::Window => f.write_str("window"),
+            TargetLevel::Pane => f.write_str("pane"),
+        }
+    }
+}
+
 /// Builder for tmux target strings (DC17).
 ///
 /// Fields are private to enforce the hierarchy invariant: pane requires window.
 /// Use `session()`, `.window()/.window_name()`, `.pane()` builders or `parse()`.
-#[derive(Debug, Clone)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+enum SessionSelector {
+    Name(String),
+    Id(SessionId),
+}
+
+impl SessionSelector {
+    fn as_target_str(&self) -> &str {
+        match self {
+            SessionSelector::Name(name) => name,
+            SessionSelector::Id(id) => id.as_str(),
+        }
+    }
+
+    fn id(&self) -> Option<&SessionId> {
+        match self {
+            SessionSelector::Name(_) => None,
+            SessionSelector::Id(id) => Some(id),
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct TargetSpec {
-    session_name: String,
+    session: SessionSelector,
     window_sel: Option<String>,
     pane_idx: Option<u32>,
 }
@@ -123,10 +559,18 @@ pub struct TargetSpec {
 impl TargetSpec {
     pub fn session(name: &str) -> Self {
         TargetSpec {
-            session_name: name.to_string(),
+            session: SessionSelector::Name(name.to_string()),
             window_sel: None,
             pane_idx: None,
         }
+    }
+
+    pub fn session_id(id: impl Into<String>) -> Result<Self> {
+        Ok(TargetSpec {
+            session: SessionSelector::Id(SessionId::new(id)?),
+            window_sel: None,
+            pane_idx: None,
+        })
     }
 
     pub fn window(mut self, index: u32) -> Self {
@@ -156,7 +600,11 @@ impl TargetSpec {
     // --- Accessors ---
 
     pub fn session_name(&self) -> &str {
-        &self.session_name
+        self.session.as_target_str()
+    }
+
+    pub fn session_id_selector(&self) -> Option<&SessionId> {
+        self.session.id()
     }
 
     pub fn window_selector(&self) -> Option<&str> {
@@ -167,7 +615,10 @@ impl TargetSpec {
         self.pane_idx
     }
 
-    /// Parse a tmux target string: "session", "session:window", "session:window.pane"
+    /// Parse a tmux target string: "session", "session:window", "session:window.pane".
+    ///
+    /// A `$<digits>` session component is treated as a stable tmux session id.
+    /// Use [`TargetSpec::session`] when a literal session name looks like `$7`.
     pub fn parse(target_str: &str) -> Result<Self> {
         if target_str.is_empty() {
             return Err(Error::Parse("empty target string".to_string()));
@@ -194,8 +645,14 @@ impl TargetSpec {
             None => None,
         };
 
+        let session = if looks_like_session_id(session_part) {
+            SessionSelector::Id(SessionId::new(session_part.to_string())?)
+        } else {
+            SessionSelector::Name(session_part.to_string())
+        };
+
         Ok(TargetSpec {
-            session_name: session_part.to_string(),
+            session,
             window_sel: window_part.map(|w| w.to_string()),
             pane_idx: pane,
         })
@@ -203,11 +660,18 @@ impl TargetSpec {
 
     pub fn to_target_string(&self) -> String {
         match (&self.window_sel, self.pane_idx) {
-            (None, _) => self.session_name.clone(),
-            (Some(w), None) => format!("{}:{}", self.session_name, w),
-            (Some(w), Some(p)) => format!("{}:{}.{}", self.session_name, w, p),
+            (None, _) => self.session.as_target_str().to_string(),
+            (Some(w), None) => format!("{}:{}", self.session.as_target_str(), w),
+            (Some(w), Some(p)) => format!("{}:{}.{}", self.session.as_target_str(), w, p),
         }
     }
+}
+
+fn looks_like_session_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('$') else {
+        return false;
+    };
+    !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 impl fmt::Display for TargetSpec {
@@ -233,7 +697,9 @@ impl TmuxSocket {
     /// This isolates automation workloads from the user's default tmux server.
     pub fn automation(scope: &str) -> Result<Self> {
         if scope.is_empty() {
-            return Err(Error::Parse("automation scope must not be empty".to_string()));
+            return Err(Error::Parse(
+                "automation scope must not be empty".to_string(),
+            ));
         }
         if scope.len() > 64 {
             return Err(Error::Parse(format!(
@@ -256,9 +722,10 @@ impl TmuxSocket {
 }
 
 /// SSH host key verification policy (DC2).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum HostKeyPolicy {
     /// Verify against ~/.ssh/known_hosts (default)
+    #[default]
     Verify,
     /// Accept and persist on first connect, reject on mismatch.
     ///
@@ -270,12 +737,6 @@ pub enum HostKeyPolicy {
     TrustFirstUse,
     /// Accept all, log warning
     Insecure,
-}
-
-impl Default for HostKeyPolicy {
-    fn default() -> Self {
-        HostKeyPolicy::Verify
-    }
 }
 
 /// Structured output from `Target::exec()` (DC19).
@@ -344,9 +805,10 @@ impl ExecState {
 /// Capture normalization mode (DC20).
 ///
 /// Controls how captured pane content is processed before delivery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CaptureNormalizeMode {
     /// No transformation. Uses `capture-pane -p` (tmux-rendered text, no ANSI).
+    #[default]
     Raw,
     /// Canonical line endings, trim width-artifact trailing spaces.
     /// Uses `capture-pane -ep` to preserve ANSI/control sequences.
@@ -354,12 +816,6 @@ pub enum CaptureNormalizeMode {
     /// Explicit ANSI/control stripping for human/LLM text workflows.
     /// Uses `capture-pane -p`, then normalizes line endings.
     PlainText,
-}
-
-impl Default for CaptureNormalizeMode {
-    fn default() -> Self {
-        CaptureNormalizeMode::Raw
-    }
 }
 
 /// Options for capture operations with fidelity metadata.
@@ -409,7 +865,13 @@ impl CaptureOptions {
 ///
 /// All fields are optional. `Default` produces the same behavior as the
 /// pre-DC22 `create_session(name, None, None)` — no size override, no
-/// history limit, tmux server defaults apply.
+/// history limit, no initial environment overrides, tmux server defaults apply.
+///
+/// `initial_environment` is the lifecycle hook for variables that must be
+/// visible to the first shell or command in the session. Post-creation
+/// [`SessionEnvironment`](crate::SessionEnvironment) writes update tmux's
+/// session environment for processes tmux starts later; they cannot mutate
+/// already-running pane processes.
 ///
 /// If `history_limit` is set, two `set-option` commands are issued after
 /// `new-session`: per-session (covers future panes) and per-pane (tmux 3.1+,
@@ -426,6 +888,13 @@ pub struct CreateSessionOptions {
     pub height: Option<u16>,
     /// Scrollback history limit for the session.
     pub history_limit: Option<u32>,
+    /// Environment variables passed to `tmux new-session -e`.
+    ///
+    /// These are applied before tmux starts the initial pane process, so they
+    /// are visible to the session's first shell or command. Values are emitted
+    /// in vector order; if the same variable name appears more than once, tmux
+    /// applies the last value.
+    pub initial_environment: Vec<SessionEnvVar>,
 }
 
 /// Options for creating a new tmux window as a child of a session (DC25).
@@ -444,18 +913,13 @@ pub struct CreateWindowOptions {
 }
 
 /// Direction for `split-window` (DC25).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplitDirection {
     /// Create panes side-by-side (`split-window -h`).
     Horizontal,
     /// Create panes stacked top/bottom (`split-window -v`).
+    #[default]
     Vertical,
-}
-
-impl Default for SplitDirection {
-    fn default() -> Self {
-        SplitDirection::Vertical
-    }
 }
 
 /// Size override for `split-window` (DC25).
@@ -596,6 +1060,20 @@ pub struct ClientInfo {
     pub width: u32,
     pub height: u32,
     pub session: String,
+    pub session_id: Option<String>,
+    pub activity: u64,
+    pub readonly: bool,
+    pub tty: Option<String>,
+}
+
+/// Attached-client activity summary for one tmux session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionClientActivity {
+    pub session: String,
+    pub attached_clients: usize,
+    pub writable_clients: usize,
+    pub latest_client_activity: Option<u64>,
+    pub latest_writable_client_activity: Option<u64>,
 }
 
 /// Pane geometry and scrollback state for reflow detection (DC20, Phase 1.9b).
@@ -665,6 +1143,11 @@ pub enum ScrollbackQuery {
     Until { pattern: Regex, max_lines: usize },
     /// Capture last N lines, stop early if pattern matches.
     LastLinesUntil { lines: usize, stop_pattern: Regex },
+    /// Capture a bounded window of scrollback older than the most recent N lines.
+    LinesRange {
+        older_than_lines: usize,
+        count: usize,
+    },
 }
 
 #[cfg(test)]
@@ -675,6 +1158,7 @@ mod tests {
     fn pane_address_roundtrip() {
         let addr = PaneAddress {
             pane_id: "%5".to_string(),
+            session_id: None,
             session: "build".to_string(),
             window: 0,
             pane: 1,
@@ -692,6 +1176,29 @@ mod tests {
         assert!(PaneAddress::parse("%1", "noseparator").is_err());
         assert!(PaneAddress::parse("%1", "session:nodot").is_err());
         assert!(PaneAddress::parse("%1", "session:abc.1").is_err());
+    }
+
+    #[test]
+    fn status_style_validates_transport_safe_values() {
+        let style = StatusStyle::new("bg=blue,fg=white").unwrap();
+        assert_eq!(style.as_str(), "bg=blue,fg=white");
+
+        assert!(StatusStyle::new("").is_err());
+        assert!(StatusStyle::new("bg=blue\nfg=white").is_err());
+        assert!(StatusStyle::new("x".repeat(STATUS_STYLE_MAX_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn status_left_validates_transport_safe_values() {
+        let left = StatusLeft::new("#{=40:session_name}").unwrap();
+        assert_eq!(left.as_str(), "#{=40:session_name}");
+        assert_eq!(StatusLeftLength::new(40).unwrap().as_u32(), 40);
+
+        assert!(StatusLeft::new("").is_ok());
+        assert!(StatusLeft::new("name\nbad").is_err());
+        assert!(StatusLeft::new("x".repeat(STATUS_LEFT_MAX_BYTES + 1)).is_err());
+        assert!(StatusLeftLength::new(STATUS_LEFT_LENGTH_MAX).is_ok());
+        assert!(StatusLeftLength::new(STATUS_LEFT_LENGTH_MAX + 1).is_err());
     }
 
     #[test]
@@ -723,6 +1230,16 @@ mod tests {
     fn target_spec_parse_session() {
         let spec = TargetSpec::parse("mysession").unwrap();
         assert_eq!(spec.session_name(), "mysession");
+        assert!(spec.window_selector().is_none());
+        assert!(spec.pane_index().is_none());
+    }
+
+    #[test]
+    fn target_spec_parse_session_id() {
+        let spec = TargetSpec::parse("$7").unwrap();
+        assert_eq!(spec.session_name(), "$7");
+        assert_eq!(spec.session_id_selector().unwrap().as_str(), "$7");
+        assert_eq!(spec.to_target_string(), "$7");
         assert!(spec.window_selector().is_none());
         assert!(spec.pane_index().is_none());
     }
@@ -883,6 +1400,10 @@ mod tests {
                     width: w,
                     height: h,
                     session: session.to_string(),
+                    session_id: None,
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 })
                 .collect(),
             pane: PaneGeometry {
@@ -963,11 +1484,19 @@ mod tests {
                     width: 200,
                     height: 50,
                     session: "build".to_string(),
+                    session_id: Some("$1".to_string()),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 },
                 ClientInfo {
                     width: 180,
                     height: 40,
                     session: "other".to_string(),
+                    session_id: Some("$2".to_string()),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 },
             ],
             pane: PaneGeometry {
@@ -984,12 +1513,20 @@ mod tests {
                     width: 200,
                     height: 50,
                     session: "build".to_string(),
+                    session_id: Some("$1".to_string()),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 },
                 // "other" session client resized — should not matter
                 ClientInfo {
                     width: 100,
                     height: 20,
                     session: "other".to_string(),
+                    session_id: Some("$2".to_string()),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 },
             ],
             pane: PaneGeometry {
@@ -1010,6 +1547,10 @@ mod tests {
                 width: 200,
                 height: 50,
                 session: "build".to_string(),
+                session_id: Some("$1".to_string()),
+                activity: 0,
+                readonly: false,
+                tty: None,
             }],
             pane: PaneGeometry {
                 pane_width: 80,
@@ -1024,6 +1565,10 @@ mod tests {
                 width: 180,
                 height: 40,
                 session: "build".to_string(),
+                session_id: Some("$1".to_string()),
+                activity: 0,
+                readonly: false,
+                tty: None,
             }],
             pane: PaneGeometry {
                 pane_width: 80,
