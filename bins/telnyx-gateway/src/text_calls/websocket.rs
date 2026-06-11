@@ -343,7 +343,6 @@ impl SharedTextCallRegistry {
             utterance_id,
             sequence: handle.next_sequence(),
             text,
-            stability: None,
             speech_state,
             reply_allowed: false,
         })?;

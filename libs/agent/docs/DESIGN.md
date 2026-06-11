@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-11 PDT | @codex-366-impl | Clarified `caller.partial` #464 scope: advisory text is implemented, while `confidence`/`stability` fields wait for model contract issue #480 and follow-up gateway protocol work. |
 | 2026-06-11 PDT | @codex-366-impl | Added `motlie.telnyx.text.partials.v1`: an opt-in advisory `caller.partial` frame for model-agnostic ASR hypotheses before final `caller.turn`. |
 | 2026-06-10 23:17 PDT | @codex-m6-ds-rv | PR #464 round-1 fixes: gated Channel/tmux behind the default `channel` feature so gateway uses the serde-only protocol surface, and made text-call registry attach/removal owner-token safe. |
 | 2026-06-10 20:42 PDT | @codex-m6-ds-rv | Added issue #460 Telnyx text stream protocol contract: shared `motlie.telnyx.text.v1` frame ownership, debug socket extension, and command/stream state machine. |

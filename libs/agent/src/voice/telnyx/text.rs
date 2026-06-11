@@ -142,8 +142,6 @@ pub enum GatewayTextFrame {
         utterance_id: String,
         sequence: u64,
         text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stability: Option<u8>,
         speech_state: CallerSpeechState,
         reply_allowed: bool,
     },
@@ -287,7 +285,6 @@ mod tests {
             utterance_id: "utt-test".to_string(),
             sequence: 2,
             text: "hello wor".to_string(),
-            stability: Some(72),
             speech_state: CallerSpeechState::Speaking,
             reply_allowed: false,
         };
@@ -296,7 +293,8 @@ mod tests {
         assert_eq!(encoded["utterance_id"], "utt-test");
         assert_eq!(encoded["sequence"], 2);
         assert_eq!(encoded["text"], "hello wor");
-        assert_eq!(encoded["stability"], 72);
+        assert!(encoded.get("confidence").is_none());
+        assert!(encoded.get("stability").is_none());
         assert_eq!(encoded["speech_state"], "speaking");
         assert_eq!(encoded["reply_allowed"], false);
     }

@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-11 | @codex-366-impl | Clarified #464 stopping point: advisory partial text is implemented, while confidence/stability scoring depends on model contract issue #480 and follow-up gateway protocol work. |
 | 2026-06-11 | @codex-366-impl | Added opt-in, model-agnostic advisory ASR partials for app/agent streams while preserving final `caller.turn` as the committed turn boundary. |
 
 ## Problem
@@ -23,7 +24,7 @@ motlie.telnyx.text.partials.v1
 When the extension is negotiated, the gateway may send advisory ASR partial hypotheses before the final caller turn:
 
 ```json
-{"type":"caller.partial","utterance_id":"utt_123","sequence":12,"text":"can you check whether","stability":72,"speech_state":"speaking","reply_allowed":false}
+{"type":"caller.partial","utterance_id":"utt_123","sequence":12,"text":"can you check whether","speech_state":"speaking","reply_allowed":false}
 ```
 
 The committed turn remains the existing final frame:
@@ -37,9 +38,10 @@ The extension is model-agnostic:
 - `utterance_id` is a gateway-generated join key for current speech.
 - `sequence` preserves stream ordering.
 - `text` is the current best hypothesis.
-- `stability` is an optional normalized 0..100 score; omitted when the backend does not provide a stable signal.
 - `speech_state` is normalized, currently `speaking`, `endpoint_candidate`, or `finalizing`.
 - `reply_allowed` is a policy flag. The first implementation emits `false`; agents should treat partials as planning context, not permission to speak over the caller.
+
+Confidence and stability scoring are intentionally not part of the #464 stopping point. Industry streaming ASR contracts usually expose partial hypotheses with confidence and stability, but `motlie_model::TranscriptSegment` cannot carry those signals yet. Issue #480 tracks the model-layer contract work needed before the gateway can expose backend-derived `confidence` or normalized interim `stability` without inventing misleading scores.
 
 ## Negotiation
 
@@ -79,6 +81,6 @@ Advisory partials let capable agents:
 ## Non-Goals
 
 - Do not emit ASR partials by default.
-- Do not expose backend-specific ASR confidence schemas.
+- Do not expose backend-specific ASR confidence schemas or gateway-invented confidence before #480 defines the model contract.
 - Do not let partials replace final `caller.turn`.
 - Do not allow early spoken replies from partials until a later policy sets `reply_allowed=true` and defines interruption semantics.

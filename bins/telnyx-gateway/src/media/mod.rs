@@ -4084,7 +4084,6 @@ mod tests {
             sample_rate_hz: 16_000,
             channels: 1,
         };
-
         let outcome = record_transcript_events(
             &state,
             &gateway_call_id,
