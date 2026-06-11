@@ -1528,6 +1528,11 @@ async fn start_speech(
     gateway_call_id: String,
     text: String,
 ) -> DriverResult<CommandOutput> {
+    if context.text_calls.contains(&gateway_call_id).await {
+        return Err(DriverError::message(format!(
+            "manual speak is disabled while a text-call stream is attached for {gateway_call_id}; send agent.turn over the stream or detach it first"
+        )));
+    }
     let queued = speech::queue_speech(
         &context.state,
         &context.media,
@@ -1839,6 +1844,13 @@ async fn call_show(
         format!("tts: {}", call_tts_status(call)),
         format!("conversation: {}", call_conversation_status(call)),
     ];
+    if call.echo_suppressed_transcripts > 0 {
+        let mut echo_line = format!("echo-suppressed: {}", call.echo_suppressed_transcripts);
+        if let Some(preview) = &call.last_echo_suppressed_preview {
+            echo_line.push_str(&format!(" last={}", preview));
+        }
+        lines.push(echo_line);
+    }
     if let Some(reason) = &call.terminal_reason {
         lines.push(format!("ended: {reason}"));
     }
@@ -2152,15 +2164,32 @@ fn call_tts_status(call: &crate::operator::state::CallSession) -> String {
     let Some(tts) = &call.tts else {
         return "idle".to_string();
     };
+    let buffer_frames = tts.frames_queued.saturating_sub(tts.frames_sent);
     let mut status = format!(
-        "{} backend={} playback={} frames={}/{} text={}",
+        "{} backend={} playback={} frames={}/{} buffer={} text={}",
         tts.status.label(),
         tts.backend.label(),
         tts.playback_id,
         tts.frames_sent,
         tts.frames_queued,
+        buffer_frames,
         tts.text_preview
     );
+    if let Some(first_audio_ms) = tts.first_audio_latency_ms {
+        status.push_str(&format!(" first_audio_ms={first_audio_ms}"));
+    }
+    if tts.pre_audio_wait_ticks > 0 {
+        status.push_str(&format!(
+            " pre_audio_wait_ms~{}",
+            tts.pre_audio_wait_ticks.saturating_mul(20)
+        ));
+    }
+    if tts.underrun_ticks > 0 {
+        status.push_str(&format!(
+            " underrun_ms~{}",
+            tts.underrun_ticks.saturating_mul(20)
+        ));
+    }
     if let Some(mark) = &tts.mark_name {
         status.push_str(&format!(" mark={mark}"));
     }
@@ -3008,12 +3037,12 @@ fn gateway_root_help() -> String {
         "Calls:",
         "  calls                          List calls in operator roster order",
         "  call use <call-id>             Select a call for this TUI/socket source",
-        "  call show [call-id]            Show selected call detail and assembled transcript",
+        "  call show [call-id]            Show selected call detail, diagnostics, and transcript",
         "  status [call-id]               Show gateway status or selected call status",
         "  answer [call-id]               Answer one waiting inbound call; auto-attach conversation",
         "  dial <+e164> [--from +e164]    Place an outbound call; auto-attach conversation",
-        "  speak [call-id] <text...>      Queue cancellable TTS over the media socket",
-        "  speak cancel [call-id]         Clear active TTS on the selected call",
+        "  speak [call-id] <text...>      Queue debug TTS; disabled while a text-call stream is attached",
+        "  speak cancel [call-id]         Clear active TTS; allowed as an emergency control",
         "  conversation status [call-id]  Show attachment, mode, handler, and latest turns",
         "  conversation smoke-test on|off Enable or disable test-only echo replies",
         "  conversation barge-in on|off|status Enable or disable transcript-triggered TTS clear",
@@ -3554,6 +3583,7 @@ fn socket_help() -> String {
         "  stream attach <call-id>",
         "  {\"type\":\"debug.attach\",\"protocol\":\"motlie.telnyx.text.v1\",\"extension\":\"motlie.telnyx.text.debug.v1\",\"call_id\":\"<call-id>\"}",
         "  Stream mode sends motlie.telnyx.text.v1 JSONL frames and accepts agent frames.",
+        "  While stream mode owns a call, command-mode speak <text> is rejected to avoid competing audio.",
         "  Send {\"type\":\"debug.detach\",\"reason\":\"done\"} to return to command mode.",
         "",
         "Discovery:",
@@ -3574,6 +3604,7 @@ fn socket_help() -> String {
         "  smoke test: conversation smoke-test on -> conversation barge-in off -> answer or dial",
         "  stop assistant audio: conversation disapprove [call-id]",
         "  inspect: status, calls, call show [call-id], transcript follow [call-id]",
+        "  call show includes TTS buffer/latency/underrun and echo-suppression counters",
         "",
         "Operational parity:",
         "  TUI and socket both use the same typed command language.",
@@ -3584,8 +3615,8 @@ fn socket_help() -> String {
         "    Detail pane scroll    transcript follow / call show polling",
         "  Outbound and M3 conversation commands are also shared:",
         "    dial <+e164> [--from +e164]",
-        "    speak [call-id] <text...>",
-        "    speak cancel [call-id]",
+        "    speak [call-id] <text...>     blocked while stream attach/app-agent owns the call",
+        "    speak cancel [call-id]        emergency clear remains available",
         "    conversation status [call-id]",
         "    conversation attach|detach [call-id]",
         "    conversation smoke-test on|off",
@@ -4311,6 +4342,37 @@ mod tests {
         assert_eq!(tts.status, TtsPlaybackStatus::Playing);
         assert_eq!(tts.frames_queued, 5);
         assert_eq!(tts.frames_sent, 0);
+    }
+
+    #[tokio::test]
+    async fn speak_rejects_manual_audio_when_text_call_stream_is_attached() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        let media = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(16);
+        media.register_call(call_id.clone(), tx).await;
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = context_with_static_tts(state, telnyx, media);
+        let _text_call_rx = context
+            .text_calls
+            .insert_test_session(call_id.clone())
+            .await;
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let error = engine
+            .run_line("speak this should not interrupt the agent stream")
+            .await
+            .expect_err("manual speak should be rejected during text-call stream");
+
+        assert!(error.to_string().contains("manual speak is disabled"));
+        assert!(error.to_string().contains("text-call stream"));
     }
 
     #[tokio::test]

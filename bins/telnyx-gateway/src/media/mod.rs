@@ -2,6 +2,7 @@ use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use chrono::Utc;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,8 +27,8 @@ use crate::adapter::{
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::{self, ConversationRuntime};
 use crate::operator::state::{
-    CallStatus, LogLevel, MediaMetadata, QualitySpanEmission, SharedState, StreamAttachOutcome,
-    TranscriptKind,
+    speech_echo_signature, CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission,
+    SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
 };
 use crate::quality::{
     ActiveAsrQualitySession, RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
@@ -699,6 +700,10 @@ async fn send_outbound_or_silence(
             media_state.outbound_pre_audio_wait_ticks =
                 media_state.outbound_pre_audio_wait_ticks.saturating_add(1);
             media_state.outbound_pacing.observe_pre_audio_wait();
+            state
+                .write()
+                .await
+                .mark_tts_pre_audio_wait(&call_id, playback_id.as_str());
             if media_state.outbound_pre_audio_wait_ticks <= 5
                 || media_state.outbound_pre_audio_wait_ticks.is_multiple_of(50)
             {
@@ -716,6 +721,10 @@ async fn send_outbound_or_silence(
         }
 
         media_state.outbound_underrun_ticks = media_state.outbound_underrun_ticks.saturating_add(1);
+        state
+            .write()
+            .await
+            .mark_tts_underrun(&call_id, playback_id.as_str());
         let append_starved = media_state
             .append_open_empty_playbacks
             .contains(playback_id.as_str());
@@ -898,6 +907,11 @@ async fn maybe_emit_first_frame_span(
         .playback_quality_contexts
         .insert(frame.playback_id.clone(), quality.clone());
     let queue_depth = outbound_queue_depth(media_state);
+    state.write().await.mark_tts_first_audio_latency(
+        call_id,
+        &frame.playback_id,
+        quality.request_started_at.elapsed().as_millis() as u64,
+    );
     let payload = map_from_value(json!({
         "playback_id": frame.playback_id.as_str(),
         "turn_id": quality.turn_id.as_deref(),
@@ -1479,24 +1493,34 @@ async fn ingest_frame(
         AsrFrameDecision::Suppress => return Ok(()),
         AsrFrameDecision::Continue { speech_onset } => {
             if speech_onset {
-                if let Some(text_calls) = text_calls {
-                    cancel_text_call_speech_for_barge_in(
-                        state,
-                        &media_state.media_registry,
-                        text_calls,
-                        &gateway_call_id,
-                    )
-                    .await?;
-                }
-                if let Some(runtime) = media_state.conversation.as_ref() {
-                    conversation::handle_speech_onset(
-                        state,
-                        &media_state.media_registry,
-                        runtime,
-                        &gateway_call_id,
-                        Some(&media_state.quality_config),
-                    )
-                    .await?;
+                if should_defer_speech_onset_barge_in(&media_state.media_registry, &gateway_call_id)
+                    .await
+                {
+                    tracing::debug!(
+                        gateway_call_id,
+                        stream_id,
+                        "barge_in.speech_onset.deferred_for_echo_guard"
+                    );
+                } else {
+                    if let Some(text_calls) = text_calls {
+                        cancel_text_call_speech_for_barge_in(
+                            state,
+                            &media_state.media_registry,
+                            text_calls,
+                            &gateway_call_id,
+                        )
+                        .await?;
+                    }
+                    if let Some(runtime) = media_state.conversation.as_ref() {
+                        conversation::handle_speech_onset(
+                            state,
+                            &media_state.media_registry,
+                            runtime,
+                            &gateway_call_id,
+                            Some(&media_state.quality_config),
+                        )
+                        .await?;
+                    }
                 }
             }
         }
@@ -1660,6 +1684,16 @@ fn record_transcript_capture(capture: &mut MediaCapture, kind: &str, text: &str,
     if let Err(error) = capture.record_transcript(kind, text, suppressed) {
         tracing::warn!(error = %error, "media.capture.transcript_failed");
     }
+}
+
+async fn should_defer_speech_onset_barge_in(
+    media_registry: &SharedMediaRegistry,
+    gateway_call_id: &str,
+) -> bool {
+    media_registry
+        .active_speech_playback_id(gateway_call_id)
+        .await
+        .is_some()
 }
 
 async fn cancel_text_call_speech_for_barge_in(
@@ -2585,6 +2619,91 @@ fn new_local_turn_id() -> String {
     format!("turn_{}", uuid::Uuid::new_v4().simple())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AssistantEchoMatch {
+    token_coverage_percent: u64,
+    longest_token_run: usize,
+}
+
+fn assistant_echo_match(call: &CallSession, transcript_text: &str) -> Option<AssistantEchoMatch> {
+    const MIN_ECHO_CHARS: usize = 10;
+    const ECHO_TAIL_WINDOW_MS: i64 = 2_000;
+
+    let tts = call.tts.as_ref()?;
+    if !tts_in_echo_window(tts, ECHO_TAIL_WINDOW_MS) || tts.echo_signature.is_empty() {
+        return None;
+    }
+
+    let candidate = speech_echo_signature(transcript_text);
+    if candidate.chars().count() < MIN_ECHO_CHARS {
+        return None;
+    }
+    if tts.echo_signature.contains(&candidate) {
+        return Some(AssistantEchoMatch {
+            token_coverage_percent: 100,
+            longest_token_run: candidate.split_whitespace().count(),
+        });
+    }
+
+    let candidate_tokens = candidate.split_whitespace().collect::<Vec<_>>();
+    let assistant_tokens = tts.echo_signature.split_whitespace().collect::<Vec<_>>();
+    if candidate_tokens.len() < 2 || assistant_tokens.len() < 2 {
+        return None;
+    }
+
+    let assistant_token_set = assistant_tokens.iter().copied().collect::<HashSet<_>>();
+    let matching_tokens = candidate_tokens
+        .iter()
+        .filter(|token| assistant_token_set.contains(**token))
+        .count();
+    let token_coverage_percent = ((matching_tokens * 100) / candidate_tokens.len().max(1)) as u64;
+    let longest_token_run = longest_common_token_run(&candidate_tokens, &assistant_tokens);
+    let is_short_echo = candidate_tokens.len() <= 3
+        && matching_tokens >= 2
+        && token_coverage_percent >= 66
+        && longest_token_run >= 2;
+    let is_long_echo = candidate_tokens.len() > 3
+        && matching_tokens >= 3
+        && token_coverage_percent >= 60
+        && longest_token_run >= 3;
+    (is_short_echo || is_long_echo).then_some(AssistantEchoMatch {
+        token_coverage_percent,
+        longest_token_run,
+    })
+}
+
+fn tts_in_echo_window(tts: &TtsPlaybackState, tail_window_ms: i64) -> bool {
+    match tts.status {
+        TtsPlaybackStatus::Queued
+        | TtsPlaybackStatus::Playing
+        | TtsPlaybackStatus::MarkSent
+        | TtsPlaybackStatus::Canceling => true,
+        TtsPlaybackStatus::Completed | TtsPlaybackStatus::Canceled => {
+            let age_ms = Utc::now()
+                .signed_duration_since(tts.updated_at)
+                .num_milliseconds();
+            (0..=tail_window_ms).contains(&age_ms)
+        }
+        TtsPlaybackStatus::Failed => false,
+    }
+}
+
+fn longest_common_token_run(left: &[&str], right: &[&str]) -> usize {
+    let mut previous = vec![0usize; right.len() + 1];
+    let mut longest = 0usize;
+    for left_token in left {
+        let mut current = vec![0usize; right.len() + 1];
+        for (index, right_token) in right.iter().enumerate() {
+            if left_token == right_token {
+                current[index + 1] = previous[index] + 1;
+                longest = longest.max(current[index + 1]);
+            }
+        }
+        previous = current;
+    }
+    longest
+}
+
 async fn record_transcript_events(
     state: &SharedState,
     gateway_call_id: &str,
@@ -2610,9 +2729,6 @@ async fn record_transcript_events(
         let text = event.event.text().to_string();
         let suppressed = event.is_suppressed();
         reset_requested |= event.requires_session_reset();
-        if let Some(capture) = context.capture.as_deref_mut() {
-            record_transcript_capture(capture, kind_label, &text, suppressed);
-        }
         let call = guard.calls.get(gateway_call_id);
         let call_control_id = call.map(|call| call.ids.call_control_id.clone());
         let call_session_id = call.and_then(|call| call.ids.call_session_id.clone());
@@ -2630,6 +2746,19 @@ async fn record_transcript_events(
             .map(|format| format.sample_rate_hz)
             .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
         let asr_backend = call.and_then(|call| call.asr_backend);
+        let assistant_echo = if suppressed {
+            None
+        } else {
+            call.and_then(|call| assistant_echo_match(call, &text))
+        };
+        if let Some(capture) = context.capture.as_deref_mut() {
+            record_transcript_capture(
+                capture,
+                kind_label,
+                &text,
+                suppressed || assistant_echo.is_some(),
+            );
+        }
 
         if suppressed {
             let suppression_reason = event
@@ -2651,6 +2780,29 @@ async fn record_transcript_events(
                 transcript_chars = text.chars().count(),
                 transcript_preview = transcript_preview.as_deref(),
                 "transcript.suppressed_repeated_token"
+            );
+            continue;
+        }
+
+        if let Some(echo) = assistant_echo {
+            let transcript_preview = include_transcript_text.then(|| transcript_preview(&text));
+            guard.record_echo_suppressed_transcript(gateway_call_id, &text);
+            tracing::warn!(
+                gateway_call_id,
+                call_control_id = call_control_id.as_deref(),
+                call_session_id = call_session_id.as_deref(),
+                call_leg_id = call_leg_id.as_deref(),
+                stream_id = effective_stream_id.as_deref(),
+                codec = codec.as_deref(),
+                sample_rate_hz,
+                asr_backend = asr_backend.map(LiveAsrBackend::label),
+                asr_model = asr_backend.map(LiveAsrBackend::model_label),
+                transcript_kind = kind_label,
+                transcript_chars = text.chars().count(),
+                token_coverage_percent = echo.token_coverage_percent,
+                longest_token_run = echo.longest_token_run,
+                transcript_preview = transcript_preview.as_deref(),
+                "transcript.suppressed_assistant_echo"
             );
             continue;
         }
@@ -3871,6 +4023,62 @@ mod tests {
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.final_transcript, "endpointing seems to be a real cha");
         assert_eq!(call.current_partial, None);
+    }
+
+    #[tokio::test]
+    async fn assistant_echo_transcript_is_suppressed_before_text_call_forwarding() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        {
+            let mut guard = state.write().await;
+            guard.start_tts_job(
+                &gateway_call_id,
+                "tts_echo".to_string(),
+                LiveTtsBackend::Kokoro82m,
+                "Why did the database administrator leave the party early? Too many tables.",
+            );
+            guard.mark_tts_frames_queued(&gateway_call_id, "tts_echo", 20);
+        }
+        let format = MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        };
+
+        let outcome = record_transcript_events(
+            &state,
+            &gateway_call_id,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "in many tables".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: Some(&text_calls),
+                quality_session: None,
+            },
+        )
+        .await;
+
+        assert!(!outcome.reset_requested);
+        assert!(outcome.conversation_events.is_empty());
+        assert!(
+            time::timeout(Duration::from_millis(100), text_rx.recv())
+                .await
+                .is_err(),
+            "assistant echo should not become caller.turn"
+        );
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert!(call.transcripts.is_empty());
+        assert_eq!(call.final_transcript, "");
+        assert_eq!(call.echo_suppressed_transcripts, 1);
     }
 
     #[tokio::test]

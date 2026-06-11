@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-11 | @codex-366-impl | Captured live-call quality fixes: effective two-chunk prebuffer for multi-chunk TTS, deterministic assistant-echo transcript suppression before `caller.turn`, text-call ownership gating for manual `speak`, and call/TUI diagnostics for first-audio, buffer, underrun, and echo-suppression counters. |
 | 2026-06-09 | @codex-m6-ds-rv | Resolved #427 pluggability follow-up: separated generic handler dispatch from smoke final coalescing, added `tts.first_chunk_max_chars` for sentence-boundary first-audio ramp experiments, and documented streaming-agent partial/voice-response contract notes. |
 | 2026-06-09 | @codex-m6-ds-rv | Resolved #427 review: smoke-test final coalescing is handler-local and keyed by the ASR-session config snapshot, ASR finish padding is a separate `asr.finish_pad_ms` knob, first-audio critical-path spans include handler/TTS time, and smoke-test mode no longer mutates global barge-in. |
 | 2026-06-09 | @codex-m6-ds-rv | Updated live-call tuned defaults and TTS chunking guidance after M6 smoke-call trials: 650 ms endpoint tail, stricter speech gate, 90-char sentence-packed TTS chunks, and one-chunk prebuffer. |
@@ -99,6 +100,7 @@ The gateway already emits several useful signals, but M6 requires a coherent lif
 | `transcript.partial` | ASR partial transcript. | Partial quality and barge-in analysis. | Not normally sent to M4 app-agent protocol; can be logged only when privacy mode allows text. |
 | `transcript.final` | Final ASR transcript. | Best current proxy for caller-turn text. | Does not include the future `turn_id`; needs `asr_session_id` mapping. |
 | `transcript.suppressed_repeated_token` | ASR adapter suppression for repeated-token hallucination. | ASR stability signal. | Suppression thresholds should be config-backed and logged by `config_id`. |
+| `transcript.suppressed_assistant_echo` | Deterministic normalized token/substring match against active or just-finished assistant TTS. | Prevents acoustic assistant echo from becoming transcript history, `caller.turn`, or conversation input without LLM/NLP matching. | Needs live-call false-positive labeling in M6 reports. |
 | `text_call.caller_turn.forward_failed` | Failure to send a caller turn to the app stream. | Reliability. | Successful caller turns need structured events. |
 | `playback.finished.status` | Terminal app-agent playback state. | Completed/canceled/failed/superseded lifecycle. | Needs latency span correlation. |
 | `tts.speak.chunk_queued` | TTS chunk packetization and queueing. | TTS startup and chunking behavior. | Needs turn-level aggregation and outbound pacing rollups. |
@@ -911,9 +913,9 @@ Prompt requirements:
 | `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. |
 | `tts.max_text_chunk_chars` | `Count` | `40..500` | `90` | clamp to range | new playback request | Packs complete sentence segments up to this size before falling back to word splits for oversized segments. |
 | `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `0` | `0` disables, otherwise clamp to range | new playback request | Optional sentence-boundary first-chunk ramp for pipelining streaming LLM output into TTS. |
-| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Number of prepared text chunks required before playback starts. |
+| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Configured prepared text chunks required before playback starts; multi-chunk non-append speech uses an effective minimum of two chunks to reduce mid-utterance starvation. |
 | `barge_in.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables barge-in path. |
-| `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. |
+| `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path; while assistant playback is active, media-level cancellation defers to partial/final ASR confirmation so assistant echo can be suppressed instead of cutting itself off. |
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
 | `barge_in.final_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Final ASR cancel path. |
 | `barge_in.clear_timeout_ms` | `DurationMs` | `100..10000` | `1000` | clamp to range | new cancel request | Clear/terminal wait. |

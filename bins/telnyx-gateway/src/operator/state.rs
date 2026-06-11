@@ -207,8 +207,12 @@ pub struct TtsPlaybackState {
     pub status: TtsPlaybackStatus,
     pub backend: LiveTtsBackend,
     pub text_preview: String,
+    pub echo_signature: String,
     pub frames_queued: usize,
     pub frames_sent: usize,
+    pub underrun_ticks: usize,
+    pub pre_audio_wait_ticks: usize,
+    pub first_audio_latency_ms: Option<u64>,
     pub mark_name: Option<String>,
     pub error: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -376,6 +380,8 @@ pub struct CallSession {
     pub terminal_reason: Option<String>,
     pub asr_backend: Option<LiveAsrBackend>,
     pub tts: Option<TtsPlaybackState>,
+    pub echo_suppressed_transcripts: usize,
+    pub last_echo_suppressed_preview: Option<String>,
     pub conversation: ConversationState,
 }
 
@@ -404,6 +410,8 @@ impl CallSession {
             terminal_reason: None,
             asr_backend: None,
             tts: None,
+            echo_suppressed_transcripts: 0,
+            last_echo_suppressed_preview: None,
             conversation: ConversationState::default(),
         };
         call.push_timeline("call created");
@@ -1090,8 +1098,12 @@ impl GatewayState {
                 status: TtsPlaybackStatus::Queued,
                 backend,
                 text_preview: preview_text(text),
+                echo_signature: speech_echo_signature(text),
                 frames_queued: 0,
                 frames_sent: 0,
+                underrun_ticks: 0,
+                pre_audio_wait_ticks: 0,
+                first_audio_latency_ms: None,
                 mark_name: None,
                 error: None,
                 updated_at: Utc::now(),
@@ -1123,6 +1135,31 @@ impl GatewayState {
             ) {
                 tts.status = TtsPlaybackStatus::Playing;
             }
+        });
+    }
+
+    pub fn mark_tts_first_audio_latency(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        latency_ms: u64,
+    ) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            if tts.first_audio_latency_ms.is_none() {
+                tts.first_audio_latency_ms = Some(latency_ms);
+            }
+        });
+    }
+
+    pub fn mark_tts_pre_audio_wait(&mut self, gateway_call_id: &str, playback_id: &str) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            tts.pre_audio_wait_ticks = tts.pre_audio_wait_ticks.saturating_add(1);
+        });
+    }
+
+    pub fn mark_tts_underrun(&mut self, gateway_call_id: &str, playback_id: &str) {
+        self.update_tts(gateway_call_id, playback_id, |tts| {
+            tts.underrun_ticks = tts.underrun_ticks.saturating_add(1);
         });
     }
 
@@ -1221,6 +1258,14 @@ impl GatewayState {
         }
     }
 
+    pub fn record_echo_suppressed_transcript(&mut self, gateway_call_id: &str, text: &str) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.echo_suppressed_transcripts = call.echo_suppressed_transcripts.saturating_add(1);
+            call.last_echo_suppressed_preview = Some(preview_text(text));
+            call.push_timeline("transcript suppressed assistant echo");
+        }
+    }
+
     fn update_tts(
         &mut self,
         gateway_call_id: &str,
@@ -1237,6 +1282,21 @@ impl GatewayState {
             tts.updated_at = Utc::now();
         }
     }
+}
+
+pub fn speech_echo_signature(text: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_was_space = true;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            previous_was_space = false;
+        } else if !previous_was_space {
+            normalized.push(' ');
+            previous_was_space = true;
+        }
+    }
+    normalized.trim().to_string()
 }
 
 fn append_transcript_fragment(transcript: &mut String, fragment: &str) {

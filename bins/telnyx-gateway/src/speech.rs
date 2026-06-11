@@ -916,6 +916,8 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
             vec![text.to_string()]
         }
     };
+    let effective_prebuffer_chunks =
+        effective_prebuffer_chunks(job.tts_prebuffer_chunks, text_chunks.len());
     let synthesis_context = SpeechSynthesisContext {
         state: &job.state,
         tts: &job.tts,
@@ -963,6 +965,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                     "max_text_chunk_chars": job.tts_max_text_chunk_chars,
                     "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                     "prebuffer_chunks": job.tts_prebuffer_chunks,
+                    "effective_prebuffer_chunks": effective_prebuffer_chunks,
                     "text_chars": text_chunk.chars().count(),
                     "audio_chunks": audio_chunks.len(),
                 }),
@@ -1032,13 +1035,15 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                     "max_text_chunk_chars": job.tts_max_text_chunk_chars,
                     "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                     "prebuffer_chunks": job.tts_prebuffer_chunks,
+                    "effective_prebuffer_chunks": effective_prebuffer_chunks,
                 }),
             )
             .await;
         }
 
         let playback_started = !first_packet_for_playback;
-        if playback_started || prepared_chunks.len() >= job.tts_prebuffer_chunks || is_last_chunk {
+        if playback_started || prepared_chunks.len() >= effective_prebuffer_chunks || is_last_chunk
+        {
             if !emitted_prebuffer_ready {
                 emitted_prebuffer_ready = true;
                 let buffered_frames = prepared_frame_count(&prepared_chunks);
@@ -1059,6 +1064,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                         "max_text_chunk_chars": job.tts_max_text_chunk_chars,
                         "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                         "prebuffer_chunks": job.tts_prebuffer_chunks,
+                    "effective_prebuffer_chunks": effective_prebuffer_chunks,
                     }),
                 )
                 .await;
@@ -1102,6 +1108,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                     "max_text_chunk_chars": job.tts_max_text_chunk_chars,
                     "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                     "prebuffer_chunks": job.tts_prebuffer_chunks,
+                    "effective_prebuffer_chunks": effective_prebuffer_chunks,
                 }),
             )
             .await;
@@ -1137,6 +1144,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
                 "max_text_chunk_chars": job.tts_max_text_chunk_chars,
                 "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                 "prebuffer_chunks": job.tts_prebuffer_chunks,
+                    "effective_prebuffer_chunks": effective_prebuffer_chunks,
             }),
         )
         .await;
@@ -1174,6 +1182,14 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
         return Ok(SpeechJobOutcome::MarkQueued);
     }
     Ok(SpeechJobOutcome::NoAudioOrCanceled)
+}
+
+fn effective_prebuffer_chunks(configured_chunks: usize, text_chunk_count: usize) -> usize {
+    if text_chunk_count > 1 {
+        configured_chunks.max(2).min(text_chunk_count)
+    } else {
+        configured_chunks.max(1)
+    }
 }
 
 fn prepared_frame_count(chunks: &[PreparedSpeechChunk]) -> usize {
@@ -1679,6 +1695,90 @@ mod tests {
             saw_mark,
             "speech job should enqueue a mark after all chunks"
         );
+    }
+
+    #[tokio::test]
+    async fn default_prebuffer_waits_for_two_chunks_when_speech_is_chunked() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_outbound_call(
+                TelnyxIds {
+                    call_control_id: "call-control-1".to_string(),
+                    call_session_id: Some("session-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                None,
+                None,
+                CallStatus::MediaStarted,
+            )
+        };
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_tts_max_text_chunk_chars(40);
+            assert_eq!(guard.quality.config.tts.prebuffer_chunks, 1);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
+        }
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let kokoro = Arc::new(BlockingSecondChunkTtsFactory::new(24_000, 2_400));
+        let piper = Arc::new(SequencedTtsFactory::new(
+            PIPER_SAMPLE_RATE_HZ,
+            2_205,
+            None,
+            "unused",
+        ));
+        let tts = Arc::new(TtsRegistry::new(kokoro.clone(), piper));
+
+        let queued = queue_speech(
+            &state,
+            &media_registry,
+            &tts,
+            LiveTtsBackend::Kokoro82m,
+            gateway_call_id.clone(),
+            "Hello world. Second sentence blocks here.".to_string(),
+            "test say",
+        )
+        .await
+        .expect("speech should be queued");
+
+        timeout(Duration::from_secs(1), kokoro.wait_for_second_call())
+            .await
+            .expect("second text chunk synthesis should start");
+        assert!(
+            timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "default prebuffer should not start playback after one chunk"
+        );
+
+        kokoro.release_second_call();
+        let mut frame_count = 0usize;
+        for _ in 0..16 {
+            let Some(command) = timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .expect("speech job should finish")
+            else {
+                break;
+            };
+            match command {
+                OutboundMediaCommand::Frame(frame) => {
+                    assert_eq!(frame.playback_id, queued.playback_id);
+                    frame_count += 1;
+                }
+                OutboundMediaCommand::Mark { playback_id } => {
+                    assert_eq!(playback_id, queued.playback_id);
+                    break;
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+        assert_eq!(frame_count, 10);
     }
 
     #[tokio::test]
