@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const TEXT_CALL_PROTOCOL: &str = "motlie.telnyx.text.v1";
 pub const TEXT_CALL_DEBUG_EXTENSION: &str = "motlie.telnyx.text.debug.v1";
+pub const TEXT_CALL_PARTIALS_EXTENSION: &str = "motlie.telnyx.text.partials.v1";
 pub const TEXT_CALL_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -27,6 +28,8 @@ pub struct TextStreamDescriptor {
     pub transport: String,
     pub content: String,
     pub turn_based: bool,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 impl Default for TextStreamDescriptor {
@@ -35,6 +38,7 @@ impl Default for TextStreamDescriptor {
             transport: "websocket".to_string(),
             content: TEXT_CALL_CONTENT_TYPE.to_string(),
             turn_based: true,
+            extensions: vec![TEXT_CALL_PARTIALS_EXTENSION.to_string()],
         }
     }
 }
@@ -95,6 +99,8 @@ pub struct AcceptCallResponse {
     pub call_url: String,
     #[serde(default)]
     pub accept: bool,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -104,6 +110,14 @@ pub enum PlaybackFinishedStatus {
     Canceled,
     Failed,
     Superseded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallerSpeechState {
+    Speaking,
+    EndpointCandidate,
+    Finalizing,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -118,8 +132,20 @@ pub enum GatewayTextFrame {
     #[serde(rename = "caller.turn")]
     CallerTurn {
         turn_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        utterance_id: Option<String>,
         sequence: u64,
         text: String,
+    },
+    #[serde(rename = "caller.partial")]
+    CallerPartial {
+        utterance_id: String,
+        sequence: u64,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stability: Option<u8>,
+        speech_state: CallerSpeechState,
+        reply_allowed: bool,
     },
     #[serde(rename = "playback.started")]
     PlaybackStarted { turn_id: String, sequence: u64 },
@@ -169,12 +195,16 @@ pub enum DebugTextStreamFrame {
     Attach {
         protocol: String,
         extension: String,
+        #[serde(default)]
+        extensions: Vec<String>,
         call_id: String,
     },
     #[serde(rename = "debug.attached")]
     Attached {
         protocol: String,
         extension: String,
+        #[serde(default)]
+        extensions: Vec<String>,
         call_id: String,
     },
     #[serde(rename = "debug.detach")]
@@ -190,14 +220,20 @@ impl DebugTextStreamFrame {
         Self::Attach {
             protocol: TEXT_CALL_PROTOCOL.to_string(),
             extension: TEXT_CALL_DEBUG_EXTENSION.to_string(),
+            extensions: Vec::new(),
             call_id: call_id.into(),
         }
     }
 
     pub fn attached(call_id: impl Into<String>) -> Self {
+        Self::attached_with_extensions(call_id, Vec::new())
+    }
+
+    pub fn attached_with_extensions(call_id: impl Into<String>, extensions: Vec<String>) -> Self {
         Self::Attached {
             protocol: TEXT_CALL_PROTOCOL.to_string(),
             extension: TEXT_CALL_DEBUG_EXTENSION.to_string(),
+            extensions,
             call_id: call_id.into(),
         }
     }
@@ -234,13 +270,35 @@ mod tests {
     fn serializes_caller_turn_as_protocol_frame() {
         let frame = GatewayTextFrame::CallerTurn {
             turn_id: "turn-test".to_string(),
+            utterance_id: Some("utt-test".to_string()),
             sequence: 1,
             text: "hello".to_string(),
         };
         let encoded = serde_json::to_value(frame).expect("frame serializes");
         assert_eq!(encoded["type"], "caller.turn");
         assert_eq!(encoded["turn_id"], "turn-test");
+        assert_eq!(encoded["utterance_id"], "utt-test");
         assert_eq!(encoded["sequence"], 1);
+    }
+
+    #[test]
+    fn serializes_advisory_caller_partial_as_protocol_frame() {
+        let frame = GatewayTextFrame::CallerPartial {
+            utterance_id: "utt-test".to_string(),
+            sequence: 2,
+            text: "hello wor".to_string(),
+            stability: Some(72),
+            speech_state: CallerSpeechState::Speaking,
+            reply_allowed: false,
+        };
+        let encoded = serde_json::to_value(frame).expect("frame serializes");
+        assert_eq!(encoded["type"], "caller.partial");
+        assert_eq!(encoded["utterance_id"], "utt-test");
+        assert_eq!(encoded["sequence"], 2);
+        assert_eq!(encoded["text"], "hello wor");
+        assert_eq!(encoded["stability"], 72);
+        assert_eq!(encoded["speech_state"], "speaking");
+        assert_eq!(encoded["reply_allowed"], false);
     }
 
     #[test]
@@ -310,6 +368,7 @@ mod tests {
         assert_eq!(encoded["type"], "debug.attach");
         assert_eq!(encoded["protocol"], TEXT_CALL_PROTOCOL);
         assert_eq!(encoded["extension"], TEXT_CALL_DEBUG_EXTENSION);
+        assert_eq!(encoded["extensions"].as_array().expect("array").len(), 0);
         assert_eq!(encoded["call_id"], "call-1");
     }
 }

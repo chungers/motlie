@@ -8,6 +8,7 @@
 |------|--------|----------|
 | 2026-06-08 00:03 PDT | @codex-367-design: Updated the M4/M5 text-call coordination contract: `playback.finished` now carries terminal status, app-agent speech uses cancel-and-replace for latest-response-wins, replaced playback maps to `canceled`, and stale valid `agent.turn` replies map to `superseded` without hanging up. | Milestone 4: External Integration Harness, Application Text Call Protocol and Gateway Control API |
 | 2026-06-07 23:08 PDT | @codex-366-impl: Added M5 support for conversational text-agent handoff: speech enqueue can opt into cancel-and-replace instead of treating an active TTS slot as a protocol failure, and M4 text-call playback terminal frames should expose completed/canceled/failed/superseded status. | Milestone 5: Conversational Realism Latency Improvements, Milestone 4: External Integration Harness, Returning TTS Audio |
+| 2026-06-11 PDT | @codex-366-impl: Added interaction-quality design and implementation for opt-in advisory `caller.partial` ASR hypotheses over `motlie.telnyx.text.partials.v1`; final `caller.turn` remains the committed turn boundary. | Application Text Call Protocol and Gateway Control API, Telnyx Interaction Quality Design |
 | 2026-06-07 18:16 PDT | @codex-366-impl: Expanded M5 #402 conversational realism scope into PR #417: local ASR endpoint finalization, partial/final/speech-onset barge-in behind the shared `conversation barge-in` toggle, and chunked TTS enqueue after each synthesized text chunk while preserving backend audio-chunk continuity inside that text chunk. | Milestone 5: Conversational Realism Latency Improvements, Milestone 3: Full-Duplex TUI Chat Conversation, Returning TTS Audio |
 | 2026-06-07 | @codex-366-impl: Fixed live ASR end-of-turn latency by replacing indefinite low-energy tail suppression with replay-sized local endpoint finalization: after the trailing silence pad, the gateway finishes the active ASR session and waits for new speech, so final transcripts do not depend on a later utterance. | Inbound Call Handler Design, Testing Scope |
 | 2026-06-07 | @codex-366-impl: Added a gateway-wide `conversation barge-in on|off|status` toggle for TUI/socket live tests; default remains on, while off prevents transcript-triggered TTS clear during smoke-test echo validation. | Milestone 3: Full-Duplex TUI Chat Conversation, Operator REPL and TUI Control Surface |
@@ -1207,7 +1208,8 @@ X-Motlie-Signature: v1=<hmac-sha256>
   "text_stream": {
     "transport": "websocket",
     "content": "text/plain; charset=utf-8",
-    "turn_based": true
+    "turn_based": true,
+    "extensions": ["motlie.telnyx.text.partials.v1"]
   }
 }
 ```
@@ -1223,7 +1225,8 @@ Content-Type: application/json
 {
   "protocol": "motlie.telnyx.text.v1",
   "call_url": "wss://agent.example.com/motlie/text-calls/call_01HZ...",
-  "accept": true
+  "accept": true,
+  "extensions": ["motlie.telnyx.text.partials.v1"]
 }
 ```
 
@@ -1318,12 +1321,13 @@ Outbound callback request after the remote party answers:
   "text_stream": {
     "transport": "websocket",
     "content": "text/plain; charset=utf-8",
-    "turn_based": true
+    "turn_based": true,
+    "extensions": ["motlie.telnyx.text.partials.v1"]
   }
 }
 ```
 
-The application returns the same `200 OK` + `call_url` shape used for inbound accepted offers. A redirect response declines the connected outbound call; the gateway should hang up and return a failed dial response. The original HTTP request must not return success until the text stream is ready, because the caller expects to start the text conversation immediately after the blocking POST returns.
+The application returns the same `200 OK` + `call_url` shape used for inbound accepted offers, optionally including `extensions` to opt into advisory protocol additions such as `motlie.telnyx.text.partials.v1`. A redirect response declines the connected outbound call; the gateway should hang up and return a failed dial response. The original HTTP request must not return success until the text stream is ready, because the caller expects to start the text conversation immediately after the blocking POST returns.
 
 ### Bidirectional Text WebSocket
 
@@ -1333,10 +1337,11 @@ Gateway-to-application frames:
 
 ```json
 {"type":"session.start","protocol":"motlie.telnyx.text.v1","call_id":"call_01HZ...","direction":"inbound"}
-{"type":"caller.turn","turn_id":"turn_01HZ...","sequence":1,"text":"I need help with my account"}
-{"type":"playback.started","turn_id":"turn_01HZ...","sequence":2}
-{"type":"playback.finished","turn_id":"turn_01HZ...","sequence":3,"status":"completed"}
-{"type":"session.end","reason":"hangup","sequence":4}
+{"type":"caller.partial","utterance_id":"utt_01HZ...","sequence":1,"text":"I need help with","speech_state":"speaking","reply_allowed":false}
+{"type":"caller.turn","turn_id":"turn_01HZ...","utterance_id":"utt_01HZ...","sequence":2,"text":"I need help with my account"}
+{"type":"playback.started","turn_id":"turn_01HZ...","sequence":3}
+{"type":"playback.finished","turn_id":"turn_01HZ...","sequence":4,"status":"completed"}
+{"type":"session.end","reason":"hangup","sequence":5}
 ```
 
 Application-to-gateway frames:
@@ -1349,6 +1354,7 @@ Application-to-gateway frames:
 Turn rules:
 
 - the gateway sends `caller.turn` only for ASR-final text by default
+- when the app opts into `motlie.telnyx.text.partials.v1`, the gateway may send advisory `caller.partial` hypotheses before final `caller.turn`; these carry `utterance_id`, not `turn_id`, and must not be treated as committed caller turns
 - multiple caller turns may be outstanding at the same time; each `caller.turn` mints a distinct `turn_id` and opens one expected application response
 - the application responds with one `agent.turn` correlated by `turn_id`, or `agent.close` if it wants the gateway to end the call
 - the gateway removes the `turn_id` when the matching `agent.turn` is accepted and speaks `agent.turn.text` with TTS, then sends `playback.started` followed by `playback.finished`
@@ -1366,7 +1372,9 @@ Recommended error frame:
 {"type":"error","code":"invalid_turn","message":"turn is not active","sequence":5}
 ```
 
-This contract deliberately stays turn-based. It does not expose ASR partials by default and does not require the application to stream token-by-token responses. A future extension can add optional partial ASR or streaming agent text frames after the simple request/response turn loop is live-tested.
+This contract deliberately stays turn-based by default. It does not expose ASR partials unless the application opts into `motlie.telnyx.text.partials.v1`, and it does not require the application to stream token-by-token responses. Advisory partials are planning context; final `caller.turn` remains authoritative for committed responses.
+
+See `docs/INTERACTION_QUALITY.md` for the conversational-quality rationale and non-goals.
 
 ### Optional Read APIs
 

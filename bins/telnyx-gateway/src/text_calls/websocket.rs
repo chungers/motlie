@@ -21,8 +21,8 @@ use crate::tts::{SharedTtsRegistry, StreamingSpeechTextPacker};
 
 use super::offers::validate_call_url;
 use super::turns::{
-    AgentTextFrame, DebugTextStreamFrame, GatewayTextFrame, PlaybackFinishedStatus,
-    TextCallDirection, TEXT_CALL_PROTOCOL,
+    AgentTextFrame, CallerSpeechState, DebugTextStreamFrame, GatewayTextFrame,
+    PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
@@ -274,6 +274,16 @@ impl SharedTextCallRegistry {
         &self,
         gateway_call_id: impl Into<String>,
     ) -> mpsc::Receiver<GatewayTextFrame> {
+        self.insert_test_session_with_partials(gateway_call_id, false)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_test_session_with_partials(
+        &self,
+        gateway_call_id: impl Into<String>,
+        emit_partials: bool,
+    ) -> mpsc::Receiver<GatewayTextFrame> {
         let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let handle = TextCallSessionHandle {
             tx,
@@ -281,6 +291,7 @@ impl SharedTextCallRegistry {
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
+            emit_partials,
         };
         self.claim(gateway_call_id.into(), handle)
             .await
@@ -304,11 +315,57 @@ impl SharedTextCallRegistry {
         self.inner.lock().await.contains_key(gateway_call_id)
     }
 
+    pub async fn send_caller_partial(
+        &self,
+        gateway_call_id: &str,
+        utterance_id: String,
+        text: String,
+        speech_state: CallerSpeechState,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        if !handle.emit_partials {
+            return Ok(false);
+        }
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Ok(false);
+        }
+        handle.try_send(GatewayTextFrame::CallerPartial {
+            utterance_id,
+            sequence: handle.next_sequence(),
+            text,
+            stability: None,
+            speech_state,
+            reply_allowed: false,
+        })?;
+        Ok(true)
+    }
+
     pub async fn send_caller_turn(
         &self,
         gateway_call_id: &str,
         text: String,
         finalized_at: Instant,
+    ) -> anyhow::Result<Option<String>> {
+        self.send_caller_turn_with_utterance(gateway_call_id, text, finalized_at, None)
+            .await
+    }
+
+    pub async fn send_caller_turn_with_utterance(
+        &self,
+        gateway_call_id: &str,
+        text: String,
+        finalized_at: Instant,
+        utterance_id: Option<String>,
     ) -> anyhow::Result<Option<String>> {
         let handle = {
             self.inner
@@ -334,6 +391,7 @@ impl SharedTextCallRegistry {
         }
         handle.try_send(GatewayTextFrame::CallerTurn {
             turn_id: turn_id.clone(),
+            utterance_id,
             sequence: handle.next_sequence(),
             text,
         })?;
@@ -401,6 +459,7 @@ struct TextCallSessionHandle {
     turns: Arc<Mutex<TextCallTurnTracker>>,
     append_turns: Arc<Mutex<BTreeMap<String, AgentAppendTurn>>>,
     config: TextCallSessionConfig,
+    emit_partials: bool,
 }
 
 impl TextCallSessionHandle {
@@ -441,16 +500,19 @@ pub struct TextCallSetup {
     pub gateway_call_id: String,
     pub call_url: String,
     pub direction: TextCallDirection,
+    pub emit_partials: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct DebugTextCallSetup {
     pub gateway_call_id: String,
     pub direction: TextCallDirection,
+    pub emit_partials: bool,
 }
 
 fn text_call_session_handle(
     session_config: TextCallSessionConfig,
+    emit_partials: bool,
 ) -> (TextCallSessionHandle, mpsc::Receiver<GatewayTextFrame>) {
     let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
     let handle = TextCallSessionHandle {
@@ -461,6 +523,7 @@ fn text_call_session_handle(
         ))),
         append_turns: Arc::new(Mutex::new(BTreeMap::new())),
         config: session_config,
+        emit_partials,
     };
     (handle, rx)
 }
@@ -484,7 +547,7 @@ pub async fn connect_application_stream(
         let guard = services.state.read().await;
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
-    let (handle, rx) = text_call_session_handle(session_config);
+    let (handle, rx) = text_call_session_handle(session_config, setup.emit_partials);
     let owner = services
         .registry
         .claim(setup.gateway_call_id.clone(), handle.clone())
@@ -524,7 +587,7 @@ where
         let guard = services.state.read().await;
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
-    let (handle, rx) = text_call_session_handle(session_config);
+    let (handle, rx) = text_call_session_handle(session_config, setup.emit_partials);
     let owner = services
         .registry
         .claim(setup.gateway_call_id.clone(), handle.clone())
@@ -565,7 +628,14 @@ where
 {
     write_json_line(
         &mut write,
-        &DebugTextStreamFrame::attached(gateway_call_id.clone()),
+        &DebugTextStreamFrame::attached_with_extensions(
+            gateway_call_id.clone(),
+            handle
+                .emit_partials
+                .then(|| TEXT_CALL_PARTIALS_EXTENSION.to_string())
+                .into_iter()
+                .collect(),
+        ),
     )
     .await?;
     write_json_line(
@@ -1435,6 +1505,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn caller_partial_requires_opted_in_session() {
+        let registry = SharedTextCallRegistry::default();
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let handle = test_handle(tx);
+        registry
+            .claim("call-default".to_string(), handle)
+            .await
+            .expect("default session should attach");
+
+        let emitted = registry
+            .send_caller_partial(
+                "call-default",
+                "utt-default".to_string(),
+                "hello wor".to_string(),
+                CallerSpeechState::Speaking,
+            )
+            .await
+            .expect("default partial send should not fail");
+        assert!(!emitted);
+        assert!(rx.try_recv().is_err());
+
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.emit_partials = true;
+        registry
+            .claim("call-partials".to_string(), handle)
+            .await
+            .expect("partial session should attach");
+
+        let emitted = registry
+            .send_caller_partial(
+                "call-partials",
+                "utt-partial".to_string(),
+                "hello wor".to_string(),
+                CallerSpeechState::Speaking,
+            )
+            .await
+            .expect("partial send should succeed");
+        assert!(emitted);
+        assert!(matches!(
+            rx.recv().await,
+            Some(GatewayTextFrame::CallerPartial {
+                utterance_id,
+                text,
+                speech_state: CallerSpeechState::Speaking,
+                reply_allowed: false,
+                ..
+            }) if utterance_id == "utt-partial" && text == "hello wor"
+        ));
+    }
+
+    #[tokio::test]
     async fn caller_turn_allows_multiple_outstanding_turns() {
         let registry = SharedTextCallRegistry::default();
         let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
@@ -1894,6 +2016,7 @@ mod tests {
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
+            emit_partials: false,
         }
     }
 }

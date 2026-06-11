@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-11 PDT | @codex-366-impl | Added `motlie.telnyx.text.partials.v1`: an opt-in advisory `caller.partial` frame for model-agnostic ASR hypotheses before final `caller.turn`. |
 | 2026-06-10 23:17 PDT | @codex-m6-ds-rv | PR #464 round-1 fixes: gated Channel/tmux behind the default `channel` feature so gateway uses the serde-only protocol surface, and made text-call registry attach/removal owner-token safe. |
 | 2026-06-10 20:42 PDT | @codex-m6-ds-rv | Added issue #460 Telnyx text stream protocol contract: shared `motlie.telnyx.text.v1` frame ownership, debug socket extension, and command/stream state machine. |
 | 2026-06-09 16:22 PDT | @codex-421-design | PR #425 api-rv hardening: `ChannelConfig.coalesce_max_wait` caps sustained debounce, and the channel re-checks no-barge-in after coalescing immediately before payload delivery, requeueing/deferring if typing appears during the coalesce window. |
@@ -51,15 +52,16 @@ The public JSONL/WebSocket frame names and fields are preserved:
 
 | Direction | Frames | Notes |
 |-----------|--------|-------|
-| gateway -> agent | `session.start`, `caller.turn`, `playback.started`, `playback.finished`, `turn.superseded`, `session.end`, `error` | `call_id` is present on `session.start`; turn-scoped frames carry `turn_id` and monotonic `sequence`. |
+| gateway -> agent | `session.start`, optional advisory `caller.partial`, `caller.turn`, `playback.started`, `playback.finished`, `turn.superseded`, `session.end`, `error` | `call_id` is present on `session.start`; committed turn-scoped frames carry `turn_id`; advisory partials carry `utterance_id`; all stream frames carry monotonic `sequence`. |
 | agent -> gateway | `agent.turn.partial`, `agent.turn`, `agent.close` | `agent.turn.partial.append` defaults to `true` for compatibility. |
-| HTTP callback | `call.offer`, `call.connected`, `AcceptCallResponse` | Used by inbound and outbound text-call setup before the JSONL stream starts. |
+| HTTP callback | `call.offer`, `call.connected`, `AcceptCallResponse` | Used by inbound and outbound text-call setup before the JSONL stream starts; `AcceptCallResponse.extensions` opts into optional stream extensions. |
 
 Correlation is intentionally narrow on the wire: `call_id` binds the stream to
-the call, `turn_id` joins caller turn, agent response, playback lifecycle, and
-quality spans, and `sequence` preserves gateway emission order for replay. M6
-ASR-specific join keys such as `asr_session_id` and `utterance_id` remain in
-quality log events; the public text stream does not expose raw ASR internals.
+the call, `turn_id` joins committed caller turn, agent response, playback
+lifecycle, and quality spans, and `sequence` preserves gateway emission order
+for replay. `utterance_id` is exposed only by the optional
+`motlie.telnyx.text.partials.v1` extension and on the matching final
+`caller.turn`; backend-specific ASR internals remain private.
 
 ### Debug Socket Extension
 
@@ -79,7 +81,10 @@ stream attach gwc_...
 ```
 
 After attach, the same socket emits public gateway frames as JSONL and accepts
-public agent frames as JSONL. The local client returns to command mode with:
+public agent frames as JSONL. A local client can request advisory ASR partials
+by adding `"extensions":["motlie.telnyx.text.partials.v1"]` to `debug.attach`
+or by using `stream attach --partials gwc_...`. The local client returns to
+command mode with:
 
 ```json
 {"type":"debug.detach","reason":"done"}

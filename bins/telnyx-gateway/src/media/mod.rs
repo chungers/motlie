@@ -34,7 +34,7 @@ use crate::quality::{
     ActiveAsrQualitySession, RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
 };
 use crate::speech;
-use crate::text_calls::turns::PlaybackFinishedStatus;
+use crate::text_calls::turns::{CallerSpeechState, PlaybackFinishedStatus};
 use crate::text_calls::SharedTextCallRegistry;
 use crate::tts::PIPER_SAMPLE_RATE_HZ;
 
@@ -2579,6 +2579,13 @@ struct FinalTurnCandidate {
     text: String,
     finalized_at: Instant,
     transcript_event_ids: Vec<String>,
+    utterance_id: Option<String>,
+}
+
+struct PartialTurnCandidate {
+    utterance_id: String,
+    text: String,
+    speech_state: CallerSpeechState,
 }
 
 fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCandidate> {
@@ -2589,9 +2596,13 @@ fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCa
     let mut text = String::new();
     let mut finalized_at = None;
     let mut transcript_event_ids = Vec::new();
+    let mut utterance_id = None;
     for turn in final_turns {
         if turn_id.is_none() {
             turn_id = Some(turn.turn_id);
+        }
+        if utterance_id.is_none() {
+            utterance_id = turn.utterance_id.clone();
         }
         let trimmed = turn.text.trim();
         if !trimmed.is_empty() {
@@ -2611,6 +2622,7 @@ fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCa
             text,
             finalized_at: finalized_at.unwrap_or_else(Instant::now),
             transcript_event_ids,
+            utterance_id,
         }]
     }
 }
@@ -2714,6 +2726,7 @@ async fn record_transcript_events(
     let include_transcript_text = guard.quality.config.logging.include_transcript_text;
     let mut reset_requested = false;
     let mut final_turns = Vec::new();
+    let mut partial_turns = Vec::new();
     let mut conversation_events = Vec::new();
     for event in events {
         let kind = if event.event.is_final() {
@@ -2820,6 +2833,15 @@ async fn record_transcript_events(
                 text: text.clone(),
                 finalized_at: Instant::now(),
                 transcript_event_ids: transcript_event_id.into_iter().collect(),
+                utterance_id: context
+                    .quality_session
+                    .map(|session| session.utterance_id.clone()),
+            });
+        } else if let Some(session) = context.quality_session {
+            partial_turns.push(PartialTurnCandidate {
+                utterance_id: session.utterance_id.clone(),
+                text: text.clone(),
+                speech_state: CallerSpeechState::Speaking,
             });
         }
         conversation_events.push(ConversationTranscriptEvent {
@@ -2847,15 +2869,35 @@ async fn record_transcript_events(
         );
     }
     drop(guard);
+    if let Some(text_calls) = context.text_calls {
+        for partial_turn in partial_turns {
+            if let Err(error) = text_calls
+                .send_caller_partial(
+                    gateway_call_id,
+                    partial_turn.utterance_id,
+                    partial_turn.text,
+                    partial_turn.speech_state,
+                )
+                .await
+            {
+                tracing::warn!(
+                    gateway_call_id,
+                    error = %error,
+                    "text_call.caller_partial.forward_failed"
+                );
+            }
+        }
+    }
     let final_turns = coalesce_final_turns(final_turns);
     for final_turn in final_turns {
         let mut emitted_join = false;
         if let Some(text_calls) = context.text_calls {
             match text_calls
-                .send_caller_turn(
+                .send_caller_turn_with_utterance(
                     gateway_call_id,
                     final_turn.text.clone(),
                     final_turn.finalized_at,
+                    final_turn.utterance_id.clone(),
                 )
                 .await
             {
@@ -2977,7 +3019,7 @@ mod tests {
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
     use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
-    use crate::text_calls::turns::GatewayTextFrame;
+    use crate::text_calls::turns::{CallerSpeechState, GatewayTextFrame};
     use crate::text_calls::SharedTextCallRegistry;
     use crate::tts::{
         LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
@@ -4023,6 +4065,77 @@ mod tests {
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.final_transcript, "endpointing seems to be a real cha");
         assert_eq!(call.current_partial, None);
+    }
+
+    #[tokio::test]
+    async fn opted_in_text_call_receives_partial_before_final_turn() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session_with_partials(gateway_call_id.clone(), true)
+            .await;
+        let quality_session = {
+            let mut guard = state.write().await;
+            guard.start_quality_asr_session(&gateway_call_id, Some("stream-1"), "test")
+        };
+        let format = MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        };
+
+        let outcome = record_transcript_events(
+            &state,
+            &gateway_call_id,
+            vec![
+                AsrTranscriptEvent::emit(TranscriptEvent::Partial {
+                    text: "hello wor".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                }),
+                AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                    text: "hello world".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                }),
+            ],
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: Some(&text_calls),
+                quality_session: Some(&quality_session),
+            },
+        )
+        .await;
+
+        assert!(!outcome.reset_requested);
+        assert_eq!(outcome.conversation_events.len(), 2);
+        let partial = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.partial should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            partial,
+            GatewayTextFrame::CallerPartial {
+                utterance_id,
+                text,
+                speech_state: CallerSpeechState::Speaking,
+                reply_allowed: false,
+                ..
+            } if utterance_id == quality_session.utterance_id && text == "hello wor"
+        ));
+        let final_turn = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            final_turn,
+            GatewayTextFrame::CallerTurn {
+                utterance_id: Some(utterance_id),
+                text,
+                ..
+            } if utterance_id == quality_session.utterance_id && text == "hello world"
+        ));
     }
 
     #[tokio::test]

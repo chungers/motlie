@@ -11,7 +11,8 @@ use crate::operator::commands::{GatewayCommand, GatewayContext};
 use crate::operator::script::run_operator_line;
 use crate::operator::state::CallDirection;
 use crate::text_calls::turns::{
-    DebugTextStreamFrame, TextCallDirection, TEXT_CALL_DEBUG_EXTENSION, TEXT_CALL_PROTOCOL,
+    DebugTextStreamFrame, TextCallDirection, TEXT_CALL_DEBUG_EXTENSION,
+    TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 use crate::text_calls::websocket::{run_debug_text_stream, DebugTextCallSetup};
 
@@ -115,14 +116,10 @@ async fn handle_connection(
         }
 
         match parse_debug_stream_attach(command) {
-            Ok(Some(call_id)) => {
-                if let Err(error) = run_attached_debug_stream(
-                    &connection_context,
-                    &mut reader,
-                    &mut writer,
-                    call_id,
-                )
-                .await
+            Ok(Some(attach)) => {
+                if let Err(error) =
+                    run_attached_debug_stream(&connection_context, &mut reader, &mut writer, attach)
+                        .await
                 {
                     let response = SocketCommandResponse::error(error.to_string());
                     write_socket_response(&mut writer, &response).await?;
@@ -159,7 +156,13 @@ where
     Ok(())
 }
 
-fn parse_debug_stream_attach(command: &str) -> Result<Option<String>, String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DebugStreamAttachRequest {
+    call_id: String,
+    emit_partials: bool,
+}
+
+fn parse_debug_stream_attach(command: &str) -> Result<Option<DebugStreamAttachRequest>, String> {
     if command.trim_start().starts_with('{') {
         let Ok(frame) = serde_json::from_str::<DebugTextStreamFrame>(command) else {
             return Ok(None);
@@ -168,6 +171,7 @@ fn parse_debug_stream_attach(command: &str) -> Result<Option<String>, String> {
             DebugTextStreamFrame::Attach {
                 protocol,
                 extension,
+                extensions,
                 call_id,
             } => {
                 if protocol != TEXT_CALL_PROTOCOL {
@@ -180,7 +184,21 @@ fn parse_debug_stream_attach(command: &str) -> Result<Option<String>, String> {
                         "unsupported debug stream extension {extension}; expected {TEXT_CALL_DEBUG_EXTENSION}"
                     ));
                 }
-                Ok(Some(call_id))
+                let emit_partials = extensions
+                    .iter()
+                    .any(|value| value == TEXT_CALL_PARTIALS_EXTENSION);
+                if let Some(unsupported) = extensions
+                    .iter()
+                    .find(|value| value.as_str() != TEXT_CALL_PARTIALS_EXTENSION)
+                {
+                    return Err(format!(
+                        "unsupported text stream extension {unsupported}; expected {TEXT_CALL_PARTIALS_EXTENSION}"
+                    ));
+                }
+                Ok(Some(DebugStreamAttachRequest {
+                    call_id,
+                    emit_partials,
+                }))
             }
             DebugTextStreamFrame::Detach { .. } => {
                 Err("debug.detach is only valid after stream attach".to_string())
@@ -203,28 +221,44 @@ fn parse_debug_stream_attach(command: &str) -> Result<Option<String>, String> {
     if argv.first().map(String::as_str) != Some("stream") {
         return Ok(None);
     }
-    if argv.get(1).map(String::as_str) != Some("attach") || argv.len() != 3 {
-        return Err("usage: stream attach <call-id>".to_string());
+    if argv.get(1).map(String::as_str) != Some("attach") {
+        return Err("usage: stream attach [--partials] <call-id>".to_string());
     }
-    Ok(argv.get(2).cloned())
+    let mut call_id = None;
+    let mut emit_partials = false;
+    for arg in argv.iter().skip(2) {
+        if arg == "--partials" {
+            emit_partials = true;
+        } else if call_id.replace(arg.clone()).is_some() {
+            return Err("usage: stream attach [--partials] <call-id>".to_string());
+        }
+    }
+    let Some(call_id) = call_id else {
+        return Err("usage: stream attach [--partials] <call-id>".to_string());
+    };
+    Ok(Some(DebugStreamAttachRequest {
+        call_id,
+        emit_partials,
+    }))
 }
 
 async fn run_attached_debug_stream<R, W>(
     context: &GatewayContext,
     reader: &mut R,
     writer: &mut W,
-    call_id: String,
+    request: DebugStreamAttachRequest,
 ) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncBufRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let direction = text_call_direction_for(context, &call_id).await?;
+    let direction = text_call_direction_for(context, &request.call_id).await?;
     run_debug_text_stream(
         context.text_call_services(),
         DebugTextCallSetup {
-            gateway_call_id: call_id,
+            gateway_call_id: request.call_id,
             direction,
+            emit_partials: request.emit_partials,
         },
         reader,
         writer,
@@ -533,12 +567,15 @@ mod tests {
         let socket_task = tokio::spawn(run_command_socket(path.clone(), Arc::new(gateway_context)));
 
         let mut client = SocketTestClient::connect(&path).await;
-        client.write_line(&format!("stream attach {call_id}")).await;
+        client
+            .write_line(&format!("stream attach --partials {call_id}"))
+            .await;
 
         let attached = client.read_json().await;
         assert_eq!(attached["type"], "debug.attached");
         assert_eq!(attached["protocol"], TEXT_CALL_PROTOCOL);
         assert_eq!(attached["extension"], TEXT_CALL_DEBUG_EXTENSION);
+        assert_eq!(attached["extensions"][0], TEXT_CALL_PARTIALS_EXTENSION);
         assert_eq!(attached["call_id"], call_id);
 
         let session_start = client.read_json().await;
@@ -546,6 +583,21 @@ mod tests {
         assert_eq!(session_start["protocol"], TEXT_CALL_PROTOCOL);
         assert_eq!(session_start["call_id"], call_id);
         assert_eq!(session_start["direction"], "inbound");
+
+        let partial_sent = text_calls
+            .send_caller_partial(
+                &call_id,
+                "utt-debug".to_string(),
+                "hello fro".to_string(),
+                crate::text_calls::turns::CallerSpeechState::Speaking,
+            )
+            .await
+            .expect("caller partial should send");
+        assert!(partial_sent);
+        let caller_partial = client.read_json().await;
+        assert_eq!(caller_partial["type"], "caller.partial");
+        assert_eq!(caller_partial["utterance_id"], "utt-debug");
+        assert_eq!(caller_partial["text"], "hello fro");
 
         let turn_id = text_calls
             .send_caller_turn(
