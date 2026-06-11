@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-11 | @codex-366-impl | Corrected #464 speech-state documentation: `endpoint_candidate` and `finalizing` are reserved enum values; the current gateway implementation emits `speaking` for advisory partials. |
 | 2026-06-11 | @codex-366-impl | Clarified #464 stopping point: advisory partial text is implemented, while confidence/stability scoring depends on model contract issue #480 and follow-up gateway protocol work. |
 | 2026-06-11 | @codex-366-impl | Added opt-in, model-agnostic advisory ASR partials for app/agent streams while preserving final `caller.turn` as the committed turn boundary. |
 
@@ -38,7 +39,7 @@ The extension is model-agnostic:
 - `utterance_id` is a gateway-generated join key for current speech.
 - `sequence` preserves stream ordering.
 - `text` is the current best hypothesis.
-- `speech_state` is normalized, currently `speaking`, `endpoint_candidate`, or `finalizing`.
+- `speech_state` is normalized. The enum reserves `speaking`, `endpoint_candidate`, and `finalizing`, but the #464 gateway implementation currently emits only `speaking`; wiring endpoint/finalizing states belongs with later scoring/early-commit work.
 - `reply_allowed` is a policy flag. The first implementation emits `false`; agents should treat partials as planning context, not permission to speak over the caller.
 
 Confidence and stability scoring are intentionally not part of the #464 stopping point. Industry streaming ASR contracts usually expose partial hypotheses with confidence and stability, but `motlie_model::TranscriptSegment` cannot carry those signals yet. Issue #480 tracks the model-layer contract work needed before the gateway can expose backend-derived `confidence` or normalized interim `stability` without inventing misleading scores.

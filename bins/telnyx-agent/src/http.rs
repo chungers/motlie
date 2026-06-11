@@ -170,6 +170,7 @@ fn accept_response(state: &AgentState, call_id: &str) -> (StatusCode, Json<Accep
             .replace("https://", "wss://")
             .replace("http://", "ws://"),
         accept: true,
+        extensions: Vec::new(),
     };
     (StatusCode::OK, Json(response))
 }

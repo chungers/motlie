@@ -52,7 +52,8 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                         cancel_matching_turn(&mut active, &turn_id);
                     }
                     Ok(GatewayTextFrame::SessionEnd { .. }) => break,
-                    Ok(GatewayTextFrame::SessionStart { .. })
+                    Ok(GatewayTextFrame::CallerPartial { .. })
+                    | Ok(GatewayTextFrame::SessionStart { .. })
                     | Ok(GatewayTextFrame::PlaybackStarted { .. })
                     | Ok(GatewayTextFrame::PlaybackFinished { .. })
                     | Ok(GatewayTextFrame::Error { .. }) => {}
