@@ -1,0 +1,10 @@
+snapshot_id = "curated-v2-smoke"
+run_id = "curated-v2-smoke-postfix-1781146615-167f5d89-spark-2f6e-aarch64-cuda-release-regression"
+profile = "dgx-spark"
+host = "spark-2f6e"
+arch = "aarch64"
+git_sha = "167f5d898bab823ae39ca3acf0c7f798328c3ee9"
+child_build_profile = "release"
+mode = "direct-release-gguf"
+cell_count = 17
+hf_token_present = true
