@@ -125,7 +125,9 @@ cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --
 
 When `nvidia-smi` is available, platform records include `gpu_backend =
 "nvidia"`, GPU identity, and driver/CUDA metadata. Resource acceptance uses
-process swap delta gates on Linux/CUDA profiles; `apple-metal` intentionally
+process swap delta gates on Linux CPU/CUDA smoke profiles with a 4 GiB per-cell
+process-swap delta ceiling; this catches runaway paging while allowing known
+large model-load paging that still passes behavior. `apple-metal` intentionally
 does not gate on machine-wide swap because macOS reports system swap rather
 than per-process bundle swap through the current sampler. Performance output
 keeps common latency fields plus a nested `capability_metrics` object tagged by
@@ -134,7 +136,19 @@ capability. Current `apple-metal` mistralrs rows may report
 wiring at this head and is called out in generated aggregate report platform
 notes.
 
-The `model-qwen3-tts-cpp` feature depends on the native submodule checkout:
+`evals matrix` children build the selected feature set with `cargo build
+--release -p evals --no-default-features ...` and then run `target/release/evals`
+so runtime/budget-bearing cells are not measured against debug binaries. Before
+launching a child, the driver verifies that LocalOnly artifact patterns are
+present under the resolved artifact root. Uncached gated cells block as
+`hf_token_missing` when `HF_TOKEN` is absent, or as `artifact_missing` when the
+token is present but artifacts were not provisioned. Token values are never
+logged.
+
+The `model-qwen3-tts-cpp` feature depends on the native submodule checkout.
+`evals matrix` preflights that scoped checkout, attempts the init command once,
+and emits `submodule_missing` before child build if the checkout remains
+incomplete:
 
 ```sh
 git submodule update --init --recursive libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp
@@ -158,7 +172,9 @@ cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --
 
 `HF_TOKEN` is read only from the environment for gated Hugging Face artifacts.
 The runner records token presence as a boolean and never logs or serializes the
-token value.
+token value. A present token does not make matrix children download artifacts;
+run `evals provision` or prefetch with the models downloader before matrix
+execution when the LocalOnly cache is cold.
 
 Per-host raw output lands under:
 
