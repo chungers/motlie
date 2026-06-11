@@ -1,3 +1,95 @@
+# Core Tenets
+
+## 0. Know your job. Crisp and Concise Communication
+
+- Before everything else, understand the duties and expections of your role.  Ask rather than assume.
+- Be succinct and to the point. Prefer direct and actionable communication.  No long verbose prose.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+
+
+# Skills
+
+Skills are organized by namespace in `.agents/skills/`.
+Read the relevant `SKILL.md` before creating any file.
+
+## Project
+
+| Skill | Path | When to use |
+|---|---|---|
+| `project` | `.agents/skills/project/SKILL.md` | Manage Motlie engineering projects and multi-agent workstreams with mstream |
+
+## Release
+
+| Skill | Path | When to use |
+|---|---|---|
+| `release` | `.agents/skills/release/SKILL.md` | Plan, stage, package, verify, or publish Motlie releases |
+
+## Voice
+
+| Skill | Path | When to use |
+|---|---|---|
+| `voice` | `.agents/skills/voice/README.md` | Voice skill namespace entrypoint and playbook |
+| `speak` | `.agents/skills/voice/speak/` | Speak text aloud with Piper or qwen3-tts.cpp |
+| `listen` | `.agents/skills/voice/listen/` | Capture and transcribe speech with Whisper, Sherpa, or Moonshine |
+| `turn` | `.agents/skills/voice/turn/` | Run one spoken turn: speak a prompt, then listen for a reply |
+
+
 # Development Process and Conventions
 
 ALWAYS confirm with the user your role and identity which can also change in a long session.
@@ -26,8 +118,14 @@ They must be targeted, actionable, and contain context / links / references so c
 ALWAYS create a local branch to track work, named in this format: {your_identity}/{summary-up-to-40-chars}.
 Push frequently to checkpoint your work.  Tell the user at every turn if you have local uncommitted changes.
 User will give instructions on when to create a PR or issue.
+When creating git worktrees, place them as siblings of the main repo checkout, not inside the repo directory.
+For example, if the main checkout is `/path/to/motlie`, create worktrees like `/path/to/<worktree-name>`,
+not `/path/to/motlie/worktrees/<worktree-name>`. This avoids accidentally checking full worktree directories
+into the repo or mixing worktree paths with tracked project content.
 NEVER stage any commits of harness files (:= CLAUDE.md, AGENTS.md, or SKILL.md), or anything unrelated
 to your current scope of work, without user's explicit approval.
+
+
 
 ## Development Stages
 
@@ -205,17 +303,22 @@ Be sure your work is tracked in a local working branch.  Stage for commits only 
 NEVER commit any harness files (CLAUDE.md, AGENTS.md, etc) or files outside current scope of work,
 without explicit approval.  Commit local changes as you go.
 
-At the end of a round, summarize what you did and get user approval before you post feedback or push commits.
+At the end of a round, summarize what you did and get user approval before you post feedback or push.
+
 
 ## Rust Coding Guidelines
 
 ### Core Principles
+
 Prioritize **correctness, safety, and maintainability** over stylistic preferences.
-No code smells, leaky abstractions, duplications and boilerplates without clear rationalization.
-Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide) for help when possible.
+No code smells, leaky abstractions, duplications and boilerplates.
+Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide)
+for help when possible.
+
 ---
 
 ### 1. Basics, Ownership & Lifetimes
+
 - Prefer static dispatch over dynamic (must justify Box<dyn ...>).
 - Prefer **clear ownership** over complex borrowing
 - Avoid unnecessary references (`&T`, `&mut T`)
@@ -225,6 +328,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 2. No Panics in Production
+
 - **Disallow `unwrap()` / `expect()`** in non-test code
 - Use `Result` + `?` for error propagation
 - Allow only for proven invariants (must justify)
@@ -233,6 +337,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 3. Types Encode Invariants
+
 - Replace primitives with domain types
 - Use `enum` over strings/flags
 - Prefer `Option` / `Result` over sentinel values
@@ -241,6 +346,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 4. Minimize Mutability
+
 - Prefer `let` over `let mut`
 - Favor functional/iterator patterns where clear
 - Keep functions small and side-effect-free when possible
@@ -248,6 +354,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 5. Errors Must Carry Context
+
 - Add context at I/O, network, and parsing boundaries
 - Use `anyhow::Context` or structured errors
 - Use `thiserror` in libraries to define error types. No `anyhow` in libs.
@@ -257,9 +364,18 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 6. Tooling Enforcement
+
 - `cargo fmt` must pass
 - `cargo clippy -- -D warnings`
 - Take deadcode warning seriously.  Do not hide them by adding `#[allow(dead_code)]`
 - No style debates in PRs
 
 ---
+
+## Toolchain & CI Policy
+
+**Floating stable, fix-forward. (David, 2026-06-10)**
+
+- CI and dev intentionally track the **latest stable Rust** (`dtolnay/rust-toolchain@stable` in workflows). Do **NOT** add `rust-toolchain.toml` or pin CI toolchain versions — we prefer discovering incompatibility as we build over intentional bumps that always fall behind.
+- When a toolchain update breaks the build (CI or local), **fix forward immediately** with a small, surgical, version-portable change (e.g. `as *const _` casts when intrinsic signatures changed — commit `baf91858`). Such breaks are expected and are not the fault of the PR that surfaces them.
+- The same applies to tooling drift generally (clippy lints added by new stables): address the lint properly, don't pin or suppress.

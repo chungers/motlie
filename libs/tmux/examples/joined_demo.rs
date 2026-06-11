@@ -65,17 +65,13 @@ async fn main() -> Result<()> {
     }
 
     // Create a session (gives us pane 0), then split to create pane 1
-    let target = host
-        .create_session(&session, &Default::default())
-        .await?;
+    let target = host.create_session(&session, &Default::default()).await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Get the initial window and split it to create a second pane
     let windows = target.children().await?;
     let window = &windows[0];
-    let _pane1 = window
-        .split_pane(&SplitPaneOptions::default())
-        .await?;
+    let _pane1 = window.split_pane(&SplitPaneOptions::default()).await?;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Subscribe before starting the monitor to avoid missing initial output.

@@ -10,6 +10,7 @@
 - 2026-05-13, @gpt55-dgx: Added structured target status, target-specific and rollup gates, evidence schema, cargo-zigbuild default, and merge-commit coordination strategy.
 - 2026-05-13, @gpt55-dgx: Fixed npm global-bin command, defined optional GitHub Pages installer updates, and added installer validation as a manifest-tracked gate.
 - 2026-05-13, @gpt55-dgx: Made static musl the default Linux target policy when feasible; glibc floors are required only for gnu fallback/CUDA targets.
+- 2026-05-17, @opus47-rel-eng: Documented that the ad-hoc signing default applies only to entitlement-free binaries; future binaries using Apple-framework entitlements (specifically `vmm` with Virtualization.framework) require Developer ID identity and a manual operator signing step to be designed when the first such binary enters release scope. (Grafted from main during 2026-06-11 sync, @ops48-orchestrator.)
 - 2026-05-14, @gpt55-dgx: Split universal/Darwin/Linux evidence lists, pinned the default Linux musl toolchain, and documented the musl allocator trade-off.
 - 2026-05-14, @gpt55-dgx: Changed releases to branch-local calver-codename events that support multiple binaries and never merge release branches back to `main`.
 - 2026-05-14, @gpt55-dgx: Clarified codename terminology, concurrent release branch handling, and installer template lifecycle.
@@ -344,6 +345,24 @@ macOS signing requirement:
 - Darwin npm packages must contain a valid signed Mach-O. Ad-hoc signing is acceptable for this release path.
 - CI must verify the installed npm command from its final npm install path, not only the build path.
 - If an installer or admin copies the npm-installed binary into `/usr/local/bin`, the final copied binary must be re-signed in place.
+
+### Per-binary signing policy
+
+The ad-hoc default applies only to binaries whose runtime needs no Apple-granted entitlements. `mmux` is the worked example: a TUI tmux selector that never calls a sandboxed Apple framework, so ad-hoc signing satisfies the kernel's Apple Silicon launch check and nothing else is required.
+
+Other Motlie binaries that depend on Apple frameworks gated by entitlements will require a real signing identity. The known case is `vmm` (planned hypervisor binary), which uses Apple's **Virtualization.framework** (`vz`). The framework refuses to instantiate VMs from binaries that do not carry the `com.apple.security.virtualization` entitlement, and entitlements are not honored on ad-hoc-signed binaries — they require a Developer ID Application identity (or App Store / personal team identity) to be embedded in the signature. `vmm`'s release manifest must therefore set fields like:
+
+```toml
+[signing]
+identity = "developer-id"
+required_entitlements = ["com.apple.security.virtualization"]
+entitlements_plist = "releases/vmm.entitlements.plist"
+notarization_required = true   # if the binary is distributed for browser download
+```
+
+The release skill and the per-binary manifest schema should treat `[signing].identity` as the dispatch point: `"adhoc"` runs the no-credential signing path documented above; `"developer-id"` (or other identity strings) requires the operator to have the corresponding private key in their login keychain and triggers an additional manual operator step at Phase 6.3 (final signing). That manual step is not yet specified — it should be designed when the first non-ad-hoc binary enters release scope, not earlier. Field names above are illustrative, not committed schema.
+
+CUDA-linked binaries (potential future `motlie-models` targets) also need entitlements (`com.apple.security.cs.allow-unsigned-executable-memory` etc.) if they JIT-compile kernels on macOS, but Motlie's current model surface uses ahead-of-time compiled artifacts so the entitlement requirement does not apply yet. Track this constraint as it materializes per binary.
 
 ### Direct Installer
 

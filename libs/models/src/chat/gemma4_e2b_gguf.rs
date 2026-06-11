@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_llama_cpp::LlamaCppTextAdapter;
+use motlie_model_llama_cpp::{LlamaCppTextBundle, LlamaCppTextHandle, LlamaCppTextSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
@@ -14,13 +14,8 @@ use crate::{
 pub const SELECTOR: &str = "google/gemma4_e2b_gguf";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_gguf_root),
-        Arc::new(LlamaCppTextAdapter::gemma4()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -65,7 +60,7 @@ pub fn descriptor() -> BundleDescriptor {
         model_id: identity.id,
         display_name: "Gemma 4 E2B-it (GGUF/llama.cpp)".into(),
         family: identity.family,
-        capabilities: motlie_model::Capabilities::chat_and_completion(),
+        capabilities: motlie_model::Capabilities::chat_completion_and_tool_use(),
         backend: BackendKind::LlamaCpp,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
@@ -79,16 +74,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(LlamaCppTextAdapter::gemma4()),
-        Arc::new(resolve_local_gguf_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = LlamaCppTextSpec::gemma4_e2b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::LlamaCpp,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn bundle() -> crate::CuratedBundle {
+    crate::CuratedBundle::Gemma4E2B_Gguf
+}
+
+pub async fn start(options: StartOptions) -> Result<LlamaCppTextHandle, ModelError> {
+    LlamaCppTextBundle::new(LlamaCppTextSpec::gemma4_e2b())
+        .start(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_gguf_root,
+        )?)
+        .await
 }
 
 fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -112,6 +118,7 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::LlamaCpp);
         assert!(descriptor.capabilities.supports(CapabilityKind::Chat));
         assert!(descriptor.capabilities.supports(CapabilityKind::Completion));
+        assert!(descriptor.capabilities.supports(CapabilityKind::ToolUse));
         let artifacts = descriptor
             .artifacts
             .expect("descriptor should expose curated artifact control");
@@ -121,6 +128,7 @@ mod tests {
         assert!(!artifacts.includes("README.md"));
     }
 
+    #[cfg(feature = "model-gemma4-e2b")]
     #[test]
     fn identity_matches_logical_gemma4_model() {
         assert_eq!(identity(), super::gemma4_e2b::identity());

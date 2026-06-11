@@ -11,10 +11,10 @@ use mistralrs::core::EmbeddingLoaderType;
 use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
-    EmbeddingRequest as ModelEmbeddingRequest, EmbeddingResponse, LoadedBundleDescriptor,
-    ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    CapabilityKind, CheckpointFormat, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest,
+    EmbeddingResponse, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
+    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    UnsupportedChat, UnsupportedCompletion,
 };
 
 const MISTRAL_EMBEDDING_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -100,6 +100,8 @@ impl MistralEmbeddingAdapter {
 
 #[async_trait]
 impl BackendAdapter for MistralEmbeddingAdapter {
+    type Handle = MistralEmbeddingHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &MISTRAL_EMBEDDING_FORMATS
     }
@@ -121,7 +123,7 @@ impl BackendAdapter for MistralEmbeddingAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -169,6 +171,8 @@ impl MistralEmbeddingBundle {
 
 #[async_trait]
 impl ModelBundle for MistralEmbeddingBundle {
+    type Handle = MistralEmbeddingHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -181,7 +185,7 @@ impl ModelBundle for MistralEmbeddingBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .metadata
             .quantization
@@ -200,9 +204,36 @@ impl ModelBundle for MistralEmbeddingBundle {
     }
 }
 
-#[async_trait]
-trait EmbeddingRuntime: Send + Sync {
-    async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError>;
+enum EmbeddingRuntime {
+    Real(MistralRuntime),
+    #[cfg(test)]
+    Stub(StubRuntime),
+}
+
+#[cfg(test)]
+struct StubRuntime;
+
+#[cfg(test)]
+impl StubRuntime {
+    async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        Ok(EmbeddingResponse {
+            vectors: request
+                .inputs
+                .into_iter()
+                .map(|input| vec![input.len() as f32])
+                .collect(),
+        })
+    }
+}
+
+impl EmbeddingRuntime {
+    async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.embed(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.embed(request).await,
+        }
+    }
 }
 
 struct MistralRuntime {
@@ -210,8 +241,7 @@ struct MistralRuntime {
     metrics: Arc<Mutex<EmbeddingMetricsState>>,
 }
 
-#[async_trait]
-impl EmbeddingRuntime for MistralRuntime {
+impl MistralRuntime {
     async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
         let input_count = request.inputs.len();
         let builder = request
@@ -246,14 +276,18 @@ impl EmbeddingRuntime for MistralRuntime {
     }
 }
 
-struct MistralEmbeddingHandle {
+pub struct MistralEmbeddingHandle {
     descriptor: LoadedBundleDescriptor,
-    runtime: Box<dyn EmbeddingRuntime>,
+    runtime: EmbeddingRuntime,
     metrics: Arc<Mutex<EmbeddingMetricsState>>,
 }
 
 #[async_trait]
 impl BundleHandle for MistralEmbeddingHandle {
+    type Chat = UnsupportedChat;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = Self;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -270,21 +304,21 @@ impl BundleHandle for MistralEmbeddingHandle {
         ))
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Ok(self)
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -309,14 +343,14 @@ fn new_embedding_handle(
     quantization: QuantizationSupport,
     resolved_quantization: Option<QuantizationBits>,
     model: mistralrs::Model,
-) -> Box<dyn BundleHandle> {
+) -> MistralEmbeddingHandle {
     let metrics = Arc::new(Mutex::new(EmbeddingMetricsState::default()));
     {
         let mut metrics = lock_metrics(&metrics, "mistral-embeddings-start");
         observe_memory(&mut metrics.runtime);
     }
 
-    Box::new(MistralEmbeddingHandle {
+    MistralEmbeddingHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -324,12 +358,12 @@ fn new_embedding_handle(
             quantization,
             resolved_quantization,
         },
-        runtime: Box::new(MistralRuntime {
+        runtime: EmbeddingRuntime::Real(MistralRuntime {
             model,
             metrics: Arc::clone(&metrics),
         }),
         metrics,
-    })
+    }
 }
 
 async fn build_embedding_model(
@@ -366,7 +400,7 @@ async fn build_embedding_model(
         .with_dtype(ModelDType::F32);
 
     if let Some(bits) = resolved_quantization {
-        builder = builder.with_auto_isq(map_quantization_bits(bits));
+        builder = builder.with_auto_isq(map_quantization_bits(bits)?);
     }
 
     if should_force_cpu() {
@@ -394,24 +428,6 @@ mod tests {
     use motlie_model::{ArtifactPolicy, BackendAdapter, BackendKind, StartOptions};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct StubRuntime;
-
-    #[async_trait]
-    impl EmbeddingRuntime for StubRuntime {
-        async fn embed(
-            &self,
-            request: ModelEmbeddingRequest,
-        ) -> Result<EmbeddingResponse, ModelError> {
-            Ok(EmbeddingResponse {
-                vectors: request
-                    .inputs
-                    .into_iter()
-                    .map(|input| vec![input.len() as f32])
-                    .collect(),
-            })
-        }
-    }
 
     #[test]
     fn embeddinggemma_spec_has_expected_identity() {
@@ -462,7 +478,7 @@ mod tests {
                 quantization: QuantizationSupport::none(),
                 resolved_quantization: None,
             },
-            runtime: Box::new(StubRuntime),
+            runtime: EmbeddingRuntime::Stub(StubRuntime),
             metrics: Arc::new(Mutex::new(EmbeddingMetricsState::default())),
         };
 

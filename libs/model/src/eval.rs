@@ -13,7 +13,9 @@ pub enum EvalTrack {
     Classification,
     Embeddings,
     Reasoning,
+    Speech,
     Summarization,
+    Transcription,
 }
 
 impl EvalTrack {
@@ -26,6 +28,9 @@ impl EvalTrack {
     pub fn primary_for_descriptor(descriptor: &CapabilityDescriptor) -> Option<Self> {
         match descriptor.kind {
             CapabilityKind::Embeddings => Some(Self::Embeddings),
+            CapabilityKind::Speech => Some(Self::Speech),
+            CapabilityKind::Transcription => Some(Self::Transcription),
+            CapabilityKind::VoiceClone => Some(Self::Speech),
             _ => None,
         }
     }
@@ -121,6 +126,26 @@ mod tests {
     }
 
     #[test]
+    fn transcription_capability_maps_to_transcription_track() {
+        let descriptor = CapabilityDescriptor::transcription_stream();
+
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&descriptor),
+            Some(EvalTrack::Transcription)
+        );
+    }
+
+    #[test]
+    fn speech_capability_maps_to_speech_track() {
+        let descriptor = CapabilityDescriptor::speech_stream();
+
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&descriptor),
+            Some(EvalTrack::Speech)
+        );
+    }
+
+    #[test]
     fn text_generation_capabilities_do_not_claim_primary_eval_tracks_yet() {
         assert_eq!(
             EvalTrack::primary_for_descriptor(&CapabilityDescriptor::chat()),
@@ -128,6 +153,14 @@ mod tests {
         );
         assert_eq!(
             EvalTrack::primary_for_descriptor(&CapabilityDescriptor::completion()),
+            None
+        );
+    }
+
+    #[test]
+    fn tool_use_capability_does_not_claim_primary_eval_track() {
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&CapabilityDescriptor::tool_use()),
             None
         );
     }

@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-31 | @codex-364-impl | Replaced the source-built ORT policy with the Cargo `ort/download-binaries` static archive path; ORT-backed builds should need no ORT env vars or source build. |
+| 2026-05-31 | @codex-364-impl | Added the general ORT/ONNX backend policy to `libs/model`; this entry is superseded by the `ort/download-binaries` static-link policy above. |
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/model` vertical slice support. Covers contract finalization for the first embedding example, including capability introspection, request/response envelopes, lifecycle traits, and lightweight `model::eval` vocabulary. |
 | 2026-04-07 | @codex-researcher | Marked the completed contract and test work for the first embedding slice after `cargo check`/`cargo test` verification. | Phases 1-5 |
 | 2026-04-08 | @codex-researcher | Closed the missing capability-ordering and eval-track mapping gaps after PR review. Added explicit `CapabilityDescriptor` -> `EvalTrack` helpers/tests and a minimal `libs/model-eval` cross-crate consumption proof so the remaining unchecked items are true deferrals rather than silent omissions. | Phases 1, 4, 5 |
@@ -12,8 +14,14 @@
 | 2026-04-08 | @claude | Implemented `QuantizationBits` in `StartOptions` for #141. Partial completion of Phase 6.3 — quantization delivered, device selection and context-length still pending. | Phase 6 |
 | 2026-04-08 | @codex-researcher | Implemented the first vision-capable bundle contract for #142: `ChatMessage` now carries multimodal content parts, `CapabilityDescriptor` has multimodal chat / vision built-ins, and the Gemma 4 slice can reuse the existing `ChatModel` trait without introducing a separate `VisionModel`. | Phase 3, Phase 6 |
 | 2026-04-09 | @codex-researcher | Documented the second embedding slice (#147) in the contract PLAN. `libs/model` remains unchanged at the trait level, but the validation matrix now explicitly covers `qwen3_embedding_06b` as proof that the embedding contract can support multiple curated bundles without new lifecycle abstractions. | Phase 5 |
+| 2026-05-11 | @codex-tool-calling | Added a focused tool-calling design and staged plan for the Gemma 4 and Qwen3/Qwen3.6 chat bundles. | Phase 6 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN covers the contract work needed to support the first end-to-end embedding vertical slice while preserving the longer-term curated-bundle architecture.
+
+Global backend policy: all ORT/ONNX backend work must follow
+[ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md). Do not add backend plans, examples,
+or validation tasks that rely on dynamic ONNX Runtime linkage, manual
+`ORT_LIB_PATH`, vendored ONNX Runtime, or source-built ONNX Runtime.
 
 ---
 
@@ -77,6 +85,15 @@ Define the actual contract backends and curated bundles must satisfy.
   `chat()` and `completion()` return `UnsupportedCapability`,
   while `embeddings()` succeeds.
   DESIGN reference: `Lifecycle Rules`, `Testing Scope for PLAN`
+
+### 2.3 — Backend-family operational policies
+
+- [x] Document the general ORT/ONNX backend policy under `libs/model/docs/ORT_ONNX_POLICY.md`.
+  DESIGN reference: `Backend Operational Policies`
+- [x] Require static ONNX Runtime linkage for all ORT-backed model crates and reject dynamic-link runbooks.
+  DESIGN reference: `Backend Operational Policies`
+- [x] Require ORT-backed model crates to use the workspace `ort` dependency with `download-binaries` so Cargo statically links the downloaded `libonnxruntime.a` archive without ORT env vars.
+  DESIGN reference: `Backend Operational Policies`
 
 ## Phase 3: Request/Response Envelopes
 
@@ -157,9 +174,11 @@ Track the already-known follow-up work needed before the first non-embedding cur
 
 ### 6.2 — Tool-calling and richer chat metadata
 
-- [ ] Add `ChatRole::Tool` and any required tool-call correlation fields on `ChatMessage`.
+Focused design and sequencing live in [DESIGN_TOOL_CALLING.md](./DESIGN_TOOL_CALLING.md) and [PLAN_TOOL_CALLING.md](./PLAN_TOOL_CALLING.md).
+
+- [x] Add `ChatRole::Tool` and any required tool-call correlation fields on `ChatMessage`.
   DESIGN reference: `Capability Surfaces`
-- [ ] Extend `ChatResponse` with additive fields for finish reason, usage metadata, and tool-call output.
+- [x] Extend `ChatResponse` with additive fields for finish reason, usage metadata, and tool-call output.
   DESIGN reference: `Capability Surfaces`
 - [ ] Evaluate whether a bundle-level `ChatSpec` metadata trait should be introduced parallel to `EmbeddingSpec`.
   DESIGN reference: `Open Concerns`

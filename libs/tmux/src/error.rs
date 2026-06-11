@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::types::TargetLevel;
+
 /// Errors produced by the motlie-tmux crate.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -26,6 +28,13 @@ pub enum Error {
     /// Invalid state or state transition.
     #[error("{0}")]
     State(String),
+
+    /// Operation does not support the target level supplied by the caller.
+    #[error("{operation} is not supported for {level} targets")]
+    UnsupportedTarget {
+        operation: &'static str,
+        level: TargetLevel,
+    },
 
     /// I/O error.
     #[error(transparent)]

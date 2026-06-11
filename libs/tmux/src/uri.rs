@@ -10,7 +10,7 @@ use std::str::FromStr;
 use crate::error::{Error, Result};
 
 use crate::host::HostHandle;
-use crate::transport::{LocalTransport, SshConfig, SshTransport, TransportKind};
+use crate::transport::{LocalTransport, SshConfig, SshTransport, TransportKind, SSH_DEFAULT_PORT};
 use crate::types::{HostKeyPolicy, TmuxSocket};
 
 /// Canonical URI component names that cannot appear as parameters.
@@ -231,7 +231,7 @@ impl SshConfig {
         if let Some(path) = socket_path {
             if has_socket_name {
                 return Err(Error::Parse(
-                    "socket-path and socket-name are mutually exclusive".into()
+                    "socket-path and socket-name are mutually exclusive".into(),
                 ));
             }
             config = config.with_socket(TmuxSocket::Path(path))?;
@@ -361,6 +361,49 @@ impl SshConfig {
         result
     }
 
+    /// Stable, human-readable endpoint identity for display and Fleet/output aliases.
+    ///
+    /// The alias includes SSH user, host, non-default port, and non-default tmux
+    /// socket identity. It intentionally omits identity-file because key paths are
+    /// sensitive and too noisy for labels.
+    pub fn endpoint_alias(&self) -> String {
+        let mut alias = String::new();
+
+        if !self.user().is_empty() {
+            alias.push_str(self.user());
+            alias.push('@');
+        }
+
+        let host = self.host();
+        if host.contains(':') {
+            alias.push('[');
+            alias.push_str(host);
+            alias.push(']');
+        } else {
+            alias.push_str(host);
+        }
+
+        if self.port() != SSH_DEFAULT_PORT {
+            alias.push(':');
+            alias.push_str(&self.port().to_string());
+        }
+
+        if let Some(socket) = self.socket() {
+            match socket {
+                TmuxSocket::Name(name) => {
+                    alias.push_str("/socket:");
+                    alias.push_str(name);
+                }
+                TmuxSocket::Path(path) => {
+                    alias.push_str("/socket-path:");
+                    alias.push_str(path);
+                }
+            }
+        }
+
+        alias
+    }
+
     /// Connect and return a HostHandle.
     ///
     /// Transport selection:
@@ -371,15 +414,32 @@ impl SshConfig {
     /// the current OS user). For SSH hosts, `user` is required — `connect()`
     /// returns an error if empty.
     pub async fn connect(self) -> Result<HostHandle> {
+        let alias = self.host().to_string();
+        self.connect_with_alias(&alias).await
+    }
+
+    /// Connect using `endpoint_alias()` as the HostHandle alias.
+    pub async fn connect_with_endpoint_alias(self) -> Result<HostHandle> {
+        let alias = self.endpoint_alias();
+        self.connect_with_alias(&alias).await
+    }
+
+    /// Connect and return a `HostHandle` using an explicit Fleet/output alias.
+    ///
+    /// This is useful when the transport host name (`localhost`, `amd2`, an IP)
+    /// is not the caller's stable routing alias.
+    pub async fn connect_with_alias(self, alias: &str) -> Result<HostHandle> {
+        if alias.is_empty() {
+            return Err(Error::Parse("host alias cannot be empty".to_string()));
+        }
         let is_local = self.is_localhost();
         let user_empty = self.user().is_empty();
         let timeout = self.timeout();
         let socket = self.socket().cloned();
-        let alias = self.host().to_string();
 
         if is_local {
             let transport = TransportKind::Local(LocalTransport::with_timeout(timeout));
-            return Ok(HostHandle::with_alias(transport, socket, &alias));
+            return Ok(HostHandle::with_alias(transport, socket, alias));
         }
 
         if user_empty {
@@ -387,7 +447,7 @@ impl SshConfig {
         }
 
         let transport = TransportKind::Ssh(SshTransport::connect(self).await?);
-        Ok(HostHandle::with_alias(transport, socket, &alias))
+        Ok(HostHandle::with_alias(transport, socket, alias))
     }
 }
 
@@ -411,7 +471,9 @@ impl FromStr for SshConfig {
 /// Validate a parsed port is in the valid range 1-65535.
 fn validate_port(port: u16) -> Result<u16> {
     if port == 0 {
-        return Err(Error::Parse("invalid port '0' (expected integer 1-65535)".into()));
+        return Err(Error::Parse(
+            "invalid port '0' (expected integer 1-65535)".into(),
+        ));
     }
     Ok(port)
 }
@@ -423,8 +485,7 @@ fn validate_uri_safe(value: &str, context: &str) -> Result<()> {
             return Err(Error::Parse(format!(
                 "{} contains URI-reserved character '{}' \
                  (disallowed: ; @ ? & = # [ ])",
-                context,
-                ch
+                context, ch
             )));
         }
     }
@@ -457,7 +518,10 @@ fn parse_userinfo(userinfo: Option<&str>) -> Result<(String, Vec<(String, String
 
         // Within-location duplicate check
         if seen_keys.iter().any(|k| k == key) {
-            return Err(Error::Parse(format!("duplicate parameter '{}' within userinfo", key)));
+            return Err(Error::Parse(format!(
+                "duplicate parameter '{}' within userinfo",
+                key
+            )));
         }
         seen_keys.push(key.to_string());
 
@@ -496,7 +560,10 @@ fn parse_authority_and_path(s: &str) -> Result<(String, u16, Option<String>)> {
             Some(pos) => {
                 let port_str = &authority[pos + 1..];
                 let port: u16 = port_str.parse().map_err(|_| {
-                    Error::Parse(format!("invalid port '{}' (expected integer 1-65535)", port_str))
+                    Error::Parse(format!(
+                        "invalid port '{}' (expected integer 1-65535)",
+                        port_str
+                    ))
                 })?;
                 (authority[..pos].to_string(), validate_port(port)?)
             }
@@ -541,7 +608,10 @@ fn parse_port_and_path(remainder: &str) -> Result<(u16, Option<String>)> {
             }
             None => {
                 let port: u16 = rest.parse().map_err(|_| {
-                    Error::Parse(format!("invalid port '{}' (expected integer 1-65535)", rest))
+                    Error::Parse(format!(
+                        "invalid port '{}' (expected integer 1-65535)",
+                        rest
+                    ))
                 })?;
                 Ok((validate_port(port)?, None))
             }
@@ -588,7 +658,10 @@ fn parse_query_params(query: Option<&str>) -> Result<Vec<(String, String)>> {
 
         // Within-location duplicate check
         if seen_keys.iter().any(|k| k == key) {
-            return Err(Error::Parse(format!("duplicate parameter '{}' within query", key)));
+            return Err(Error::Parse(format!(
+                "duplicate parameter '{}' within query",
+                key
+            )));
         }
         seen_keys.push(key.to_string());
 
@@ -637,8 +710,7 @@ mod tests {
 
     #[test]
     fn parse_query_params_valid() {
-        let cfg =
-            SshConfig::parse("ssh://deploy@prod?host-key-policy=tofu&timeout=30").unwrap();
+        let cfg = SshConfig::parse("ssh://deploy@prod?host-key-policy=tofu&timeout=30").unwrap();
         assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::TrustFirstUse);
         assert_eq!(cfg.timeout(), Duration::from_secs(30));
     }
@@ -653,8 +725,7 @@ mod tests {
 
     #[test]
     fn parse_mixed_params() {
-        let cfg =
-            SshConfig::parse("ssh://deploy;timeout=30@prod?host-key-policy=tofu").unwrap();
+        let cfg = SshConfig::parse("ssh://deploy;timeout=30@prod?host-key-policy=tofu").unwrap();
         assert_eq!(cfg.timeout(), Duration::from_secs(30));
         assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::TrustFirstUse);
     }
@@ -711,6 +782,57 @@ mod tests {
         let cfg = SshConfig::parse("ssh://user@[::1]:2222").unwrap();
         assert_eq!(cfg.host(), "::1");
         assert_eq!(cfg.port(), 2222);
+    }
+
+    #[test]
+    fn endpoint_alias_includes_user_host_and_non_default_port() {
+        let cfg = SshConfig::parse("ssh://david@amd1:2222").unwrap();
+        assert_eq!(cfg.endpoint_alias(), "david@amd1:2222");
+    }
+
+    #[test]
+    fn endpoint_alias_distinguishes_users_on_same_host() {
+        let david = SshConfig::parse("ssh://david@amd1").unwrap();
+        let alice = SshConfig::parse("ssh://alice@amd1").unwrap();
+
+        assert_eq!(david.endpoint_alias(), "david@amd1");
+        assert_eq!(alice.endpoint_alias(), "alice@amd1");
+        assert_ne!(david.endpoint_alias(), alice.endpoint_alias());
+    }
+
+    #[test]
+    fn endpoint_alias_includes_socket_identity() {
+        let named = SshConfig::parse("ssh://david;socket-name=build@amd1").unwrap();
+        assert_eq!(named.endpoint_alias(), "david@amd1/socket:build");
+
+        let path = SshConfig::parse("ssh://david@amd1/tmp/tmux.sock").unwrap();
+        assert_eq!(
+            path.endpoint_alias(),
+            "david@amd1/socket-path:/tmp/tmux.sock"
+        );
+    }
+
+    #[test]
+    fn endpoint_alias_omits_identity_file() {
+        let cfg = SshConfig::parse("ssh://david@amd1?identity-file=/Users/david/.ssh/motliehost")
+            .unwrap();
+        assert_eq!(cfg.endpoint_alias(), "david@amd1");
+    }
+
+    #[test]
+    fn endpoint_alias_brackets_ipv6_hosts() {
+        let cfg = SshConfig::parse("ssh://user@[::1]:2222").unwrap();
+        assert_eq!(cfg.endpoint_alias(), "user@[::1]:2222");
+    }
+
+    #[tokio::test]
+    async fn connect_with_endpoint_alias_sets_host_alias() {
+        let host = SshConfig::parse("ssh://localhost")
+            .unwrap()
+            .connect_with_endpoint_alias()
+            .await
+            .unwrap();
+        assert_eq!(host.host_alias(), "localhost");
     }
 
     #[test]
@@ -791,22 +913,19 @@ mod tests {
 
     #[test]
     fn parse_duplicate_within_userinfo() {
-        let err =
-            SshConfig::parse("ssh://user;timeout=10;timeout=20@host").unwrap_err();
+        let err = SshConfig::parse("ssh://user;timeout=10;timeout=20@host").unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
 
     #[test]
     fn parse_duplicate_within_query() {
-        let err =
-            SshConfig::parse("ssh://user@host?timeout=10&timeout=20").unwrap_err();
+        let err = SshConfig::parse("ssh://user@host?timeout=10&timeout=20").unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
 
     #[test]
     fn parse_socket_path_and_name_mutual_exclusion() {
-        let err = SshConfig::parse("ssh://user@host/tmp/tmux.sock?socket-name=other")
-            .unwrap_err();
+        let err = SshConfig::parse("ssh://user@host/tmp/tmux.sock?socket-name=other").unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 
@@ -818,8 +937,7 @@ mod tests {
 
     #[test]
     fn parse_invalid_policy_value() {
-        let err =
-            SshConfig::parse("ssh://user@host?host-key-policy=invalid").unwrap_err();
+        let err = SshConfig::parse("ssh://user@host?host-key-policy=invalid").unwrap_err();
         assert!(err.to_string().contains("invalid host-key-policy"));
     }
 
@@ -869,26 +987,24 @@ mod tests {
 
     #[test]
     fn to_uri_string_with_policy() {
-        let cfg = SshConfig::new("host", "user")
-            .with_host_key_policy(HostKeyPolicy::TrustFirstUse);
-        assert_eq!(
-            cfg.to_uri_string(),
-            "ssh://user;host-key-policy=tofu@host"
-        );
+        let cfg = SshConfig::new("host", "user").with_host_key_policy(HostKeyPolicy::TrustFirstUse);
+        assert_eq!(cfg.to_uri_string(), "ssh://user;host-key-policy=tofu@host");
     }
 
     #[test]
     fn to_uri_string_with_timeout() {
-        let cfg =
-            SshConfig::new("host", "user").with_timeout(Duration::from_secs(30));
+        let cfg = SshConfig::new("host", "user").with_timeout(Duration::from_secs(30));
         assert_eq!(cfg.to_uri_string(), "ssh://user;timeout=30@host");
     }
 
     #[test]
     fn to_uri_string_with_inactivity_timeout() {
-        let cfg = SshConfig::new("host", "user")
-            .with_inactivity_timeout(Some(Duration::from_secs(120)));
-        assert_eq!(cfg.to_uri_string(), "ssh://user;inactivity-timeout=120@host");
+        let cfg =
+            SshConfig::new("host", "user").with_inactivity_timeout(Some(Duration::from_secs(120)));
+        assert_eq!(
+            cfg.to_uri_string(),
+            "ssh://user;inactivity-timeout=120@host"
+        );
     }
 
     #[test]
@@ -902,10 +1018,7 @@ mod tests {
         let cfg = SshConfig::new("host", "user")
             .with_socket(TmuxSocket::Name("myserver".into()))
             .unwrap();
-        assert_eq!(
-            cfg.to_uri_string(),
-            "ssh://user;socket-name=myserver@host"
-        );
+        assert_eq!(cfg.to_uri_string(), "ssh://user;socket-name=myserver@host");
     }
 
     #[test]
@@ -930,8 +1043,7 @@ mod tests {
 
     #[test]
     fn to_uri_string_no_user_with_params() {
-        let cfg = SshConfig::new("localhost", "")
-            .with_timeout(Duration::from_secs(30));
+        let cfg = SshConfig::new("localhost", "").with_timeout(Duration::from_secs(30));
         assert_eq!(cfg.to_uri_string(), "ssh://localhost?timeout=30");
     }
 
@@ -983,8 +1095,7 @@ mod tests {
     #[test]
     fn roundtrip_query_to_nassh() {
         // Parse from query params, canonical form renders as nassh, re-parse matches
-        let cfg1 =
-            SshConfig::parse("ssh://user@host?host-key-policy=tofu").unwrap();
+        let cfg1 = SshConfig::parse("ssh://user@host?host-key-policy=tofu").unwrap();
         let cfg2 = SshConfig::parse(&cfg1.to_string()).unwrap();
         assert_eq!(cfg1, cfg2);
     }
@@ -1027,8 +1138,7 @@ mod tests {
 
     #[test]
     fn parse_reserved_in_socket_name() {
-        let err =
-            SshConfig::parse("ssh://user;socket-name=my;server@host").unwrap_err();
+        let err = SshConfig::parse("ssh://user;socket-name=my;server@host").unwrap_err();
         // ';' in socket-name value — ';' splits userinfo params so this
         // parses socket-name=my, then "server" as another param without '='
         let msg = err.to_string();
@@ -1037,15 +1147,13 @@ mod tests {
 
     #[test]
     fn parse_invalid_socket_name_chars() {
-        let err =
-            SshConfig::parse("ssh://user@host?socket-name=my%20server").unwrap_err();
+        let err = SshConfig::parse("ssh://user@host?socket-name=my%20server").unwrap_err();
         assert!(err.to_string().contains("invalid socket-name"));
     }
 
     #[test]
     fn parse_valid_socket_name() {
-        let cfg =
-            SshConfig::parse("ssh://user@host?socket-name=my-server_v2.0").unwrap();
+        let cfg = SshConfig::parse("ssh://user@host?socket-name=my-server_v2.0").unwrap();
         assert_eq!(
             cfg.socket(),
             Some(&TmuxSocket::Name("my-server_v2.0".to_string()))
@@ -1054,10 +1162,13 @@ mod tests {
 
     #[test]
     fn builder_invalid_socket_name() {
-        let result = SshConfig::new("host", "user")
-            .with_socket(TmuxSocket::Name("bad;name".into()));
+        let result =
+            SshConfig::new("host", "user").with_socket(TmuxSocket::Name("bad;name".into()));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid socket name"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid socket name"));
     }
 
     #[test]
@@ -1093,6 +1204,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_with_alias_sets_host_alias() {
+        let host = SshConfig::parse("ssh://localhost")
+            .unwrap()
+            .connect_with_alias("local")
+            .await
+            .unwrap();
+        assert!(matches!(host.transport_kind(), TransportKind::Local(_)));
+        assert_eq!(host.host_alias(), "local");
+    }
+
+    #[tokio::test]
     async fn connect_127_0_0_1() {
         let host = SshConfig::parse("ssh://127.0.0.1")
             .unwrap()
@@ -1119,7 +1241,11 @@ mod tests {
             .connect()
             .await;
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("user is required"));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("user is required"));
     }
 
     #[tokio::test]
@@ -1152,9 +1278,8 @@ mod tests {
 
     #[test]
     fn parse_identity_file_query() {
-        let cfg =
-            SshConfig::parse("ssh://deploy@host?identity-file=/home/deploy/.ssh/id_ed25519")
-                .unwrap();
+        let cfg = SshConfig::parse("ssh://deploy@host?identity-file=/home/deploy/.ssh/id_ed25519")
+            .unwrap();
         assert_eq!(
             cfg.identity_file(),
             Some(std::path::Path::new("/home/deploy/.ssh/id_ed25519"))
@@ -1163,15 +1288,13 @@ mod tests {
 
     #[test]
     fn parse_identity_file_nassh_rejected() {
-        let err =
-            SshConfig::parse("ssh://deploy;identity-file=/path/to/key@host").unwrap_err();
+        let err = SshConfig::parse("ssh://deploy;identity-file=/path/to/key@host").unwrap_err();
         assert!(err.to_string().contains("query-only"));
     }
 
     #[test]
     fn parse_identity_file_relative_path_rejected() {
-        let err =
-            SshConfig::parse("ssh://deploy@host?identity-file=relative/key").unwrap_err();
+        let err = SshConfig::parse("ssh://deploy@host?identity-file=relative/key").unwrap_err();
         assert!(err.to_string().contains("absolute path"));
     }
 
@@ -1185,8 +1308,7 @@ mod tests {
     fn parse_identity_file_mixed_params() {
         // nassh timeout + query identity-file
         let cfg =
-            SshConfig::parse("ssh://deploy;timeout=30@host?identity-file=/keys/deploy")
-                .unwrap();
+            SshConfig::parse("ssh://deploy;timeout=30@host?identity-file=/keys/deploy").unwrap();
         assert_eq!(cfg.timeout(), Duration::from_secs(30));
         assert_eq!(
             cfg.identity_file(),
@@ -1196,26 +1318,22 @@ mod tests {
 
     #[test]
     fn roundtrip_identity_file_with_user() {
-        let cfg =
-            SshConfig::parse("ssh://deploy@host?identity-file=/keys/deploy").unwrap();
+        let cfg = SshConfig::parse("ssh://deploy@host?identity-file=/keys/deploy").unwrap();
         let reparsed = SshConfig::parse(&cfg.to_string()).unwrap();
         assert_eq!(cfg, reparsed);
     }
 
     #[test]
     fn roundtrip_identity_file_no_user() {
-        let cfg =
-            SshConfig::parse("ssh://localhost?identity-file=/keys/deploy").unwrap();
+        let cfg = SshConfig::parse("ssh://localhost?identity-file=/keys/deploy").unwrap();
         let reparsed = SshConfig::parse(&cfg.to_string()).unwrap();
         assert_eq!(cfg, reparsed);
     }
 
     #[test]
     fn roundtrip_identity_file_with_other_params() {
-        let cfg = SshConfig::parse(
-            "ssh://deploy;timeout=30@host?identity-file=/keys/deploy",
-        )
-        .unwrap();
+        let cfg =
+            SshConfig::parse("ssh://deploy;timeout=30@host?identity-file=/keys/deploy").unwrap();
         let reparsed = SshConfig::parse(&cfg.to_string()).unwrap();
         assert_eq!(cfg, reparsed);
     }
@@ -1260,10 +1378,7 @@ mod tests {
             .with_identity_file("/keys/deploy")
             .unwrap();
         let uri = cfg.to_uri_string();
-        assert_eq!(
-            uri,
-            "ssh://localhost?timeout=30&identity-file=/keys/deploy"
-        );
+        assert_eq!(uri, "ssh://localhost?timeout=30&identity-file=/keys/deploy");
     }
 
     #[test]
@@ -1297,11 +1412,10 @@ mod tests {
 
     #[test]
     fn parse_then_builder_identity_file_duplicate_errors() {
-        let err =
-            SshConfig::parse("ssh://deploy@host?identity-file=/keys/a")
-                .unwrap()
-                .with_identity_file("/keys/b")
-                .unwrap_err();
+        let err = SshConfig::parse("ssh://deploy@host?identity-file=/keys/a")
+            .unwrap()
+            .with_identity_file("/keys/b")
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("/keys/a"));
         assert!(msg.contains("/keys/b"));
@@ -1310,12 +1424,11 @@ mod tests {
     #[tokio::test]
     async fn connect_localhost_with_identity_file() {
         // identity-file is silently ignored for localhost (LocalTransport)
-        let host =
-            SshConfig::parse("ssh://localhost?identity-file=/nonexistent/key")
-                .unwrap()
-                .connect()
-                .await
-                .unwrap();
+        let host = SshConfig::parse("ssh://localhost?identity-file=/nonexistent/key")
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
         assert!(matches!(host.transport_kind(), TransportKind::Local(_)));
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "motlie-voice"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reusable audio pipeline helpers for Motlie examples and adapters"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+hound = "3.5"
+motlie-model = { path = "../model" }
+thiserror.workspace = true

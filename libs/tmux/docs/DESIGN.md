@@ -6,6 +6,16 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-359-og: Split `SinkFilter` session-name and stable session-id routing so id-addressed filters do not match sessions literally named `$N`. | SinkFilter |
+| 2026-05-28 | @codex: Add policy-light attached-client activity signals for orchestrators: `ClientInfo` now includes `client_activity`, `client_readonly`, and `client_tty`, and `HostHandle::session_client_activity()` summarizes input recency for one session without embedding delivery policy in the library. | Discovery, HostHandle |
+| 2026-05-28 | @codex: Add the host-alias integration cleanup from feature/mstream: `SshConfig::connect_with_alias()` creates `HostHandle`s with caller-owned Fleet aliases, `Fleet::unregister()` removes host, monitor, and target-alias bookkeeping together, timeline lifecycle remains on `OutputBus` rather than duplicated on Fleet, and historical workstream/short-name aliases were removed in favor of explicit target-alias APIs. | Fleet, DC21 |
+| 2026-05-27 | @gpt55-337-og: Issue #337 Fleet API follow-up — add cross-host `FleetTargetSpec`, target aliases, fleet-wide session inventory with generic tag prefixing, batch tag writes/removals, idempotent target monitoring, and timeline filter/scope helpers. Keep application/workflow business concepts outside `libs/tmux`. | Fleet |
+| 2026-05-02 | @codex: Added initial session environment values to `CreateSessionOptions` and documented that post-creation `SessionEnvironment` writes only affect future tmux-spawned processes. | HostHandle, Target, control.rs, types.rs |
+| 2026-05-02 | @codex: Reworked session status-bar control into `Target::status() -> SessionStatus`, with snapshot/apply/restore helpers and validated `StatusLeftLength`. | Target, SessionStatus |
+| 2026-05-02 | @codex: DC34 follow-up for mmux PR feedback — add a host-level batch session-tag read API so selector refreshes can enrich a fresh session listing without one round trip per session. | Target, DC34 |
+| 2026-05-01 | @codex: DC34 follow-up for issue #241 — add planned session tag deletion API using tmux `set-option -u`: scoped `SessionTags::unset(key)`. | Target, DC34 |
+| 2026-04-30 | @codex: DC34 — session metadata tags on `Target` via tmux user-defined session options. Add scoped `SessionTags` and validated self-describing `SessionTag` with strict session-only scope, stable-id dispatch, namespace/key validation, and small-value bounds. | Target, DC34 |
+| 2026-04-28 | @gpt55-dgx: PR #228 selector cleanup — document the implemented non-empty `SessionId` wrapper for `SessionInfo.id` so stable id dispatch cannot silently fall back to names. | Discovery Types |
 | 2026-04-09 | @claude: Note anyhow→thiserror migration in dependency table and prototype sections. Library now uses typed `Error` enum via `thiserror`; `anyhow` retained as dev-dependency only. Prototype code snippets are pre-migration and preserved as historical context. | Dependencies, Prototype |
 | 2026-03-25 | @claude: DC33 — per-source coherent history rendering. Coalesce same-source chunks, add `RenderMode::PerSource`, per-source budgets. See [`docs/HISTORY.md`](./HISTORY.md). | DC28, DC33, History |
 | 2026-03-22 | @claude: Update Phase 5 section to reflect shipped DC32 split-screen REPL mode — replace "not in current scope" / generic `TuiSink` with shipped 5.1+5.2 status and binary-local consumer description. | Phase 5, DC32 |
@@ -57,7 +67,7 @@
 | 2026-03-08 | Explicit FIFO cleanup on monitoring stop: `SessionMonitorHandle::shutdown()` and `stop_monitoring_session()` call `PipeManager::cleanup()` when pipe-pane fallback is active (P4). | Core Abstractions, Module Specs, DC13 |
 | 2026-03-08 | Static dispatch on hot paths: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Remaining dynamic types: `CallbackSink.state` (`Arc<dyn Any>`), `on_flush` (`Pin<Box<dyn Future>>` — Rust async limitation). | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
 | 2026-03-08 | Added `Target::exec()` for structured command execution with sentinel-based capture (DC19). `ExecOutput` type with stdout and exit code. | Core Abstractions, DC19 |
-| 2026-03-08 | Added workstreams to `Fleet`: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. Future DC18 outlines composite workstreams composing with sinks/streams. | Core Abstractions |
+| 2026-03-08 | Added the original `Fleet` named-target APIs: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. These names were later replaced by target-alias APIs so application terms remain outside `libs/tmux`. | Core Abstractions |
 | 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
 | 2026-03-08 | `MonitorHandle` lookup API uses `&Target`/`&TargetSpec` instead of raw strings; `start/stop_monitoring_session` accept `&Target`. Rationale for keeping `SessionMonitorHandle` name (DC10 session-scoped constraint). | Core Abstractions, DC13 |
 | 2026-03-08 | Added `TargetSpec` type with builder for `HostHandle::target()` — replaces raw string parameter | Core Abstractions, DC17 |
@@ -124,7 +134,7 @@ A library that:
 5. Sends arbitrary input to panes with proper key escaping (Enter, C-c, etc.)
 6. Executes shell commands in panes and captures structured output (exit code, stdout)
 7. Manages session metadata (rename sessions/windows)
-8. Names logical workstreams across hosts and targets for domain-meaningful addressing
+8. Names target aliases across hosts and targets for domain-meaningful addressing
 9. Attaches output pipes for continuous monitoring
 10. Combines multi-source output into conversation/transcript-friendly history
 11. Exposes composable stream/history adapters for external analysis
@@ -136,7 +146,7 @@ A library that:
   multi-host connection pool, tmux session creation and termination, session/window/pane
   listing, pane content capture, structured command execution (exec with exit code),
   remote input with escaping, host-level file transfer (local filesystem / SSH SFTP),
-  session metadata management, named workstreams, stream/history-oriented output
+  session metadata management, target aliases, stream/history-oriented output
   sink pipeline, control-mode monitoring, external-agent-friendly stream composition,
   structured logging, CLI binary
 - **Out of scope**: Web UI, SSH server setup/configuration, tmux installation
@@ -401,7 +411,7 @@ libs/tmux/
 │   ├── config.rs           # Historical appendix direction only — built-in automation config is deferred
 │   ├── transport.rs        # TransportKind enum + LocalTransport + SshTransport
 │   ├── host.rs             # HostHandle: per-host facade for all tmux operations
-│   ├── fleet.rs            # Fleet: multi-host registry, aggregation, routing, workstreams
+│   ├── fleet.rs            # Fleet: multi-host registry, aggregation, target-alias routing
 │   ├── discovery.rs        # Session/window/pane listing, filter, PaneAddress type
 │   ├── capture.rs          # Pane content capture (capture-pane) and scrollback dump
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
@@ -498,7 +508,27 @@ control actions back to the right host/target when an external agent decides to 
 <!-- @claude 2026-03-20 — updated to match shipped API (PR #92 R2). -->
 
 ```rust
-pub struct Fleet { /* host registry, shared output bus, workstream bindings */ }
+pub struct Fleet { /* host registry, shared output bus, target aliases */ }
+
+pub struct FleetTargetSpec { /* host alias + TargetSpec */ }
+
+pub struct ResolvedFleetTarget {
+    pub spec: FleetTargetSpec,
+    pub host: HostHandle,
+    pub target: Target,
+}
+
+pub struct FleetSnapshotOptions {
+    pub hosts: Option<Vec<String>>,
+    pub tag_prefixes: Vec<String>,
+}
+
+pub struct FleetSessionSnapshot {
+    pub host_alias: String,
+    pub session: SessionInfo,
+    pub target: FleetTargetSpec,
+    pub tags: BTreeMap<String, Vec<SessionTag>>,
+}
 
 impl Fleet {
     /// Create an empty fleet with a fresh shared OutputBus.
@@ -509,6 +539,9 @@ impl Fleet {
     /// shared OutputBus into the host (via inject_output_bus) so all monitors
     /// publish to a single aggregation bus.
     pub fn register(&mut self, alias: &str, host: HostHandle) -> Result<()>;
+
+    /// Remove a host plus Fleet-owned monitor and target-alias bookkeeping.
+    pub fn unregister(&mut self, alias: &str) -> Result<HostHandle>;
 
     /// Look up a host by alias.
     pub fn host(&self, name: &str) -> Option<&HostHandle>;
@@ -522,6 +555,13 @@ impl Fleet {
     /// Host status: Connected, Monitoring { sessions }, Error(String).
     pub fn host_status(&self, alias: &str) -> Option<HostStatus>;
 
+    /// Resolve a cross-host target spec.
+    pub async fn resolve_target(&self, spec: &FleetTargetSpec) -> Result<Option<ResolvedFleetTarget>>;
+    pub async fn require_target(&self, spec: &FleetTargetSpec) -> Result<ResolvedFleetTarget>;
+    pub async fn resolve_targets<I>(&self, specs: I) -> Result<Vec<ResolvedFleetTarget>>
+    where
+        I: IntoIterator<Item = FleetTargetSpec>;
+
     // --- Monitoring lifecycle ---
 
     /// Start monitoring a specific session on a host.
@@ -530,31 +570,52 @@ impl Fleet {
     /// Start monitoring all sessions on a host.
     pub async fn start_monitoring_host(&mut self, alias: &str) -> Result<()>;
 
+    /// Start/stop monitoring the session containing a target.
+    /// Repeated calls are idempotent.
+    pub async fn start_monitoring_target(&mut self, spec: &FleetTargetSpec) -> Result<()>;
+    pub fn stop_monitoring_target(&mut self, spec: &FleetTargetSpec) -> Result<()>;
+    pub async fn ensure_monitoring_session(&mut self, spec: &FleetTargetSpec) -> Result<SessionMonitorStatus>;
+    pub async fn ensure_monitoring_sessions<I>(&mut self, specs: I) -> Result<Vec<SessionMonitorStatus>>
+    where
+        I: IntoIterator<Item = FleetTargetSpec>;
+    pub fn stop_monitoring_session_target(&mut self, spec: &FleetTargetSpec) -> Result<()>;
+    pub fn monitor_status_for_target(&self, spec: &FleetTargetSpec) -> Option<SessionMonitorStatus>;
+
     /// Stop all monitoring on a host.
     pub fn stop_monitoring_host(&mut self, alias: &str) -> Result<()>;
 
     /// Shutdown: stop all monitoring, close the bus.
     pub fn shutdown(&mut self);
 
-    // --- Workstreams (named bindings) ---
+    // --- Inventory ---
 
-    /// Bind a workstream name to a host alias + TargetSpec.
-    pub fn bind(&mut self, name: &str, host_alias: &str, target: TargetSpec) -> Result<()>;
+    pub async fn list_sessions_by_host(&self) -> Result<BTreeMap<String, Vec<SessionInfo>>>;
+    pub async fn list_sessions_with_tags(&self, tag_prefix: &str) -> Result<Vec<FleetSessionInfo>>;
+    pub async fn snapshot_sessions(&self, opts: FleetSnapshotOptions) -> Result<Vec<FleetSessionSnapshot>>;
 
-    /// Remove a workstream binding.
-    pub fn unbind(&mut self, name: &str) -> Result<()>;
+    // --- Target aliases (named bindings) ---
 
-    /// Resolve a workstream to a Target (async — resolves TargetSpec).
-    pub async fn find(&self, name: &str) -> Result<Option<Target>>;
+    pub fn bind_target_alias(&mut self, name: &str, target: FleetTargetSpec) -> Result<()>;
+    pub fn unbind_target_alias(&mut self, name: &str) -> Result<()>;
+    pub async fn resolve_target_alias(&self, name: &str) -> Result<Option<ResolvedFleetTarget>>;
+    pub async fn require_target_alias(&self, name: &str) -> Result<ResolvedFleetTarget>;
+    pub fn target_aliases(&self) -> impl Iterator<Item = &str>;
 
-    /// List all workstream names.
-    pub fn workstreams(&self) -> impl Iterator<Item = &str>;
+    // --- Timeline helpers ---
+
+    pub fn timeline_options_for_targets(
+        &self,
+        targets: &[ResolvedFleetTarget],
+        base: TimelineOptions,
+    ) -> TimelineOptions;
 
     /// Convenience routing helpers for external agents.
     pub async fn send_text(&self, name: &str, text: &str) -> Result<()>;
     pub async fn send_keys(&self, name: &str, keys: &KeySequence) -> Result<()>;
     pub async fn capture(&self, name: &str) -> Result<String>;
     pub async fn target(&self, name: &str) -> Result<Target>;
+    pub async fn send_text_to(&self, spec: &FleetTargetSpec, text: &str) -> Result<()>;
+    pub async fn capture_target(&self, spec: &FleetTargetSpec) -> Result<String>;
 }
 ```
 
@@ -564,51 +625,54 @@ then uses Motlie to act. `Fleet` therefore focuses on three coordination jobs:
 
 1. **Connection registry**: keep `HostHandle`s by stable alias.
 2. **Stream aggregation**: expose one cross-host `OutputBus` / subscription seam.
-3. **Action routing**: resolve a domain name or binding back to the correct `HostHandle`
-   and `Target`.
+3. **Action routing**: resolve a target alias or `FleetTargetSpec` back to the
+   correct `HostHandle` and `Target`.
 
-**Workstreams** give callers a domain-meaningful vocabulary that decouples intent from
-infrastructure. Instead of `fleet.host("web-1")?.session("build")`, a caller says
-`fleet.find("build-pipeline")` — the mapping from name to (host, target) is established
-once and referenced everywhere. This is especially useful when an external agent builds
-conversation history from many sources and later needs to route a tool call back to the
-same source session or pane.
+**Target aliases** give callers a stable vocabulary that decouples caller intent from
+tmux addressing. Instead of repeatedly resolving `fleet.host("web-1")?.target(...)`, a
+caller can bind `"primary"` to `FleetTargetSpec::new("web-1", TargetSpec::session("build"))?`.
+Fleet registration requires `alias == host.host_alias()` so monitor labels and routing
+names are consistent; `SshConfig::connect_with_alias(alias)` is the canonical way for
+higher-level tools to use stable routing names like `"local"` or `"amd2"` when the
+transport URI host differs.
+The only naming layer in `Fleet` is the target-alias registry; domain-specific workflow
+concepts stay outside `libs/tmux`.
+
+**Session inventory + tags** provide generic discovery for higher-level selectors and
+dashboards. `Fleet::list_sessions_with_tags(prefix)` enumerates all registered hosts,
+batch-reads tags under a caller-owned prefix on each host, and returns `FleetSessionInfo`
+records. The library validates prefix/key/value syntax but does not interpret tag names
+or values.
+
+**Timeline helpers** are intentionally narrow. `ResolvedFleetTarget::sink_filter()` and
+`Fleet::timeline_options_for_targets()` produce generic bus filters for each target's
+host/session. Storage, retention, rendering, and marker persistence remain owned by the
+existing output/history pipeline or external consumers.
 
 **Usage**:
 
 ```rust
 let host = fleet.host("web-1").unwrap();
 let opts = CreateSessionOptions { command: Some("cargo build".to_string()), ..Default::default() };
-let build = host.create_session("build", &opts).await?;
-fleet.bind("build-pipeline", host, build.clone())?;
+host.create_session("build", &opts).await?;
+let build = FleetTargetSpec::session("web-1", "build")?;
+fleet.bind_target_alias("build-pipeline", build.clone())?;
 
 // Later — anywhere in the codebase
-let (_, _, target) = fleet.find("build-pipeline").unwrap();
+let target = fleet.target("build-pipeline").await?;
 target.send_text("cargo test").await?;
 
-// List all workstreams
-for ws in fleet.workstreams() {
-    println!("{}: {} on {}", ws.name, ws.target.target_string(), ws.host_alias);
+// List all target aliases
+for alias in fleet.target_aliases() {
+    println!("{alias}");
 }
 ```
 
-**Future: workstreams as sink/stream groups** (DC18). A workstream today binds a single
-name to a single (host, target). A natural extension is *composite workstreams* that
-group multiple targets under one name — e.g., "deploy" spans `web-1:build`, `db-1:migrate`,
-and `web-1:test`. This would compose with the existing sink pipeline:
-
-- **`SinkFilter` by workstream**: Filter output by workstream name instead of
-  individual host/session/pane fields. The bus resolves the workstream to its member
-  targets at filter-match time.
-- **`JoinedStream` over a workstream**: `bus.subscribe()` with a workstream-derived
-  filter, wrapped by `JoinedStream`, gives a consolidated labeled view of all member
-  targets in that logical workflow.
-- **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
-  workstream with a single call.
-
-This extension is deferred — single-target workstreams cover the immediate need.
-Composite workstreams require decisions about membership lifecycle (what happens when
-a target is killed?) that should be informed by real usage patterns.
+**Future: target alias groups**. Fleet aliases intentionally bind one name to one
+target today. A possible future extension is grouping multiple targets under one
+alias, e.g. "deploy" spanning `web-1:build`, `db-1:migrate`, and `web-1:test`.
+That grouping belongs above the current generic target-alias API and is deferred
+until real usage clarifies membership lifecycle and monitoring semantics.
 
 ### `HostHandle` — Per-Host Entry Point
 
@@ -1204,7 +1268,7 @@ listing and display.
 ```rust
 pub struct SessionInfo {
     pub name: String,
-    pub id: String,             // tmux internal $N id
+    pub id: SessionId,          // non-empty tmux internal $N id
     pub created: u64,           // unix timestamp
     pub attached: bool,         // has a client attached
     pub window_count: u32,
@@ -1232,6 +1296,11 @@ pub struct PaneInfo {
 }
 
 ```
+
+`SessionId` is parsed from tmux `#{session_id}` and rejects empty values at the
+discovery boundary. Callers that need a stable dispatch key use
+`session.id.as_str()`; falling back to display names for id-based dispatch is
+not part of the contract.
 
 These are populated by `tmux list-sessions -F`, `list-windows -F`, and `list-panes -F`
 with appropriate format strings. The format strings are centralized in `discovery.rs` to
@@ -1359,6 +1428,7 @@ set is delivered.
 pub struct SinkFilter {
     pub host: Option<String>,      // regex against host alias
     pub session: Option<String>,   // regex against session name
+    pub session_id: Option<String>, // regex against stable tmux session id
     pub window: Option<String>,    // regex against "session:window_index"
     pub pane: Option<String>,      // regex against pane_id or "session:window.pane"
 }
@@ -1367,6 +1437,7 @@ pub struct SinkFilter {
 pub struct CompiledSinkFilter {
     pub host: Option<Regex>,
     pub session: Option<Regex>,
+    pub session_id: Option<Regex>,
     pub window: Option<Regex>,
     pub pane: Option<Regex>,
 }
@@ -2252,7 +2323,7 @@ Internal responsibilities:
 - Per-host stop delegates to `HostHandle::stop_monitoring()`, which tears down all session monitors for that host
 - Owns the `shutdown` watch channel; `shutdown()` signals all targets
 - Owns the `OutputBus` (shared with HostHandles via `Arc`); exposes `output_bus()` accessor
-- Maintains workstream registry: `HashMap<String, WorkstreamEntry>` for named (host, target) bindings
+- Maintains target alias registry: `HashMap<String, TargetAliasEntry>` for named cross-host target bindings
 
 ```rust
 pub enum HostStatus {
@@ -2522,8 +2593,12 @@ pub struct CreateSessionOptions {
     pub width: Option<u16>,
     pub height: Option<u16>,
     pub history_limit: Option<u32>,
+    pub initial_environment: Vec<SessionEnvVar>,
 }
 ```
+
+`initial_environment` is emitted to `tmux new-session -e` in vector order. If a
+caller supplies duplicate variable names, tmux applies the last emitted value.
 
 `HostHandle::create_session` signature changes from:
 
@@ -2544,7 +2619,7 @@ pub async fn create_session(
 `control::create_session` (internal) changes similarly. The generated tmux commands:
 
 ```
-tmux new-session -d -s <name> [-n <window_name>] [-x <W> -y <H>] [<command>]
+tmux new-session -d -s <name> [-n <window_name>] [-x <W> -y <H>] [-e KEY=VALUE ...] [<command>]
 tmux set-option -t <name> history-limit <N>        # if history_limit set
 tmux set-option -p -t <name> history-limit <N>     # if history_limit set (tmux 3.1+)
 ```
@@ -3330,7 +3405,7 @@ transcript as complete.
   - if reconnect succeeds but the monitored session no longer exists, emit a terminal
     discontinuity/failure marker and transition that session monitor to permanent
     failed/stopped state
-  - Fleet bindings remain as names, but subsequent `find()` / routed actions may fail
+  - Fleet target aliases remain as names, but subsequent target resolution / routed actions may fail
     until the caller recreates or rebinds the target
 - **Pane topology change during outage**:
   - if the session still exists but pane IDs changed, the monitor resumes at the session
@@ -3571,13 +3646,13 @@ conversation-history direction while leaving room for a deeper full-fidelity TUI
 ### DC27: Fleet Routing Convenience vs Direct Target Use
 
 **Decision**: Keep both levels. `Target` remains the canonical direct-control handle,
-while `Fleet` offers convenience routing for workflows that reason in aliases and
-workstream names rather than holding a resolved `Target` the whole time.
+while `Fleet` offers convenience routing for workflows that reason in target aliases
+rather than holding a resolved `Target` the whole time.
 
 **Rationale**:
 - External agents often consume output first, then decide later what to do. In that
-  delay, the most convenient stable handle is often a workstream or host alias rather
-  than a previously retained `Target`.
+  delay, the most convenient stable handle is often a target alias or host alias
+  rather than a previously retained `Target`.
 - `Fleet` already owns the registry/binding layer, so convenience methods like
   `send_text(name, ...)`, `send_keys(name, ...)`, and `capture(name)` are natural
   wrappers around `find(name)` plus normal `Target` operations.
@@ -3588,8 +3663,10 @@ workstream names rather than holding a resolved `Target` the whole time.
 - `Fleet`-level routing helpers are conveniences, not privileged APIs.
 - They resolve a binding or alias, then delegate to the same underlying
   `HostHandle` / `Target` control path used by direct callers.
-- Workstream name resolution remains explicit and inspectable through `bind()`,
-  `find()`, and `workstreams()`.
+- Target alias resolution remains explicit and inspectable through
+  `bind_target_alias()`, `resolve_target_alias()`, and `target_aliases()`.
+  Historical `bind()`, `find()`, and `workstreams()` names were removed; caller
+  concepts such as workstreams stay outside `libs/tmux`.
 
 ### DC7: Capture-Pane vs Stream Monitoring
 
@@ -3838,7 +3915,7 @@ mirrors this uniformity avoids three problems:
 | Component | Responsibility |
 |-----------|---------------|
 | `HostHandle` | Host-level: `list_sessions`, `create_session`, `session`, `target`, `start_monitoring`, `stop_monitoring`, `start_monitoring_session`, `stop_monitoring_session` |
-| `Target` | Entity-level: creation (`new_window`, `split_pane`), I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
+| `Target` | Entity-level: session metadata (`tags`, `set_tag`, `read_tag`, `list_tags`), creation (`new_window`, `split_pane`), I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
 | `SessionMonitorHandle` | Monitoring lifecycle + `Deref<Target=Target>` — adds `shutdown`, `is_active` |
 
 - **Cheap handles**: `Target` holds `Arc<HostHandleInner>` + `TargetAddress` enum.
@@ -3852,6 +3929,115 @@ mirrors this uniformity avoids three problems:
 `is_active()`. Everything else comes from `Target` via `Deref`. This means
 `monitor.capture()`, `monitor.children()`, `monitor.send_text("x")` etc. all work
 without any explicit delegation code.
+
+### DC34: Session Metadata Tags
+
+**Decision**: Session metadata is represented as tmux user-defined session options
+behind a small `Target` API:
+
+```rust
+pub struct SessionTag {
+    /* private validated fields: prefix, key, value */
+}
+
+pub struct SessionTags<'a> {
+    /* transport, tmux prefix, stable session id, validated tag prefix */
+}
+
+pub struct StatusStyle(String);
+pub struct StatusLeft(String);
+pub struct StatusLeftLength(u32);
+
+pub struct SessionStatus<'a> {
+    /* transport, tmux prefix, stable session id */
+}
+
+pub struct SessionStatusSnapshot {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+pub struct SessionStatusOverrides {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+impl Target {
+    pub async fn tags(&self, prefix: &str) -> Result<SessionTags<'_>>;
+    pub async fn status(&self) -> Result<SessionStatus<'_>>;
+}
+
+impl SessionTags<'_> {
+    pub fn prefix(&self) -> &str;
+    pub async fn set(&self, key: &str, value: &str) -> Result<()>;
+    pub async fn read(&self, key: &str) -> Result<Option<String>>;
+    pub async fn list(&self) -> Result<Vec<SessionTag>>;
+    pub async fn unset(&self, key: &str) -> Result<()>;
+}
+
+impl SessionStatus<'_> {
+    pub async fn snapshot(&self) -> Result<SessionStatusSnapshot>;
+    pub async fn apply(&self, overrides: &SessionStatusOverrides) -> Result<()>;
+    pub async fn restore(&self, snapshot: &SessionStatusSnapshot) -> Result<()>;
+    pub async fn set_style(&self, style: &StatusStyle) -> Result<()>;
+    pub async fn unset_style(&self) -> Result<()>;
+    pub async fn read_local_style(&self) -> Result<Option<StatusStyle>>;
+    pub async fn set_left(&self, left: &StatusLeft) -> Result<()>;
+    pub async fn unset_left(&self) -> Result<()>;
+    pub async fn read_local_left(&self) -> Result<Option<StatusLeft>>;
+    pub async fn set_left_length(&self, length: StatusLeftLength) -> Result<()>;
+    pub async fn unset_left_length(&self) -> Result<()>;
+    pub async fn read_local_left_length(&self) -> Result<Option<StatusLeftLength>>;
+}
+```
+
+`HostHandle::list_tags_for_session_infos(prefix, sessions)` is the batch read
+companion for callers that already have a session listing and need to enrich it
+without one round trip per session.
+
+For `prefix = "mmux"` and `key = "role"`, the underlying tmux option is
+`@mmux/role`. `SessionTag` carries the namespace prefix as well as the
+unprefixed key so listed tags are self-describing and round-trippable.
+
+**Scope**:
+- Session targets only. Window and pane targets return `UnsupportedTarget`.
+- Prefix and key are stable ASCII components: letters, digits, `.`, `_`, `-`.
+- Values are UTF-8 strings, may be empty, reject control characters, and are
+  capped at 2 KiB.
+- Dispatch uses the stable `SessionId` from `SessionInfo`, not the display name.
+- `Target::tags(prefix)` validates the prefix and captures the command prefix and
+  stable session id once. There are no direct one-shot tag methods on `Target`;
+  all tag work goes through the `SessionTags` scope.
+- `HostHandle::list_tags_for_session_infos(prefix, sessions)` returns tags by
+  stable `SessionId` and includes empty vectors for sessions without matching
+  tags.
+- `SessionTags::unset(key)` removes the session-local user option with tmux
+  `set-option -u`; it does not encode deletion as an empty string.
+- `Target::status()` captures the same session identity and command prefix for
+  built-in status-bar options. `SessionStatus::snapshot/apply/restore` keep
+  attach-time temporary chrome semantics in the library. `StatusStyle` rejects
+  empty values; `StatusLeft` allows empty values to mean "render no left status
+  text"; `StatusLeftLength` is a fallible bounded numeric type. Reads return
+  only session-local overrides, not inherited/global values.
+- The helper constructor is async because resolving the command prefix can lazily
+  probe the tmux binary on the underlying transport before it is cached.
+
+**Rationale**: tmux user-defined options are the closest native mechanism to
+session metadata: they live in tmux state, survive for the session lifetime, and
+can be written by processes inside the session. Keeping this API session-only
+avoids a single method whose meaning changes across session/window/pane scopes.
+
+**Command boundary**: The implementation uses direct tmux option commands through
+the existing control module (`set-option`, `show-option -q`, `show-options`) and
+does not run shell pipelines such as `grep`. Deletion uses `set-option -u -t
+<stable-session-id> @<prefix>/<key>` with no value argument. A persistent
+control-mode command client was not introduced for this slice because
+`tmux -C attach-session` creates an attached client and would perturb
+`attached_count`/client state for metadata polling. If the library later grows a
+non-attaching command channel, these helpers can move under it without changing
+the public contract.
 
 ### DC17: Type Safety via Target + TargetAddress
 
@@ -3893,27 +4079,20 @@ string, and `host.target(&spec)` queries tmux to verify the entity exists and re
 is preferred when components are known at compile time. This is the bridge from raw
 strings (CLI args, config files) to typed handles.
 
-### DC18: Composite Workstreams (Future)
+### DC18: Target Alias Groups (Future)
 
-**Status**: Deferred — documented for future reference. Single-target workstreams
-(`Fleet::bind()`) are in scope; composite workstreams require real usage patterns to
-inform membership lifecycle decisions.
+**Status**: Deferred — documented for future reference. Current Fleet aliases
+bind one name to one cross-host target. Multi-target grouping is out of scope for
+`libs/tmux` until consumers prove the lifecycle and monitoring requirements.
 
-**Concept**: Extend workstreams to group multiple (host, target) pairs under one name —
-e.g., "deploy" spans `web-1:build`, `db-1:migrate`, and `web-1:test`. This would
-compose with existing abstractions:
-
-- **`SinkFilter` by workstream**: Filter output by workstream name. The bus resolves
-  the workstream to its member targets at filter-match time.
-- **`JoinedStream` over a workstream**: `bus.subscribe()` with workstream-derived
-  filters, wrapped by `JoinedStream`, gives a consolidated labeled view.
-- **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
-  workstream with a single call.
+**Concept**: A higher layer could group multiple `(host, target)` pairs under one
+name, e.g. "deploy" spans `web-1:build`, `db-1:migrate`, and `web-1:test`, then
+derive ordinary `SinkFilter` values from the member targets.
 
 **Open questions** (to be resolved by usage):
 - What happens when a member target is killed or disconnected?
-- Can targets belong to multiple workstreams?
-- Should workstreams be defined in config or only programmatically?
+- Can targets belong to multiple groups?
+- Should groups be defined in config or only programmatically?
 
 ### DC25: Hierarchy Creation Symmetry on `Target`
 
@@ -4136,7 +4315,7 @@ into a single call with clear completion semantics and an exit code.
 - **Host-level `HostHandle::exec()`** (transport bypass): Rejected — runs outside tmux,
   so the command doesn't execute in the pane's environment (virtualenvs, working directory,
   shell aliases, env vars set by prior commands). The pane's shell is the ground truth for
-  the workstream's state; bypassing it loses that context.
+  the target's state; bypassing it loses that context.
 - **`tmux run-shell`**: Runs a command in tmux's server context, not in the pane's shell.
   Output appears in the pane but isn't easily captured programmatically. Doesn't inherit
   the pane's shell environment.
@@ -4543,18 +4722,18 @@ without embedding policy or decision logic.
 ### Phase 2c: Fleet Coordination + Routed Control
 
 **Goal**: Make `Fleet` the coordination layer for multi-host monitoring, aggregation,
-binding/workstream lookup, and routed control actions.
+target-alias lookup, and routed control actions.
 
 **Tasks**:
 1. Implement `fleet.rs` as a programmatic registry: connect hosts, assign aliases,
-   expose `host()`, `hosts()`, `output_bus()`, and workstream bindings
+   expose `host()`, `hosts()`, `output_bus()`, and target alias bindings
 2. Aggregate monitoring lifecycle across hosts with `start_monitoring()`,
    `start_monitoring_host()`, `stop_monitoring_host()`, and `shutdown()`
 3. Add convenience routing helpers (`send_text`, `send_keys`, `capture`, `target`)
    so external agents can act through Fleet without reimplementing lookup logic
 4. Preserve explicit per-host status tracking and per-target error isolation
 5. Unit/integration tests: multi-host connect with one failure, alias conflict
-   detection, workstream bind/find/unbind, routed action correctness
+   detection, target alias bind/find/unbind, routed action correctness
 
 **Deliverable**: Multi-host registry and routing layer that pairs naturally with
 external policy engines.
@@ -4563,7 +4742,7 @@ external policy engines.
 - `Fleet` can connect to multiple hosts concurrently with per-host isolation
 - `Fleet::output_bus()` exposes unified stream aggregation for all monitored hosts
 - `Fleet` can route control actions back to the correct bound host/target
-- Workstream bindings make stable target lookup possible without config DSLs
+- Target alias bindings make stable target lookup possible without config DSLs
 
 ### Phase 3: Agent-Facing API + CLI / Examples
 

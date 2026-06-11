@@ -46,6 +46,21 @@ pub enum DriverError {
     #[error("invalid argument '{name}': {reason}")]
     InvalidArgument { name: &'static str, reason: String },
 
+    #[error("malformed qualified name '{raw}'")]
+    MalformedQualifiedName { raw: String },
+
+    #[error("no current scope is selected")]
+    MissingCurrentScope,
+
+    #[error("unknown scope '{scope}'")]
+    UnknownScope { scope: String },
+
+    #[error("ambiguous name '{name}'; candidates: {candidates:?}")]
+    AmbiguousName {
+        name: String,
+        candidates: Vec<String>,
+    },
+
     #[error("failed to persist artifact {path}: {reason}")]
     Persist { path: PathBuf, reason: String },
 
@@ -62,6 +77,26 @@ impl DriverError {
         Self::InvalidArgument {
             name,
             reason: reason.into(),
+        }
+    }
+
+    pub fn malformed_qualified_name(raw: impl Into<String>) -> Self {
+        Self::MalformedQualifiedName { raw: raw.into() }
+    }
+
+    pub fn unknown_scope(scope: impl Into<String>) -> Self {
+        Self::UnknownScope {
+            scope: scope.into(),
+        }
+    }
+
+    pub fn ambiguous_name(
+        name: impl Into<String>,
+        candidates: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::AmbiguousName {
+            name: name.into(),
+            candidates: candidates.into_iter().map(Into::into).collect(),
         }
     }
 }

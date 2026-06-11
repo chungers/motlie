@@ -1,181 +1,205 @@
 # tmux Driver Integration
 
-## Scope
+## Current State
 
-This document records how the first `motlie-driver` vertical slice should
-integrate with `motlie-tmux`.
+This document records the tmux integration that now exists in `motlie-driver`.
 
-The first slice is:
+Implemented:
+- `driver::commands::tmux` as the single-host tmux command family
+- `driver::commands::tmux_app` as the multi-host / namespaced outer command family
+- shared tmux REPL and TUI frontends in `motlie_driver::tmux_frontend`
+- semantic resolution in the core driver via `CommandSet::Resolved`, `resolve_command`, and static `execute`
+- opt-in multi-host mode in `bins/tmux/driver` with `connect <ssh-uri> as <alias>`
 
-- REPL-owned
-- in-process
-- tmux resources only
-- feature-equivalent with `libs/tmux/examples/repl`
-- TUI-capable, including the current split-screen mirror flow
-
-The goal is to build `driver::commands::tmux`, `driver::repl`, and
-`driver::tui` on top of the tmux crate without breaking the current examples.
+The driver now supports both:
+- single-host mode: one `TmuxState`, namespace-less behavior
+- multi-host mode: one `TmuxAppState` with multiple named `TmuxState` connections
 
 ## Brownfield Constraint
 
-This step is brownfield.
+This integration remains brownfield with respect to `motlie-tmux`.
 
 That means:
+1. public tmux APIs already used by examples remain stable
+2. driver-facing tmux improvements are additive
+3. the driver consumes `motlie-tmux`; it does not move ownership semantics into it
 
-1. public tmux APIs already used by examples should remain stable
-2. driver-facing tmux improvements should be additive
-3. examples should not need to be rewritten just to keep compiling
+The examples and driver still rely on the stable tmux public surface around:
+- `HostHandle`
+- `Target`
+- monitor/session watch APIs
+- capture / send / transfer operations
 
-The examples currently depend directly on:
+## What Lives Where
 
-- `HostHandle::create_session`
-- `HostHandle::session`
-- `HostHandle::target`
-- `Target::new_window`
-- `Target::split_pane`
-- `Target::kill`
-- `Target::send_text`
-- `Target::send_keys`
-- `Target::sample_text`
-- `Target::capture_all`
-- `HostHandle::output_bus`
-- `HostHandle::start_monitoring_session`
-- `OutputBus::subscribe`
-
-Those are the APIs that should not be churned for the driver work.
-
-## What The Driver Needs
-
-The driver layer needs higher-level helpers around three recurring tmux tasks:
-
-1. session watch lifecycle
-2. reusable target discovery
-3. canonical target-string resolution
-
-The current examples implement those ad hoc.
-
-### Session watch lifecycle
-
-Both the plain REPL and the TUI manually compose:
-
-1. `output_bus.subscribe(...)`
-2. `start_monitoring_session(...)`
-3. `Subscription::history(...)`
-4. teardown with `unsubscribe`, `join`, and `shutdown`
-
-The driver wants one additive owned handle for that lifecycle.
-
-The tmux-side additive surface is:
-
-```rust
-pub struct SessionWatchOptions {
-    pub queue_capacity: usize,
-    pub history: HistoryOptions,
-}
-
-pub struct SessionWatchHandle { ... }
-
-impl HostHandle {
-    pub async fn watch_session(
-        &self,
-        session_name: &str,
-        opts: &SessionWatchOptions,
-    ) -> Result<SessionWatchHandle>;
-}
-```
-
-This does not replace the lower-level monitoring APIs. It simply packages the
-existing pattern into one driver-friendly handle.
-
-### Target discovery
-
-The current examples rebuild the session/window/pane tree inline for `targets`
-rendering and completion-oriented logic.
-
-The driver wants one reusable discovery snapshot so `targets`, tab completion,
-and TUI navigation can share the same source.
-
-The additive tmux-side surface is:
-
-```rust
-pub struct SessionTargetTree { ... }
-pub struct WindowTargetTree { ... }
-pub struct PaneTargetTree { ... }
-
-impl HostHandle {
-    pub async fn snapshot_targets(&self) -> Result<Vec<SessionTargetTree>>;
-    pub async fn list_target_strings(&self) -> Result<Vec<String>>;
-}
-```
-
-### Target-string resolution
-
-The current REPL and TUI both duplicate:
-
-1. `TargetSpec::parse(...)`
-2. `HostHandle::target(...)`
-
-The driver wants a single helper:
-
-```rust
-impl HostHandle {
-    pub async fn resolve_target_str(&self, target_str: &str) -> Result<Option<Target>>;
-}
-```
-
-## What Stays In tmux vs What Moves To driver
-
-### `motlie-tmux` keeps
+### `motlie-tmux` owns
 
 - lifecycle and transport logic
-- target/session/window/pane semantics
+- host/session/window/pane semantics
 - monitor supervision
 - output bus and history machinery
 - capture and transfer operations
+- additive helper APIs such as:
+  - `watch_session(...)`
+  - `snapshot_targets()`
+  - `list_target_strings()`
+  - `resolve_target_str(...)`
 
 ### `motlie-driver::commands::tmux` owns
 
-- command names and clap schema
-- driver session state
-- owned/imported/ephemeral semantics
-- command sequencing and orchestration
-- dynamic completion from live driver state plus tmux discovery
-- frontend-facing effects for REPL/TUI
+- the typed tmux command schema
+- single-host tmux driver state (`TmuxState`)
+- dynamic completion over sessions/targets/stream modes
+- retained local mirror history
+- REPL/TUI-facing command outputs and effects
 
-## First Vertical Slice State Model
+### `motlie-driver::commands::tmux_app` owns
 
-For the first slice, the driver should treat tmux state roughly as:
+- app-level multi-host commands:
+  - `connect`
+  - `disconnect`
+  - `use`
+  - `connections`
+- the multi-host app state (`TmuxAppState`)
+- semantic resolution from raw names into `(alias, command)` pairs
+- namespaced completion over `alias/...`
+- current-alias fallback when bare names are allowed
+
+## Semantic Resolution Model
+
+The tmux integration is the first real proof of the new core driver resolution stage.
+
+Flow:
+1. `clap` parses the command syntax
+2. `TmuxCommand` or `TmuxAppCommand` is created from matches
+3. `resolve_command(...)` performs sync in-memory scope resolution
+4. async execution runs against the selected `TmuxState`
+
+Single-host tmux keeps identity resolution:
+- parsed command == resolved command
+- no namespace layer
+
+Multi-host tmux adds a real resolution layer:
+- `alias/<session>` and `alias/<target>` resolve to one selected `TmuxState`
+- bare names resolve against `current` when allowed
+- explicit alias always wins over `current`
+
+## Multi-host State Shape
+
+The binary-level multi-host tmux context is:
 
 ```rust
-pub struct TmuxState {
-    pub host: HostHandle,
-    pub owned_sessions: HashSet<String>,
-    pub active_watch: Option<SessionWatchHandle>,
-    pub active_stream: Option<ManagedStream>,
+pub struct TmuxAppState {
+    connections: BTreeMap<String, TmuxState>,
+    current: Option<String>,
 }
 ```
 
-Important:
+Where:
+- `connections` maps alias -> connected tmux host state
+- `current` is the default alias selected by `use <alias>`
 
-- `owned_sessions` are the only tmux entities destroyed by default on driver close
-- watch/stream state is ephemeral child state
-- discovered targets are usable immediately, but not automatically owned
+`disconnect <alias>` behavior:
+- remove the alias from `connections`
+- call `shutdown_managed_state()` on that alias before dropping it
+- clear `current` if it pointed at the removed alias
 
-## Required Driver Work After tmux Helpers Exist
+Process-exit behavior in multi-host mode:
+- the top-level tmux driver now calls `shutdown_all_managed_state()` before exit
+- this ensures non-current aliases do not retain driver-managed watch/stream state after the session ends
 
-Once the additive tmux helpers are in place, the driver work becomes:
+## Command Resolution Rules
 
-1. define `TmuxCommand` as one typed family
-2. cover the union of plain REPL and TUI commands
-3. route both `driver::repl` and `driver::tui` through the same command engine
-4. replace binary-local parser logic with `clap`
-5. replace duplicated watch/discovery code with tmux helper APIs
+### App-level commands
 
-## Non-Goals For This Step
+These do not require `current`:
+- `connect <ssh-uri> as <alias>`
+- `disconnect <alias>`
+- `use <alias>`
+- `connections`
 
-1. do not move ownership semantics into `motlie-tmux`
-2. do not change the signatures of the existing example-facing APIs
-3. do not block driver work on a deep tmux crate redesign
+### Commands that accept `alias/<session>`
 
-The tmux crate only needs additive public lifecycle helpers to support the new
-driver architecture cleanly.
+These can resolve explicitly by alias:
+- `new-window <session> <name> ...`
+- `monitor start <session> [seconds]`
+- `history <session> [session...]`
+
+### Commands that accept `alias/<target>`
+
+These can resolve explicitly by alias:
+- `split-pane <target> ...`
+- `kill <target>`
+- `send <target> <text...>`
+- `keys <target> <keys...>`
+- `capture <target> <lines>`
+- `stream <target> ...`
+
+### Commands that require `current`
+
+These do not take an explicit qualified resource argument and therefore require
+`use <alias>` first in multi-host mode:
+- `create <name> ...`
+- `targets`
+- `mirror history ...`
+- `mirror clear`
+- `tui on`
+- `tui off`
+- `monitor stop`
+- `upload ...`
+- `download ...`
+
+Important rule:
+- multi-host `targets` does **not** implicitly fan out across every alias
+- if `current` is unset, bare `targets` returns `MissingCurrentScope`
+
+### `history` normalization rule
+
+One `history` command is constrained to one alias.
+
+Rules:
+- `history alpha/demo demo` resolves both names against `alpha`
+- `history alpha/demo beta/build` is rejected
+- if no session argument has an explicit alias, bare names resolve against `current`
+
+## Completion Model
+
+Completion follows the same rules as resolution.
+
+In single-host mode:
+- completion is driven from the one `TmuxState`
+
+In multi-host mode:
+- app-level commands complete aliases directly
+- if the user already typed `alias/...`, completion stays inside that alias
+- if `current` is set, bare completion resolves against the current alias
+- if `current` is not set, qualifying completions are returned as `alias/...`
+
+## Frontend Integration
+
+The shared tmux frontends in `motlie_driver::tmux_frontend` now work against both:
+- `CommandEngine<TmuxState, TmuxCommand>`
+- `CommandEngine<TmuxAppState, TmuxAppCommand>`
+
+That reuse is enabled by the `TmuxFrontendState` trait.
+
+The top-level binary stays an assembly layer:
+- single-host mode wires `TmuxState + TmuxCommand`
+- `--multi-host` wires `TmuxAppState + TmuxAppCommand`
+- REPL/TUI behavior stays shared above that
+
+## Current Verification Scope
+
+What this integration now proves:
+- the core driver resolution stage is compositional
+- a simple adapter can keep identity resolution
+- a larger app-level command family can add namespace-aware resolution without changing the shared frontend code
+- tmux is a working proof that future namespace-aware adapters, including VMM, do not need to bolt scope parsing into every `execute()` path
+
+## Non-goals
+
+This integration still does not:
+1. move resource lifecycle/business logic into `motlie-driver`
+2. make `motlie-tmux` depend on `motlie-driver`
+3. generalize a cross-subsystem orchestration layer yet
+4. add imported/remote proxy lifecycles beyond the current in-process tmux driver session

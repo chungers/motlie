@@ -1,0 +1,26 @@
+[package]
+name = "motlie-model-sherpa-onnx"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "sherpa-onnx streaming backend implementations for motlie-model ASR contracts"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Upstream sherpa-onnx currently publishes CPU static archives through the Rust crate.
+cuda = []
+
+[dependencies]
+async-trait = "0.1.89"
+motlie-model = { path = "../..", features = ["metrics-runtime"] }
+sherpa-onnx = "1.13.2"
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

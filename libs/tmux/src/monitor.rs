@@ -54,6 +54,11 @@ use crate::types::*;
 // ---------------------------------------------------------------------------
 
 /// Parsed control mode message from tmux.
+///
+/// `Notification` is intentionally retained for the future event-driven host
+/// watcher. The current `HostHandle::watch_host_events()` implementation uses
+/// polling plus snapshot reconciliation; monitor sessions handle live session
+/// rename notifications and otherwise preserve notification parsing coverage.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ControlModeMessage {
     /// `%output %<pane_id> <data>`
@@ -65,6 +70,8 @@ pub(crate) enum ControlModeMessage {
     /// Unrecognized line
     Unknown(String),
 }
+
+type SessionRenameCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// Parse a single control mode line.
 pub(crate) fn parse_control_line(line: &str) -> ControlModeMessage {
@@ -93,6 +100,15 @@ pub(crate) fn parse_control_line(line: &str) -> ControlModeMessage {
     } else {
         ControlModeMessage::Unknown(line.to_string())
     }
+}
+
+fn parse_session_renamed_notification(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("%session-renamed ")?;
+    let (session_id, new_name) = rest.split_once(' ')?;
+    if session_id.is_empty() || new_name.is_empty() {
+        return None;
+    }
+    Some((session_id.to_string(), decode_octal_escapes(new_name)))
 }
 
 /// Decode tmux control mode octal escapes (`\ooo`) to actual bytes.
@@ -139,11 +155,12 @@ struct PaneAssemblyState {
 }
 
 impl PaneAssemblyState {
-    fn new(pane_id: &str, session: &str) -> Self {
+    fn new(pane_id: &str, session_id: &str, session: &str) -> Self {
         PaneAssemblyState {
             sequence: 0,
             address: PaneAddress {
                 pane_id: pane_id.to_string(),
+                session_id: SessionId::new(session_id.to_string()).ok(),
                 session: session.to_string(),
                 // Window/pane indices unknown from control mode — use 0.
                 // These are display-only; pane_id is authoritative.
@@ -156,6 +173,7 @@ impl PaneAssemblyState {
 
 /// Monitors a single tmux session via control mode.
 pub struct SessionMonitor {
+    session_id: String,
     session_name: String,
     host_alias: String,
     socket: Option<TmuxSocket>,
@@ -164,17 +182,20 @@ pub struct SessionMonitor {
     tmux_bin: Option<String>,
     normalize: CaptureNormalizeMode,
     pane_states: HashMap<String, PaneAssemblyState>,
+    session_rename_callback: Option<SessionRenameCallback>,
 }
 
 impl SessionMonitor {
     pub fn new(session_name: String, host_alias: String) -> Self {
         SessionMonitor {
+            session_id: session_name.clone(),
             session_name,
             host_alias,
             socket: None,
             tmux_bin: None,
             normalize: CaptureNormalizeMode::Raw,
             pane_states: HashMap::new(),
+            session_rename_callback: None,
         }
     }
 
@@ -185,12 +206,32 @@ impl SessionMonitor {
         normalize: CaptureNormalizeMode,
     ) -> Self {
         SessionMonitor {
+            session_id: session_name.clone(),
             session_name,
             host_alias,
             socket: None,
             tmux_bin: None,
             normalize,
             pane_states: HashMap::new(),
+            session_rename_callback: None,
+        }
+    }
+
+    pub(crate) fn with_identity(
+        session_id: String,
+        session_name: String,
+        host_alias: String,
+        normalize: CaptureNormalizeMode,
+    ) -> Self {
+        SessionMonitor {
+            session_id,
+            session_name,
+            host_alias,
+            socket: None,
+            tmux_bin: None,
+            normalize,
+            pane_states: HashMap::new(),
+            session_rename_callback: None,
         }
     }
 
@@ -206,9 +247,14 @@ impl SessionMonitor {
         self
     }
 
+    pub(crate) fn with_session_rename_callback(mut self, callback: SessionRenameCallback) -> Self {
+        self.session_rename_callback = Some(callback);
+        self
+    }
+
     fn attach_command(&self) -> String {
         build_attach_command(
-            &self.session_name,
+            &self.session_id,
             self.socket.as_ref(),
             self.tmux_bin.as_deref(),
         )
@@ -228,6 +274,21 @@ impl SessionMonitor {
         }
     }
 
+    fn handle_session_renamed(&mut self, session_id: &str, new_name: &str) {
+        if session_id != self.session_id {
+            return;
+        }
+
+        self.session_name = new_name.to_string();
+        for state in self.pane_states.values_mut() {
+            state.address.session = new_name.to_string();
+        }
+
+        if let Some(callback) = &self.session_rename_callback {
+            callback(session_id, new_name);
+        }
+    }
+
     /// Process a parsed %output frame: return a TargetOutput.
     ///
     /// Applies the configured normalization mode (1.9a):
@@ -239,7 +300,9 @@ impl SessionMonitor {
         let state = self
             .pane_states
             .entry(pane_id.to_string())
-            .or_insert_with(|| PaneAssemblyState::new(pane_id, &self.session_name));
+            .or_insert_with(|| {
+                PaneAssemblyState::new(pane_id, &self.session_id, &self.session_name)
+            });
 
         state.sequence += 1;
 
@@ -334,9 +397,14 @@ impl SessionMonitor {
                                             Self::signal_startup_ready(startup_ready);
                                         }
                                     }
-                                    ControlModeMessage::Notification(_) => {
+                                    ControlModeMessage::Notification(line) => {
                                         if signals_startup_ready {
                                             Self::signal_startup_ready(startup_ready);
+                                        }
+                                        if let Some((session_id, new_name)) =
+                                            parse_session_renamed_notification(&line)
+                                        {
+                                            self.handle_session_renamed(&session_id, &new_name);
                                         }
                                     }
                                     ControlModeMessage::Unknown(line) => {
@@ -385,6 +453,8 @@ fn build_attach_command(
 /// underlying `Target`.
 pub struct SessionMonitorHandle {
     target: Target,
+    session_id: String,
+    display_name: Arc<std::sync::Mutex<String>>,
     stop_tx: watch::Sender<bool>,
     task: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<MonitorExitReason>>>>,
     health: Arc<std::sync::Mutex<MonitorHealth>>,
@@ -394,12 +464,16 @@ impl SessionMonitorHandle {
     /// Create a new handle. Called internally by HostHandle::start_monitoring_session.
     pub(crate) fn new(
         target: Target,
+        session_id: String,
+        display_name: Arc<std::sync::Mutex<String>>,
         stop_tx: watch::Sender<bool>,
         task: tokio::task::JoinHandle<Result<MonitorExitReason>>,
         health: Arc<std::sync::Mutex<MonitorHealth>>,
     ) -> Self {
         SessionMonitorHandle {
             target,
+            session_id,
+            display_name,
             stop_tx,
             task: std::sync::Mutex::new(Some(task)),
             health,
@@ -416,8 +490,7 @@ impl SessionMonitorHandle {
         let _ = self.stop_tx.send(true);
         let task = self.task.lock().expect("task lock poisoned").take();
         if let Some(task) = task {
-            task.await?
-                .map(|_| ())?;
+            task.await?.map(|_| ())?;
         }
         Ok(())
     }
@@ -434,6 +507,19 @@ impl SessionMonitorHandle {
     /// Get the underlying target.
     pub fn target(&self) -> &Target {
         &self.target
+    }
+
+    /// Stable tmux session id for this monitor.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Current best-known display name for this monitor.
+    pub fn display_name(&self) -> String {
+        self.display_name
+            .lock()
+            .expect("display name lock poisoned")
+            .clone()
     }
 }
 
@@ -464,30 +550,58 @@ impl MonitorHandle {
 
     /// Get a session monitor handle by name.
     pub fn get(&self, session: &str) -> Option<&SessionMonitorHandle> {
-        self.sessions.get(session)
+        self.sessions.get(session).or_else(|| {
+            self.sessions
+                .values()
+                .find(|handle| handle.session_id() == session || handle.display_name() == session)
+        })
     }
 
     /// Stop and remove a specific session's monitor.
     pub async fn stop_session(&mut self, name: &str) -> Result<()> {
-        let handle = self
+        let key = self
             .sessions
-            .remove(name)
+            .keys()
+            .find(|key| {
+                key.as_str() == name
+                    || self
+                        .sessions
+                        .get(*key)
+                        .is_some_and(|handle| handle.display_name() == name)
+            })
+            .cloned()
             .ok_or_else(|| Error::NotFound(format!("session '{}' not being monitored", name)))?;
+        let handle = self.sessions.remove(&key).expect("key selected from map");
         handle.shutdown().await
     }
 
+    /// Remove a specific session's monitor from aggregate bookkeeping.
+    pub(crate) fn remove_session(&mut self, name: &str) -> Option<SessionMonitorHandle> {
+        if self.sessions.contains_key(name) {
+            return self.sessions.remove(name);
+        }
+        let key = self
+            .sessions
+            .iter()
+            .find_map(|(key, handle)| (handle.display_name() == name).then(|| key.clone()))?;
+        self.sessions.remove(&key)
+    }
+
     /// Get a session monitor handle by TargetSpec.
-    /// Matches on the spec's session name.
     pub fn get_by_spec(&self, spec: &crate::TargetSpec) -> Option<&SessionMonitorHandle> {
-        self.sessions.get(spec.session_name())
+        if let Some(id) = spec.session_id_selector() {
+            self.get(id.as_str())
+        } else {
+            self.get(spec.session_name())
+        }
     }
 
     /// List currently active session names.
-    pub fn active_sessions(&self) -> Vec<&str> {
+    pub fn active_sessions(&self) -> Vec<String> {
         self.sessions
-            .iter()
-            .filter(|(_, h)| h.is_active())
-            .map(|(name, _)| name.as_str())
+            .values()
+            .filter(|h| h.is_active())
+            .map(SessionMonitorHandle::display_name)
             .collect()
     }
 
@@ -497,8 +611,11 @@ impl MonitorHandle {
     /// has exited (failed, stopped). Use this when reporting health status —
     /// per-session health is the ground truth (DC29), so terminal states must
     /// remain visible.
-    pub fn all_sessions(&self) -> Vec<&str> {
-        self.sessions.keys().map(|k| k.as_str()).collect()
+    pub fn all_sessions(&self) -> Vec<String> {
+        self.sessions
+            .values()
+            .map(SessionMonitorHandle::display_name)
+            .collect()
     }
 
     /// Number of monitored sessions.
@@ -578,6 +695,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_session_renamed_notification_extracts_id_and_name() {
+        assert_eq!(
+            parse_session_renamed_notification("%session-renamed $1 renamed"),
+            Some(("$1".to_string(), "renamed".to_string()))
+        );
+        assert_eq!(
+            parse_session_renamed_notification("%session-renamed $1 new\\040name"),
+            Some(("$1".to_string(), "new name".to_string()))
+        );
+        assert_eq!(
+            parse_session_renamed_notification("%session-changed $1 s"),
+            None
+        );
+    }
+
+    #[test]
     fn parse_unknown() {
         let msg = parse_control_line("some random output");
         assert!(matches!(msg, ControlModeMessage::Unknown(_)));
@@ -612,10 +745,7 @@ mod tests {
 
     #[test]
     fn decode_multiple_escapes() {
-        assert_eq!(
-            decode_octal_escapes("a\\012b\\011c\\040d"),
-            "a\nb\tc d"
-        );
+        assert_eq!(decode_octal_escapes("a\\012b\\011c\\040d"), "a\nb\tc d");
     }
 
     #[test]
@@ -639,10 +769,7 @@ mod tests {
     #[test]
     fn decode_utf8_four_byte() {
         // 🎉 is U+1F389, encoded as 0xF0 0x9F 0x8E 0x89 (octal 360 237 216 211)
-        assert_eq!(
-            decode_octal_escapes("\\360\\237\\216\\211"),
-            "🎉"
-        );
+        assert_eq!(decode_octal_escapes("\\360\\237\\216\\211"), "🎉");
     }
 
     #[test]
@@ -783,23 +910,39 @@ mod tests {
         Arc::new(std::sync::Mutex::new(MonitorHealth::Streaming))
     }
 
+    fn monitor_handle_for_test(
+        target: crate::host::Target,
+        stop_tx: watch::Sender<bool>,
+        task: tokio::task::JoinHandle<Result<MonitorExitReason>>,
+        health: Arc<std::sync::Mutex<MonitorHealth>>,
+    ) -> SessionMonitorHandle {
+        let session_id = target
+            .session_id()
+            .unwrap_or_else(|| target.session_name())
+            .to_string();
+        let display_name = Arc::new(std::sync::Mutex::new(target.session_name().to_string()));
+        SessionMonitorHandle::new(target, session_id, display_name, stop_tx, task, health)
+    }
+
     #[tokio::test]
     async fn monitor_handle_stop_session() {
         let target1 = crate::host::HostHandle::local().create_target_for_test("s1");
         let target2 = crate::host::HostHandle::local().create_target_for_test("s2");
         let (tx1, _) = watch::channel(false);
         let (tx2, _) = watch::channel(false);
-        let task1 = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
-        let task2 = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
+        let task1 =
+            tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
+        let task2 =
+            tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
         let mut sessions = HashMap::new();
         sessions.insert(
             "s1".to_string(),
-            SessionMonitorHandle::new(target1, tx1, task1, default_health()),
+            monitor_handle_for_test(target1, tx1, task1, default_health()),
         );
         sessions.insert(
             "s2".to_string(),
-            SessionMonitorHandle::new(target2, tx2, task2, default_health()),
+            monitor_handle_for_test(target2, tx2, task2, default_health()),
         );
         let mut handle = MonitorHandle::new(sessions);
 
@@ -817,11 +960,13 @@ mod tests {
     fn monitor_handle_get_by_spec() {
         let target = crate::host::HostHandle::local().create_target_for_test("build");
         let (tx, _) = watch::channel(false);
-        let task = tokio::runtime::Runtime::new().unwrap().spawn(async { Ok(MonitorExitReason::Stopped) });
+        let task = tokio::runtime::Runtime::new()
+            .unwrap()
+            .spawn(async { Ok(MonitorExitReason::Stopped) });
         let mut sessions = HashMap::new();
         sessions.insert(
             "build".to_string(),
-            SessionMonitorHandle::new(target, tx, task, default_health()),
+            monitor_handle_for_test(target, tx, task, default_health()),
         );
         let handle = MonitorHandle::new(sessions);
 
@@ -832,17 +977,47 @@ mod tests {
         assert!(handle.get_by_spec(&spec2).is_none());
     }
 
+    #[test]
+    fn monitor_handle_display_name_can_update_without_rekeying() {
+        let target = crate::host::HostHandle::local().create_target_for_test("build");
+        let (tx, _) = watch::channel(false);
+        let task = tokio::runtime::Runtime::new()
+            .unwrap()
+            .spawn(async { Ok(MonitorExitReason::Stopped) });
+        let display_name = Arc::new(std::sync::Mutex::new("build".to_string()));
+        let session_id = target.session_id().unwrap().to_string();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            session_id.clone(),
+            SessionMonitorHandle::new(
+                target,
+                session_id.clone(),
+                display_name.clone(),
+                tx,
+                task,
+                default_health(),
+            ),
+        );
+        let handle = MonitorHandle::new(sessions);
+
+        assert!(handle.get(&session_id).is_some());
+        assert_eq!(handle.all_sessions(), vec!["build".to_string()]);
+        *display_name.lock().unwrap() = "renamed".to_string();
+
+        assert!(handle.get(&session_id).is_some());
+        assert!(handle.get("renamed").is_some());
+        assert_eq!(handle.all_sessions(), vec!["renamed".to_string()]);
+    }
+
     // --- SessionMonitorHandle tests ---
 
     #[tokio::test]
     async fn monitor_handle_shutdown() {
-        let target = crate::host::HostHandle::local().create_target_for_test(
-            "test_session",
-        );
+        let target = crate::host::HostHandle::local().create_target_for_test("test_session");
         let (stop_tx, _stop_rx) = watch::channel(false);
         let task = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
-        let handle = SessionMonitorHandle::new(target, stop_tx, task, default_health());
+        let handle = monitor_handle_for_test(target, stop_tx, task, default_health());
         // Shutdown waits for the task to finish
         handle.shutdown().await.unwrap();
         assert!(!handle.is_active());
@@ -857,8 +1032,7 @@ mod tests {
 
         // Simulate control mode output: two %output frames then EOF
         let control_output = b"%output %5 hello world\n%output %6 second pane\n";
-        let mock = MockTransport::new()
-            .with_shell_data(vec![control_output.to_vec()]);
+        let mock = MockTransport::new().with_shell_data(vec![control_output.to_vec()]);
         let mut shell = mock.open_shell_for_test().await;
 
         let bus = OutputBus::new();
@@ -900,6 +1074,61 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[tokio::test]
+    async fn monitor_updates_display_name_and_existing_panes_on_session_renamed() {
+        use crate::sink::{OutputBus, SinkEvent};
+        use crate::transport::MockTransport;
+
+        let control_output = b"%output %5 before\n%session-renamed $1 new\n%output %5 after\n";
+        let mock = MockTransport::new().with_shell_data(vec![control_output.to_vec()]);
+        let mut shell = mock.open_shell_for_test().await;
+
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let mut rx = sub.into_receiver();
+
+        let display_name = Arc::new(std::sync::Mutex::new("old".to_string()));
+        let callback_display_name = display_name.clone();
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let mut monitor = SessionMonitor::with_identity(
+            "$1".to_string(),
+            "old".to_string(),
+            "localhost".to_string(),
+            CaptureNormalizeMode::Raw,
+        )
+        .with_session_rename_callback(Arc::new(move |session_id, new_name| {
+            assert_eq!(session_id, "$1");
+            *callback_display_name.lock().unwrap() = new_name.to_string();
+        }));
+
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut ready = Some(ready_tx);
+        let result = monitor
+            .run(&mut shell, &bus, stop_rx, &mut ready)
+            .await
+            .unwrap();
+        assert_eq!(result, MonitorExitReason::ConnectionLost);
+        ready_rx.await.expect("ready signal should be sent");
+        assert_eq!(*display_name.lock().unwrap(), "new");
+
+        match rx.try_recv().unwrap() {
+            SinkEvent::Data(out) => {
+                assert_eq!(out.content, "before");
+                assert_eq!(out.session_name(), "old");
+                assert_eq!(out.session_id(), Some("$1"));
+            }
+            other => panic!("expected Data, got {:?}", other),
+        }
+        match rx.try_recv().unwrap() {
+            SinkEvent::Data(out) => {
+                assert_eq!(out.content, "after");
+                assert_eq!(out.session_name(), "new");
+                assert_eq!(out.session_id(), Some("$1"));
+            }
+            other => panic!("expected Data, got {:?}", other),
+        }
+    }
+
     // --- MonitorHealth tests (DC29, 4.2a) ---
 
     #[tokio::test]
@@ -909,7 +1138,7 @@ mod tests {
         let (stop_tx, _) = watch::channel(false);
         let task = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
-        let handle = SessionMonitorHandle::new(target, stop_tx, task, health.clone());
+        let handle = monitor_handle_for_test(target, stop_tx, task, health.clone());
         assert_eq!(handle.health(), MonitorHealth::Streaming);
 
         // Simulate health transition
@@ -926,8 +1155,7 @@ mod tests {
         use crate::transport::MockTransport;
 
         let control_output = b"%output %5 hello\n";
-        let mock = MockTransport::new()
-            .with_shell_data(vec![control_output.to_vec()]);
+        let mock = MockTransport::new().with_shell_data(vec![control_output.to_vec()]);
         let mut shell = mock.open_shell_for_test().await;
 
         let bus = OutputBus::new();
@@ -944,7 +1172,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, MonitorExitReason::ConnectionLost);
-        ready_rx.await.expect("ready signal should be sent before EOF");
+        ready_rx
+            .await
+            .expect("ready signal should be sent before EOF");
 
         // Verify data was still published before EOF
         match rx.try_recv().unwrap() {
