@@ -1185,11 +1185,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
 }
 
 fn effective_prebuffer_chunks(configured_chunks: usize, text_chunk_count: usize) -> usize {
-    if text_chunk_count > 1 {
-        configured_chunks.max(2).min(text_chunk_count)
-    } else {
-        configured_chunks.max(1)
-    }
+    configured_chunks.max(1).min(text_chunk_count.max(1))
 }
 
 fn prepared_frame_count(chunks: &[PreparedSpeechChunk]) -> usize {
@@ -1533,6 +1529,10 @@ mod tests {
             self.second_started.notified().await;
         }
 
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
         fn release_second_call(&self) {
             self.release_second.notify_waiters();
         }
@@ -1651,7 +1651,8 @@ mod tests {
             &tts,
             LiveTtsBackend::Kokoro82m,
             gateway_call_id.clone(),
-            "Hello world. Second sentence blocks here.".to_string(),
+            "Hello world. Second sentence blocks here. Third sentence confirms chunking."
+                .to_string(),
             "test say",
         )
         .await
@@ -1690,7 +1691,7 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
         }
-        assert_eq!(frame_count, 10);
+        assert_eq!(frame_count, 15);
         assert!(
             saw_mark,
             "speech job should enqueue a mark after all chunks"
@@ -1698,7 +1699,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_prebuffer_waits_for_two_chunks_when_speech_is_chunked() {
+    async fn default_prebuffer_starts_after_first_chunk_when_speech_is_chunked() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = {
             let mut guard = state.write().await;
@@ -1741,24 +1742,33 @@ mod tests {
             &tts,
             LiveTtsBackend::Kokoro82m,
             gateway_call_id.clone(),
-            "Hello world. Second sentence blocks here.".to_string(),
+            "Hello world. Second sentence blocks here. Third sentence confirms chunking."
+                .to_string(),
             "test say",
         )
         .await
         .expect("speech should be queued");
 
-        timeout(Duration::from_secs(1), kokoro.wait_for_second_call())
+        let first_command = timeout(Duration::from_secs(1), rx.recv())
             .await
-            .expect("second text chunk synthesis should start");
-        assert!(
-            timeout(Duration::from_millis(200), rx.recv())
-                .await
-                .is_err(),
-            "default prebuffer should not start playback after one chunk"
-        );
+            .expect("default prebuffer should start playback after one chunk")
+            .expect("speech job should emit a media command");
+        match first_command {
+            OutboundMediaCommand::Frame(frame) => {
+                assert_eq!(frame.playback_id, queued.playback_id);
+            }
+            other => panic!("expected first frame before second chunk completes, got {other:?}"),
+        }
+        timeout(Duration::from_secs(1), async {
+            while kokoro.calls() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("second text chunk synthesis should start");
 
         kokoro.release_second_call();
-        let mut frame_count = 0usize;
+        let mut frame_count = 1usize;
         for _ in 0..16 {
             let Some(command) = timeout(Duration::from_secs(1), rx.recv())
                 .await
@@ -1778,7 +1788,7 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
         }
-        assert_eq!(frame_count, 10);
+        assert_eq!(frame_count, 15);
     }
 
     #[tokio::test]
