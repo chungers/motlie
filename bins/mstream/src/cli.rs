@@ -367,6 +367,14 @@ pub struct SendArgs {
         help = "Verify the prompt is visible after delivery; bracketed sends retry once with literal paste before failing."
     )]
     pub verify_delivery: bool,
+    #[arg(
+        long = "input-quiet-for",
+        value_parser = parse_duration_secs,
+        default_value_t = DEFAULT_TIMER_INPUT_QUIET_FOR_SECS
+    )]
+    pub input_quiet_for_secs: u64,
+    #[arg(long)]
+    pub no_input_guard: bool,
     #[arg(long, value_enum)]
     pub require_state: Option<AgentState>,
     #[arg(long, value_enum)]
@@ -387,6 +395,11 @@ impl SendArgs {
             submit_retries: if enter { self.submit_retries } else { 0 },
             submit_retry_delay_ms: self.submit_retry_delay_ms,
             verify_delivery: self.verify_delivery,
+            input_quiet_for_secs: if self.no_input_guard {
+                None
+            } else {
+                Some(self.input_quiet_for_secs)
+            },
             require_state: self.require_state,
             set_state: self.set_state,
         })
@@ -421,6 +434,19 @@ pub struct BroadcastArgs {
     pub submit_retries: u8,
     #[arg(long, default_value_t = DEFAULT_SUBMIT_RETRY_DELAY_MS)]
     pub submit_retry_delay_ms: u64,
+    #[arg(
+        long,
+        help = "Verify each target prompt is visible after delivery; bracketed sends retry once with literal paste before failing."
+    )]
+    pub verify_delivery: bool,
+    #[arg(
+        long = "input-quiet-for",
+        value_parser = parse_duration_secs,
+        default_value_t = DEFAULT_TIMER_INPUT_QUIET_FOR_SECS
+    )]
+    pub input_quiet_for_secs: u64,
+    #[arg(long)]
+    pub no_input_guard: bool,
     #[arg(long)]
     pub role: Option<String>,
     #[arg(long, value_enum)]
@@ -438,6 +464,12 @@ impl BroadcastArgs {
             settle_ms: self.settle_ms,
             submit_retries: if enter { self.submit_retries } else { 0 },
             submit_retry_delay_ms: self.submit_retry_delay_ms,
+            verify_delivery: self.verify_delivery,
+            input_quiet_for_secs: if self.no_input_guard {
+                None
+            } else {
+                Some(self.input_quiet_for_secs)
+            },
             role: self.role,
             state: self.state,
         })
@@ -577,10 +609,17 @@ pub struct TimerStartArgs {
         help = "Write the prompt without performing the settle-delayed verified prompt submit."
     )]
     pub no_prompt_submit: bool,
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_SETTLE_MS)]
+    pub settle_ms: u64,
     #[arg(long, default_value_t = DEFAULT_TIMER_SUBMIT_RETRIES)]
     pub submit_retries: u8,
     #[arg(long, default_value_t = DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS)]
     pub submit_retry_delay_ms: u64,
+    #[arg(
+        long,
+        help = "Verify the timer prompt is visible after delivery; bracketed sends retry once with literal paste before failing."
+    )]
+    pub verify_delivery: bool,
     #[arg(
         long = "input-quiet-for",
         value_parser = parse_duration_secs,
@@ -614,8 +653,10 @@ impl TimerStartArgs {
             prompt: self.prompt,
             paste_mode: self.paste_mode,
             enter,
+            settle_ms: self.settle_ms,
             submit_retries: if enter { self.submit_retries } else { 0 },
             submit_retry_delay_ms: self.submit_retry_delay_ms,
+            verify_delivery: self.verify_delivery,
             input_quiet_for_secs: if self.no_input_guard {
                 None
             } else {
@@ -933,6 +974,40 @@ mod tests {
     }
 
     #[test]
+    fn send_allows_input_guard_override_and_disable() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "send",
+            "issue-453",
+            "local::agent",
+            "--text",
+            "Wake up.",
+            "--input-quiet-for",
+            "30s",
+        ])
+        .expect("send command parses");
+        let ClientRequest::Send(request) = cli.command.into_request().expect("send request") else {
+            panic!("expected send request");
+        };
+        assert_eq!(request.input_quiet_for_secs, Some(30));
+
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "send",
+            "issue-453",
+            "local::agent",
+            "--text",
+            "Wake up.",
+            "--no-input-guard",
+        ])
+        .expect("send command parses");
+        let ClientRequest::Send(request) = cli.command.into_request().expect("send request") else {
+            panic!("expected send request");
+        };
+        assert_eq!(request.input_quiet_for_secs, None);
+    }
+
+    #[test]
     fn broadcast_no_prompt_submit_disables_submit_retries() {
         let cli = Cli::try_parse_from([
             "mstream",
@@ -950,6 +1025,28 @@ mod tests {
         };
         assert!(!request.enter);
         assert_eq!(request.submit_retries, 0);
+    }
+
+    #[test]
+    fn broadcast_verify_delivery_and_input_guard_build_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "broadcast",
+            "issue-453",
+            "--text",
+            "Wake up.",
+            "--verify-delivery",
+            "--input-quiet-for",
+            "45s",
+        ])
+        .expect("broadcast command parses");
+
+        let request = cli.command.into_request().expect("broadcast request");
+        let ClientRequest::Broadcast(request) = request else {
+            panic!("expected broadcast request");
+        };
+        assert!(request.verify_delivery);
+        assert_eq!(request.input_quiet_for_secs, Some(45));
     }
 
     #[test]
@@ -1156,8 +1253,10 @@ mod tests {
         assert_eq!(request.prompt, "Wake up and poll.");
         assert_eq!(request.paste_mode, PasteMode::Bracketed);
         assert!(request.enter);
+        assert_eq!(request.settle_ms, DEFAULT_SUBMIT_SETTLE_MS);
         assert_eq!(request.submit_retries, 1);
         assert_eq!(request.submit_retry_delay_ms, 750);
+        assert!(!request.verify_delivery);
         assert_eq!(
             request.input_quiet_for_secs,
             Some(DEFAULT_TIMER_INPUT_QUIET_FOR_SECS)
@@ -1190,6 +1289,33 @@ mod tests {
         };
         assert_eq!(request.submit_retries, 2);
         assert_eq!(request.submit_retry_delay_ms, 1000);
+    }
+
+    #[test]
+    fn timer_start_command_allows_settle_and_delivery_verification() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "start",
+            "issue-337-poll",
+            "--every",
+            "5m",
+            "--target",
+            "local::orchestrator",
+            "--prompt",
+            "Wake up and poll.",
+            "--settle-ms",
+            "1250",
+            "--verify-delivery",
+        ])
+        .expect("timer command parses");
+
+        let request = cli.command.into_request().expect("timer request");
+        let ClientRequest::TimerStart(request) = request else {
+            panic!("expected timer start request");
+        };
+        assert_eq!(request.settle_ms, 1250);
+        assert!(request.verify_delivery);
     }
 
     #[test]

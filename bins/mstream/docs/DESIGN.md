@@ -692,6 +692,8 @@ mstream timer start issue-337-poll \
   --target local::codex-orchestrator \
   --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize material changes, and decide whether to keep, change, or stop this timer." \
   --paste-mode bracketed \
+  --settle-ms 500 \
+  --verify-delivery \
   --submit-retries 1 \
   --submit-retry-delay-ms 750
 
@@ -705,22 +707,23 @@ accepts seconds or minutes. `--target` uses `<host-alias>::<session>` and must
 resolve when the timer starts. `--prompt` is not persisted outside daemon
 memory. The default behavior submits the prompt with Enter; `--no-enter` leaves
 the text in the pane and disables submit retries. `--paste-mode
-bracketed|literal` matches `send`/`broadcast` and defaults to bracketed.
+bracketed|literal`, `--settle-ms`, and `--verify-delivery` match the
+send/broadcast delivery primitive surface.
 
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key after pasted text. The retry policy is
-configurable with `--submit-retries` and `--submit-retry-delay-ms`. Retries
-send only extra Enter keys, never the prompt text, so the duplicate-submission
-risk is limited to the submit action.
+configurable with `--settle-ms`, `--submit-retries`, and
+`--submit-retry-delay-ms`. Retries send only extra Enter keys, never the prompt
+text, so the duplicate-submission risk is limited to the submit action.
 
-Timers default to an attached-client input guard. Before sending prompt text or
-submit retries, `mstream` asks `libs/tmux` for the target session's most recent
-attached-client activity. If input was observed within `--input-quiet-for`
-(default `10s`), the timer does not send keys, increments `defer_count`, records
-`last_deferred_at`, `last_defer_reason=recent_client_input`, records the latest
-input timestamp, and reschedules the next attempt after the remaining quiet
-window. `--no-input-guard` disables this behavior for cases where collision
-avoidance is not wanted.
+Timers, send, and broadcast default to an attached-client input guard. Before
+sending prompt text or submit retries, `mstream` asks `libs/tmux` for the target
+session's most recent attached-client activity. If input was observed within
+`--input-quiet-for` (default `10s`), the managed channel does not send keys.
+Timers additionally increment `defer_count`, record `last_deferred_at`,
+`last_defer_reason=recent_client_input`, record the latest input timestamp, and
+reschedule the next attempt after the remaining quiet window. `--no-input-guard`
+disables this behavior for cases where collision avoidance is not wanted.
 
 Timers are intentionally best-effort. If the target is gone, the host is
 disconnected, or the activity query/send-keys path fails, `mstream` records

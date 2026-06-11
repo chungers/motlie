@@ -445,8 +445,10 @@ struct TimerRecord {
     prompt: String,
     paste_mode: PasteMode,
     enter: bool,
+    settle_ms: u64,
     submit_retries: u8,
     submit_retry_delay_ms: u64,
+    verify_delivery: bool,
     input_quiet_for_secs: Option<u64>,
     generation: u64,
     started_at: DateTime<Utc>,
@@ -671,12 +673,14 @@ struct MmuxLabelApplyResult {
 struct BroadcastTarget {
     target: ResolvedTarget,
     state: AgentState,
+    verify_delivery: bool,
 }
 
 struct BroadcastTargetSnapshot {
     target: SessionTarget,
     handle: HostHandle,
     state: AgentState,
+    verify_delivery: bool,
 }
 
 struct RecruitPlan {
@@ -705,8 +709,10 @@ struct TimerFireSnapshot {
     prompt: String,
     paste_mode: PasteMode,
     enter: bool,
+    settle_ms: u64,
     submit_retries: u8,
     submit_retry_delay_ms: u64,
+    delivery_ack_requested: bool,
     input_quiet_for_secs: Option<u64>,
     generation: u64,
     message_id: Option<String>,
@@ -719,6 +725,7 @@ struct TimerDeliveryRecord {
     target: SessionTarget,
     prompt: String,
     generation: u64,
+    delivery_ack_requested: bool,
 }
 
 enum TimerFireOutcome {
@@ -917,10 +924,11 @@ impl DaemonState {
             agent::DeliveryEvent::Submitted {
                 message_ids,
                 verified,
+                delivery_verified,
                 ..
             } => {
                 let message_ids = agent_message_id_keys(&message_ids);
-                state.record_timer_delivery_submitted(&message_ids, verified)?;
+                state.record_timer_delivery_submitted(&message_ids, verified, delivery_verified)?;
             }
             agent::DeliveryEvent::Failed {
                 message_ids, error, ..
@@ -1872,11 +1880,11 @@ impl DaemonState {
                     );
                 }
             }
-            let verify_delivery = request.verify_delivery
-                || (request.paste_mode == PasteMode::Bracketed
-                    && record
-                        .and_then(|record| record.agent.as_deref())
-                        .is_some_and(agent_name_is_codex));
+            let verify_delivery = delivery_verification_requested(
+                request.verify_delivery,
+                request.paste_mode,
+                record.and_then(|record| record.agent.as_deref()),
+            );
             (current_state, verify_delivery)
         };
         if request.interrupt_first {
@@ -1900,6 +1908,7 @@ impl DaemonState {
                         request.submit_retries,
                         request.submit_retry_delay_ms,
                     ),
+                    quiet_guard: quiet_guard_policy(request.input_quiet_for_secs),
                     timeout: Duration::from_secs(120),
                 },
             )
@@ -1947,6 +1956,7 @@ impl DaemonState {
             "delivery_ack_requested": verify_delivery,
             "delivery_verified": outcome.delivery_verified(),
             "submit_verified": outcome.verified(),
+            "input_quiet_for_secs": option_u64_json(request.input_quiet_for_secs),
             "cursor": cursor,
         })];
         if let Some(change) = change {
@@ -2012,24 +2022,47 @@ impl DaemonState {
             let channel =
                 Self::agent_channel_for_resolved_shared(Arc::clone(&shared), &target.target)
                     .await?;
-            let queued = channel
-                .enqueue(
-                    Self::agent_message(
-                        agent::MessageSource::broadcast("mstream.broadcast"),
-                        request.text.clone(),
-                        request.paste_mode,
-                    ),
-                    agent::EnqueueOptions {
-                        submit: Self::agent_submit_policy(
-                            request.enter,
-                            request.settle_ms,
-                            request.submit_retries,
-                            request.submit_retry_delay_ms,
-                        ),
-                        quiet_guard: agent::QuietGuardPolicy::Default,
-                    },
+            let message = Self::agent_message(
+                agent::MessageSource::broadcast("mstream.broadcast"),
+                request.text.clone(),
+                request.paste_mode,
+            )
+            .with_delivery_verification(target.verify_delivery);
+            let submit = Self::agent_submit_policy(
+                request.enter,
+                request.settle_ms,
+                request.submit_retries,
+                request.submit_retry_delay_ms,
+            );
+            let quiet_guard = quiet_guard_policy(request.input_quiet_for_secs);
+            let (message_id, delivery_verified, submit_verified) = if target.verify_delivery {
+                let outcome = channel
+                    .send(
+                        message,
+                        agent::SendOptions {
+                            submit,
+                            quiet_guard,
+                            timeout: Duration::from_secs(120),
+                        },
+                    )
+                    .await?;
+                (
+                    outcome.message_id().to_string(),
+                    outcome.delivery_verified(),
+                    outcome.verified(),
                 )
-                .await?;
+            } else {
+                let queued = channel
+                    .enqueue(
+                        message,
+                        agent::EnqueueOptions {
+                            submit,
+                            quiet_guard,
+                        },
+                    )
+                    .await?;
+                (queued.message_id.to_string(), false, false)
+            };
             Self::touch_resolved_session_shared(Arc::clone(&shared), &target.target).await?;
             sent += 1;
             let cursor = shared.lock().await.record_event(
@@ -2045,7 +2078,13 @@ impl DaemonState {
                 "op": "broadcast_sent",
                 "workstream": request.workstream,
                 "target": target.target.spec.to_string(),
-                "message_id": queued.message_id.to_string(),
+                "message_id": message_id,
+                "paste_mode": request.paste_mode.as_str(),
+                "enter": request.enter,
+                "delivery_ack_requested": target.verify_delivery,
+                "delivery_verified": delivery_verified,
+                "submit_verified": submit_verified,
+                "input_quiet_for_secs": option_u64_json(request.input_quiet_for_secs),
                 "cursor": cursor,
             }));
         }
@@ -2533,8 +2572,10 @@ impl DaemonState {
                     prompt: request.prompt,
                     paste_mode: request.paste_mode,
                     enter: request.enter,
+                    settle_ms: request.settle_ms,
                     submit_retries,
                     submit_retry_delay_ms: request.submit_retry_delay_ms,
+                    verify_delivery: request.verify_delivery,
                     input_quiet_for_secs: request.input_quiet_for_secs,
                     generation,
                     started_at,
@@ -2578,8 +2619,10 @@ impl DaemonState {
             "every_secs": request.every_secs,
             "paste_mode": request.paste_mode.as_str(),
             "enter": request.enter,
+            "settle_ms": request.settle_ms,
             "submit_retries": submit_retries,
             "submit_retry_delay_ms": request.submit_retry_delay_ms,
+            "verify_delivery": request.verify_delivery,
             "input_quiet_for_secs": option_u64_json(request.input_quiet_for_secs),
             "generation": generation,
             "upserted": previous_generation.is_some(),
@@ -2640,6 +2683,14 @@ impl DaemonState {
             if required_generation.is_some_and(|generation| timer.generation != generation) {
                 bail!("timer '{name}' is no longer active");
             }
+            let delivery_ack_requested = delivery_verification_requested(
+                timer.verify_delivery,
+                timer.paste_mode,
+                state
+                    .sessions
+                    .get(&timer.target)
+                    .and_then(|record| record.agent.as_deref()),
+            );
             TimerFireSnapshot {
                 name: timer.name.clone(),
                 workstream: timer.workstream.clone(),
@@ -2649,8 +2700,10 @@ impl DaemonState {
                 prompt: timer.prompt.clone(),
                 paste_mode: timer.paste_mode,
                 enter: timer.enter,
+                settle_ms: timer.settle_ms,
                 submit_retries: timer.submit_retries,
                 submit_retry_delay_ms: timer.submit_retry_delay_ms,
+                delivery_ack_requested,
                 input_quiet_for_secs: timer.input_quiet_for_secs,
                 generation: timer.generation,
                 message_id: None,
@@ -2693,19 +2746,16 @@ impl DaemonState {
                         agent::MessageSource::timer(format!("mstream.timer:{}", snapshot.name)),
                         snapshot.prompt.clone(),
                         snapshot.paste_mode,
-                    ),
+                    )
+                    .with_delivery_verification(snapshot.delivery_ack_requested),
                     agent::EnqueueOptions {
                         submit: Self::agent_submit_policy(
                             snapshot.enter,
-                            500,
+                            snapshot.settle_ms,
                             snapshot.submit_retries,
                             snapshot.submit_retry_delay_ms,
                         ),
-                        quiet_guard: if snapshot.input_quiet_for_secs.is_some() {
-                            agent::QuietGuardPolicy::Default
-                        } else {
-                            agent::QuietGuardPolicy::Disabled
-                        },
+                        quiet_guard: quiet_guard_policy(snapshot.input_quiet_for_secs),
                     },
                 )
                 .await?;
@@ -2734,6 +2784,7 @@ impl DaemonState {
                                     target: snapshot.target.clone(),
                                     prompt: snapshot.prompt.clone(),
                                     generation: snapshot.generation,
+                                    delivery_ack_requested: snapshot.delivery_ack_requested,
                                 },
                             )
                         });
@@ -4605,6 +4656,7 @@ impl DaemonState {
         &mut self,
         message_ids: &[String],
         verified: bool,
+        delivery_verified: bool,
     ) -> anyhow::Result<()> {
         let records = self.take_timer_delivery_records(message_ids);
         if records.is_empty() {
@@ -4626,14 +4678,30 @@ impl DaemonState {
             };
             if generation_matches {
                 if let Some(workstream) = &record.workstream {
-                    let suffix = if verified { "verified" } else { "unverified" };
+                    let submit_suffix = if verified {
+                        "submit verified"
+                    } else {
+                        "submit unverified"
+                    };
+                    let delivery_suffix = if record.delivery_ack_requested {
+                        if delivery_verified {
+                            "delivery verified"
+                        } else {
+                            "delivery unverified"
+                        }
+                    } else {
+                        "delivery not requested"
+                    };
                     self.record_event(
                         workstream,
                         EventDraft::new("timer_fired")
                             .direction_to_agent()
                             .target(&record.target)
                             .text(record.prompt.clone())
-                            .summary(format!("timer fired: {} ({suffix})", record.name)),
+                            .summary(format!(
+                                "timer fired: {} ({submit_suffix}, {delivery_suffix})",
+                                record.name
+                            )),
                     )?;
                 }
             }
@@ -4877,6 +4945,7 @@ impl DaemonState {
             selected.push(BroadcastTarget {
                 target: resolved,
                 state: snapshot.state,
+                verify_delivery: snapshot.verify_delivery,
             });
         }
         Ok(selected)
@@ -4906,6 +4975,11 @@ impl DaemonState {
                 handle: self.host_handle(target.host_alias())?,
                 target,
                 state: session.state,
+                verify_delivery: delivery_verification_requested(
+                    request.verify_delivery,
+                    request.paste_mode,
+                    session.agent.as_deref(),
+                ),
             });
         }
         Ok(selected)
@@ -5211,8 +5285,10 @@ impl TimerRecord {
             "every_secs": self.every_secs,
             "paste_mode": self.paste_mode.as_str(),
             "enter": self.enter,
+            "settle_ms": self.settle_ms,
             "submit_retries": self.submit_retries,
             "submit_retry_delay_ms": self.submit_retry_delay_ms,
+            "verify_delivery": self.verify_delivery,
             "input_quiet_for_secs": option_u64_json(self.input_quiet_for_secs),
             "generation": self.generation,
             "started_at": self.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -5575,6 +5651,20 @@ fn agent_name_is_codex(agent: &str) -> bool {
         .is_some_and(|name| name == "codex" || name.starts_with("codex-"))
 }
 
+fn delivery_verification_requested(
+    explicit: bool,
+    paste_mode: PasteMode,
+    agent: Option<&str>,
+) -> bool {
+    explicit || (paste_mode == PasteMode::Bracketed && agent.is_some_and(agent_name_is_codex))
+}
+
+fn quiet_guard_policy(input_quiet_for_secs: Option<u64>) -> agent::QuietGuardPolicy {
+    input_quiet_for_secs
+        .map(|secs| agent::QuietGuardPolicy::For(Duration::from_secs(secs)))
+        .unwrap_or(agent::QuietGuardPolicy::Disabled)
+}
+
 fn encode_agent_args_tag(agent_args: &[String]) -> String {
     serde_json::to_string(agent_args).expect("agent args should serialize")
 }
@@ -5599,6 +5689,9 @@ fn timer_fire_outcome_json(outcome: TimerFireOutcome) -> Value {
             "target": snapshot.target.to_string(),
             "generation": snapshot.generation,
             "paste_mode": snapshot.paste_mode.as_str(),
+            "enter": snapshot.enter,
+            "settle_ms": snapshot.settle_ms,
+            "delivery_ack_requested": snapshot.delivery_ack_requested,
             "input_quiet_for_secs": option_u64_json(snapshot.input_quiet_for_secs),
             "message_id": snapshot.message_id,
         }),
@@ -6035,8 +6128,10 @@ mod tests {
             prompt: "Wake up.".to_string(),
             paste_mode: PasteMode::Bracketed,
             enter: true,
+            settle_ms: 500,
             submit_retries: 0,
             submit_retry_delay_ms: 0,
+            verify_delivery: false,
             input_quiet_for_secs: None,
             generation: 1,
             started_at,
@@ -7361,6 +7456,7 @@ mod tests {
                 target: target.clone(),
                 prompt: "Wake up.".to_string(),
                 generation: 1,
+                delivery_ack_requested: false,
             }],
         );
         let shared = Arc::new(Mutex::new(state));
@@ -8520,8 +8616,10 @@ mod tests {
             prompt: "Wake up.".to_string(),
             paste_mode: PasteMode::Bracketed,
             enter: true,
+            settle_ms: 500,
             submit_retries: 1,
             submit_retry_delay_ms: 750,
+            verify_delivery: false,
             input_quiet_for_secs: Some(10),
             generation: 3,
             started_at,
@@ -8563,8 +8661,10 @@ mod tests {
             prompt: prompt.to_string(),
             paste_mode: PasteMode::Bracketed,
             enter: true,
+            settle_ms: 500,
             submit_retries: 1,
             submit_retry_delay_ms: 750,
+            verify_delivery: false,
             input_quiet_for_secs: Some(10),
         };
 
@@ -8585,6 +8685,60 @@ mod tests {
         assert_eq!(timer.generation, 2);
         assert_eq!(timer.prompt, "second");
         assert_eq!(timer.paste_mode, PasteMode::Bracketed);
+    }
+
+    #[tokio::test]
+    async fn broadcast_verify_delivery_reports_ack_per_target() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ worker $1 100 0 1  150\n")
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "hello\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        state.channel_manager = agent::ChannelManager::new(agent::ChannelConfig {
+            coalesce_window: Duration::ZERO,
+            coalesce_max_wait: Duration::ZERO,
+            preserve_composer: false,
+            ..agent::ChannelConfig::default()
+        });
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-453");
+        state
+            .add_session_to_workstream(
+                "issue-453",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::broadcast_shared(
+            shared,
+            BroadcastRequest {
+                workstream: "issue-453".to_string(),
+                text: "hello".to_string(),
+                paste_mode: PasteMode::Bracketed,
+                enter: false,
+                settle_ms: 500,
+                submit_retries: 0,
+                submit_retry_delay_ms: 750,
+                verify_delivery: true,
+                input_quiet_for_secs: None,
+                role: None,
+                state: None,
+            },
+        )
+        .await
+        .expect("broadcast");
+
+        assert_eq!(records[0]["op"], "broadcast_sent");
+        assert_eq!(records[0]["delivery_ack_requested"], true);
+        assert_eq!(records[0]["delivery_verified"], true);
+        assert_eq!(records[0]["submit_verified"], false);
     }
 
     #[tokio::test]
@@ -8635,6 +8789,60 @@ mod tests {
         assert!(!rendered.contains("\\x1b[200~"));
     }
 
+    #[tokio::test]
+    async fn timer_fire_auto_verifies_codex_bracketed_delivery() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ worker $1 100 0 1  150\n")
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "Wake up.\n")
+            .with_default("");
+        let commands = mock.command_log();
+        let mut state = DaemonState::default();
+        state.channel_manager = agent::ChannelManager::new(agent::ChannelConfig {
+            coalesce_window: Duration::ZERO,
+            coalesce_max_wait: Duration::ZERO,
+            preserve_composer: false,
+            ..agent::ChannelConfig::default()
+        });
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-355");
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        let mut timer = timer_record("poll", target, Some(100));
+        timer.enter = false;
+        timer.input_quiet_for_secs = None;
+        state.timers.insert("poll".to_string(), timer);
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::timer_fire_shared(shared, "poll".to_string())
+            .await
+            .expect("timer fire");
+
+        assert_eq!(records[0]["delivery_ack_requested"], true);
+        for _ in 0..20 {
+            if commands
+                .lock()
+                .expect("command log")
+                .iter()
+                .any(|command| command.contains("capture-pane"))
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        let rendered = commands.lock().expect("command log").join("\n");
+        assert!(rendered.contains("capture-pane"));
+    }
+
     #[test]
     fn timer_list_filters_by_workstream() {
         let mut state = DaemonState::default();
@@ -8655,8 +8863,10 @@ mod tests {
                     prompt: "Wake up.".to_string(),
                     paste_mode: PasteMode::Bracketed,
                     enter: true,
+                    settle_ms: 500,
                     submit_retries: 1,
                     submit_retry_delay_ms: 750,
+                    verify_delivery: false,
                     input_quiet_for_secs: Some(10),
                     generation: 1,
                     started_at,
@@ -8700,8 +8910,10 @@ mod tests {
                     prompt: "Wake up.".to_string(),
                     paste_mode: PasteMode::Bracketed,
                     enter: true,
+                    settle_ms: 500,
                     submit_retries: 1,
                     submit_retry_delay_ms: 750,
+                    verify_delivery: false,
                     input_quiet_for_secs: Some(10),
                     generation: 1,
                     started_at,

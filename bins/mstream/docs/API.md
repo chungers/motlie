@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, timer start upsert behavior, and timer paste-mode selection. |
+| 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, timer start upsert behavior, timer paste-mode selection, and delivery primitive parity controls. |
 | 2026-06-07 | @codex-401-impl | Clarified issue #409 audit durability: non-`agent_output` events are lossless-enqueued, high-volume `agent_output` is best-effort with observable degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
 | 2026-06-06 | @codex-401-impl | Added issue #409 durable audit call-log events: redacted `to_agent`/`from_agent` text, OutputBus agent output capture, socket-adjacent JSONL replay, and readable transcripts that survive daemon restart. |
 | 2026-06-06 | @codex-401-impl | Added issue #410 `new`/`recruit --agent-arg` passthrough for agent argv flags such as Claude `--permission-mode auto`. |
@@ -213,14 +213,17 @@ then kills and deregisters only a managed target whose live tmux tags are
 
 ```sh
 mstream send pr-324 local::codex-worker --text "Re-run clippy." --enter
-mstream send pr-324 local::codex-worker --text "/permissions" --verify-delivery
+mstream send pr-324 local::codex-worker --text "/permissions" \
+  --verify-delivery --input-quiet-for 10s
 mstream send pr-324 local::codex-worker --interrupt-first --settle-ms 500 \
   --text "Stop and address feedback." --enter --set-state busy
 
 mstream interrupt local::codex-worker
 mstream interrupt local::codex-worker --key ctrl-c
 
-mstream broadcast pr-324 --state busy --text "Wrap up your current step and summarize status." --enter
+mstream broadcast pr-324 --state busy \
+  --text "Wrap up your current step and summarize status." \
+  --enter --verify-delivery
 
 mstream session mark local::codex-worker --state done --summary "Implemented requested fixes."
 mstream session mark local::codex-worker --state blocked --summary "Need host credentials."
@@ -233,12 +236,19 @@ When the target is joined to an open workstream, `interrupt` appends an
 target is a connected tmux session that is not joined to a known workstream, the
 command still sends the key and returns only the command result.
 
-`send --verify-delivery` captures the target pane after payload delivery and
-requires the prompt text to be visible before optional submit. For bracketed
-paste sends, mstream retries once with literal paste before returning a
-`delivery not confirmed` error. Known Codex sessions using bracketed paste
-request this delivery check automatically. Successful send results include
+`send --verify-delivery` and `broadcast --verify-delivery` capture each target
+pane after payload delivery and require the prompt text to be visible before
+optional submit. For bracketed paste sends, mstream retries once with literal
+paste before returning a `delivery not confirmed` error. Known Codex sessions
+using bracketed paste request this delivery check automatically for `send`,
+`broadcast`, and timer fires. Successful verified send/broadcast results include
 `delivery_ack_requested`, `delivery_verified`, and `submit_verified`.
+
+`send`, `broadcast`, and timers default to `--input-quiet-for 10s`. When
+attached-client input in the target session is newer than that quiet window, the
+managed channel defers without sending prompt text or Enter retries. Use
+`--input-quiet-for <duration>` to tune the guard, or `--no-input-guard` when
+delivery should not wait for a quiet window.
 
 `session mark` is coordinator-owned in the project workflow: the orchestrator
 marks explicit targets after observing durable evidence such as pushed commits,
@@ -285,6 +295,8 @@ mstream timer start issue-337-poll \
   --self \
   --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize only material changes, then decide whether to keep, change, or stop this timer." \
   --paste-mode bracketed \
+  --settle-ms 500 \
+  --verify-delivery \
   --submit-retries 1 \
   --submit-retry-delay-ms 750
 
@@ -319,18 +331,22 @@ closeout. `timer list --workstream <name>` returns only scoped timers.
 
 Timer prompts default to sending Enter after the text, matching the
 orchestrator self-prompt use case. They also default to one extra Enter after
-750ms to handle agent TUI cases where the first submit key is missed. Tune with
-`--submit-retries` and `--submit-retry-delay-ms`; retries send only extra Enter
-keys and never re-send prompt text. Use `--no-enter` when the text should be
-placed in the pane without submission; this disables submit retries.
+750ms to handle agent TUI cases where the first submit key is missed. Tune
+settle and retries with `--settle-ms`, `--submit-retries`, and
+`--submit-retry-delay-ms`; retries send only extra Enter keys and never re-send
+prompt text. Use `--no-enter` when the text should be placed in the pane without
+submission; this disables submit retries.
 `--paste-mode bracketed|literal` matches `send`/`broadcast` and defaults to
 `bracketed`; choose `literal` when the target TUI mishandles bracketed paste, or
 keep `bracketed` for long orchestrator self-reminders that should enter the
 composer as a paste block rather than raw typed lines.
+`--verify-delivery` requests the same pane-capture delivery check used by
+`send`; known Codex bracketed timer targets request it automatically at fire
+time.
 
-Timer delivery also defaults to `--input-quiet-for 10s`. When attached-client
-input in the target session is newer than that quiet window, the timer defers
-without sending prompt text or Enter retries, records
+Timer delivery uses the shared `--input-quiet-for 10s` default. When
+attached-client input in the target session is newer than that quiet window, the
+timer defers without sending prompt text or Enter retries, records
 `last_defer_reason=recent_client_input`, and schedules the next attempt after
 the remaining quiet time. Use `--input-quiet-for <duration>` to tune the guard,
 or `--no-input-guard` when unattended delivery should not wait for a quiet
@@ -341,8 +357,8 @@ prompt. It follows the same input-quiet guard and does not replace the next
 scheduled wakeup. `timer list` reports `next_fire_at`, `last_fired_at`,
 `fire_count`, `defer_count`, `last_deferred_at`, `last_defer_reason`,
 `last_input_activity_at`, `input_quiet_for_secs`, `last_error`,
-`submit_retries`, `submit_retry_delay_ms`, optional `workstream`, and prompt
-length without echoing the prompt body.
+`settle_ms`, `submit_retries`, `submit_retry_delay_ms`, `verify_delivery`,
+optional `workstream`, and prompt length without echoing the prompt body.
 
 `close --stop-timers` stops timers scoped to the closing workstream.
 `close --standby-agents` sends a standby message to joined sessions before
