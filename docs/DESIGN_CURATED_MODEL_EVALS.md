@@ -452,9 +452,10 @@ reasoning token as the user-visible answer latency. When a backend cannot
 stream, it may expose backend-specific timing hooks or usage counters. If
 neither is available, the metric is recorded as unavailable
 with a reason such as `metric_unsupported_by_backend` or
-`metric_not_instrumented`. Tokens/second is computed only from a collected
-output-token count and decode interval; it is not inferred from character count
-without an explicit tokenizer source. Warm-up duration is a named phase before
+`metric_not_instrumented`. Total tokens/second is computed from generated
+tokens over request-to-last-token wall time; decode tokens/second is computed from generated tokens over the
+first-token-to-last-token decode interval. Neither is inferred from character
+count without an explicit tokenizer source. Warm-up duration is a named phase before
 the measured request. CUDA peak VRAM and utilization are sampled for the
 selected device through NVML or `nvidia-smi` during warm-up and request windows,
 recording start/peak/final memory plus sample source and cadence.

@@ -168,7 +168,7 @@ impl ScenarioRunner for ChatRunner {
             .map(u64::from);
         let model_text_metrics = model_metrics.and_then(|snapshot| snapshot.text_generation);
         let timing = response_timing_metrics(primary.timing.as_ref());
-        let tokens_per_second = timing.decode_tokens_per_second.or_else(|| {
+        let tokens_per_second = timing.tokens_per_second.or_else(|| {
             model_text_metrics
                 .as_ref()
                 .and_then(|metrics| metrics.avg_generated_tokens_per_sec)
@@ -271,6 +271,7 @@ struct ResponseTimingMetrics {
     ttft_first_token_ms: Option<u64>,
     ttft_first_answer_token_ms: Option<u64>,
     decode_ms: Option<u64>,
+    tokens_per_second: Option<f64>,
     decode_tokens_per_second: Option<f64>,
 }
 
@@ -283,6 +284,7 @@ fn response_timing_metrics(timing: Option<&GenerationTiming>) -> ResponseTimingM
         ttft_first_token_ms: timing.time_to_first_token().map(elapsed_ms),
         ttft_first_answer_token_ms: timing.time_to_first_answer_token().map(elapsed_ms),
         decode_ms: timing.decode_duration().map(elapsed_ms),
+        tokens_per_second: timing.total_tokens_per_second(),
         decode_tokens_per_second: timing.decode_tokens_per_second(),
     }
 }
@@ -338,7 +340,7 @@ fn required_chat_metric_gaps(
         gaps.push(MetricUnavailable::new(
             "tokens_per_second",
             "metric_unsupported_by_backend",
-            "chat_response.timing.decode_tokens_per_second",
+            "chat_response.timing.total_tokens_per_second",
         ));
     }
     gaps
@@ -493,7 +495,9 @@ mod tests {
         assert_eq!(metrics.ttft_first_token_ms, Some(10));
         assert_eq!(metrics.ttft_first_answer_token_ms, Some(25));
         assert_eq!(metrics.decode_ms, Some(100));
-        assert_eq!(metrics.decode_tokens_per_second, Some(50.0));
+        assert!(metrics
+            .decode_tokens_per_second
+            .is_some_and(|decode| decode > metrics.tokens_per_second.unwrap()));
     }
 
     #[test]

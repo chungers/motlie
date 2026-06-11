@@ -112,14 +112,27 @@ impl GenerationTiming {
         last_token_at.checked_duration_since(first_token_at)
     }
 
-    pub fn decode_tokens_per_second(&self) -> Option<f64> {
-        let decode_seconds = self.decode_duration()?.as_secs_f64();
-        if self.generated_tokens == 0 || decode_seconds <= 0.0 {
-            return None;
-        }
-
-        Some(f64::from(self.generated_tokens) / decode_seconds)
+    pub fn total_duration(&self) -> Option<Duration> {
+        let last_token_at = self.last_token_at?;
+        last_token_at.checked_duration_since(self.request_at)
     }
+
+    pub fn decode_tokens_per_second(&self) -> Option<f64> {
+        tokens_per_second(self.generated_tokens, self.decode_duration()?)
+    }
+
+    pub fn total_tokens_per_second(&self) -> Option<f64> {
+        tokens_per_second(self.generated_tokens, self.total_duration()?)
+    }
+}
+
+fn tokens_per_second(generated_tokens: u32, duration: Duration) -> Option<f64> {
+    let seconds = duration.as_secs_f64();
+    if generated_tokens == 0 || seconds <= 0.0 {
+        return None;
+    }
+
+    Some(f64::from(generated_tokens) / seconds)
 }
 
 fn elapsed_since(started_at: Instant, ended_at: Option<Instant>) -> Option<Duration> {
@@ -270,7 +283,11 @@ mod tests {
             Some(Duration::from_millis(30))
         );
         assert_eq!(timing.decode_duration(), Some(Duration::from_millis(100)));
+        assert_eq!(timing.total_duration(), Some(Duration::from_millis(110)));
         assert_eq!(timing.decode_tokens_per_second(), Some(40.0));
+        assert!(timing
+            .decode_tokens_per_second()
+            .is_some_and(|decode| decode > timing.total_tokens_per_second().unwrap()));
     }
 }
 

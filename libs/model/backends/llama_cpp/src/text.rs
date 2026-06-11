@@ -532,10 +532,11 @@ impl LlamaCppRuntime {
         let generated = self
             .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new())
             .await?;
+        let timing = timing_for_visible_content(generated.timing, &generated.text);
         Ok(ChatResponse {
             content: generated.text,
             usage: Some(generated.usage),
-            timing: Some(generated.timing),
+            timing: Some(timing),
             ..ChatResponse::default()
         })
     }
@@ -561,7 +562,21 @@ impl LlamaCppRuntime {
                 message: err.to_string(),
             })?;
 
-        openai_response_json_to_chat_response(message_json, generated.usage, Some(generated.timing))
+        let mut response = openai_response_json_to_chat_response(
+            message_json,
+            generated.usage,
+            Some(generated.timing),
+        )?;
+        if let Some(timing) = response.timing.take() {
+            response.timing = Some(timing_for_openai_response(
+                timing,
+                &template,
+                &generated.text,
+                &generated.token_timings,
+                &response.content,
+            ));
+        }
+        Ok(response)
     }
 
     async fn generate_text_inner(
@@ -643,6 +658,7 @@ impl LlamaCppRuntime {
             let mut first_token_at = None;
             let mut first_answer_token_at = None;
             let mut last_token_at = None;
+            let mut token_timings = Vec::new();
             let prompt_position_start =
                 i32::try_from(tokens.len()).map_err(|_| ModelError::BackendExecution {
                     backend: "llama-cpp",
@@ -677,6 +693,10 @@ impl LlamaCppRuntime {
 
                 let stop_triggered =
                     truncate_on_stop_sequence(&mut generated_text, &stop_sequences);
+                token_timings.push(GeneratedTokenTiming {
+                    end_byte: generated_text.len(),
+                    at: token_at,
+                });
                 if first_answer_token_at.is_none()
                     && has_visible_answer_text_for_timing(&generated_text)
                 {
@@ -744,6 +764,7 @@ impl LlamaCppRuntime {
                     last_token_at,
                     generated_tokens: generated_token_count,
                 },
+                token_timings,
             })
         })
         .await
@@ -765,6 +786,13 @@ struct GeneratedText {
     text: String,
     usage: GenerationUsage,
     timing: GenerationTiming,
+    token_timings: Vec<GeneratedTokenTiming>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GeneratedTokenTiming {
+    end_byte: usize,
+    at: Instant,
 }
 
 fn token_count_to_u32(count: usize) -> u32 {
@@ -789,6 +817,48 @@ fn strip_leading_reasoning_for_timing(generated_text: &str) -> &str {
         return rest;
     }
     strip_empty_gemma4_channel_prefix(generated_text)
+}
+
+fn timing_for_visible_content(mut timing: GenerationTiming, content: &str) -> GenerationTiming {
+    if content.trim().is_empty() {
+        timing.first_answer_token_at = None;
+    } else if timing.first_answer_token_at.is_none() {
+        timing.first_answer_token_at = timing.first_token_at;
+    }
+    timing
+}
+
+fn timing_for_openai_response(
+    mut timing: GenerationTiming,
+    template: &ChatTemplateResult,
+    generated_text: &str,
+    token_timings: &[GeneratedTokenTiming],
+    final_content: &str,
+) -> GenerationTiming {
+    if final_content.trim().is_empty() {
+        timing.first_answer_token_at = None;
+        return timing;
+    }
+
+    timing.first_answer_token_at =
+        first_parsed_content_token_at(template, generated_text, token_timings)
+            .or(timing.last_token_at)
+            .or(timing.first_token_at);
+    timing
+}
+
+fn first_parsed_content_token_at(
+    template: &ChatTemplateResult,
+    generated_text: &str,
+    token_timings: &[GeneratedTokenTiming],
+) -> Option<Instant> {
+    token_timings.iter().find_map(|token| {
+        let prefix = generated_text.get(..token.end_byte)?;
+        let message_json = template.parse_response_oaicompat(prefix, false).ok()?;
+        let value: Value = serde_json::from_str(&message_json).ok()?;
+        let content = openai_response_content(&value);
+        (!content.trim().is_empty()).then_some(token.at)
+    })
 }
 
 fn truncate_on_stop_sequence(generated_text: &mut String, stop_sequences: &[String]) -> bool {
@@ -1011,12 +1081,7 @@ fn openai_response_json_to_chat_response(
             operation: "parse_openai_response_json",
             message: err.to_string(),
         })?;
-    let content = value
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let content = strip_empty_gemma4_channel_prefix(&content).to_string();
+    let content = openai_response_content(&value);
     let reasoning = value
         .get("reasoning_content")
         .or_else(|| value.get("reasoning"))
@@ -1048,6 +1113,14 @@ fn openai_response_json_to_chat_response(
         usage: Some(usage),
         timing,
     })
+}
+
+fn openai_response_content(value: &Value) -> String {
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    strip_empty_gemma4_channel_prefix(content).to_string()
 }
 
 fn strip_empty_gemma4_channel_prefix(content: &str) -> &str {
@@ -1816,6 +1889,28 @@ mod tests {
         assert!(has_visible_answer_text_for_timing(
             "<|channel>thought\n<channel|>The answer is 42"
         ));
+    }
+
+    #[test]
+    fn visible_content_timing_clears_or_fills_answer_timestamp() {
+        let request_at = Instant::now();
+        let first_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(10))
+            .unwrap();
+        let mut timing = GenerationTiming {
+            request_at,
+            first_token_at: Some(first_token_at),
+            first_answer_token_at: Some(first_token_at),
+            last_token_at: Some(first_token_at),
+            generated_tokens: 1,
+        };
+
+        timing = timing_for_visible_content(timing, "   ");
+        assert_eq!(timing.first_answer_token_at, None);
+
+        timing.first_answer_token_at = None;
+        timing = timing_for_visible_content(timing, "answer");
+        assert_eq!(timing.first_answer_token_at, Some(first_token_at));
     }
 
     #[tokio::test]
