@@ -173,4 +173,28 @@ cpu_depth_allowed = ["smoke"]
         assert!(snapshot.cells[0].applies_to_profile("local-cpu-x86_64"));
         assert!(!snapshot.cells[0].applies_to_profile("apple-metal"));
     }
+
+    #[test]
+    fn curated_qwen36_cells_pin_labeled_q4_artifact() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("bins/evals should live two levels below repo root");
+        let snapshot = load_snapshot(&repo_root.join("evals/snapshots/curated-v2-smoke.toml"))
+            .expect("curated-v2-smoke snapshot should parse");
+        let cells = snapshot
+            .cells
+            .iter()
+            .filter(|cell| cell.bundle_id == "qwen3_6_27b_gguf")
+            .collect::<Vec<_>>();
+
+        assert_eq!(cells.len(), 2);
+        for cell in cells {
+            assert_eq!(cell.quantization, "q4_k_m");
+            assert_eq!(
+                cell.artifact.patterns,
+                vec!["Qwen3.6-27B-Q4_K_M.gguf".to_owned()]
+            );
+        }
+    }
 }

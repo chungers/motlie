@@ -450,6 +450,9 @@ fn run_child_cell(
     run_command.args(["--depth", cell.depth.as_str()]);
     run_command.args(["--checkpoint-format", &cell.checkpoint_format]);
     run_command.args(["--artifact-quantization", &cell.quantization]);
+    if let Some(precision) = cell_runtime_precision(cell)? {
+        run_command.args(["--precision", precision]);
+    }
     run_command.args(["--model-family", &cell.model_family]);
     run_command.args(["--backend", &cell.backend]);
     run_command.args(["--requested-accelerator", requested.as_str()]);
@@ -614,7 +617,7 @@ fn pre_run_record(
             cargo_features: cell.features_for_profile(profile),
             build_profile: None,
             quantization: Some(cell.quantization.clone()),
-            runtime_precision: None,
+            runtime_precision: cell_runtime_precision_label(cell),
             artifact_root: String::new(),
             download_artifacts: false,
             context_length: None,
@@ -931,6 +934,29 @@ fn merge_bindgen_args(
     args.join(" ")
 }
 
+fn cell_runtime_precision(cell: &SnapshotCell) -> Result<Option<&'static str>> {
+    quantization_precision(&cell.quantization)
+}
+
+fn cell_runtime_precision_label(cell: &SnapshotCell) -> Option<String> {
+    quantization_precision(&cell.quantization)
+        .ok()
+        .flatten()
+        .map(ToOwned::to_owned)
+}
+
+fn quantization_precision(quantization: &str) -> Result<Option<&'static str>> {
+    match quantization {
+        "default" => Ok(None),
+        "q4_k_m" | "q4_0" => Ok(Some("q4")),
+        "q5_k_m" => Ok(Some("q5")),
+        "q8_0" => Ok(Some("q8")),
+        "fp8" => Ok(Some("fp8")),
+        "f16" | "f32" => Ok(None),
+        other => bail!("unknown snapshot quantization `{other}`"),
+    }
+}
+
 fn requires_hf_token(cell: &SnapshotCell, artifact_root: &Path) -> bool {
     cell.artifact.requires_hf_token && !artifact_cache_satisfies(cell, artifact_root)
 }
@@ -1189,6 +1215,16 @@ mod tests {
         cell.checkpoint_format = "hf_safetensors".to_owned();
 
         assert!(!is_gguf_cell(&cell));
+    }
+
+    #[test]
+    fn snapshot_quantization_maps_to_child_precision() {
+        assert_eq!(quantization_precision("default").unwrap(), None);
+        assert_eq!(quantization_precision("q4_k_m").unwrap(), Some("q4"));
+        assert_eq!(quantization_precision("q4_0").unwrap(), Some("q4"));
+        assert_eq!(quantization_precision("q5_k_m").unwrap(), Some("q5"));
+        assert_eq!(quantization_precision("q8_0").unwrap(), Some("q8"));
+        assert!(quantization_precision("q6_k").is_err());
     }
 
     #[test]
