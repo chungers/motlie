@@ -19,12 +19,11 @@ use motlie_model::{
     ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
     ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
-    TextMetricState,
+    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
+    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -130,7 +129,7 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-E4B-it",
             file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
-            thinking: ThinkingMode::Auto,
+            thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support_with_recommended(QuantizationBits::Eight),
             default_context_length: 32768,
@@ -150,7 +149,7 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-12b-it",
             file_layout: GgufFileLayout::QuantizedSuffix,
             arch: LlamaCppTextArch::Gemma4,
-            thinking: ThinkingMode::Auto,
+            thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             // @gemma4-cdx 2026-06-04 22:49 PDT: GGUF is the
             // local fallback for the official 12B safetensors path; prefer
@@ -173,7 +172,7 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-12b-it-qat-q4_0",
             file_layout: GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
             arch: LlamaCppTextArch::Gemma4,
-            thinking: ThinkingMode::Auto,
+            thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             // @gemma4-cdx 2026-06-05 17:45 PDT: Google publishes the QAT
             // checkpoint as a single GGUF Q4_0 artifact, so expose only Q4
@@ -485,20 +484,33 @@ struct LlamaCppRuntime {
 unsafe impl Send for LlamaCppRuntime {}
 unsafe impl Sync for LlamaCppRuntime {}
 
+fn should_render_openai_compatible_chat(
+    arch: LlamaCppTextArch,
+    thinking: ThinkingMode,
+    request: &ChatRequest,
+) -> bool {
+    request.requires_tool_use()
+        || thinking == ThinkingMode::Auto
+        || arch == LlamaCppTextArch::Gemma4
+}
+
+fn openai_template_enable_thinking(thinking: ThinkingMode) -> bool {
+    thinking == ThinkingMode::Auto
+}
+
+fn openai_template_add_bos() -> bool {
+    true
+}
+
 impl LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let thinking = request.thinking.unwrap_or(self.thinking);
-        if request.requires_tool_use() || thinking == ThinkingMode::Auto {
+        if should_render_openai_compatible_chat(self.arch, thinking, &request) {
             let rendered = render_openai_compatible_chat(&self.model, thinking, &request)?;
             return self.generate_rendered_chat(rendered, &request.params).await;
         }
 
-        // Keep text-only chat on the existing handwritten prompt path in this
-        // PR when thinking is disabled so existing non-tool generation behavior
-        // stays stable. Tool-bearing and thinking-enabled chats use
-        // llama.cpp's OpenAI-compatible Jinja path because the embedded
-        // templates define model-specific tool and thinking markers.
-        let prompt = format_chat_prompt(self.arch, &request)?;
+        let prompt = format_qwen3_prompt(&request.messages)?;
         self.generate_text(&prompt, &request.params).await
     }
 
@@ -780,8 +792,8 @@ fn render_openai_compatible_chat(
         add_generation_prompt: true,
         use_jinja: true,
         parallel_tool_calls: false,
-        enable_thinking: thinking == ThinkingMode::Auto,
-        add_bos: false,
+        enable_thinking: openai_template_enable_thinking(thinking),
+        add_bos: openai_template_add_bos(),
         add_eos: false,
         parse_tool_calls,
     };
@@ -1092,17 +1104,6 @@ fn openai_response_tool_call(
     })
 }
 
-/// Format a chat request into the model's expected prompt template.
-///
-/// Returns an error if any message contains non-text content parts (images).
-/// llama.cpp text-only backends do not support multimodal input.
-fn format_chat_prompt(arch: LlamaCppTextArch, request: &ChatRequest) -> Result<String, ModelError> {
-    match arch {
-        LlamaCppTextArch::Qwen3 => format_qwen3_prompt(&request.messages),
-        LlamaCppTextArch::Gemma4 => format_gemma4_prompt(&request.messages),
-    }
-}
-
 fn collect_text(message: &motlie_model::ChatMessage) -> Result<String, ModelError> {
     let mut text = String::new();
     for part in &message.content {
@@ -1131,23 +1132,6 @@ fn format_qwen3_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String,
         prompt.push_str("<|im_end|>\n");
     }
     prompt.push_str("<|im_start|>assistant\n");
-    Ok(prompt)
-}
-
-fn format_gemma4_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String, ModelError> {
-    let mut prompt = String::new();
-    for msg in messages {
-        let role = match msg.role {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-            ChatRole::Assistant => "model",
-            ChatRole::Tool => "tool",
-        };
-        prompt.push_str(&format!("<start_of_turn>{role}\n"));
-        prompt.push_str(&collect_text(msg)?);
-        prompt.push_str("<end_of_turn>\n");
-    }
-    prompt.push_str("<start_of_turn>model\n");
     Ok(prompt)
 }
 
@@ -1436,7 +1420,7 @@ mod tests {
         assert_eq!(spec.display_name, "Gemma 4 E4B-it (GGUF)");
         assert_eq!(spec.model_prefix, "gemma-4-E4B-it");
         assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
-        assert_eq!(spec.thinking, ThinkingMode::Auto);
+        assert_eq!(spec.thinking, ThinkingMode::Disabled);
         assert_eq!(
             spec.quantization.recommended(),
             Some(QuantizationBits::Eight)
@@ -1451,6 +1435,18 @@ mod tests {
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
         assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
+    }
+
+    #[test]
+    fn gemma4_12b_specs_default_to_answer_first_chat() {
+        for spec in [
+            LlamaCppTextSpec::gemma4_12b(),
+            LlamaCppTextSpec::gemma4_12b_qat_q4_0(),
+        ] {
+            assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
+            assert_eq!(spec.thinking, ThinkingMode::Disabled);
+            assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
+        }
     }
 
     #[test]
@@ -1552,16 +1548,34 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_chat_template_formats_correctly() {
-        let messages = vec![
-            ChatMessage::new(ChatRole::System, "Be concise."),
-            ChatMessage::new(ChatRole::User, "Hello"),
-        ];
-        let prompt = format_gemma4_prompt(&messages).expect("text-only messages should format");
+    fn gemma4_answer_first_uses_rendered_template_controls() {
+        let request = ChatRequest {
+            messages: vec![ChatMessage::new(ChatRole::User, "Hello")],
+            ..Default::default()
+        };
 
-        assert!(prompt.contains("<start_of_turn>system\nBe concise.<end_of_turn>"));
-        assert!(prompt.contains("<start_of_turn>user\nHello<end_of_turn>"));
-        assert!(prompt.ends_with("<start_of_turn>model\n"));
+        assert!(should_render_openai_compatible_chat(
+            LlamaCppTextArch::Gemma4,
+            ThinkingMode::Disabled,
+            &request
+        ));
+        assert!(!openai_template_enable_thinking(ThinkingMode::Disabled));
+        assert!(openai_template_enable_thinking(ThinkingMode::Auto));
+        assert!(openai_template_add_bos());
+    }
+
+    #[test]
+    fn qwen3_answer_first_keeps_handwritten_chatml_path() {
+        let request = ChatRequest {
+            messages: vec![ChatMessage::new(ChatRole::User, "Hello")],
+            ..Default::default()
+        };
+
+        assert!(!should_render_openai_compatible_chat(
+            LlamaCppTextArch::Qwen3,
+            ThinkingMode::Disabled,
+            &request
+        ));
     }
 
     #[test]
@@ -1798,7 +1812,7 @@ mod tests {
             ..Default::default()
         };
 
-        let error = format_chat_prompt(LlamaCppTextArch::Qwen3, &request)
+        let error = format_qwen3_prompt(&request.messages)
             .expect_err("images should be rejected for text-only runtime");
         assert!(matches!(
             error,
