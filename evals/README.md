@@ -106,6 +106,26 @@ BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include" \
   cargo build -p evals --no-default-features --features model-qwen3-4b-gguf --all-targets
 ```
 
+## Build Policy
+
+The eval driver is feature-light and builds one model cell at a time in child
+Cargo processes. Child builds must be reproducible from repo policy rather than
+host-specific shell setup.
+
+ORT-backed cells (`checkpoint_format = "onnx"`, including Piper TTS and
+Sherpa/Moonshine ASR) prefer static ONNX Runtime linkage. `evals matrix` scrubs
+`ORT_LIB_PATH`, `ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK`,
+`ORT_SKIP_DOWNLOAD`, `ORT_OFFLINE`, and `CARGO_NET_OFFLINE` from ORT child
+builds, then sets `MOTLIE_ORT_SOURCE=sherpa-onnx`. The workspace patches
+`ort-sys` under `third_party/ort-sys`; that patch downloads the k2-fsa
+`sherpa-onnx` static package for Linux/macOS/Windows targets and links its
+`libonnxruntime.a` as the single static ORT provider. Do not rely on host
+`ORT_LIB_PATH` or shared ONNX Runtime libraries for curated eval cells.
+
+First ORT-backed builds need network access unless the static archive is already
+cached by Cargo or supplied through `SHERPA_ONNX_ARCHIVE_DIR`. The token policy
+is unchanged: `HF_TOKEN` is only for Hugging Face artifacts and is never logged.
+
 For CUDA-class hosts, pass the matching profile:
 
 ```sh

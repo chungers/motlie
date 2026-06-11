@@ -8,6 +8,50 @@ Live operational log of the first distributed eval exercise (issue #399 v2). Doc
 - HF token: env-only at run time, SSH-provisioned by the orchestrator; never committed/logged; results record only `HF_TOKEN_PRESENT`.
 - Coordination substrate: this branch. Per-host results PRs -> branch; orchestrator aggregates -> coverage-report PR; single final merge to main (David).
 
+## Build Policy
+
+Run matrix evals through the feature-light outer driver:
+
+```sh
+cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml
+```
+
+The driver builds each cell in a child Cargo process using the cell's declared
+features and profile overlays. Do not pre-combine unrelated model families into a
+single manual feature set unless a workflow explicitly asks for that check.
+
+### ORT / ONNX Runtime
+
+Piper TTS, Sherpa ASR, Moonshine ASR, and future `checkpoint_format = "onnx"`
+cells use ONNX Runtime. Eval child builds prefer static ORT linkage:
+
+- The workspace uses `ort` with `download-binaries`, `tls-native`, and `api-24`.
+- The workspace patches `ort-sys` from `third_party/ort-sys`.
+- `evals matrix` removes dynamic/offline ORT env overrides from ORT-backed child
+  builds: `ORT_LIB_PATH`, `ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK`,
+  `ORT_SKIP_DOWNLOAD`, `ORT_OFFLINE`, and `CARGO_NET_OFFLINE`.
+- The driver sets `MOTLIE_ORT_SOURCE=sherpa-onnx`; patched `ort-sys` downloads
+  the k2-fsa `sherpa-onnx` static package for the target and links
+  `libonnxruntime.a` as the process ORT provider.
+
+First ORT-backed builds require network access unless the archive is already
+cached or provided via `SHERPA_ONNX_ARCHIVE_DIR`. `ORT_LIB_PATH` and shared ONNX
+Runtime libraries are not accepted runbook paths for curated evals.
+
+### Classification
+
+Child build failures are classified by stage. Native linker failures such as
+`_OrtGetApiBase` / `OrtGetApiBase`, `undefined symbols`, `undefined reference`,
+or `linker command failed` are reported as `native_link_failed`. Artifact auth
+reasons are reserved for real Hugging Face or artifact-provider authorization
+failures.
+
+### Artifacts
+
+`HF_TOKEN` may be used to fetch gated Hugging Face artifacts. The eval runner
+records only token presence as a boolean and must never log or serialize the
+token value.
+
 ## Process steps (as executed)
 1. `@ops48-orchestrator 2026-06-10 PDT` — Merged framework PR #424 (`43c6ce39`, all-3-approved x86/CUDA/Metal) into `evals/2026-06-infra` -> head `e722d23d`. Seeded this runbook.
 2. _(pending)_ HF_TOKEN provisioning via SSH-written env file outside the repo checkout (`<work-root>/issue-399-eval-suite/.hf-env`, chmod 600); runners `source` it before `evals matrix`.
@@ -41,9 +85,10 @@ Curated bundles are LOCAL models meant for CPU inference — failures and budget
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **debug child builds inflate wall time (mac1 data for the orchestrator gotcha above):** every mistralrs chat/perf/tool cell on this host burned the full 1200s budget (7 cells ≈ 2h20m for zero successful generations). The #435 harness batch switches matrix children to release before the next round.
 
 ## Open issues
+- `@codex-399-impl 2026-06-10 PDT` -- **#444/#449/#451 ORT follow-up:** eval child builds for ONNX/ORT-backed Piper and Sherpa cells now use static ORT from the workspace `third_party/ort-sys` patch, scrub host dynamic ORT env, and classify `_OrtGetApiBase`/undefined-symbol linker failures as `native_link_failed`. Local aarch64 one-cell repros for Piper and Sherpa both passed with poisoned parent ORT env; see issue comments for raw commands and metrics.
 - Umbrella tracker: #435 (sub-issues filed as runs land)
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **snapshot quant label vs runtime default mismatch:** `qwen3_6_27b_gguf` cells are labeled `q4_k_m` but the runtime default (no `--precision` from the driver) resolves the bundle's recommended quant **Q5_K_M** → `GGUF artifact Qwen3.6-27B-Q5_K_M.gguf not found`. Any green record under this condition would mislabel the quant axis. Fix: driver passes `--precision` derived from the cell's quantization label, or snapshot validation against `QuantizationSupport.recommended`.
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **failure-classification heuristics misfire (2 cases):** (a) the 27B `Q5_K_M.gguf not found` log classified `child_run_failed` instead of `artifact_missing` (phrasing dodges the heuristics); (b) sherpa/piper child **builds** failed with ort-sys link errors (`_OrtGetApiBase ... not found for architecture arm64` — ORT dylib not linkable on macOS without `ORT_LIB_PATH`) but classified `artifact_unauthorized`. Suggest matching on the specific loader error strings and checking child_build status before artifact heuristics.
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **qwen3_4b (mistralrs) chat_smoke empty response:** `response contained neither text content nor tool calls` — suspected Qwen3 think-token exhaustion of `max_tokens = 96`; cross-check on x86 leg (same CPU path).
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **gemma4 GGUF chat-template defect (systematic):** e4b/12b/12b-qat GGUF `chat_smoke` all produce 0 response chars on llama.cpp/Metal (accelerator pass, true `failed` records) while their bench/tool_use cells pass; qwen3-4b GGUF chat is fine. Likely gemma4 chat-template handling in the llama.cpp text path.
-- `@claude-fable5-399-rv 2026-06-10 PDT` — **ort-backed cells (sherpa/piper) cannot link on macOS in the matrix child build** (no `ORT_LIB_PATH` wiring in the driver, unlike the examples script's `run_with_optional_ort`); moonshine (also ort) linked and ran — feature-set difference worth a look.
+- `@claude-fable5-399-rv 2026-06-10 PDT` — **ort-backed cells (sherpa/piper) could not link on macOS in the matrix child build** (historical mac1 finding from the first run). Follow-up #444/#449/#451 now routes ORT-backed eval child builds through static ORT policy and classifies link failures as `native_link_failed`; rerun required on mac/x86 to replace the old failed records.
