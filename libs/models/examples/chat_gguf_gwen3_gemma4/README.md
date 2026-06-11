@@ -121,15 +121,15 @@ cargo run -p motlie-models --no-default-features \
 
 Switch to Gemma 4 E4B. With no `--precision` flag this uses the E4B spec's
 recommended Q8_0 GGUF artifact, `temperature=1.0`, `top_p=0.95`, and
-`thinking=Auto`. The example prints the recommended settings, the effective
-system prompt, the assistant priming turn, and any returned thinking trace:
+answer-first `thinking=Disabled`. Gemma 4 GGUF chat uses the native embedded
+chat template with thinking disabled by default; pass `--thinking=auto` only
+when you explicitly want reasoning traces:
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-gemma4-e4b-gguf \
   --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_e4b_gguf \
   --system="You are Gemma, a helpful assistant." \
   --assistant="I will keep the answer compact." \
-  --thinking=auto \
   "Summarize ownership in one paragraph"
 ```
 
@@ -140,7 +140,6 @@ spec's recommended Q4_K_M artifact; pass `--precision=q8` to select Q8_0:
 cargo run -p motlie-models --no-default-features --features model-gemma4-12b-gguf \
   --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_12b_gguf \
   --system="You are Gemma, a helpful assistant." \
-  --thinking=auto \
   "Summarize ownership in one paragraph"
 ```
 
@@ -151,7 +150,6 @@ Q4_0 artifact:
 cargo run -p motlie-models --no-default-features --features model-gemma4-12b-qat-q4-0-gguf \
   --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_12b_qat_q4_0_gguf \
   --system="You are Gemma, a helpful assistant." \
-  --thinking=auto \
   "Summarize ownership in one paragraph"
 ```
 
@@ -161,14 +159,14 @@ Representative prompt-control output:
 recommended-generation-params: GenerationParams { max_tokens: None, temperature: Some(1.0), top_p: Some(0.95), stop_sequences: [] }
 recommended-system-prompt: Some("You are Gemma, a helpful assistant.")
 recommended-quantization: GGUF Q8_0
-recommended-thinking: Auto
+recommended-thinking: Disabled
 effective-chat-params: GenerationParams { max_tokens: None, temperature: Some(1.0), top_p: Some(0.95), stop_sequences: [] }
-thinking: Auto
+thinking: Disabled
 system-prompt: enabled
 system-prompt-content: You are Gemma, a helpful assistant.
 assistant-priming: enabled
 assistant-priming-content: I will keep the answer compact.
-single-turn-thinking-trace: <reasoning trace when returned by the backend, otherwise none>
+single-turn-thinking-trace: none
 ```
 
 `--assistant` is intended as a priming turn alongside a system prompt. The

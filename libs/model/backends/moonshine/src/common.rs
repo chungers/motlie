@@ -154,7 +154,17 @@ impl Drop for StagedModelDir {
 fn link_or_copy(src: &Path, dest: &Path) -> Result<(), ModelError> {
     use std::os::unix::fs::symlink;
 
-    match symlink(src, dest) {
+    let symlink_src = src
+        .canonicalize()
+        .map_err(|err| ModelError::BackendInitialization {
+            backend: "moonshine",
+            message: format!(
+                "failed to resolve `{}` before staging: {err}",
+                src.display()
+            ),
+        })?;
+
+    match symlink(&symlink_src, dest) {
         Ok(()) => Ok(()),
         Err(_) => match std::fs::hard_link(src, dest) {
             Ok(()) => Ok(()),
@@ -275,5 +285,32 @@ mod tests {
         let err = write_token_bytes(&mut Vec::new(), vec![0_u8; 16_384])
             .expect_err("oversized token must fail");
         assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("16,383")));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn link_or_copy_keeps_relative_sources_readable_from_temp_dest() {
+        let original_cwd = std::env::current_dir().expect("current dir should be readable");
+        let root =
+            std::env::temp_dir().join(format!("moonshine-link-or-copy-{}", std::process::id()));
+        let source_dir = root.join("source");
+        let dest_dir = root.join("dest");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&source_dir).expect("source dir should be creatable");
+        std::fs::create_dir_all(&dest_dir).expect("dest dir should be creatable");
+        std::fs::write(source_dir.join("streaming_config.json"), b"{}")
+            .expect("source file should be writable");
+
+        std::env::set_current_dir(&source_dir).expect("test cwd should switch");
+        link_or_copy(
+            Path::new("streaming_config.json"),
+            &dest_dir.join("streaming_config.json"),
+        )
+        .expect("relative source should stage");
+        std::env::set_current_dir(original_cwd).expect("cwd should restore");
+
+        let staged = std::fs::read_to_string(dest_dir.join("streaming_config.json"))
+            .expect("staged file should be readable");
+        assert_eq!(staged, "{}");
+        std::fs::remove_dir_all(root).expect("temp root should be removable");
     }
 }

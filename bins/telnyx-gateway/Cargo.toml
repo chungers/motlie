@@ -1,0 +1,84 @@
+[package]
+name = "motlie-telnyx-gateway"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Operator-driven Telnyx voice gateway for Motlie"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "telnyx-gateway"
+path = "src/main.rs"
+
+[features]
+default = []
+golden-ab = ["sherpa", "moonshine", "whisper", "piper", "kokoro", "qwen3-tts-cpp"]
+sherpa = [
+    "dep:motlie-model-sherpa-onnx",
+    "motlie-models/model-sherpa-onnx-streaming",
+]
+moonshine = [
+    "dep:motlie-model-moonshine",
+    "motlie-models/model-moonshine-streaming",
+]
+whisper = [
+    "dep:motlie-model-whisper-cpp",
+    "motlie-models/model-whisper-base-en",
+]
+qwen3-tts-cpp = [
+    "dep:motlie-model-qwen3-tts-cpp",
+    "motlie-models/model-qwen3-tts-cpp",
+]
+piper = [
+    "dep:motlie-model-piper",
+    "motlie-models/model-piper-en-us-ljspeech-medium",
+]
+kokoro = [
+    "dep:motlie-model-kokoro",
+    "motlie-models/model-kokoro-82m",
+]
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5.58", features = ["derive"] }
+crossterm = "0.29"
+futures-util = "0.3"
+hex = "0.4"
+hound = "3.5"
+hmac = "0.12"
+motlie-driver = { path = "../../libs/driver" }
+motlie-model = { path = "../../libs/model" }
+motlie-model-moonshine = { path = "../../libs/model/backends/moonshine", optional = true }
+motlie-model-kokoro = { path = "../../libs/model/backends/kokoro", optional = true }
+motlie-model-piper = { path = "../../libs/model/backends/piper", optional = true }
+motlie-model-qwen3-tts-cpp = { path = "../../libs/model/backends/qwen3_tts_cpp", optional = true }
+motlie-model-sherpa-onnx = { path = "../../libs/model/backends/sherpa_onnx", optional = true }
+motlie-model-whisper-cpp = { path = "../../libs/model/backends/whisper_cpp", optional = true }
+motlie-models = { path = "../../libs/models", default-features = false }
+motlie-voice = { path = "../../libs/voice" }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+reqwest = { version = "0.13.2", features = ["json"] }
+serde.workspace = true
+serde_json = "1.0.149"
+sha2 = "0.10"
+shlex = "1.3"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite = "0.28"
+toml = "1.1"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tower = "0.5"

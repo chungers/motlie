@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
     feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-kokoro-82m",
     feature = "model-qwen3-tts-cpp",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
@@ -34,6 +35,8 @@ pub mod tts;
 use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
 
+#[cfg(feature = "model-kokoro-82m")]
+use motlie_model_kokoro::KokoroHandle;
 #[cfg(any(
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
@@ -316,6 +319,7 @@ pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
     feature = "model-sherpa-onnx-streaming",
     feature = "model-moonshine-streaming",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-kokoro-82m",
     feature = "model-qwen3-tts-cpp",
 ))]
 pub(crate) fn resolve_typed_artifact_policy(
@@ -376,10 +380,14 @@ pub enum CuratedBundle {
     WhisperBaseEn,
     #[cfg(feature = "model-sherpa-onnx-streaming")]
     SherpaOnnxStreamingEn,
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    SherpaOnnxStreamingEnKroko2025,
     #[cfg(feature = "model-moonshine-streaming")]
     MoonshineStreamingEn,
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
     PiperEnUsLjspeechMedium,
+    #[cfg(feature = "model-kokoro-82m")]
+    Kokoro82m,
     #[cfg(feature = "model-qwen3-tts-cpp")]
     Qwen3TtsCpp0_6B,
 }
@@ -418,10 +426,16 @@ impl CuratedBundle {
             Self::WhisperBaseEn => asr::whisper_base_en::descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::descriptor(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => {
+                asr::sherpa_onnx_streaming_en_kroko_2025::descriptor()
+            }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::descriptor(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m => tts::kokoro_82m::descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::descriptor(),
             _ => unreachable!("no curated bundle variants are enabled"),
@@ -488,6 +502,12 @@ impl CuratedBundle {
             Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::start_typed(options)
                 .await
                 .map(CuratedHandle::SherpaOnnxStreamingEn),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => {
+                asr::sherpa_onnx_streaming_en_kroko_2025::start_typed(options)
+                    .await
+                    .map(CuratedHandle::SherpaOnnxStreamingEnKroko2025)
+            }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::start_typed(options)
                 .await
@@ -496,6 +516,10 @@ impl CuratedBundle {
             Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::start_typed(options)
                 .await
                 .map(CuratedHandle::PiperEnUsLjspeechMedium),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m => tts::kokoro_82m::start_typed(options)
+                .await
+                .map(CuratedHandle::Kokoro82m),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::start_typed(options)
                 .await
@@ -535,10 +559,14 @@ pub enum CuratedHandle {
     WhisperBaseEn(WhisperCppHandle),
     #[cfg(feature = "model-sherpa-onnx-streaming")]
     SherpaOnnxStreamingEn(SherpaOnnxHandle),
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    SherpaOnnxStreamingEnKroko2025(SherpaOnnxHandle),
     #[cfg(feature = "model-moonshine-streaming")]
     MoonshineStreamingEn(MoonshineHandle),
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
     PiperEnUsLjspeechMedium(PiperHandle),
+    #[cfg(feature = "model-kokoro-82m")]
+    Kokoro82m(KokoroHandle),
     #[cfg(feature = "model-qwen3-tts-cpp")]
     Qwen3TtsCpp0_6B(Qwen3TtsCppHandle),
 }
@@ -578,10 +606,14 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.descriptor(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.descriptor(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.descriptor(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.descriptor(),
             _ => unreachable!("no curated handle variants are enabled"),
@@ -617,10 +649,14 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.capabilities(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.capabilities(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.capabilities(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.capabilities(),
             _ => unreachable!("no curated handle variants are enabled"),
@@ -656,10 +692,14 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.metric_snapshot(),
             _ => unreachable!("no curated handle variants are enabled"),
@@ -695,10 +735,14 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.accelerator_observation(),
             _ => unreachable!("no curated handle variants are enabled"),
@@ -794,10 +838,14 @@ impl BundleHandle for CuratedHandle {
             Self::WhisperBaseEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingEn(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.shutdown().await,
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.shutdown().await,
         }
@@ -973,6 +1021,7 @@ fn download_checkpoint_artifacts_with_options(
             let api = ApiBuilder::new()
                 .with_cache_dir(artifact_root.to_path_buf())
                 .with_token(options.hf_token.clone())
+                .with_progress(false)
                 .build()
                 .map_err(|source| ModelsError::HuggingFaceClient {
                     message: source.to_string(),
@@ -1128,6 +1177,7 @@ pub enum ModelSelector {
     feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-kokoro-82m",
     feature = "model-qwen3-tts-cpp",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
@@ -1280,6 +1330,7 @@ impl ModelSelector {
     feature = "model-gemma4-12b-qat-q4-0-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-kokoro-82m",
     feature = "model-qwen3-tts-cpp",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
@@ -1298,6 +1349,12 @@ impl FromStr for ModelSelector {
         if let Some(raw) = value.strip_prefix("tts:") {
             #[cfg(not(feature = "model-piper-en-us-ljspeech-medium"))]
             if raw == tts::PIPER_EN_US_LJSPEECH_MEDIUM_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            #[cfg(not(feature = "model-kokoro-82m"))]
+            if raw == tts::KOKORO_82M_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
@@ -1445,6 +1502,12 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-sherpa-onnx-streaming"))]
+            if raw == asr::SHERPA_ONNX_STREAMING_KROKO_2025_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-whisper-base-en"))]
             if raw == asr::WHISPER_BASE_EN_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
@@ -1501,10 +1564,16 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "whisper_base_en" => Some(CuratedBundle::WhisperBaseEn),
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         "sherpa_onnx_streaming_zipformer_en" => Some(CuratedBundle::SherpaOnnxStreamingEn),
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        "sherpa_onnx_streaming_zipformer_en_kroko_2025" => {
+            Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)
+        }
         #[cfg(feature = "model-moonshine-streaming")]
         "moonshine_streaming_en" => Some(CuratedBundle::MoonshineStreamingEn),
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         "piper_en_us_ljspeech_medium" => Some(CuratedBundle::PiperEnUsLjspeechMedium),
+        #[cfg(feature = "model-kokoro-82m")]
+        "kokoro_82m" => Some(CuratedBundle::Kokoro82m),
         #[cfg(feature = "model-qwen3-tts-cpp")]
         "qwen3_tts_cpp_0_6b" => Some(CuratedBundle::Qwen3TtsCpp0_6B),
         _ => None,
@@ -1565,6 +1634,12 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         ("sherpa_onnx_streaming_zipformer_en", BackendKind::SherpaOnnx, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::SherpaOnnxStreamingEn)
         }
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        (
+            "sherpa_onnx_streaming_zipformer_en_kroko_2025",
+            BackendKind::SherpaOnnx,
+            CheckpointFormat::Onnx,
+        ) => Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025),
         #[cfg(feature = "model-moonshine-streaming")]
         ("moonshine_streaming_en", BackendKind::Ort, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::MoonshineStreamingEn)
@@ -1573,6 +1648,8 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         ("piper_en_us_ljspeech_medium", BackendKind::Ort, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::PiperEnUsLjspeechMedium)
         }
+        #[cfg(feature = "model-kokoro-82m")]
+        ("kokoro_82m", BackendKind::Ort, CheckpointFormat::Onnx) => Some(CuratedBundle::Kokoro82m),
         #[cfg(feature = "model-qwen3-tts-cpp")]
         ("qwen3_tts_cpp_0_6b", BackendKind::Qwen3TtsCpp, CheckpointFormat::Gguf) => {
             Some(CuratedBundle::Qwen3TtsCpp0_6B)
@@ -1625,12 +1702,16 @@ impl Catalog {
         chat::gemma4_12b_qat_q4_0_gguf::register(&mut catalog);
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
+        #[cfg(feature = "model-kokoro-82m")]
+        tts::kokoro_82m::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-cpp")]
         tts::qwen3_tts_cpp::register(&mut catalog);
         #[cfg(feature = "model-moonshine-streaming")]
         asr::moonshine_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         asr::sherpa_onnx_streaming_en::register(&mut catalog);
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        asr::sherpa_onnx_streaming_en_kroko_2025::register(&mut catalog);
         #[cfg(feature = "model-whisper-base-en")]
         asr::whisper_base_en::register(&mut catalog);
         catalog
@@ -2275,6 +2356,16 @@ mod tests {
             assert_eq!(model, TtsModels::PiperEnUsLjspeechMedium);
             assert_eq!(model.to_string(), "piper/en_us_ljspeech_medium");
         }
+
+        #[cfg(feature = "model-kokoro-82m")]
+        {
+            let model: TtsModels = "kokoro/kokoro_82m"
+                .parse()
+                .expect("known TTS selector should parse");
+
+            assert_eq!(model, TtsModels::Kokoro82m);
+            assert_eq!(model.to_string(), "kokoro/kokoro_82m");
+        }
     }
 
     #[test]
@@ -2290,6 +2381,16 @@ mod tests {
                 ModelSelector::Tts(TtsModels::PiperEnUsLjspeechMedium)
             );
             assert_eq!(selector.to_string(), "tts:piper/en_us_ljspeech_medium");
+        }
+
+        #[cfg(feature = "model-kokoro-82m")]
+        {
+            let selector: ModelSelector = "tts:kokoro/kokoro_82m"
+                .parse()
+                .expect("known TTS selector should parse");
+
+            assert_eq!(selector, ModelSelector::Tts(TtsModels::Kokoro82m));
+            assert_eq!(selector.to_string(), "tts:kokoro/kokoro_82m");
         }
     }
 
@@ -2350,6 +2451,15 @@ mod tests {
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         {
             let descriptor = crate::tts::piper_en_us_ljspeech_medium::descriptor();
+            assert_eq!(
+                descriptor.capabilities.descriptors(),
+                &[CapabilityDescriptor::speech_buffered()]
+            );
+        }
+
+        #[cfg(feature = "model-kokoro-82m")]
+        {
+            let descriptor = crate::tts::kokoro_82m::descriptor();
             assert_eq!(
                 descriptor.capabilities.descriptors(),
                 &[CapabilityDescriptor::speech_buffered()]

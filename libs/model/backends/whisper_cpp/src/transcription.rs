@@ -344,6 +344,7 @@ fn decode_samples(
     whisper_params.set_print_progress(false);
     whisper_params.set_print_realtime(false);
     whisper_params.set_print_timestamps(false);
+    whisper_params.set_debug_mode(false);
     whisper_params.set_single_segment(false);
 
     state

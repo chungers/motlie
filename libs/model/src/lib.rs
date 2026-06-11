@@ -85,6 +85,7 @@ pub enum BundleFamily {
     Gemma,
     Gpt,
     Hermes,
+    Kokoro,
     Other(String),
     Piper,
     Qwen,

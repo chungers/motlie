@@ -34,10 +34,11 @@ cat /path/to/audio.wav | cargo run -p motlie-models --example asr_sherpa_onnx \
 - The curated sherpa-onnx artifacts must already be downloaded under the
   default HF cache root, or `--artifact-root` may point directly at the
   resolved artifact directory that contains the ONNX files.
-- A compatible ONNX Runtime installation must be provided explicitly for the
-  `ort` crate. Set `ORT_LIB_PATH` to the ONNX Runtime library directory unless
-  the runtime is already discoverable via `pkg-config` or another explicit
-  system installation path.
+- Runtime is provided by the upstream `sherpa-onnx` Rust crate. Its default
+  feature statically links a downloaded prebuilt `sherpa-onnx` native archive.
+  Do not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`.
+- The backend uses upstream Sherpa endpointing. Keep normal pauses in the audio
+  stream; callers should not split a sentence into separate ASR sessions.
 - The `.wav` file must be PCM audio (`i16` or `f32`).
 - For transcript-quality checks, prefer recorded speech. Synthetic TTS WAVs are
   useful for plumbing validation, but they are not representative of sherpa's

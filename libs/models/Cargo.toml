@@ -27,12 +27,14 @@ model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-qwen3-6-27b-gguf = ["dep:motlie-model-llama-cpp"]
 model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
+model-kokoro-82m = ["dep:motlie-model-kokoro"]
 model-qwen3-tts-cpp = ["dep:motlie-model-qwen3-tts-cpp"]
 model-moonshine-streaming = ["dep:motlie-model-moonshine"]
 model-sherpa-onnx-streaming = ["dep:motlie-model-sherpa-onnx"]
 model-whisper-base-en = ["dep:motlie-model-whisper-cpp"]
 llama-cpp-cuda = ["dep:motlie-model-llama-cpp", "motlie-model-llama-cpp/cuda"]
 piper-cuda = ["dep:motlie-model-piper", "motlie-model-piper/cuda"]
+kokoro-cuda = ["dep:motlie-model-kokoro", "motlie-model-kokoro/cuda"]
 qwen3-tts-cpp-cuda = ["dep:motlie-model-qwen3-tts-cpp", "motlie-model-qwen3-tts-cpp/cuda"]
 sherpa-onnx-cuda = ["dep:motlie-model-sherpa-onnx", "motlie-model-sherpa-onnx/cuda"]
 whisper-cpp-cuda = ["dep:motlie-model-whisper-cpp", "motlie-model-whisper-cpp/cuda"]
@@ -50,6 +52,7 @@ motlie-voice = { path = "../voice" }
 motlie-model-mistral = { path = "../model/backends/mistral", optional = true }
 motlie-model-llama-cpp = { path = "../model/backends/llama_cpp", optional = true }
 motlie-model-piper = { path = "../model/backends/piper", optional = true }
+motlie-model-kokoro = { path = "../model/backends/kokoro", optional = true }
 motlie-model-qwen3-tts-cpp = { path = "../model/backends/qwen3_tts_cpp", optional = true }
 motlie-model-moonshine = { path = "../model/backends/moonshine", optional = true }
 motlie-model-sherpa-onnx = { path = "../model/backends/sherpa_onnx", optional = true }
@@ -93,6 +96,7 @@ path = "examples/chat_tool_binding/main.rs"
 [[example]]
 name = "chat_multimodal_gemma4"
 path = "examples/chat_multimodal_gemma4/main.rs"
+required-features = ["model-gemma4-e2b"]
 
 [[example]]
 name = "chat_gguf_gwen3_gemma4"
@@ -129,5 +133,11 @@ path = "examples/tts_piper/main.rs"
 required-features = ["model-piper-en-us-ljspeech-medium"]
 
 [[example]]
+name = "tts_kokoro"
+path = "examples/tts_kokoro/main.rs"
+required-features = ["model-kokoro-82m"]
+
+[[example]]
 name = "bench_chat"
 path = "examples/bench_chat.rs"
+required-features = ["model-qwen3-4b"]
