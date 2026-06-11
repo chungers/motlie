@@ -1,5 +1,8 @@
 # Curated Eval Coverage Report
 
+- generated: 2026-06-11 (cycle: evals/2026-06-infra)
+- canonical name is stable; per-cycle history lives in git + the chrono-named run dirs
+
 - input files: `8`
 - records: `143`
 - overall: `fail`
