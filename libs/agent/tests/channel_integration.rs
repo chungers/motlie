@@ -1,3 +1,5 @@
+#![cfg(feature = "channel")]
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use motlie_agent::{

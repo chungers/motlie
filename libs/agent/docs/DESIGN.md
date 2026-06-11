@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-10 23:17 PDT | @codex-m6-ds-rv | PR #464 round-1 fixes: gated Channel/tmux behind the default `channel` feature so gateway uses the serde-only protocol surface, and made text-call registry attach/removal owner-token safe. |
 | 2026-06-10 20:42 PDT | @codex-m6-ds-rv | Added issue #460 Telnyx text stream protocol contract: shared `motlie.telnyx.text.v1` frame ownership, debug socket extension, and command/stream state machine. |
 | 2026-06-09 16:22 PDT | @codex-421-design | PR #425 api-rv hardening: `ChannelConfig.coalesce_max_wait` caps sustained debounce, and the channel re-checks no-barge-in after coalescing immediately before payload delivery, requeueing/deferring if typing appears during the coalesce window. |
 | 2026-06-09 15:55 PDT | @codex-421-design | PR #425 CLI completion: mstream send, broadcast, and timer now expose `--no-prompt-submit`, keep `--no-enter` as a hidden deprecated alias for one release, and retain the same prompt-submit behavior. |
@@ -41,7 +42,10 @@ Product mode is mixed:
 gateway, `telnyx-agent`, and the debug operator socket do not depend on each
 other for wire structs. The protocol module is
 `motlie_agent::voice::telnyx::text`, and the public protocol string remains
-`motlie.telnyx.text.v1`.
+`motlie.telnyx.text.v1`. The protocol module is intentionally serde-only and
+available with `default-features = false`; the Channel/tmux automation surface
+stays behind the default `channel` feature so gateway protocol peers do not
+link tmux or SSH machinery to use these wire structs.
 
 The public JSONL/WebSocket frame names and fields are preserved:
 

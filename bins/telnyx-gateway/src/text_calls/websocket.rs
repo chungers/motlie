@@ -239,27 +239,34 @@ impl TextCallTurnTracker {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SharedTextCallRegistry {
-    inner: Arc<Mutex<BTreeMap<String, TextCallSessionHandle>>>,
+    inner: Arc<Mutex<BTreeMap<String, TextCallRegistryEntry>>>,
+    next_owner: Arc<AtomicU64>,
+}
+
+impl Default for SharedTextCallRegistry {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(BTreeMap::new())),
+            next_owner: Arc::new(AtomicU64::new(1)),
+        }
+    }
 }
 
 impl SharedTextCallRegistry {
-    async fn insert(&self, gateway_call_id: String, handle: TextCallSessionHandle) {
-        self.inner.lock().await.insert(gateway_call_id, handle);
-    }
-
-    async fn insert_if_absent(
+    async fn claim(
         &self,
         gateway_call_id: String,
         handle: TextCallSessionHandle,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TextCallSessionOwner> {
         let mut guard = self.inner.lock().await;
         if guard.contains_key(&gateway_call_id) {
             anyhow::bail!("text-call stream already attached for {gateway_call_id}");
         }
-        guard.insert(gateway_call_id, handle);
-        Ok(())
+        let owner = TextCallSessionOwner(self.next_owner.fetch_add(1, Ordering::SeqCst));
+        guard.insert(gateway_call_id, TextCallRegistryEntry { owner, handle });
+        Ok(owner)
     }
 
     #[cfg(test)]
@@ -275,12 +282,22 @@ impl SharedTextCallRegistry {
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
         };
-        self.insert(gateway_call_id.into(), handle).await;
+        self.claim(gateway_call_id.into(), handle)
+            .await
+            .expect("test session should claim text-call registry slot");
         rx
     }
 
-    pub async fn remove(&self, gateway_call_id: &str) {
-        self.inner.lock().await.remove(gateway_call_id);
+    async fn remove_owner(&self, gateway_call_id: &str, owner: TextCallSessionOwner) -> bool {
+        let mut guard = self.inner.lock().await;
+        let Some(entry) = guard.get(gateway_call_id) else {
+            return false;
+        };
+        if entry.owner != owner {
+            return false;
+        }
+        guard.remove(gateway_call_id);
+        true
     }
 
     pub async fn contains(&self, gateway_call_id: &str) -> bool {
@@ -293,7 +310,13 @@ impl SharedTextCallRegistry {
         text: String,
         finalized_at: Instant,
     ) -> anyhow::Result<Option<String>> {
-        let handle = { self.inner.lock().await.get(gateway_call_id).cloned() };
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
         let Some(handle) = handle else {
             return Ok(None);
         };
@@ -324,7 +347,13 @@ impl SharedTextCallRegistry {
         playback_id: &str,
         status: PlaybackFinishedStatus,
     ) -> bool {
-        let handle = { self.inner.lock().await.get(gateway_call_id).cloned() };
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
         let Some(handle) = handle else {
             return false;
         };
@@ -338,7 +367,13 @@ impl SharedTextCallRegistry {
     }
 
     pub async fn send_session_end(&self, gateway_call_id: &str, reason: impl Into<String>) {
-        let handle = { self.inner.lock().await.get(gateway_call_id).cloned() };
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
         if let Some(handle) = handle {
             let _ = handle
                 .send(GatewayTextFrame::SessionEnd {
@@ -348,6 +383,15 @@ impl SharedTextCallRegistry {
                 .await;
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TextCallSessionOwner(u64);
+
+#[derive(Clone)]
+struct TextCallRegistryEntry {
+    owner: TextCallSessionOwner,
+    handle: TextCallSessionHandle,
 }
 
 #[derive(Clone)]
@@ -436,21 +480,28 @@ pub async fn connect_application_stream(
         call_id: setup.gateway_call_id.clone(),
         direction: setup.direction,
     };
-    send_json_frame(&mut write, &start).await?;
-
     let session_config = {
         let guard = services.state.read().await;
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
     let (handle, rx) = text_call_session_handle(session_config);
-    services
+    let owner = services
         .registry
-        .insert(setup.gateway_call_id.clone(), handle.clone())
-        .await;
+        .claim(setup.gateway_call_id.clone(), handle.clone())
+        .await?;
+
+    if let Err(error) = send_json_frame(&mut write, &start).await {
+        services
+            .registry
+            .remove_owner(&setup.gateway_call_id, owner)
+            .await;
+        return Err(error);
+    }
 
     tokio::spawn(run_text_call_session(
         services,
         setup.gateway_call_id,
+        owner,
         handle,
         read,
         write,
@@ -474,9 +525,9 @@ where
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
     let (handle, rx) = text_call_session_handle(session_config);
-    services
+    let owner = services
         .registry
-        .insert_if_absent(setup.gateway_call_id.clone(), handle.clone())
+        .claim(setup.gateway_call_id.clone(), handle.clone())
         .await?;
 
     let result = run_debug_text_call_session(
@@ -492,7 +543,10 @@ where
 
     handle.append_turns.lock().await.clear();
     handle.turns.lock().await.clear();
-    services.registry.remove(&setup.gateway_call_id).await;
+    services
+        .registry
+        .remove_owner(&setup.gateway_call_id, owner)
+        .await;
     result
 }
 
@@ -609,6 +663,7 @@ where
 async fn run_text_call_session<W, R>(
     services: TextCallStreamServices,
     gateway_call_id: String,
+    owner: TextCallSessionOwner,
     handle: TextCallSessionHandle,
     mut read: R,
     mut write: W,
@@ -671,7 +726,10 @@ async fn run_text_call_session<W, R>(
 
     handle.append_turns.lock().await.clear();
     handle.turns.lock().await.clear();
-    services.registry.remove(&gateway_call_id).await;
+    services
+        .registry
+        .remove_owner(&gateway_call_id, owner)
+        .await;
     if !gateway_closed {
         let _ =
             hangup_gateway_call(&services, &gateway_call_id, "text-call websocket closed").await;
@@ -1335,13 +1393,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_duplicate_attach_and_stale_debug_detach_do_not_remove_app_session() {
+        let registry = SharedTextCallRegistry::default();
+        let (debug_tx, mut debug_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let debug_handle = test_handle(debug_tx);
+        let (app_tx, mut app_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let app_handle = test_handle(app_tx);
+
+        let debug_owner = registry
+            .claim("call-test".to_string(), debug_handle)
+            .await
+            .expect("debug attach should claim first");
+        let duplicate_error = registry
+            .claim("call-test".to_string(), app_handle.clone())
+            .await
+            .expect_err("app attach must not replace active debug owner");
+        assert!(format!("{duplicate_error:#}").contains("already attached"));
+        assert!(registry.contains("call-test").await);
+
+        assert!(registry.remove_owner("call-test", debug_owner).await);
+        let app_owner = registry
+            .claim("call-test".to_string(), app_handle)
+            .await
+            .expect("app attach should claim after debug detaches");
+        assert!(!registry.remove_owner("call-test", debug_owner).await);
+        assert!(registry.contains("call-test").await);
+
+        let turn_id = registry
+            .send_caller_turn("call-test", "hello app".to_string(), Instant::now())
+            .await
+            .expect("app-owned session should accept caller turn")
+            .expect("app-owned session should receive caller turn");
+        assert!(matches!(
+            app_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurn { turn_id: id, text, .. })
+                if id == turn_id && text == "hello app"
+        ));
+        assert!(debug_rx.try_recv().is_err());
+        assert!(registry.remove_owner("call-test", app_owner).await);
+        assert!(!registry.contains("call-test").await);
+    }
+
+    #[tokio::test]
     async fn caller_turn_allows_multiple_outstanding_turns() {
         let registry = SharedTextCallRegistry::default();
         let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let handle = test_handle(tx);
         registry
-            .insert("call-test".to_string(), handle.clone())
-            .await;
+            .claim("call-test".to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
 
         let first = registry
             .send_caller_turn("call-test", "first".to_string(), Instant::now())
@@ -1388,8 +1489,9 @@ mod tests {
             }
         }
         registry
-            .insert("call-test".to_string(), handle.clone())
-            .await;
+            .claim("call-test".to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
 
         let error = registry
             .send_caller_turn("call-test", "overflow".to_string(), Instant::now())
@@ -1509,8 +1611,9 @@ mod tests {
         let handle = test_handle(tx);
         services
             .registry
-            .insert(call_id.to_string(), handle.clone())
-            .await;
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
         handle
             .turns
             .lock()
@@ -1584,8 +1687,9 @@ mod tests {
         let handle = test_handle(tx);
         services
             .registry
-            .insert(call_id.to_string(), handle.clone())
-            .await;
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
         handle
             .turns
             .lock()
@@ -1658,8 +1762,9 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let handle = test_handle(tx);
         registry
-            .insert("call-test".to_string(), handle.clone())
-            .await;
+            .claim("call-test".to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
 
         registry
             .send_caller_turn("call-test", "first".to_string(), Instant::now())

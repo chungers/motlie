@@ -1,3 +1,6 @@
+//! Compatibility alias: canonical Telnyx text-call protocol definitions live in `motlie_agent::voice::telnyx::text` (#460).
+//! Gateway-internal imports may continue using this module path.
+
 pub use motlie_agent::voice::telnyx::text::{
     AcceptCallResponse, AgentTextFrame, CallConnectedPayload, CallOfferPayload,
     DebugTextStreamFrame, GatewayTextFrame, PlaybackFinishedStatus, TextCallDirection,
