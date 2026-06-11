@@ -463,6 +463,7 @@ impl SherpaOnnxStream {
                 start_ms: result_start_ms(result),
                 end_ms: self.audio_position_ms(),
                 text: text.to_string(),
+                confidence: sherpa_result_confidence(result),
                 final_segment: true,
             });
         }
@@ -476,6 +477,7 @@ impl SherpaOnnxStream {
             start_ms: result_start_ms(result),
             end_ms: self.audio_position_ms(),
             text: text.to_string(),
+            confidence: sherpa_result_confidence(result),
             final_segment: false,
         })
     }
@@ -519,6 +521,29 @@ fn result_start_ms(result: &RecognizerResult) -> u64 {
         .unwrap_or_default() as u64
 }
 
+fn sherpa_result_confidence(result: &RecognizerResult) -> Option<f32> {
+    latest_sherpa_token_confidence(result.lm_probs.as_deref(), result.ys_probs.as_deref())
+}
+
+fn latest_sherpa_token_confidence(
+    lm_probs: Option<&[f32]>,
+    ys_probs: Option<&[f32]>,
+) -> Option<f32> {
+    let native_probs = lm_probs
+        .filter(|probs| !probs.is_empty())
+        .or_else(|| ys_probs.filter(|probs| !probs.is_empty()))?;
+
+    native_probs
+        .iter()
+        .rev()
+        .copied()
+        .find_map(sherpa_log_prob_to_confidence)
+}
+
+fn sherpa_log_prob_to_confidence(log_prob: f32) -> Option<f32> {
+    (log_prob.is_finite() && log_prob <= 0.0).then(|| log_prob.exp())
+}
+
 fn non_empty_update(update: TranscriptionUpdate) -> Option<TranscriptionUpdate> {
     if update.segments.is_empty() {
         None
@@ -557,6 +582,8 @@ mod tests {
             segment: None,
             start_time: Some(1.25),
             is_final: false,
+            ys_probs: None,
+            lm_probs: None,
         };
 
         assert_eq!(result_start_ms(&result), 1_250);
@@ -571,8 +598,31 @@ mod tests {
             segment: None,
             start_time: Some(-0.25),
             is_final: false,
+            ys_probs: None,
+            lm_probs: None,
         };
 
         assert_eq!(result_start_ms(&result), 0);
+    }
+
+    #[test]
+    fn sherpa_confidence_uses_latest_lm_log_prob_when_present() {
+        let confidence = latest_sherpa_token_confidence(Some(&[-0.7, -0.2]), Some(&[-0.1]));
+
+        assert_eq!(confidence, Some((-0.2_f32).exp()));
+    }
+
+    #[test]
+    fn sherpa_confidence_falls_back_to_latest_ys_log_prob() {
+        let confidence = latest_sherpa_token_confidence(None, Some(&[-0.7, -0.4]));
+
+        assert_eq!(confidence, Some((-0.4_f32).exp()));
+    }
+
+    #[test]
+    fn sherpa_confidence_ignores_non_native_log_prob_values() {
+        let confidence = latest_sherpa_token_confidence(Some(&[f32::NAN, 0.5]), None);
+
+        assert_eq!(confidence, None);
     }
 }

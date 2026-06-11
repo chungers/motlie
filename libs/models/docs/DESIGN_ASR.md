@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-11 | @asr480-impl: Added the implemented `TranscriptSegment::confidence` carrier semantics for backend-native ASR confidence and documented that stability remains out of scope because no current engine emits it natively. | Core Contract Changes in `libs/model`, Streaming PCM API Contract, API Sketch, Testing Scope for PLAN |
 | 2026-04-17 | @codex-asr: Renamed the ASR example paths to `asr_whisper`, `asr_sherpa_onnx`, and `asr_moonshine` and updated the design references accordingly. | API Sketch, Testing Scope for PLAN |
 | 2026-04-14 | @codex-asr: Documented the implemented Phase 2 `sherpa-onnx` backend slice, including explicit ONNX Runtime provisioning, curated bundle wiring, and feature-flag status alongside the original `whisper.cpp` recommendation. | Overview, Research Summary, Recommended Vertical Slice, Generic Backend Design, Feature Flag Design, Alternatives Considered |
 | 2026-04-13 | @codex-asr: Addressed R1 review feedback by stream-scoping `AudioSpec`, changing `push_chunk()` to return `Option`, documenting `Send`/not-`Sync` stream ownership, making quantization explicit, tightening edge-case semantics, and narrowing the first implementation slice to the `.wav` path. | Core Contract Changes in `libs/model`, Generic Backend Design, Curated Bundle Design in `libs/models`, Streaming PCM API Contract, Migration and Compatibility Strategy, API Sketch, Testing Scope for PLAN |
@@ -281,15 +282,18 @@ pub struct TranscriptionParams {
     pub emit_partials: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TranscriptSegment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    /// Optional backend-native confidence normalized to `0.0..=1.0` only by
+    /// direct unit conversion. This is a carrier, not a derived score.
+    pub confidence: Option<f32>,
     pub final_segment: bool,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TranscriptionUpdate {
     pub segments: Vec<TranscriptSegment>,
 }
