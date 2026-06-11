@@ -315,15 +315,7 @@ fn evaluate_accelerator_memory_gate(
         .unwrap_or_else(|| accelerator::requested_for_profile(&context.profile.name));
 
     match requested {
-        AcceleratorClass::Cuda if resources.gpu_memory_peak_bytes.is_none() => {
-            Some(SectionEvaluation {
-                status: AcceptanceStatus::Blocked,
-                failure_reason: Some(
-                    "resource metric gpu_memory_peak_bytes blocked: CUDA peak VRAM sampler not instrumented"
-                        .to_owned(),
-                ),
-            })
-        }
+        AcceleratorClass::Cuda => None,
         AcceleratorClass::Metal if !has_metal_unified_memory_peak(resources) => {
             Some(SectionEvaluation {
                 status: AcceptanceStatus::Blocked,
@@ -932,6 +924,54 @@ mod tests {
     }
 
     #[test]
+    fn realistic_linux_swap_gate_allows_model_load_paging() {
+        let context = test_context_with_swap_limit("local-cpu-x86_64", 4 * 1024 * 1024 * 1024);
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            process_swap_delta_peak_bytes: Some(2_673_098_240),
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status(&resources, &context);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Pass);
+    }
+
+    #[test]
+    fn realistic_linux_swap_gate_still_fails_over_threshold() {
+        let context = test_context_with_swap_limit("local-cpu-x86_64", 4 * 1024 * 1024 * 1024);
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            process_swap_delta_peak_bytes: Some(5 * 1024 * 1024 * 1024),
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status(&resources, &context);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Fail);
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("max_process_swap_delta_bytes=4294967296 exceeded"));
+    }
+
+    #[test]
+    fn cuda_gpu_memory_sampler_gap_is_advisory() {
+        let context = test_context("dgx-spark");
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            gpu_memory_peak_bytes: None,
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status(&resources, &context);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Pass);
+        assert_eq!(evaluation.failure_reason, None);
+    }
+
+    #[test]
     fn coverage_reason_uses_accelerator_fallback_reason() {
         let assertions = vec![passing_assertion()];
         let performance = passing_section();
@@ -1086,7 +1126,11 @@ mod tests {
     }
 
     fn test_context(profile_name: &str) -> RunContext {
-        let scenario = toml::from_str(
+        test_context_with_swap_limit(profile_name, 0)
+    }
+
+    fn test_context_with_swap_limit(profile_name: &str, swap_limit: u64) -> RunContext {
+        let raw = format!(
             r#"
 schema_version = 1
 id = "chat_smoke"
@@ -1107,10 +1151,10 @@ capture_startup_ms = true
 capture_request_latency = true
 
 [profiles.local-cpu-x86_64.gates]
-max_process_swap_delta_bytes = 0
+max_process_swap_delta_bytes = {swap_limit}
 "#,
-        )
-        .unwrap();
+        );
+        let scenario = toml::from_str(&raw).unwrap();
 
         RunContext {
             scenario,

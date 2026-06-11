@@ -24,15 +24,15 @@ capture_request_latency = true
 capture_peak_rss = true
 
 [profiles.local-cpu-x86_64.gates]
-max_process_swap_delta_bytes = 0
+max_process_swap_delta_bytes = 4294967296
 
 [profiles.local-cpu-aarch64.gates]
-max_process_swap_delta_bytes = 0
+max_process_swap_delta_bytes = 4294967296
 
 [profiles.apple-metal]
 
 [profiles.dgx-spark.gates]
-max_process_swap_delta_bytes = 0
+max_process_swap_delta_bytes = 4294967296
 
 [profiles.cuda-workstation.gates]
-max_process_swap_delta_bytes = 0
+max_process_swap_delta_bytes = 4294967296

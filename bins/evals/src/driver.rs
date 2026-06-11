@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,15 @@ use crate::result::{
     RESULT_SCHEMA_VERSION,
 };
 use crate::snapshot::{load_snapshot, EvalSnapshot, SnapshotCell};
+
+const CHILD_BUILD_PROFILE: &str = "release";
+const QWEN3_TTS_CPP_SUBMODULE_PATH: &str = "libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp";
+const QWEN3_TTS_CPP_REQUIRED_PATHS: &[&str] = &[
+    "libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp/CMakeLists.txt",
+    "libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp/src/qwen3tts_c_api.cpp",
+    "libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp/src/qwen3tts_c_api.h",
+    "libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp/ggml/CMakeLists.txt",
+];
 
 pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()> {
     let options = MatrixOptions::parse(args)?;
@@ -104,6 +114,31 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
                     "artifact provisioning requires HF_TOKEN env; token value is not logged"
                         .to_owned(),
                 ),
+                &run_id,
+                &command_line,
+            ))?;
+            emitted_pre_run += 1;
+            continue;
+        }
+
+        if requires_artifact_cache(cell) && !artifact_cache_satisfies(cell, &options.artifact_root)
+        {
+            sink.emit(&pre_run_record(
+                &snapshot,
+                cell,
+                &profile,
+                &platform,
+                &cell_accelerator,
+                coverage.with_outcome(
+                    TerminalOutcome::Blocked,
+                    Some(OutcomeReason::ArtifactMissing),
+                ),
+                AcceptanceStatus::Blocked,
+                Some(format!(
+                    "artifact cache preflight missing required artifacts for `{}` under `{}`; run `evals provision` or provide --artifact-root before matrix execution",
+                    cell.bundle_id,
+                    options.artifact_root.display()
+                )),
                 &run_id,
                 &command_line,
             ))?;
@@ -200,6 +235,39 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
             continue;
         }
 
+        if let Some(child) = preflight_required_submodules(cell, &profile, &results_dir)? {
+            let child_coverage = coverage_for_cell(
+                &snapshot,
+                cell,
+                &profile,
+                &platform,
+                &cell_accelerator,
+                ApplicabilityDecision::BlockedPreRun,
+                TerminalOutcome::Blocked,
+                child.reason.clone(),
+            );
+            let mut record = pre_run_record(
+                &snapshot,
+                cell,
+                &profile,
+                &platform,
+                &cell_accelerator,
+                child_coverage,
+                AcceptanceStatus::Blocked,
+                Some(format!(
+                    "vendored submodule preflight failed; see {}",
+                    child.log_path.display()
+                )),
+                &run_id,
+                &command_line,
+            );
+            record.runtime.child_build = child.child_build.clone();
+            record.runtime.build_profile = Some(CHILD_BUILD_PROFILE.to_owned());
+            sink.emit(&record)?;
+            emitted_pre_run += 1;
+            continue;
+        }
+
         launched += 1;
         let child = run_child_cell(
             cell,
@@ -239,6 +307,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
                 &command_line,
             );
             record.runtime.child_build = child.child_build.clone();
+            record.runtime.build_profile = Some(CHILD_BUILD_PROFILE.to_owned());
             sink.emit(&record)?;
             emitted_pre_run += 1;
         }
@@ -374,6 +443,134 @@ struct GgufBindgenEnv {
     repo_wired: bool,
 }
 
+fn preflight_required_submodules(
+    cell: &SnapshotCell,
+    profile: &str,
+    results_dir: &Path,
+) -> Result<Option<ChildOutcome>> {
+    if !requires_qwen3_tts_cpp_submodule(cell, profile) {
+        return Ok(None);
+    }
+
+    let missing = missing_qwen3_tts_cpp_submodule_paths();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+
+    let log_path = results_dir
+        .join("logs")
+        .join(format!("{}-submodule-preflight.log", cell.id));
+    append_child_log(
+        &log_path,
+        &format!(
+            "qwen3-tts.cpp submodule preflight missing before init:\n{}",
+            missing
+                .iter()
+                .map(|path| format!("- {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    )?;
+
+    let args = vec![
+        "submodule".to_owned(),
+        "update".to_owned(),
+        "--init".to_owned(),
+        "--recursive".to_owned(),
+        QWEN3_TTS_CPP_SUBMODULE_PATH.to_owned(),
+    ];
+    append_child_log(&log_path, &format!("running: git {}", args.join(" ")))?;
+
+    let started_at = Instant::now();
+    let mut command = Command::new("git");
+    command.current_dir(repo_root()).args(&args);
+    attach_child_log(&mut command, &log_path)?;
+    let status = command.status().with_context(|| {
+        format!(
+            "failed to spawn qwen3-tts.cpp submodule init for snapshot cell `{}`",
+            cell.id
+        )
+    })?;
+    let child_build = ChildBuildSection {
+        command: std::iter::once("git".to_owned())
+            .chain(args.clone())
+            .collect(),
+        status: status.code(),
+        duration_ms: Some(duration_ms(started_at.elapsed())),
+        log_path: Some(log_path.display().to_string()),
+    };
+
+    let remaining = missing_qwen3_tts_cpp_submodule_paths();
+    if status.success() && remaining.is_empty() {
+        append_child_log(
+            &log_path,
+            "qwen3-tts.cpp submodule preflight satisfied after init",
+        )?;
+        return Ok(None);
+    }
+
+    append_child_log(
+        &log_path,
+        &format!(
+            "qwen3-tts.cpp submodule preflight still missing after init:\n{}",
+            remaining
+                .iter()
+                .map(|path| format!("- {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    )?;
+
+    Ok(Some(ChildOutcome {
+        success: false,
+        log_path,
+        reason: Some(OutcomeReason::SubmoduleMissing),
+        child_build: Some(child_build),
+    }))
+}
+
+fn requires_qwen3_tts_cpp_submodule(cell: &SnapshotCell, profile: &str) -> bool {
+    cell.bundle_id == "qwen3_tts_cpp_0_6b"
+        || cell
+            .features_for_profile(profile)
+            .iter()
+            .any(|feature| feature == "model-qwen3-tts-cpp")
+}
+
+fn missing_qwen3_tts_cpp_submodule_paths() -> Vec<PathBuf> {
+    let root = repo_root();
+    QWEN3_TTS_CPP_REQUIRED_PATHS
+        .iter()
+        .map(|relative| root.join(relative))
+        .filter(|path| !path.is_file())
+        .collect()
+}
+
+fn append_child_log(log_path: &Path, message: &str) -> Result<()> {
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open child log `{}`", log_path.display()))?;
+    writeln!(log, "{message}")?;
+    Ok(())
+}
+
+fn child_build_args(features: &[String]) -> Vec<String> {
+    let mut build_args = vec![
+        "build".to_owned(),
+        "--release".to_owned(),
+        "-p".to_owned(),
+        "evals".to_owned(),
+        "--no-default-features".to_owned(),
+    ];
+    if !features.is_empty() {
+        build_args.push("--features".to_owned());
+        build_args.push(features.join(" "));
+    }
+    build_args
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_child_cell(
     cell: &SnapshotCell,
@@ -388,17 +585,7 @@ fn run_child_cell(
     let log_path = results_dir.join("logs").join(format!("{}.log", cell.id));
     let gguf_bindgen_env = gguf_bindgen_env(cell);
     let features = cell.features_for_profile(profile);
-
-    let mut build_args = vec![
-        "build".to_owned(),
-        "-p".to_owned(),
-        "evals".to_owned(),
-        "--no-default-features".to_owned(),
-    ];
-    if !features.is_empty() {
-        build_args.push("--features".to_owned());
-        build_args.push(features.join(" "));
-    }
+    let build_args = child_build_args(&features);
 
     let build_started_at = Instant::now();
     let mut build_command = Command::new("cargo");
@@ -429,7 +616,7 @@ fn run_child_cell(
         });
     }
 
-    let mut run_command = Command::new(evals_debug_binary());
+    let mut run_command = Command::new(evals_child_binary());
     run_command.current_dir(repo_root());
     run_command.arg("run");
     run_command.args(["--bundle", &cell.bundle_id]);
@@ -504,12 +691,12 @@ fn run_child_cell(
     }
 }
 
-fn evals_debug_binary() -> PathBuf {
+fn evals_child_binary() -> PathBuf {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| repo_root().join("target"));
     target_dir
-        .join("debug")
+        .join(CHILD_BUILD_PROFILE)
         .join(format!("evals{}", std::env::consts::EXE_SUFFIX))
 }
 
@@ -961,6 +1148,10 @@ fn requires_hf_token(cell: &SnapshotCell, artifact_root: &Path) -> bool {
     cell.artifact.requires_hf_token && !artifact_cache_satisfies(cell, artifact_root)
 }
 
+fn requires_artifact_cache(cell: &SnapshotCell) -> bool {
+    !cell.artifact.allow_missing && !cell.artifact.patterns.is_empty()
+}
+
 fn artifact_cache_satisfies(cell: &SnapshotCell, artifact_root: &Path) -> bool {
     if cell.artifact.allow_missing {
         return true;
@@ -991,6 +1182,10 @@ fn artifact_cache_satisfies(cell: &SnapshotCell, artifact_root: &Path) -> bool {
 }
 
 fn bundle_artifact_cache_root(cell: &SnapshotCell, artifact_root: &Path) -> Option<PathBuf> {
+    if let Some(repo) = curated_hf_repo_for_bundle(&cell.bundle_id) {
+        return Some(artifact_root.join(format!("models--{}", repo.replace('/', "--"))));
+    }
+
     let catalog = Catalog::with_defaults();
     let descriptor = catalog.bundle(&BundleId::new(cell.bundle_id.clone()))?;
     let artifacts = descriptor.artifacts.as_ref()?;
@@ -998,6 +1193,34 @@ fn bundle_artifact_cache_root(cell: &SnapshotCell, artifact_root: &Path) -> Opti
         ArtifactSource::HuggingFace { repo } => {
             Some(artifact_root.join(format!("models--{}", repo.replace('/', "--"))))
         }
+    }
+}
+
+fn curated_hf_repo_for_bundle(bundle_id: &str) -> Option<&'static str> {
+    match bundle_id {
+        "embeddinggemma_300m" => Some("google/embeddinggemma-300m"),
+        "qwen3_embedding_06b" => Some("Qwen/Qwen3-Embedding-0.6B"),
+        "qwen3_4b" => Some("Qwen/Qwen3-4B"),
+        "gemma4_e2b" => Some("google/gemma-4-E2B-it"),
+        "gemma4_e4b" => Some("google/gemma-4-E4B-it"),
+        "qwen3_4b_gguf" => Some("Qwen/Qwen3-4B-GGUF"),
+        "qwen3_6_27b_gguf" => Some("unsloth/Qwen3.6-27B-GGUF"),
+        "gemma4_e2b_gguf" => Some("unsloth/gemma-4-E2B-it-GGUF"),
+        "gemma4_e4b_gguf" => Some("unsloth/gemma-4-E4B-it-GGUF"),
+        "gemma4_12b_gguf" => Some("unsloth/gemma-4-12b-it-GGUF"),
+        "gemma4_12b_qat_q4_0_gguf" => Some("google/gemma-4-12B-it-qat-q4_0-gguf"),
+        "whisper_base_en" => Some("ggerganov/whisper.cpp"),
+        "moonshine_streaming_en" => Some("UsefulSensors/moonshine-streaming"),
+        "sherpa_onnx_streaming_zipformer_en" => {
+            Some("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26")
+        }
+        "sherpa_onnx_streaming_zipformer_en_kroko_2025" => {
+            Some("csukuangfj/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06")
+        }
+        "piper_en_us_ljspeech_medium" => Some("rhasspy/piper-voices"),
+        "qwen3_tts_cpp_0_6b" => Some("koboldcpp/tts"),
+        "kokoro_82m" => Some("onnx-community/Kokoro-82M-v1.0-ONNX"),
+        _ => None,
     }
 }
 
@@ -1295,6 +1518,53 @@ mod tests {
             "apple-metal",
             AcceleratorClass::Metal
         ));
+    }
+
+    #[test]
+    fn child_build_args_use_release_profile() {
+        let args = child_build_args(&["model-gemma4-e2b".to_owned()]);
+
+        assert_eq!(args[0], "build");
+        assert_eq!(args[1], "--release");
+        assert!(args.contains(&"--no-default-features".to_owned()));
+        assert_eq!(args.last().map(String::as_str), Some("model-gemma4-e2b"));
+    }
+
+    #[test]
+    fn qwen3_tts_cpp_cells_require_submodule_preflight() {
+        let mut cell = test_snapshot_cell();
+
+        assert!(!requires_qwen3_tts_cpp_submodule(&cell, "local-cpu-x86_64"));
+
+        cell.bundle_id = "qwen3_tts_cpp_0_6b".to_owned();
+        assert!(requires_qwen3_tts_cpp_submodule(&cell, "local-cpu-x86_64"));
+
+        cell.bundle_id = "bundle".to_owned();
+        cell.features.push("model-qwen3-tts-cpp".to_owned());
+        assert!(requires_qwen3_tts_cpp_submodule(&cell, "local-cpu-x86_64"));
+    }
+
+    #[test]
+    fn artifact_cache_preflight_requires_declared_patterns() {
+        let mut cell = test_snapshot_cell();
+
+        assert!(!requires_artifact_cache(&cell));
+
+        cell.artifact.patterns = vec!["*.gguf".to_owned()];
+        assert!(requires_artifact_cache(&cell));
+
+        cell.artifact.allow_missing = true;
+        assert!(!requires_artifact_cache(&cell));
+    }
+
+    #[test]
+    fn artifact_cache_root_uses_curated_repo_without_feature_enabled() {
+        let mut cell = test_snapshot_cell();
+        cell.bundle_id = "qwen3_4b".to_owned();
+
+        let root = bundle_artifact_cache_root(&cell, Path::new("/tmp/hf-cache")).unwrap();
+
+        assert_eq!(root, PathBuf::from("/tmp/hf-cache/models--Qwen--Qwen3-4B"));
     }
 
     #[test]
