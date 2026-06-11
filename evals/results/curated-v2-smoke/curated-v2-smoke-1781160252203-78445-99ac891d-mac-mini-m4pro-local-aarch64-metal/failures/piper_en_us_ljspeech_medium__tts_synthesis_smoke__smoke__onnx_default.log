@@ -1,0 +1,15 @@
+   Compiling once_cell v1.21.4
+   Compiling rustls-pki-types v1.14.1
+   Compiling motlie-model-espeak-ng v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/libs/model/backends/espeak_ng)
+   Compiling motlie-models v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/libs/models)
+   Compiling tempfile v3.27.0
+   Compiling webpki-root-certs v1.0.7
+   Compiling native-tls v0.2.18
+   Compiling ureq v3.3.0
+   Compiling ort-sys v2.0.0-rc.12 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/third_party/ort-sys)
+warning: ort-sys@2.0.0-rc.12: [ort-sys] [WARN] can't do xcframework linking for target 'aarch64-apple-darwin'
+   Compiling ort v2.0.0-rc.12
+   Compiling motlie-model-ort v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/libs/model/backends/ort)
+   Compiling motlie-model-piper v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/libs/model/backends/piper)
+   Compiling evals v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/bins/evals)
+    Finished `release` profile [optimized] target(s) in 6.59s
