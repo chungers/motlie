@@ -2000,6 +2000,7 @@ impl AsrGate {
         self.speech_started_at = None;
         self.low_energy_started_at = None;
         self.low_energy_run_ms = 0;
+        self.suppressed_tail_frames = 0;
         self.last_speech_peak = None;
         self.last_speech_rms = None;
     }
@@ -3551,6 +3552,59 @@ mod tests {
                 assert_eq!(endpoint_gate.last_speech_peak, Some(4_000));
             }
             other => panic!("expected finalize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn asr_gate_resets_tail_suppression_at_utterance_boundary() {
+        let mut gate = AsrGate::default();
+        let mut quality = VoiceQualityConfig::default();
+        quality.endpoint.trailing_silence_ms = 20;
+        let speech = SampleStats {
+            peak: 4_000,
+            rms: 4_000.0,
+            mean: 0.0,
+        };
+        let silence = SampleStats {
+            peak: 0,
+            rms: 0.0,
+            mean: 0.0,
+        };
+
+        assert_eq!(
+            gate.accept(1, "stream-1", 20, &speech, &quality),
+            AsrFrameDecision::Continue { speech_onset: true }
+        );
+        assert_eq!(
+            gate.accept(2, "stream-1", 20, &silence, &quality),
+            AsrFrameDecision::Continue {
+                speech_onset: false,
+            }
+        );
+        match gate.accept(3, "stream-1", 20, &silence, &quality) {
+            AsrFrameDecision::Finalize { endpoint_gate, .. } => {
+                assert_eq!(endpoint_gate.suppressed_tail_frames, 1);
+            }
+            other => panic!("expected first finalize, got {other:?}"),
+        }
+
+        gate.wait_for_next_speech();
+
+        assert_eq!(
+            gate.accept(4, "stream-1", 20, &speech, &quality),
+            AsrFrameDecision::Continue { speech_onset: true }
+        );
+        assert_eq!(
+            gate.accept(5, "stream-1", 20, &silence, &quality),
+            AsrFrameDecision::Continue {
+                speech_onset: false,
+            }
+        );
+        match gate.accept(6, "stream-1", 20, &silence, &quality) {
+            AsrFrameDecision::Finalize { endpoint_gate, .. } => {
+                assert_eq!(endpoint_gate.suppressed_tail_frames, 1);
+            }
+            other => panic!("expected second finalize, got {other:?}"),
         }
     }
 
