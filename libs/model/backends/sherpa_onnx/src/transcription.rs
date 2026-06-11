@@ -522,16 +522,11 @@ fn result_start_ms(result: &RecognizerResult) -> u64 {
 }
 
 fn sherpa_result_confidence(result: &RecognizerResult) -> Option<f32> {
-    latest_sherpa_token_confidence(result.lm_probs.as_deref(), result.ys_probs.as_deref())
+    latest_sherpa_token_confidence(result.ys_probs.as_deref())
 }
 
-fn latest_sherpa_token_confidence(
-    lm_probs: Option<&[f32]>,
-    ys_probs: Option<&[f32]>,
-) -> Option<f32> {
-    let native_probs = lm_probs
-        .filter(|probs| !probs.is_empty())
-        .or_else(|| ys_probs.filter(|probs| !probs.is_empty()))?;
+fn latest_sherpa_token_confidence(ys_probs: Option<&[f32]>) -> Option<f32> {
+    let native_probs = ys_probs.filter(|probs| !probs.is_empty())?;
 
     native_probs
         .iter()
@@ -606,22 +601,31 @@ mod tests {
     }
 
     #[test]
-    fn sherpa_confidence_uses_latest_lm_log_prob_when_present() {
-        let confidence = latest_sherpa_token_confidence(Some(&[-0.7, -0.2]), Some(&[-0.1]));
+    fn sherpa_confidence_uses_latest_ys_log_prob() {
+        let confidence = latest_sherpa_token_confidence(Some(&[-0.7, -0.2]));
 
         assert_eq!(confidence, Some((-0.2_f32).exp()));
     }
 
     #[test]
-    fn sherpa_confidence_falls_back_to_latest_ys_log_prob() {
-        let confidence = latest_sherpa_token_confidence(None, Some(&[-0.7, -0.4]));
+    fn sherpa_confidence_returns_none_without_ys_probs() {
+        let result = RecognizerResult {
+            text: "hello".into(),
+            tokens: vec![],
+            timestamps: None,
+            segment: None,
+            start_time: None,
+            is_final: false,
+            ys_probs: None,
+            lm_probs: Some(vec![-0.1]),
+        };
 
-        assert_eq!(confidence, Some((-0.4_f32).exp()));
+        assert_eq!(sherpa_result_confidence(&result), None);
     }
 
     #[test]
     fn sherpa_confidence_ignores_non_native_log_prob_values() {
-        let confidence = latest_sherpa_token_confidence(Some(&[f32::NAN, 0.5]), None);
+        let confidence = latest_sherpa_token_confidence(Some(&[f32::NAN, 0.5]));
 
         assert_eq!(confidence, None);
     }

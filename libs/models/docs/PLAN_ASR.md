@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-11 | @asr480-impl | Added the #480 confidence-contract implementation note: `TranscriptSegment::confidence` carries backend-native ASR confidence, and stability is deferred because no current engine emits native stability. |
+| 2026-06-11 | @asr480-impl | Added the #480 confidence-contract implementation note: `TranscriptSegment::confidence` carries backend-native tail-token ASR confidence, values are not comparable across backends, and stability is deferred because no current engine emits native stability. |
 | 2026-04-17 | @codex-asr | Renamed the shipped ASR example targets and paths to `asr_whisper`, `asr_sherpa_onnx`, and `asr_moonshine`, and updated the build-plan references accordingly. |
 | 2026-04-14 | @codex-asr | Added the concrete Phase 2 `sherpa-onnx` follow-on slice to keep the PLAN aligned with the implemented backend crate, curated bundle, feature flags, explicit ONNX Runtime provisioning, and `models_v0_6` example. |
 | 2026-04-13 | @codex-asr | Addressed R1 review feedback by adding explicit tasks for the stream-scoped `AudioSpec`, `Option<TranscriptionUpdate>`, runtime metrics, exact brownfield file touch points, `QuantizationSupport::none()`, and the websocket deferral details for the first implementation slice. |
@@ -33,7 +33,7 @@ Add ASR to `libs/model` without disturbing the existing bundle lifecycle shape.
 
 - [ ] Add `PcmEncoding`, `AudioSpec`, `PcmChunk`, `TranscriptionParams`, `TranscriptSegment`, and `TranscriptionUpdate`.
   DESIGN reference: `Core Contract Changes in libs/model`, `Streaming PCM API Contract`
-- [x] 2026-06-11 @asr480-impl: Add `TranscriptSegment::confidence: Option<f32>` as a dumb carrier for backend-native ASR confidence. Sherpa and Whisper wire native token probabilities with only unit conversion; Moonshine returns `None`. Stability is deferred because no current engine emits native stability.
+- [x] 2026-06-11 @asr480-impl: Add `TranscriptSegment::confidence: Option<f32>` as a dumb carrier for backend-native tail-token ASR confidence. Sherpa uses native `ys_probs` with only unit conversion, Whisper uses native token probability, Moonshine returns `None`, and values are not comparable across backends. Stability is deferred because no current engine emits native stability.
   DESIGN reference: `Core Contract Changes in libs/model`, `Streaming PCM API Contract`
 - [ ] Add `TranscriptionModel` and `TranscriptionStream`.
   DESIGN reference: `Core Contract Changes in libs/model`

@@ -79,7 +79,9 @@ impl Default for SpokenLanguageIdentificationConfig {
 impl SpokenLanguageIdentificationConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::SpokenLanguageIdentificationConfig {
         sys::SpokenLanguageIdentificationConfig {
-            whisper: self.whisper.to_sys(cstrings),
+            whisper: self
+                .whisper
+                .to_sys(cstrings),
             num_threads: self.num_threads,
             debug: self.debug as i32,
             provider: to_c_ptr(&self.provider, cstrings),
@@ -131,10 +133,15 @@ impl SpokenLanguageIdentification {
             }
 
             let ans = SpokenLanguageIdentificationResult {
-                lang: if (*p).lang.is_null() {
+                lang: if (*p)
+                    .lang
+                    .is_null()
+                {
                     String::new()
                 } else {
-                    CStr::from_ptr((*p).lang).to_string_lossy().into_owned()
+                    CStr::from_ptr((*p).lang)
+                        .to_string_lossy()
+                        .into_owned()
                 },
             };
 
@@ -147,7 +154,10 @@ impl SpokenLanguageIdentification {
 impl Drop for SpokenLanguageIdentification {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxDestroySpokenLanguageIdentification(self.ptr);
             }
         }

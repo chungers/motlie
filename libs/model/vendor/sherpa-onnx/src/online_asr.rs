@@ -170,11 +170,21 @@ impl Default for OnlineModelConfig {
 impl OnlineModelConfig {
     pub(crate) fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OnlineModelConfig {
         sys::OnlineModelConfig {
-            transducer: self.transducer.to_sys(cstrings),
-            paraformer: self.paraformer.to_sys(cstrings),
-            zipformer2_ctc: self.zipformer2_ctc.to_sys(cstrings),
-            nemo_ctc: self.nemo_ctc.to_sys(cstrings),
-            t_one_ctc: self.t_one_ctc.to_sys(cstrings),
+            transducer: self
+                .transducer
+                .to_sys(cstrings),
+            paraformer: self
+                .paraformer
+                .to_sys(cstrings),
+            zipformer2_ctc: self
+                .zipformer2_ctc
+                .to_sys(cstrings),
+            nemo_ctc: self
+                .nemo_ctc
+                .to_sys(cstrings),
+            t_one_ctc: self
+                .t_one_ctc
+                .to_sys(cstrings),
 
             tokens: to_c_ptr(&self.tokens, cstrings),
             num_threads: self.num_threads,
@@ -189,7 +199,10 @@ impl OnlineModelConfig {
                 .tokens_buf
                 .as_ref()
                 .map_or(ptr::null(), |buf| buf.as_ptr() as *const _),
-            tokens_buf_size: self.tokens_buf.as_ref().map_or(0, |buf| buf.len() as i32),
+            tokens_buf_size: self
+                .tokens_buf
+                .as_ref()
+                .map_or(0, |buf| buf.len() as i32),
         }
     }
 }
@@ -302,7 +315,9 @@ impl OnlineRecognizerConfig {
     pub(crate) fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OnlineRecognizerConfig {
         sys::OnlineRecognizerConfig {
             feat_config: self.feat_config,
-            model_config: self.model_config.to_sys(cstrings),
+            model_config: self
+                .model_config
+                .to_sys(cstrings),
             decoding_method: to_c_ptr(&self.decoding_method, cstrings),
             max_active_paths: self.max_active_paths,
             enable_endpoint: self.enable_endpoint as i32,
@@ -311,7 +326,9 @@ impl OnlineRecognizerConfig {
             rule3_min_utterance_length: self.rule3_min_utterance_length,
             hotwords_file: to_c_ptr(&self.hotwords_file, cstrings),
             hotwords_score: self.hotwords_score,
-            ctc_fst_decoder_config: self.ctc_fst_decoder_config.to_sys(cstrings),
+            ctc_fst_decoder_config: self
+                .ctc_fst_decoder_config
+                .to_sys(cstrings),
             rule_fsts: to_c_ptr(&self.rule_fsts, cstrings),
             rule_fars: to_c_ptr(&self.rule_fars, cstrings),
             blank_penalty: self.blank_penalty,
@@ -319,8 +336,13 @@ impl OnlineRecognizerConfig {
                 .hotwords_buf
                 .as_ref()
                 .map_or(ptr::null(), |buf| buf.as_ptr() as *const _),
-            hotwords_buf_size: self.hotwords_buf.as_ref().map_or(0, |buf| buf.len() as i32),
-            hr: self.hr.to_sys(cstrings),
+            hotwords_buf_size: self
+                .hotwords_buf
+                .as_ref()
+                .map_or(0, |buf| buf.len() as i32),
+            hr: self
+                .hr
+                .to_sys(cstrings),
         }
     }
 }
@@ -370,7 +392,10 @@ impl OnlineRecognizer {
 
     /// Decode multiple streams in one batch call.
     pub fn decode_multiple_streams(&self, streams: &[&OnlineStream]) {
-        let ptrs: Vec<*const sys::OnlineStream> = streams.iter().map(|s| s.ptr).collect();
+        let ptrs: Vec<*const sys::OnlineStream> = streams
+            .iter()
+            .map(|s| s.ptr)
+            .collect();
         unsafe {
             sys::SherpaOnnxDecodeMultipleOnlineStreams(self.ptr, ptrs.as_ptr(), ptrs.len() as i32)
         }
@@ -398,7 +423,9 @@ impl OnlineRecognizer {
             if cstr.is_null() {
                 return None;
             }
-            let s = CStr::from_ptr(cstr).to_string_lossy().into_owned();
+            let s = CStr::from_ptr(cstr)
+                .to_string_lossy()
+                .into_owned();
             sys::SherpaOnnxDestroyOnlineStreamResultJson(cstr);
             serde_json::from_str(&s).ok()
         }
@@ -466,7 +493,9 @@ impl OnlineStream {
             if p.is_null() {
                 String::new()
             } else {
-                CStr::from_ptr(p).to_string_lossy().into_owned()
+                CStr::from_ptr(p)
+                    .to_string_lossy()
+                    .into_owned()
             }
         }
     }

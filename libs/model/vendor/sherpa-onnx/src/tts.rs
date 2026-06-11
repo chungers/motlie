@@ -359,16 +359,30 @@ pub struct OfflineTtsModelConfig {
 impl OfflineTtsModelConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OfflineTtsModelConfig {
         sys::OfflineTtsModelConfig {
-            vits: self.vits.to_sys(cstrings),
+            vits: self
+                .vits
+                .to_sys(cstrings),
             num_threads: self.num_threads,
             debug: self.debug as i32,
             provider: to_c_ptr(&self.provider, cstrings),
-            matcha: self.matcha.to_sys(cstrings),
-            kokoro: self.kokoro.to_sys(cstrings),
-            kitten: self.kitten.to_sys(cstrings),
-            zipvoice: self.zipvoice.to_sys(cstrings),
-            pocket: self.pocket.to_sys(cstrings),
-            supertonic: self.supertonic.to_sys(cstrings),
+            matcha: self
+                .matcha
+                .to_sys(cstrings),
+            kokoro: self
+                .kokoro
+                .to_sys(cstrings),
+            kitten: self
+                .kitten
+                .to_sys(cstrings),
+            zipvoice: self
+                .zipvoice
+                .to_sys(cstrings),
+            pocket: self
+                .pocket
+                .to_sys(cstrings),
+            supertonic: self
+                .supertonic
+                .to_sys(cstrings),
         }
     }
 }
@@ -386,7 +400,9 @@ pub struct OfflineTtsConfig {
 impl OfflineTtsConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OfflineTtsConfig {
         sys::OfflineTtsConfig {
-            model: self.model.to_sys(cstrings),
+            model: self
+                .model
+                .to_sys(cstrings),
             rule_fsts: to_c_ptr(&self.rule_fsts, cstrings),
             max_num_sentences: self.max_num_sentences,
             rule_fars: to_c_ptr(&self.rule_fars, cstrings),
@@ -437,7 +453,10 @@ impl GeneratedAudio {
     pub fn samples(&self) -> &[f32] {
         unsafe {
             let p = &*self.ptr;
-            if p.samples.is_null() || p.n <= 0 {
+            if p.samples
+                .is_null()
+                || p.n <= 0
+            {
                 &[]
             } else {
                 slice::from_raw_parts(p.samples, p.n as usize)
@@ -459,7 +478,10 @@ impl GeneratedAudio {
 impl Drop for GeneratedAudio {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxDestroyOfflineTtsGeneratedAudio(self.ptr);
             }
         }

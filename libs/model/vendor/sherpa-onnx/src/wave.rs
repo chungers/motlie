@@ -69,7 +69,10 @@ impl Wave {
 impl Drop for Wave {
     fn drop(&mut self) {
         unsafe {
-            if !self.inner.is_null() {
+            if !self
+                .inner
+                .is_null()
+            {
                 sys::SherpaOnnxFreeWave(self.inner);
             }
         }

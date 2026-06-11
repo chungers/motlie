@@ -17,7 +17,8 @@ impl LinearResampler {
     /// Create a new resampler that converts from `samp_rate_in_hz` to
     /// `samp_rate_out_hz`.
     pub fn create(samp_rate_in_hz: i32, samp_rate_out_hz: i32) -> Option<Self> {
-        let filter_cutoff_hz = 0.99 * 0.5 * (samp_rate_in_hz as f32).min(samp_rate_out_hz as f32);
+        let filter_cutoff_hz =
+            0.99 * 0.5 * (samp_rate_in_hz as f32).min(samp_rate_out_hz as f32);
         let num_zeros = 6;
 
         let ptr = unsafe {

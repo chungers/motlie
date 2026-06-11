@@ -42,7 +42,11 @@ fn c_ptr_to_string(ptr: *const c_char) -> String {
     if ptr.is_null() {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+        unsafe {
+            CStr::from_ptr(ptr)
+                .to_string_lossy()
+                .into_owned()
+        }
     }
 }
 
@@ -81,14 +85,19 @@ impl KeywordSpotterConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::KeywordSpotterConfig {
         sys::KeywordSpotterConfig {
             feat_config: self.feat_config,
-            model_config: self.model_config.to_sys(cstrings),
+            model_config: self
+                .model_config
+                .to_sys(cstrings),
             max_active_paths: self.max_active_paths,
             num_trailing_blanks: self.num_trailing_blanks,
             keywords_score: self.keywords_score,
             keywords_threshold: self.keywords_threshold,
             keywords_file: to_c_ptr(&self.keywords_file, cstrings),
             keywords_buf: to_c_ptr(&self.keywords_buf, cstrings),
-            keywords_buf_size: self.keywords_buf.as_ref().map_or(0, |s| s.len() as i32),
+            keywords_buf_size: self
+                .keywords_buf
+                .as_ref()
+                .map_or(0, |s| s.len() as i32),
         }
     }
 }
@@ -152,7 +161,10 @@ impl KeywordSpotter {
 
     /// Decode multiple streams in one batch.
     pub fn decode_multiple_streams(&self, streams: &[&OnlineStream]) {
-        let ptrs: Vec<*const sys::OnlineStream> = streams.iter().map(|s| s.ptr).collect();
+        let ptrs: Vec<*const sys::OnlineStream> = streams
+            .iter()
+            .map(|s| s.ptr)
+            .collect();
         unsafe {
             sys::SherpaOnnxDecodeMultipleKeywordStreams(self.ptr, ptrs.as_ptr(), ptrs.len() as i32)
         }
@@ -172,7 +184,11 @@ impl KeywordSpotter {
             }
 
             let result = &*p;
-            let tokens_arr = if result.tokens_arr.is_null() || result.count <= 0 {
+            let tokens_arr = if result
+                .tokens_arr
+                .is_null()
+                || result.count <= 0
+            {
                 Vec::new()
             } else {
                 slice::from_raw_parts(result.tokens_arr, result.count as usize)
@@ -181,7 +197,11 @@ impl KeywordSpotter {
                     .collect()
             };
 
-            let timestamps = if result.timestamps.is_null() || result.count <= 0 {
+            let timestamps = if result
+                .timestamps
+                .is_null()
+                || result.count <= 0
+            {
                 Vec::new()
             } else {
                 slice::from_raw_parts(result.timestamps, result.count as usize).to_vec()
@@ -209,7 +229,9 @@ impl KeywordSpotter {
                 return None;
             }
 
-            let ans = CStr::from_ptr(p).to_string_lossy().into_owned();
+            let ans = CStr::from_ptr(p)
+                .to_string_lossy()
+                .into_owned();
             sys::SherpaOnnxFreeKeywordResultJson(p);
             Some(ans)
         }
@@ -219,7 +241,10 @@ impl KeywordSpotter {
 impl Drop for KeywordSpotter {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxDestroyKeywordSpotter(self.ptr);
             }
         }

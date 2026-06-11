@@ -483,24 +483,60 @@ pub struct OfflineModelConfig {
 impl OfflineModelConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OfflineModelConfig {
         sys::OfflineModelConfig {
-            transducer: self.transducer.to_sys(cstrings),
-            paraformer: self.paraformer.to_sys(cstrings),
-            nemo_ctc: self.nemo_ctc.to_sys(cstrings),
-            whisper: self.whisper.to_sys(cstrings),
-            tdnn: self.tdnn.to_sys(cstrings),
-            sense_voice: self.sense_voice.to_sys(cstrings),
-            canary: self.canary.to_sys(cstrings),
-            fire_red_asr: self.fire_red_asr.to_sys(cstrings),
-            dolphin: self.dolphin.to_sys(cstrings),
-            moonshine: self.moonshine.to_sys(cstrings),
-            zipformer_ctc: self.zipformer_ctc.to_sys(cstrings),
-            wenet_ctc: self.wenet_ctc.to_sys(cstrings),
-            omnilingual: self.omnilingual.to_sys(cstrings),
-            medasr: self.medasr.to_sys(cstrings),
-            funasr_nano: self.funasr_nano.to_sys(cstrings),
-            fire_red_asr_ctc: self.fire_red_asr_ctc.to_sys(cstrings),
-            qwen3_asr: self.qwen3_asr.to_sys(cstrings),
-            cohere_transcribe: self.cohere_transcribe.to_sys(cstrings),
+            transducer: self
+                .transducer
+                .to_sys(cstrings),
+            paraformer: self
+                .paraformer
+                .to_sys(cstrings),
+            nemo_ctc: self
+                .nemo_ctc
+                .to_sys(cstrings),
+            whisper: self
+                .whisper
+                .to_sys(cstrings),
+            tdnn: self
+                .tdnn
+                .to_sys(cstrings),
+            sense_voice: self
+                .sense_voice
+                .to_sys(cstrings),
+            canary: self
+                .canary
+                .to_sys(cstrings),
+            fire_red_asr: self
+                .fire_red_asr
+                .to_sys(cstrings),
+            dolphin: self
+                .dolphin
+                .to_sys(cstrings),
+            moonshine: self
+                .moonshine
+                .to_sys(cstrings),
+            zipformer_ctc: self
+                .zipformer_ctc
+                .to_sys(cstrings),
+            wenet_ctc: self
+                .wenet_ctc
+                .to_sys(cstrings),
+            omnilingual: self
+                .omnilingual
+                .to_sys(cstrings),
+            medasr: self
+                .medasr
+                .to_sys(cstrings),
+            funasr_nano: self
+                .funasr_nano
+                .to_sys(cstrings),
+            fire_red_asr_ctc: self
+                .fire_red_asr_ctc
+                .to_sys(cstrings),
+            qwen3_asr: self
+                .qwen3_asr
+                .to_sys(cstrings),
+            cohere_transcribe: self
+                .cohere_transcribe
+                .to_sys(cstrings),
 
             tokens: to_c_ptr(&self.tokens, cstrings),
             num_threads: self.num_threads,
@@ -537,8 +573,12 @@ impl OfflineRecognizerConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OfflineRecognizerConfig {
         sys::OfflineRecognizerConfig {
             feat_config: self.feat_config,
-            model_config: self.model_config.to_sys(cstrings),
-            lm_config: self.lm_config.to_sys(cstrings),
+            model_config: self
+                .model_config
+                .to_sys(cstrings),
+            lm_config: self
+                .lm_config
+                .to_sys(cstrings),
             decoding_method: to_c_ptr(&self.decoding_method, cstrings),
             max_active_paths: self.max_active_paths,
             hotwords_file: to_c_ptr(&self.hotwords_file, cstrings),
@@ -546,7 +586,9 @@ impl OfflineRecognizerConfig {
             rule_fsts: to_c_ptr(&self.rule_fsts, cstrings),
             rule_fars: to_c_ptr(&self.rule_fars, cstrings),
             blank_penalty: self.blank_penalty,
-            hr: self.hr.to_sys(cstrings),
+            hr: self
+                .hr
+                .to_sys(cstrings),
         }
     }
 }
@@ -648,7 +690,10 @@ impl OfflineRecognizer {
 
     /// Decode multiple streams in one batch call.
     pub fn decode_multiple_streams(&self, streams: &[&OfflineStream]) {
-        let ptrs: Vec<*const sys::OfflineStream> = streams.iter().map(|s| s.ptr).collect();
+        let ptrs: Vec<*const sys::OfflineStream> = streams
+            .iter()
+            .map(|s| s.ptr)
+            .collect();
         unsafe {
             sys::SherpaOnnxDecodeMultipleOfflineStreams(self.ptr, ptrs.as_ptr(), ptrs.len() as i32)
         }
@@ -692,7 +737,9 @@ impl OfflineStream {
             if cstr.is_null() {
                 return None;
             }
-            let s = CStr::from_ptr(cstr).to_string_lossy().into_owned();
+            let s = CStr::from_ptr(cstr)
+                .to_string_lossy()
+                .into_owned();
             sys::SherpaOnnxDestroyOfflineStreamResultJson(cstr);
             serde_json::from_str(&s).ok()
         }
@@ -711,7 +758,9 @@ impl OfflineStream {
             if p.is_null() {
                 String::new()
             } else {
-                CStr::from_ptr(p).to_string_lossy().into_owned()
+                CStr::from_ptr(p)
+                    .to_string_lossy()
+                    .into_owned()
             }
         }
     }

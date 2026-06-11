@@ -48,7 +48,9 @@ impl Default for OfflineSpeakerSegmentationModelConfig {
 impl OfflineSpeakerSegmentationModelConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OfflineSpeakerSegmentationModelConfig {
         sys::OfflineSpeakerSegmentationModelConfig {
-            pyannote: self.pyannote.to_sys(cstrings),
+            pyannote: self
+                .pyannote
+                .to_sys(cstrings),
             num_threads: self.num_threads,
             debug: self.debug as i32,
             provider: to_c_ptr(&self.provider, cstrings),
@@ -106,9 +108,15 @@ impl Default for OfflineSpeakerDiarizationConfig {
 impl OfflineSpeakerDiarizationConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OfflineSpeakerDiarizationConfig {
         sys::OfflineSpeakerDiarizationConfig {
-            segmentation: self.segmentation.to_sys(cstrings),
-            embedding: self.embedding.to_sys(cstrings),
-            clustering: self.clustering.to_sys(),
+            segmentation: self
+                .segmentation
+                .to_sys(cstrings),
+            embedding: self
+                .embedding
+                .to_sys(cstrings),
+            clustering: self
+                .clustering
+                .to_sys(),
             min_duration_on: self.min_duration_on,
             min_duration_off: self.min_duration_off,
         }
@@ -177,7 +185,10 @@ impl OfflineSpeakerDiarization {
 impl Drop for OfflineSpeakerDiarization {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxDestroyOfflineSpeakerDiarization(self.ptr);
             }
         }
@@ -234,7 +245,10 @@ impl OfflineSpeakerDiarizationResult {
 impl Drop for OfflineSpeakerDiarizationResult {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxOfflineSpeakerDiarizationDestroyResult(self.ptr);
             }
         }

@@ -73,8 +73,12 @@ pub struct VadModelConfig {
 impl VadModelConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::VadModelConfig {
         sys::VadModelConfig {
-            silero_vad: self.silero_vad.to_sys(cstrings),
-            ten_vad: self.ten_vad.to_sys(cstrings),
+            silero_vad: self
+                .silero_vad
+                .to_sys(cstrings),
+            ten_vad: self
+                .ten_vad
+                .to_sys(cstrings),
             sample_rate: self.sample_rate,
             num_threads: self.num_threads,
             provider: to_c_ptr(&self.provider, cstrings),

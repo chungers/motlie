@@ -51,7 +51,9 @@ impl Default for AudioTaggingModelConfig {
 impl AudioTaggingModelConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::AudioTaggingModelConfig {
         sys::AudioTaggingModelConfig {
-            zipformer: self.zipformer.to_sys(cstrings),
+            zipformer: self
+                .zipformer
+                .to_sys(cstrings),
             ced: to_c_ptr(&self.ced, cstrings),
             num_threads: self.num_threads,
             debug: self.debug as i32,
@@ -81,7 +83,9 @@ impl Default for AudioTaggingConfig {
 impl AudioTaggingConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::AudioTaggingConfig {
         sys::AudioTaggingConfig {
-            model: self.model.to_sys(cstrings),
+            model: self
+                .model
+                .to_sys(cstrings),
             labels: to_c_ptr(&self.labels, cstrings),
             top_k: self.top_k,
         }
@@ -136,10 +140,15 @@ impl AudioTagging {
             let mut cur = p;
             while !(*cur).is_null() {
                 let event = &*(*cur);
-                let name = if event.name.is_null() {
+                let name = if event
+                    .name
+                    .is_null()
+                {
                     String::new()
                 } else {
-                    CStr::from_ptr(event.name).to_string_lossy().into_owned()
+                    CStr::from_ptr(event.name)
+                        .to_string_lossy()
+                        .into_owned()
                 };
                 ans.push(AudioEvent {
                     name,
@@ -158,7 +167,10 @@ impl AudioTagging {
 impl Drop for AudioTagging {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxDestroyAudioTagging(self.ptr);
             }
         }

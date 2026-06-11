@@ -19,16 +19,23 @@ pub struct TranscriptSegment {
     /// Optional backend-native confidence carried without calibration or
     /// downstream policy. Values are normalized to `0.0..=1.0` only when a
     /// backend emits log probabilities and the conversion is a direct `exp`.
+    /// Values are uncalibrated and are not comparable across backends.
     ///
     /// `None` means the backend has no reliable native confidence signal or the
-    /// current decode path does not expose one. Current mappings are:
+    /// current decode path does not expose one. The scalar is the latest token's
+    /// native confidence because the approved contract is segment-shaped; for
+    /// final segments this scores the tail token, not the whole segment.
+    /// Current mappings are:
     ///
-    /// - sherpa-onnx: latest native online token log-probability from `lm_probs`
-    ///   when present, otherwise `ys_probs`, converted with `exp`. No token
-    ///   aggregation or stability modeling is applied.
+    /// - sherpa-onnx: latest native online token log-probability from `ys_probs`,
+    ///   converted with `exp`. `lm_probs` is retained in the vendored wrapper but
+    ///   is not used for this field. No token aggregation or stability modeling
+    ///   is applied.
     /// - whisper.cpp: latest native decoded token probability from
     ///   `whisper_full_get_token_p`. No token aggregation, avg-logprob synthesis,
-    ///   or `no_speech_probability` penalty is applied.
+    ///   or `no_speech_probability` penalty is applied. Segments may end on
+    ///   punctuation or special tokens, so this value can be optimistic for
+    ///   segment-level quality.
     /// - moonshine: `None` until decoder confidence is exposed.
     ///
     /// This field is model/backend confidence, not interim stability. Stability

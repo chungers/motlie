@@ -115,7 +115,10 @@ impl SpeakerEmbeddingExtractor {
 impl Drop for SpeakerEmbeddingExtractor {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxDestroySpeakerEmbeddingExtractor(self.ptr);
             }
         }
@@ -167,7 +170,11 @@ impl SpeakerEmbeddingManager {
 
     /// Add multiple embeddings for `name`.
     pub fn add_list(&self, name: &str, embeddings: &[Vec<f32>]) -> bool {
-        if embeddings.is_empty() || embeddings.iter().any(|v| v.len() != self.dim as usize) {
+        if embeddings.is_empty()
+            || embeddings
+                .iter()
+                .any(|v| v.len() != self.dim as usize)
+        {
             return false;
         }
 
@@ -176,7 +183,10 @@ impl SpeakerEmbeddingManager {
             Err(_) => return false,
         };
 
-        let mut ptrs: Vec<*const f32> = embeddings.iter().map(|v| v.as_ptr()).collect();
+        let mut ptrs: Vec<*const f32> = embeddings
+            .iter()
+            .map(|v| v.as_ptr())
+            .collect();
         ptrs.push(ptr::null());
 
         unsafe {
@@ -232,7 +242,9 @@ impl SpeakerEmbeddingManager {
             if p.is_null() {
                 None
             } else {
-                let ans = CStr::from_ptr(p).to_string_lossy().into_owned();
+                let ans = CStr::from_ptr(p)
+                    .to_string_lossy()
+                    .into_owned();
                 sys::SherpaOnnxSpeakerEmbeddingManagerFreeSearch(p);
                 Some(ans)
             }
@@ -266,10 +278,15 @@ impl SpeakerEmbeddingManager {
                 .iter()
                 .map(|m| SpeakerEmbeddingMatch {
                     score: m.score,
-                    name: if m.name.is_null() {
+                    name: if m
+                        .name
+                        .is_null()
+                    {
                         String::new()
                     } else {
-                        CStr::from_ptr(m.name).to_string_lossy().into_owned()
+                        CStr::from_ptr(m.name)
+                            .to_string_lossy()
+                            .into_owned()
                     },
                 })
                 .collect::<Vec<_>>();
@@ -321,7 +338,11 @@ impl SpeakerEmbeddingManager {
             let mut ans = Vec::new();
             let mut p = names;
             while !(*p).is_null() {
-                ans.push(CStr::from_ptr(*p).to_string_lossy().into_owned());
+                ans.push(
+                    CStr::from_ptr(*p)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
                 p = p.add(1);
             }
             sys::SherpaOnnxSpeakerEmbeddingManagerFreeAllSpeakers(names);
@@ -333,7 +354,10 @@ impl SpeakerEmbeddingManager {
 impl Drop for SpeakerEmbeddingManager {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxDestroySpeakerEmbeddingManager(self.ptr);
             }
         }

@@ -11,7 +11,11 @@ use std::ptr;
 fn c_str_to_static_str(ptr: *const c_char) -> &'static str {
     assert!(!ptr.is_null(), "C string pointer is null");
 
-    unsafe { CStr::from_ptr(ptr).to_str().unwrap() }
+    unsafe {
+        CStr::from_ptr(ptr)
+            .to_str()
+            .unwrap()
+    }
 }
 
 /// Return the sherpa-onnx version string compiled into the native library.

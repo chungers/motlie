@@ -64,7 +64,9 @@ pub struct OfflinePunctuationConfig {
 impl OfflinePunctuationConfig {
     fn to_sys(&self, cstrings: &mut Vec<CString>) -> sys::OfflinePunctuationConfig {
         sys::OfflinePunctuationConfig {
-            model: self.model.to_sys(cstrings),
+            model: self
+                .model
+                .to_sys(cstrings),
         }
     }
 }
@@ -101,7 +103,9 @@ impl OfflinePunctuation {
                 return None;
             }
 
-            let ans = CStr::from_ptr(p).to_string_lossy().into_owned();
+            let ans = CStr::from_ptr(p)
+                .to_string_lossy()
+                .into_owned();
             sys::SherpaOfflinePunctuationFreeText(p);
             Some(ans)
         }
@@ -111,7 +115,10 @@ impl OfflinePunctuation {
 impl Drop for OfflinePunctuation {
     fn drop(&mut self) {
         unsafe {
-            if !self.ptr.is_null() {
+            if !self
+                .ptr
+                .is_null()
+            {
                 sys::SherpaOnnxDestroyOfflinePunctuation(self.ptr);
             }
         }
