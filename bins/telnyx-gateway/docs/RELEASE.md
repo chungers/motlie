@@ -146,4 +146,3 @@ Do not set `ORT_LIB_PATH`, `ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK`, or
 - [ ] Verify `tts status` reports `kokoro-82m` available and default.
 - [ ] Verify Piper is listed as available fallback.
 - [ ] Verify no dynamic `libonnxruntime.so` dependency appears in `readelf -d`.
-

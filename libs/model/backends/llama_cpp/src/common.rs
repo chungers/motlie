@@ -4,8 +4,8 @@ use motlie_model::{ArtifactPolicy, ModelError};
 
 // Re-export shared metric types and helpers so backend code imports from one place.
 pub(crate) use motlie_model::metrics_runtime::{
-    RuntimeMetricState, TextMetricState, lock_metrics, observe_latency, observe_memory,
-    observe_text_generation, should_force_cpu, snapshot_text_metrics,
+    lock_metrics, observe_latency, observe_memory, observe_text_generation, should_force_cpu,
+    snapshot_text_metrics, RuntimeMetricState, TextMetricState,
 };
 
 #[derive(Debug)]

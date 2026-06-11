@@ -17,13 +17,13 @@ use motlie_models::tts::qwen3_tts_cpp;
 use motlie_voice::pipeline::convert::{decode_samples_to_f32, downmix_to_mono};
 use motlie_voice::pipeline::resample::{LinearInterpolator, Resampler};
 
-#[path = "../audio_support.rs"]
+#[path = "../support/audio.rs"]
 mod audio_support;
-#[path = "../bundle_support.rs"]
+#[path = "../support/bundle.rs"]
 mod bundle_support;
-#[path = "../quiet_support.rs"]
+#[path = "../support/quiet.rs"]
 mod quiet_support;
-#[path = "../tts_support.rs"]
+#[path = "../support/tts.rs"]
 mod tts_support;
 
 const REFERENCE_SAMPLE_RATE_HZ: u32 = 16_000;

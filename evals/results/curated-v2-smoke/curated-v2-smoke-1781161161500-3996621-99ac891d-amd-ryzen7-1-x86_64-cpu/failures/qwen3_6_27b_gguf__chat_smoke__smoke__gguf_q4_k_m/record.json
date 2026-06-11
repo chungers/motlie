@@ -1,0 +1,271 @@
+{
+  "schema_version": 3,
+  "identity": {
+    "run_id": "curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu",
+    "git_sha": "99ac891d8a2adabe823cce61b2a9fec0aa5dbde3",
+    "git_branch": null,
+    "command_line": [
+      "/tmp/motlie-final-99ac891d-target/release/evals",
+      "run",
+      "--bundle",
+      "qwen3_6_27b_gguf",
+      "--scenario",
+      "chat_smoke",
+      "--profile",
+      "local-cpu-x86_64",
+      "--root",
+      "/home/dchung/sessions/issue-399-eval-suite/codex-399-amd-rv/motlie-final-99ac891d-20260610-2343/evals",
+      "--artifact-root",
+      "/home/dchung/sessions/issue-399-eval-suite/codex-399-amd-rv/motlie-final-99ac891d-20260610-2343/artifacts/models/hf-cache",
+      "--jsonl",
+      "evals/results/curated-v2-smoke/curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu/results.jsonl",
+      "--run-id",
+      "curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu",
+      "--snapshot-id",
+      "curated-v2-smoke",
+      "--cell-id",
+      "qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m",
+      "--depth",
+      "smoke",
+      "--checkpoint-format",
+      "gguf",
+      "--artifact-quantization",
+      "q4_k_m",
+      "--precision",
+      "q4",
+      "--model-family",
+      "qwen3",
+      "--backend",
+      "llama_cpp",
+      "--requested-accelerator",
+      "cpu",
+      "--child-build-log",
+      "evals/results/curated-v2-smoke/curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu/logs/qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m.log",
+      "--child-build-status",
+      "0",
+      "--child-build-duration-ms",
+      "8306",
+      "--quiet-backend-logs"
+    ],
+    "host_id": "amd-ryzen7-1",
+    "host_slug": "amd-ryzen7-1"
+  },
+  "coverage": {
+    "snapshot_id": "curated-v2-smoke",
+    "cell_id": "qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m",
+    "depth": "smoke",
+    "capability": "chat",
+    "scenario_id": "chat_smoke",
+    "bundle_id": "qwen3_6_27b_gguf",
+    "model_family": "qwen3",
+    "checkpoint_format": "gguf",
+    "quantization": "q4_k_m",
+    "backend": "llama_cpp",
+    "profile": "local-cpu-x86_64",
+    "host_id": "amd-ryzen7-1",
+    "host_slug": "amd-ryzen7-1",
+    "arch": "x86_64",
+    "requested_accelerator": "cpu",
+    "resolved_accelerator": "cpu",
+    "applicability": "applicable",
+    "terminal_outcome": "failed",
+    "reason": "behavior_assertion_failed",
+    "grouping_keys": {
+      "backend": "llama_cpp",
+      "bundle": "qwen3_6_27b_gguf",
+      "capability": "chat",
+      "checkpoint_format": "gguf",
+      "depth": "smoke",
+      "profile": "local-cpu-x86_64",
+      "quantization": "q4_k_m"
+    }
+  },
+  "selection": {
+    "bundle_id": "qwen3_6_27b_gguf",
+    "selector": null,
+    "backend": "LlamaCpp",
+    "checkpoint_format": "Gguf",
+    "artifact_quantization": "q4_k_m",
+    "artifact_snapshot": null,
+    "artifact_patterns": [
+      "Exact(\"Qwen3.6-27B-Q4_K_M.gguf\")"
+    ],
+    "artifact_files": [],
+    "scenario": "chat_smoke",
+    "capability": "chat"
+  },
+  "profile": {
+    "name": "local-cpu-x86_64"
+  },
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64",
+    "target_triple": null,
+    "hostname": "amd-ryzen7-1",
+    "host_id": "amd-ryzen7-1",
+    "host_slug": "amd-ryzen7-1",
+    "total_memory_bytes": 30376046592,
+    "available_memory_bytes": 28555227136,
+    "total_swap_bytes": 8589930496,
+    "free_swap_bytes": 6903570432,
+    "gpu_backend": "unavailable",
+    "gpus": [],
+    "accelerator_metadata": {},
+    "unavailable": [
+      "kernel_version",
+      "libc",
+      "gpu_inventory",
+      "profile:local-cpu-x86_64:accelerator_metadata"
+    ]
+  },
+  "accelerator": {
+    "requested_class": "cpu",
+    "resolved_class": "cpu",
+    "selected_devices": [],
+    "backend_mode": "llama_cpp:cpu",
+    "offload": "gpu_layers=9999",
+    "driver_versions": {},
+    "fallback_reason": null,
+    "use_proof_source": "backend_observation"
+  },
+  "runtime": {
+    "cargo_features": [
+      "model-qwen3-6-27b-gguf"
+    ],
+    "build_profile": "release",
+    "quantization": "q4",
+    "runtime_precision": "q4",
+    "artifact_root": "/home/dchung/sessions/issue-399-eval-suite/codex-399-amd-rv/motlie-final-99ac891d-20260610-2343/artifacts/models/hf-cache",
+    "download_artifacts": false,
+    "context_length": null,
+    "gpu_layers": null,
+    "child_build": {
+      "command": [],
+      "status": 0,
+      "duration_ms": 8306,
+      "log_path": "evals/results/curated-v2-smoke/curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu/logs/qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m.log"
+    },
+    "budgets": {},
+    "env": {
+      "CUDA_VISIBLE_DEVICES": null,
+      "MOTLIE_GGUF_BINDGEN_INCLUDE_WIRED": "true",
+      "MOTLIE_MODEL_FORCE_CPU": null,
+      "MOTLIE_MODEL_GPU_LAYERS": null,
+      "MOTLIE_PAGED_ATTN_CONTEXT": null
+    }
+  },
+  "performance": {
+    "startup_ms": 23016,
+    "warmup_ms": null,
+    "request_latencies_ms": [
+      61149,
+      59851
+    ],
+    "unavailable": [
+      {
+        "metric": "warmup_ms",
+        "reason": "metric_not_instrumented",
+        "source": "chat_runner"
+      },
+      {
+        "metric": "ttft_first_answer_token_ms",
+        "reason": "metric_not_reported_by_backend",
+        "source": "chat_response.timing.first_answer_token_at"
+      }
+    ],
+    "capability_metrics": {
+      "capability": "chat",
+      "prompt_tokens": 36,
+      "completion_tokens": 96,
+      "time_to_first_token_ms": 12343,
+      "ttft_first_token_ms": 12343,
+      "ttft_first_answer_token_ms": null,
+      "decode_ms": 48085,
+      "tokens_per_second": 1.5886370828929313,
+      "decode_tokens_per_second": 1.9964308147208045,
+      "response_chars": 0,
+      "followup_response_chars": 0,
+      "completion_chars": null,
+      "tool_call_count": null
+    }
+  },
+  "resources": {
+    "rss_start_bytes": 11030528,
+    "rss_peak_bytes": 25707544576,
+    "rss_final_bytes": 119296000,
+    "process_swap_start_bytes": 0,
+    "process_swap_peak_bytes": 69611520,
+    "process_swap_final_bytes": 2367488,
+    "process_swap_delta_peak_bytes": 69611520,
+    "gpu_memory_peak_bytes": null,
+    "gpu_utilization_peak_percent": null,
+    "memory_peaks": [
+      {
+        "kind": "process_rss",
+        "bytes": 25707544576,
+        "device_id": null,
+        "source": "sysinfo",
+        "unavailable_reason": null
+      },
+      {
+        "kind": "cuda_vram",
+        "bytes": null,
+        "device_id": null,
+        "source": "unavailable",
+        "unavailable_reason": "metric_not_instrumented"
+      }
+    ],
+    "unavailable": [
+      "gpu_memory_peak_bytes"
+    ],
+    "unavailable_metrics": [
+      {
+        "metric": "gpu_memory_peak_bytes",
+        "reason": "metric_not_instrumented",
+        "source": "accelerator_sampler"
+      }
+    ]
+  },
+  "acceptance": {
+    "behavior_status": "fail",
+    "performance_status": "pass",
+    "resource_status": "pass",
+    "accelerator_status": "pass",
+    "overall_status": "fail",
+    "failure_reason": "behavior assertion `min_response_chars` failed: response_chars=0 min=16",
+    "assertions": [
+      {
+        "name": "min_response_chars",
+        "status": "fail",
+        "message": "response_chars=0 min=16"
+      },
+      {
+        "name": "min_followup_response_chars",
+        "status": "fail",
+        "message": "followup_response_chars=0 min=8"
+      }
+    ],
+    "gates": [
+      {
+        "section": "performance",
+        "name": "performance_measured",
+        "status": "pass",
+        "observed": null,
+        "threshold": null,
+        "source": "runner",
+        "reason": null,
+        "message": null
+      },
+      {
+        "section": "resources",
+        "name": "resource_gates",
+        "status": "pass",
+        "observed": null,
+        "threshold": null,
+        "source": "metrics_sampler",
+        "reason": null,
+        "message": null
+      }
+    ]
+  }
+}

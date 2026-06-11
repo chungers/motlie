@@ -1,3 +1,6 @@
+#[path = "../support/feature_matrix.rs"]
+mod feature_matrix;
+
 fn main() -> anyhow::Result<()> {
     gemma4_multimodal_example::run()
 }
@@ -28,10 +31,10 @@ mod gemma4_multimodal_example {
     use std::time::Instant;
 
     mod support {
-        include!("../support.rs");
+        include!("../support/runtime.rs");
     }
     mod tool_demo_support {
-        include!("../tool_demo_support.rs");
+        include!("../support/tool_demo.rs");
     }
 
     #[tokio::main]

@@ -7,9 +7,9 @@ use motlie_model::typed::{AudioBuf, BatchTranscriber, Mono};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
-    UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, StartOptions, TranscriptSegment, TranscriptionParams,
+    TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 
 use crate::common::{
@@ -254,6 +254,22 @@ impl BundleHandle for WhisperCppHandle {
             text_generation: None,
             embeddings: None,
         })
+    }
+
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        if cfg!(feature = "cuda") {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "whisper_cpp:cuda".to_owned(),
+                offload: Some("cuda_execution_provider=on".to_owned()),
+                selected_device: Some("0".to_owned()),
+            })
+        } else {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "whisper_cpp:cpu".to_owned(),
+                offload: Some("accelerator_feature=none".to_owned()),
+                selected_device: None,
+            })
+        }
     }
 
     fn chat(&self) -> Result<&Self::Chat, ModelError> {

@@ -7,6 +7,9 @@
 //! adapts that runtime to Motlie's typed `StreamingTranscriber` /
 //! `TranscriptionSession` contract.
 
+#[allow(unused_imports)]
+use ort as _;
+
 mod common;
 mod transcription;
 

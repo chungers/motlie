@@ -15,15 +15,16 @@ use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatFinishReason, ChatModel, ChatRequest, ChatResponse, ChatRole,
     CheckpointFormat, CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
-    GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
-    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    ToolChoice, ToolSpec, UnsupportedEmbeddings,
+    GenerationTiming, GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError,
+    ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, StartOptions, ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::common::{
-    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
-    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
+    TextMetricState,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -531,7 +532,13 @@ impl LlamaCppRuntime {
         let generated = self
             .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new())
             .await?;
-        Ok(ChatResponse::text(generated.text))
+        let timing = timing_for_visible_content(generated.timing, &generated.text);
+        Ok(ChatResponse {
+            content: generated.text,
+            usage: Some(generated.usage),
+            timing: Some(timing),
+            ..ChatResponse::default()
+        })
     }
 
     async fn generate_rendered_chat(
@@ -555,7 +562,21 @@ impl LlamaCppRuntime {
                 message: err.to_string(),
             })?;
 
-        openai_response_json_to_chat_response(message_json, generated.usage)
+        let mut response = openai_response_json_to_chat_response(
+            message_json,
+            generated.usage,
+            Some(generated.timing),
+        )?;
+        if let Some(timing) = response.timing.take() {
+            response.timing = Some(timing_for_openai_response(
+                timing,
+                &template,
+                &generated.text,
+                &generated.token_timings,
+                &response.content,
+            ));
+        }
+        Ok(response)
     }
 
     async fn generate_text_inner(
@@ -576,7 +597,7 @@ impl LlamaCppRuntime {
 
         // Run inference on a blocking thread — llama.cpp is synchronous.
         tokio::task::spawn_blocking(move || {
-            let started_at = Instant::now();
+            let request_at = Instant::now();
 
             let ctx_params =
                 LlamaContextParams::default().with_n_ctx(std::num::NonZeroU32::new(context_length));
@@ -634,6 +655,10 @@ impl LlamaCppRuntime {
 
             let mut generated_token_count: u32 = 0;
             let mut generated_text = String::new();
+            let mut first_token_at = None;
+            let mut first_answer_token_at = None;
+            let mut last_token_at = None;
+            let mut token_timings = Vec::new();
             let prompt_position_start =
                 i32::try_from(tokens.len()).map_err(|_| ModelError::BackendExecution {
                     backend: "llama-cpp",
@@ -658,10 +683,26 @@ impl LlamaCppRuntime {
                         message: e.to_string(),
                     })?;
 
+                let token_at = Instant::now();
+                if first_token_at.is_none() {
+                    first_token_at = Some(token_at);
+                }
+                last_token_at = Some(token_at);
                 generated_text.push_str(&piece);
                 generated_token_count += 1;
 
-                if truncate_on_stop_sequence(&mut generated_text, &stop_sequences) {
+                let stop_triggered =
+                    truncate_on_stop_sequence(&mut generated_text, &stop_sequences);
+                token_timings.push(GeneratedTokenTiming {
+                    end_byte: generated_text.len(),
+                    at: token_at,
+                });
+                if first_answer_token_at.is_none()
+                    && has_visible_answer_text_for_timing(&generated_text)
+                {
+                    first_answer_token_at = Some(token_at);
+                }
+                if stop_triggered {
                     break;
                 }
 
@@ -696,7 +737,7 @@ impl LlamaCppRuntime {
                     })?;
             }
 
-            let elapsed = started_at.elapsed();
+            let elapsed = request_at.elapsed();
 
             {
                 let mut m = lock_metrics(&metrics, "llama-cpp-text-generate");
@@ -716,6 +757,14 @@ impl LlamaCppRuntime {
                     completion_tokens: Some(generated_token_count),
                     total_tokens: Some(prompt_token_count.saturating_add(generated_token_count)),
                 },
+                timing: GenerationTiming {
+                    request_at,
+                    first_token_at,
+                    first_answer_token_at,
+                    last_token_at,
+                    generated_tokens: generated_token_count,
+                },
+                token_timings,
             })
         })
         .await
@@ -736,10 +785,80 @@ struct RenderedChatPrompt {
 struct GeneratedText {
     text: String,
     usage: GenerationUsage,
+    timing: GenerationTiming,
+    token_timings: Vec<GeneratedTokenTiming>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GeneratedTokenTiming {
+    end_byte: usize,
+    at: Instant,
 }
 
 fn token_count_to_u32(count: usize) -> u32 {
     count.min(u32::MAX as usize) as u32
+}
+
+fn has_visible_answer_text_for_timing(generated_text: &str) -> bool {
+    !strip_leading_reasoning_for_timing(generated_text)
+        .trim()
+        .is_empty()
+}
+
+fn strip_leading_reasoning_for_timing(generated_text: &str) -> &str {
+    let generated_text = generated_text.trim_start_matches([' ', '\n', '\r', '\t']);
+    if let Some(rest) = generated_text.strip_prefix("<think>") {
+        return rest
+            .find("</think>")
+            .map(|end| &rest[end + "</think>".len()..])
+            .unwrap_or_default();
+    }
+    if let Some(rest) = generated_text.strip_prefix("</think>") {
+        return rest;
+    }
+    strip_empty_gemma4_channel_prefix(generated_text)
+}
+
+fn timing_for_visible_content(mut timing: GenerationTiming, content: &str) -> GenerationTiming {
+    if content.trim().is_empty() {
+        timing.first_answer_token_at = None;
+    } else if timing.first_answer_token_at.is_none() {
+        timing.first_answer_token_at = timing.first_token_at;
+    }
+    timing
+}
+
+fn timing_for_openai_response(
+    mut timing: GenerationTiming,
+    template: &ChatTemplateResult,
+    generated_text: &str,
+    token_timings: &[GeneratedTokenTiming],
+    final_content: &str,
+) -> GenerationTiming {
+    if final_content.trim().is_empty() {
+        timing.first_answer_token_at = None;
+        return timing;
+    }
+
+    timing.first_answer_token_at =
+        first_parsed_content_token_at(template, generated_text, token_timings)
+            .or(timing.last_token_at)
+            .or(timing.first_token_at);
+    timing
+}
+
+fn first_parsed_content_token_at(
+    template: &ChatTemplateResult,
+    generated_text: &str,
+    token_timings: &[GeneratedTokenTiming],
+) -> Option<Instant> {
+    token_timings.iter().find_map(|token| {
+        let prefix = generated_text.get(..token.end_byte)?;
+        let message_json = template.parse_response_oaicompat(prefix, false).ok()?;
+        let value: Value = serde_json::from_str(&message_json).ok()?;
+        let content = openai_response_content(&value);
+        (!content.trim().is_empty()).then_some(token.at)
+    })
 }
 
 fn truncate_on_stop_sequence(generated_text: &mut String, stop_sequences: &[String]) -> bool {
@@ -954,6 +1073,7 @@ fn build_sampler(
 fn openai_response_json_to_chat_response(
     message_json: String,
     usage: GenerationUsage,
+    timing: Option<GenerationTiming>,
 ) -> Result<ChatResponse, ModelError> {
     let value: Value =
         serde_json::from_str(&message_json).map_err(|err| ModelError::BackendExecution {
@@ -961,12 +1081,7 @@ fn openai_response_json_to_chat_response(
             operation: "parse_openai_response_json",
             message: err.to_string(),
         })?;
-    let content = value
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let content = strip_empty_gemma4_channel_prefix(&content).to_string();
+    let content = openai_response_content(&value);
     let reasoning = value
         .get("reasoning_content")
         .or_else(|| value.get("reasoning"))
@@ -996,7 +1111,16 @@ fn openai_response_json_to_chat_response(
         finish_reason,
         reasoning,
         usage: Some(usage),
+        timing,
     })
+}
+
+fn openai_response_content(value: &Value) -> String {
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    strip_empty_gemma4_channel_prefix(content).to_string()
 }
 
 fn strip_empty_gemma4_channel_prefix(content: &str) -> &str {
@@ -1162,6 +1286,31 @@ impl BundleHandle for LlamaCppTextHandle {
     fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
         let metrics = lock_metrics(&self.metrics, "llama-cpp-text-metric-snapshot").clone();
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
+    }
+
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        let gpu_layers = resolve_gpu_layers();
+        if gpu_layers == 0 {
+            return Some(RuntimeAcceleratorObservation {
+                backend_mode: "llama_cpp:cpu".to_owned(),
+                offload: Some("gpu_layers=0".to_owned()),
+                selected_device: None,
+            });
+        }
+
+        let (backend_mode, selected_device) = if cfg!(feature = "cuda") {
+            ("llama_cpp:cuda".to_owned(), Some("0".to_owned()))
+        } else if cfg!(target_os = "macos") {
+            ("llama_cpp:metal".to_owned(), Some("0".to_owned()))
+        } else {
+            ("llama_cpp:cpu".to_owned(), None)
+        };
+
+        Some(RuntimeAcceleratorObservation {
+            backend_mode,
+            offload: Some(format!("gpu_layers={gpu_layers}")),
+            selected_device,
+        })
     }
 
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
@@ -1633,7 +1782,7 @@ mod tests {
         .expect("schema should be valid");
 
         assert_eq!(
-            openai_tool_choice(Some(&ToolChoice::Required), &[tool.clone()])
+            openai_tool_choice(Some(&ToolChoice::Required), std::slice::from_ref(&tool))
                 .expect("required should map"),
             Some("required".to_string())
         );
@@ -1670,6 +1819,7 @@ mod tests {
                 completion_tokens: Some(4),
                 total_tokens: Some(7),
             },
+            None,
         )
         .expect("response should map");
 
@@ -1695,7 +1845,7 @@ mod tests {
         })
         .to_string();
 
-        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default())
+        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default(), None)
             .expect("response should map");
 
         assert_eq!(response.content, "The answer is 68.0 degrees Fahrenheit.");
@@ -1719,12 +1869,48 @@ mod tests {
         })
         .to_string();
 
-        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default())
+        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default(), None)
             .expect("response should map");
 
         assert_eq!(response.content, "");
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.finish_reason, Some(ChatFinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn timing_answer_visibility_skips_leading_thinking_blocks() {
+        assert!(!has_visible_answer_text_for_timing("<think>reasoning"));
+        assert!(!has_visible_answer_text_for_timing(
+            "<think>reasoning</think>  "
+        ));
+        assert!(has_visible_answer_text_for_timing(
+            "<think>reasoning</think> final answer"
+        ));
+        assert!(has_visible_answer_text_for_timing(
+            "<|channel>thought\n<channel|>The answer is 42"
+        ));
+    }
+
+    #[test]
+    fn visible_content_timing_clears_or_fills_answer_timestamp() {
+        let request_at = Instant::now();
+        let first_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(10))
+            .unwrap();
+        let mut timing = GenerationTiming {
+            request_at,
+            first_token_at: Some(first_token_at),
+            first_answer_token_at: Some(first_token_at),
+            last_token_at: Some(first_token_at),
+            generated_tokens: 1,
+        };
+
+        timing = timing_for_visible_content(timing, "   ");
+        assert_eq!(timing.first_answer_token_at, None);
+
+        timing.first_answer_token_at = None;
+        timing = timing_for_visible_content(timing, "answer");
+        assert_eq!(timing.first_answer_token_at, Some(first_token_at));
     }
 
     #[tokio::test]

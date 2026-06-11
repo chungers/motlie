@@ -7,9 +7,9 @@ use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSes
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
-    UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, StartOptions, TranscriptSegment, TranscriptionParams,
+    TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use sherpa_onnx::{
     OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, OnlineTransducerModelConfig,
@@ -243,6 +243,14 @@ impl BundleHandle for SherpaOnnxHandle {
         })
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        Some(RuntimeAcceleratorObservation {
+            backend_mode: "sherpa_onnx:cpu".to_owned(),
+            offload: Some(sherpa_cpu_offload_reason()),
+            selected_device: None,
+        })
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
@@ -292,6 +300,16 @@ fn new_transcription_handle(
 
 struct SherpaOnnxRuntime {
     recognizer: Mutex<OnlineRecognizer>,
+}
+
+fn sherpa_cpu_offload_reason() -> String {
+    if motlie_model::metrics_runtime::should_force_cpu() {
+        "provider=cpu;force_cpu=true".to_owned()
+    } else if cfg!(feature = "cuda") {
+        "provider=cpu;cuda_feature_noop".to_owned()
+    } else {
+        "provider=cpu".to_owned()
+    }
 }
 
 fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, ModelError> {

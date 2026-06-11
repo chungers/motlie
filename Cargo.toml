@@ -2,6 +2,7 @@
 members = [
     "libs/core",
     "libs/db",
+    "libs/eval-tools",
     "libs/mcp",
     "libs/model",
     "libs/voice",
@@ -16,12 +17,12 @@ members = [
     "libs/model/backends/sherpa_onnx",
     "libs/model/vendor/sherpa-onnx-sys",
     "libs/model/backends/whisper_cpp",
-    "libs/model-eval",
     "libs/models",
     "libs/tmux",
     "libs/agent",
     "libs/driver",
     "bins/voice-agent",
+    "bins/evals",
     "bins/telnyx-gateway",
     "bins/telnyx-agent",
     "bins/tmux/driver",
@@ -224,4 +225,5 @@ path = "bins/motlie/tests/db_cli.rs"
 tempfile = "3.25.0"
 
 [patch.crates-io]
+ort-sys = { path = "third_party/ort-sys" }
 sherpa-onnx-sys = { path = "libs/model/vendor/sherpa-onnx-sys" }

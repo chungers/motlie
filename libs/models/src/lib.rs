@@ -77,8 +77,8 @@ pub use motlie_model::{
 };
 use motlie_model::{
     BundleHandle, ChatModel, CompletionModel, EmbeddingModel, LoadedBundleDescriptor, ModelError,
-    ModelMetricSnapshot, StartOptions, UnsupportedChat, UnsupportedCompletion,
-    UnsupportedEmbeddings,
+    ModelMetricSnapshot, RuntimeAcceleratorObservation, StartOptions, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 pub use tool_registry::{Mcp, McpError, McpTransport, ToolDispatch, ToolList, ToolListError};
 pub use tts::TtsModels;
@@ -706,6 +706,49 @@ impl BundleHandle for CuratedHandle {
         }
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        #[allow(unreachable_patterns)]
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-e4b")]
+            Self::Gemma4E4B(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-qwen3-6-27b-gguf")]
+            Self::Qwen3_6_27B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-e4b-gguf")]
+            Self::Gemma4E4B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B(handle) => handle.accelerator_observation(),
+            _ => unreachable!("no curated handle variants are enabled"),
+        }
+    }
+
     fn chat(&self) -> std::result::Result<&Self::Chat, ModelError> {
         #[allow(unreachable_patterns)]
         match self {
@@ -755,6 +798,7 @@ impl BundleHandle for CuratedHandle {
     }
 
     fn embeddings(&self) -> std::result::Result<&Self::Embeddings, ModelError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(_) => Ok(self),
@@ -872,6 +916,7 @@ impl EmbeddingModel for CuratedHandle {
         &self,
         request: motlie_model::EmbeddingRequest,
     ) -> std::result::Result<motlie_model::EmbeddingResponse, ModelError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m(handle) => handle.embed(request).await,
@@ -894,6 +939,13 @@ impl BundleArtifacts {
     pub fn includes(&self, filename: &str) -> bool {
         self.include.iter().any(|rule| rule.matches(filename))
     }
+
+    pub fn include_for_quantization(
+        &self,
+        quantization: Option<QuantizationBits>,
+    ) -> Vec<ArtifactRule> {
+        artifact_rules_for_quantization(self.format, &self.include, quantization)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -905,6 +957,7 @@ pub struct ArtifactDownloadSummary {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArtifactDownloadOptions {
     pub hf_token: Option<String>,
+    pub quantization: Option<QuantizationBits>,
 }
 
 pub fn default_artifact_root() -> PathBuf {
@@ -946,7 +999,7 @@ pub fn download_bundle_artifacts_with_options(
         &ModelCheckpoint {
             format: artifacts.format,
             source: artifacts.source.clone(),
-            include: artifacts.include.clone(),
+            include: artifacts.include_for_quantization(options.quantization),
             quantization: None,
         },
         artifact_root,
@@ -1006,6 +1059,44 @@ fn download_checkpoint_artifacts_with_options(
             downloaded.sort();
             Ok(downloaded)
         }
+    }
+}
+
+pub fn artifact_rules_for_quantization(
+    format: CheckpointFormat,
+    include: &[ArtifactRule],
+    quantization: Option<QuantizationBits>,
+) -> Vec<ArtifactRule> {
+    if format != CheckpointFormat::Gguf {
+        return include.to_vec();
+    }
+    let Some(quantization) = quantization else {
+        return include.to_vec();
+    };
+
+    include
+        .iter()
+        .filter(|rule| artifact_rule_matches_gguf_quant(rule, quantization))
+        .cloned()
+        .collect()
+}
+
+fn artifact_rule_matches_gguf_quant(rule: &ArtifactRule, quantization: QuantizationBits) -> bool {
+    let raw = match rule {
+        ArtifactRule::Exact(value) | ArtifactRule::Suffix(value) => value,
+    };
+    let normalized = raw.to_ascii_lowercase();
+    gguf_quant_markers(quantization)
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+fn gguf_quant_markers(quantization: QuantizationBits) -> &'static [&'static str] {
+    match quantization {
+        QuantizationBits::Four => &["q4_k_m", "q4_0"],
+        QuantizationBits::Five => &["q5_k_m"],
+        QuantizationBits::Eight => &["q8_0"],
+        QuantizationBits::FloatEight => &["fp8"],
     }
 }
 
@@ -2451,5 +2542,31 @@ mod tests {
         assert!(artifacts.includes("config.json"));
         assert!(artifacts.includes("weights-00001.safetensors"));
         assert!(!artifacts.includes("README.md"));
+    }
+
+    #[test]
+    fn gguf_artifact_rules_filter_to_requested_quantization() {
+        let artifacts = BundleArtifacts {
+            control_name: "qwen3_6_27b_gguf",
+            format: CheckpointFormat::Gguf,
+            source: ArtifactSource::HuggingFace {
+                repo: "unsloth/Qwen3.6-27B-GGUF",
+            },
+            include: vec![
+                ArtifactRule::Exact("Qwen3.6-27B-Q4_K_M.gguf"),
+                ArtifactRule::Exact("Qwen3.6-27B-Q5_K_M.gguf"),
+                ArtifactRule::Exact("Qwen3.6-27B-Q8_0.gguf"),
+            ],
+        };
+
+        assert_eq!(
+            artifacts.include_for_quantization(Some(QuantizationBits::Four)),
+            vec![ArtifactRule::Exact("Qwen3.6-27B-Q4_K_M.gguf")]
+        );
+        assert_eq!(
+            artifacts.include_for_quantization(Some(QuantizationBits::Five)),
+            vec![ArtifactRule::Exact("Qwen3.6-27B-Q5_K_M.gguf")]
+        );
+        assert_eq!(artifacts.include_for_quantization(None), artifacts.include);
     }
 }

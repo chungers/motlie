@@ -80,6 +80,11 @@ path = "examples/embeddings/main.rs"
 required-features = ["model-google-gemma-300m", "model-qwen3-embedding-06b"]
 
 [[example]]
+name = "embeddings_basic"
+path = "examples/embeddings_basic/main.rs"
+required-features = ["model-google-gemma-300m", "model-qwen3-embedding-06b"]
+
+[[example]]
 name = "chat_mistral_qwen3"
 path = "examples/chat_mistral_qwen3/main.rs"
 required-features = ["model-qwen3-4b"]

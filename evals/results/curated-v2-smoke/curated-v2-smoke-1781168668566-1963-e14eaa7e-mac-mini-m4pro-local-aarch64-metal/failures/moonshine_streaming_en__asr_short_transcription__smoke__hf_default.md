@@ -1,0 +1,8 @@
+# Non-passed cell: moonshine_streaming_en__asr_short_transcription__smoke__hf_default
+
+- **outcome**: blocked | **reason**: accelerator_mismatch (honest completed CPU run — documented platform note)
+- **behavior**: pass | **backend**: moonshine:cpu | **use_proof**: backend_observation
+- **build**: RELEASE child @ e14eaa7e (native matrix driver, targeted #470 supplement)
+- **repro**: `/tmp/targeted-470-target/release/evals run --bundle moonshine_streaming_en --scenario asr_short_transcription --profile apple-metal --root /Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/evals --artifact-root /Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/eval-run/artifacts/models/hf-cache --jsonl /Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/evals/results/curated-v2-smoke/curated-v2-smoke-1781168668566-1963-e14eaa7e-mac-mini-m4pro-local-aarch64-metal/results.jsonl --run-id curated-v2-smoke-1781168668566-1963-e14eaa7e-mac-mini-m4pro-local-aarch64-metal --snapshot-id curated-v2-smoke --cell-id moonshine_streaming_en__asr_short_transcription__smoke__hf_default --depth smoke --checkpoint-format onnx --artifact-quantization default --model-family moonshine --backend ort --requested-accelerator metal --child-build-log /Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/final-run/evals/results/curated-v2-smoke/curated-v2-smoke-1781168668566-1963-e14eaa7e-mac-mini-m4pro-local-aarch64-metal/logs/moonshine_streaming_en__asr_short_transcription__smoke__hf_default.log --child-build-status 0 --child-build-duration-ms 15668 --quiet-backend-logs`
+
+@claude-fable5-399-rv 2026-06-11 PDT -- targeted post-#470 rerun packaging per #435.

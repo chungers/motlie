@@ -1,14 +1,37 @@
 use std::path::Path;
 
-use motlie_model::ModelError;
 #[cfg(feature = "cuda")]
 use motlie_model::metrics_runtime::should_force_cpu;
+use motlie_model::ModelError;
 use ort::session::Session;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrtExecutionTarget {
     Auto,
     CpuOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrtResolvedExecutionTarget {
+    Cpu,
+    Cuda,
+}
+
+pub fn resolved_execution_target(target: OrtExecutionTarget) -> OrtResolvedExecutionTarget {
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(target, OrtExecutionTarget::CpuOnly) || should_force_cpu() {
+            OrtResolvedExecutionTarget::Cpu
+        } else {
+            OrtResolvedExecutionTarget::Cuda
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = target;
+        OrtResolvedExecutionTarget::Cpu
+    }
 }
 
 pub fn build_session(backend: &'static str, model_path: &Path) -> Result<Session, ModelError> {
@@ -37,7 +60,7 @@ pub fn build_session_with_target(
     })?;
 
     #[cfg(feature = "cuda")]
-    let mut builder = if matches!(target, OrtExecutionTarget::CpuOnly) || should_force_cpu() {
+    let mut builder = if resolved_execution_target(target) == OrtResolvedExecutionTarget::Cpu {
         builder
     } else {
         builder
