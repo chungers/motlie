@@ -1397,7 +1397,7 @@ mod tests {
     use super::*;
     use crate::platform::GpuSnapshot;
     use crate::result::EvalDepth;
-    use crate::snapshot::EvalSnapshot;
+    use crate::snapshot::{load_snapshot, EvalSnapshot};
 
     fn test_snapshot_cell() -> SnapshotCell {
         SnapshotCell {
@@ -1671,6 +1671,59 @@ unauthorized access to model cache"#,
         let root = bundle_artifact_cache_root(&cell, Path::new("/tmp/hf-cache")).unwrap();
 
         assert_eq!(root, PathBuf::from("/tmp/hf-cache/models--Qwen--Qwen3-4B"));
+    }
+
+    #[test]
+    fn curated_asr_tts_snapshot_patterns_match_cached_artifact_basenames() {
+        fn write_file(path: &Path) {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("parent dir should be writable");
+            std::fs::write(path, b"stub").expect("artifact stub should be writable");
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "motlie-evals-artifact-patterns-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        write_file(&root.join("models--ggerganov--whisper.cpp/snapshots/test/ggml-base.en.bin"));
+        for name in [
+            "frontend.ort",
+            "encoder.ort",
+            "adapter.ort",
+            "cross_kv.ort",
+            "decoder_kv.ort",
+            "streaming_config.json",
+            "tokenizer.json",
+        ] {
+            write_file(&root.join(format!(
+                "models--UsefulSensors--moonshine-streaming/snapshots/test/onnx/small/{name}"
+            )));
+        }
+        write_file(&root.join("models--koboldcpp--tts/snapshots/test/qwen3-tts-0.6b-q8_0.gguf"));
+        write_file(
+            &root.join("models--koboldcpp--tts/snapshots/test/qwen3-tts-tokenizer-f16.gguf"),
+        );
+
+        let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
+            .expect("curated snapshot should parse");
+        for cell_id in [
+            "whisper_base_en__asr_short_transcription__smoke__ggml_default",
+            "moonshine_streaming_en__asr_short_transcription__smoke__hf_default",
+            "qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0",
+        ] {
+            let cell = snapshot
+                .cells
+                .iter()
+                .find(|cell| cell.id == cell_id)
+                .expect("snapshot cell should exist");
+            assert!(
+                artifact_cache_satisfies(cell, &root),
+                "{cell_id} artifact preflight should match cached filenames"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

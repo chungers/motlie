@@ -663,7 +663,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 "cuda-workstation" = ["cuda", "whisper-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = false
-patterns = ["*.bin", "*.gguf"]
+patterns = ["ggml-base.en.bin"]
 [cells.budgets]
 max_wall_time_secs = 900
 cpu_depth_allowed = ["smoke"]
@@ -682,7 +682,15 @@ features = ["model-moonshine-streaming"]
 profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
 [cells.artifact]
 requires_hf_token = false
-patterns = ["*.onnx"]
+patterns = [
+  "frontend.ort",
+  "encoder.ort",
+  "adapter.ort",
+  "cross_kv.ort",
+  "decoder_kv.ort",
+  "streaming_config.json",
+  "tokenizer.json",
+]
 [cells.budgets]
 max_wall_time_secs = 900
 cpu_depth_allowed = ["smoke"]
@@ -748,7 +756,7 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "dgx-spark", "cuda-workstat
 "cuda-workstation" = ["cuda", "qwen3-tts-cpp-cuda"]
 [cells.artifact]
 requires_hf_token = false
-patterns = ["*.gguf", "tokenizer*.gguf"]
+patterns = ["qwen3-tts-0.6b-q8_0.gguf", "qwen3-tts-tokenizer-f16.gguf"]
 [cells.budgets]
 max_wall_time_secs = 900
 cpu_depth_allowed = ["smoke"]
