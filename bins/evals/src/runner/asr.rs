@@ -703,12 +703,14 @@ mod tests {
                     start_ms: 0,
                     end_ms: 100,
                     text: "hel".to_owned(),
+                    confidence: None,
                     final_segment: false,
                 },
                 TranscriptSegment {
                     start_ms: 0,
                     end_ms: 200,
                     text: "hello".to_owned(),
+                    confidence: None,
                     final_segment: true,
                 },
             ],
@@ -857,6 +859,7 @@ mod tests {
                     start_ms: 0,
                     end_ms: call,
                     text: format!("call-{call}"),
+                    confidence: None,
                     final_segment: true,
                 }],
             })
