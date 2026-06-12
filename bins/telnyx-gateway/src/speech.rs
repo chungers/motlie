@@ -1529,10 +1529,6 @@ mod tests {
             self.second_started.notified().await;
         }
 
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-
         fn release_second_call(&self) {
             self.release_second.notify_waiters();
         }
@@ -1706,7 +1702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_prebuffer_starts_after_first_chunk_when_speech_is_chunked() {
+    async fn default_prebuffer_waits_for_second_chunk_when_speech_is_chunked() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = {
             let mut guard = state.write().await;
@@ -1756,26 +1752,18 @@ mod tests {
         .await
         .expect("speech should be queued");
 
-        let first_command = timeout(Duration::from_secs(1), rx.recv())
+        timeout(Duration::from_secs(1), kokoro.wait_for_second_call())
             .await
-            .expect("default prebuffer should start playback after one chunk")
-            .expect("speech job should emit a media command");
-        match first_command {
-            OutboundMediaCommand::Frame(frame) => {
-                assert_eq!(frame.playback_id, queued.playback_id);
-            }
-            other => panic!("expected first frame before second chunk completes, got {other:?}"),
-        }
-        timeout(Duration::from_secs(1), async {
-            while kokoro.calls() < 2 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("second text chunk synthesis should start");
+            .expect("second text chunk synthesis should start");
+        assert!(
+            timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "default prebuffer should wait for the second prepared chunk"
+        );
 
         kokoro.release_second_call();
-        let mut frame_count = 1usize;
+        let mut frame_count = 0usize;
         for _ in 0..16 {
             let Some(command) = timeout(Duration::from_secs(1), rx.recv())
                 .await

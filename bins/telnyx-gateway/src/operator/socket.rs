@@ -589,6 +589,8 @@ mod tests {
                 &call_id,
                 "utt-debug".to_string(),
                 "hello fro".to_string(),
+                Some(0.77),
+                Some(0.63),
                 crate::text_calls::turns::CallerSpeechState::Speaking,
             )
             .await
@@ -598,6 +600,8 @@ mod tests {
         assert_eq!(caller_partial["type"], "caller.partial");
         assert_eq!(caller_partial["utterance_id"], "utt-debug");
         assert_eq!(caller_partial["text"], "hello fro");
+        assert_eq!(caller_partial["confidence"], 0.77);
+        assert_eq!(caller_partial["stability"], 0.63);
 
         let turn_id = text_calls
             .send_caller_turn(

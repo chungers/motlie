@@ -1788,8 +1788,7 @@ async fn ingest_frame(
         Some(stream_id),
         text_calls,
         quality_session.as_ref(),
-        events,
-        partial_speech_state,
+        ForwardAsrEvents::new(events, partial_speech_state),
     )
     .await;
     if record_outcome.reset_requested {
@@ -2375,9 +2374,7 @@ async fn finish_stream(
     )
     .await?;
     if let Some(call_id) = gateway_call_id {
-        let _ =
-            flush_ready_pending_final_transcript(state, media_state, &call_id, text_calls, true)
-                .await;
+        flush_ready_pending_final_transcript(state, media_state, &call_id, text_calls, true).await;
         let mut guard = state.write().await;
         if let Some(call) = guard.calls.get_mut(&call_id) {
             call.status = CallStatus::Ended;
@@ -2525,12 +2522,25 @@ async fn finish_asr_session(
             stream_id.as_deref(),
             text_calls,
             quality_session.as_ref(),
-            transcript_events,
-            CallerSpeechState::Finalizing,
+            ForwardAsrEvents::new(transcript_events, CallerSpeechState::Finalizing),
         )
         .await;
     }
     Ok(())
+}
+
+struct ForwardAsrEvents {
+    events: Vec<AsrTranscriptEvent>,
+    partial_speech_state: CallerSpeechState,
+}
+
+impl ForwardAsrEvents {
+    fn new(events: Vec<AsrTranscriptEvent>, partial_speech_state: CallerSpeechState) -> Self {
+        Self {
+            events,
+            partial_speech_state,
+        }
+    }
 }
 
 async fn ingest_asr_finish_silence(
@@ -2555,11 +2565,10 @@ async fn record_and_forward_asr_events(
     stream_id: Option<&str>,
     text_calls: Option<&SharedTextCallRegistry>,
     quality_session: Option<&ActiveAsrQualitySession>,
-    events: Vec<AsrTranscriptEvent>,
-    partial_speech_state: CallerSpeechState,
+    input: ForwardAsrEvents,
 ) -> TranscriptRecordOutcome {
     let mut events =
-        reconcile_asr_final_events(state, call_id, stream_id, quality_session, events).await;
+        reconcile_asr_final_events(state, call_id, stream_id, quality_session, input.events).await;
     let mut outcome = TranscriptRecordOutcome::default();
     if !has_emitted_final(&events) {
         outcome.merge(
@@ -2576,8 +2585,7 @@ async fn record_and_forward_asr_events(
             stream_id,
             text_calls,
             quality_session,
-            events,
-            partial_speech_state,
+            ForwardAsrEvents::new(events, input.partial_speech_state),
         )
         .await,
     );
@@ -2591,16 +2599,15 @@ async fn record_and_forward_reconciled_events(
     stream_id: Option<&str>,
     text_calls: Option<&SharedTextCallRegistry>,
     quality_session: Option<&ActiveAsrQualitySession>,
-    events: Vec<AsrTranscriptEvent>,
-    partial_speech_state: CallerSpeechState,
+    input: ForwardAsrEvents,
 ) -> TranscriptRecordOutcome {
-    if events.is_empty() {
+    if input.events.is_empty() {
         return TranscriptRecordOutcome::default();
     }
     let record_outcome = record_transcript_events(
         state,
         call_id,
-        events,
+        input.events,
         TranscriptRecordContext {
             stream_id,
             media_format: media_state.media_format.as_ref(),
@@ -2608,7 +2615,7 @@ async fn record_and_forward_reconciled_events(
             text_calls,
             quality_session,
             echo_config: Some(&media_state.quality_config.echo_suppression),
-            partial_speech_state,
+            partial_speech_state: input.partial_speech_state,
         },
     )
     .await;
@@ -2658,8 +2665,7 @@ async fn flush_ready_pending_final_transcript(
         pending.stream_id.as_deref(),
         text_calls,
         pending.quality_session.as_ref(),
-        vec![pending.event],
-        CallerSpeechState::Finalizing,
+        ForwardAsrEvents::new(vec![pending.event], CallerSpeechState::Finalizing),
     )
     .await
 }
@@ -3250,7 +3256,61 @@ struct FinalTurnCandidate {
 struct PartialTurnCandidate {
     utterance_id: String,
     text: String,
+    confidence: Option<f32>,
+    stability: Option<f32>,
     speech_state: CallerSpeechState,
+}
+
+fn transcript_event_confidence(event: &TranscriptEvent) -> Option<f32> {
+    let update = match event {
+        TranscriptEvent::Partial { update, .. } | TranscriptEvent::Final { update, .. } => update,
+    };
+    update
+        .segments
+        .iter()
+        .rev()
+        .find_map(|segment| normalized_transcript_score(segment.confidence))
+}
+
+fn normalized_transcript_score(score: Option<f32>) -> Option<f32> {
+    score.filter(|score| score.is_finite() && *score >= 0.0 && *score <= 1.0)
+}
+
+fn partial_stability_score(
+    previous_partial: Option<&str>,
+    current_partial: &str,
+    speech_state: CallerSpeechState,
+) -> Option<f32> {
+    let previous = normalize_partial_for_stability(previous_partial?)?;
+    let current = normalize_partial_for_stability(current_partial)?;
+    let common = common_prefix_chars(&previous, &current);
+    let current_chars = current.chars().count();
+    if current_chars == 0 {
+        return None;
+    }
+    let prefix_ratio = common as f32 / current_chars as f32;
+    let base = if previous == current {
+        0.92
+    } else if current.starts_with(&previous) {
+        0.55 + (prefix_ratio * 0.35)
+    } else {
+        prefix_ratio * 0.70
+    };
+    let speech_state_bonus = match speech_state {
+        CallerSpeechState::Speaking => 0.0,
+        CallerSpeechState::EndpointCandidate => 0.04,
+        CallerSpeechState::Finalizing => 0.08,
+    };
+    Some((base + speech_state_bonus).clamp(0.0, 1.0))
+}
+
+fn normalize_partial_for_stability(text: &str) -> Option<String> {
+    let normalized = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCandidate> {
@@ -3430,6 +3490,17 @@ async fn record_transcript_events(
             .map(|format| format.sample_rate_hz)
             .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
         let asr_backend = call.and_then(|call| call.asr_backend);
+        let previous_partial = call.and_then(|call| call.current_partial.clone());
+        let transcript_confidence = transcript_event_confidence(&event.event);
+        let transcript_stability = if matches!(kind, TranscriptKind::Partial) {
+            partial_stability_score(
+                previous_partial.as_deref(),
+                &text,
+                context.partial_speech_state,
+            )
+        } else {
+            None
+        };
         let assistant_echo = if suppressed {
             None
         } else {
@@ -3512,6 +3583,8 @@ async fn record_transcript_events(
             partial_turns.push(PartialTurnCandidate {
                 utterance_id: session.utterance_id.clone(),
                 text: text.clone(),
+                confidence: transcript_confidence,
+                stability: transcript_stability,
                 speech_state: context.partial_speech_state,
             });
         }
@@ -3532,6 +3605,8 @@ async fn record_transcript_events(
             asr_model = asr_backend.map(LiveAsrBackend::model_label),
             transcript_kind = kind_label,
             transcript_chars = text.chars().count(),
+            transcript_confidence,
+            transcript_stability,
             turn_id = conversation_events
                 .last()
                 .and_then(|event| event.turn_id.as_deref()),
@@ -3547,6 +3622,8 @@ async fn record_transcript_events(
                     gateway_call_id,
                     partial_turn.utterance_id,
                     partial_turn.text,
+                    partial_turn.confidence,
+                    partial_turn.stability,
                     partial_turn.speech_state,
                 )
                 .await
@@ -4806,11 +4883,13 @@ mod tests {
             Some("stream-1"),
             Some(&text_calls),
             None,
-            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
-                text: "there is also a".to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            })],
-            CallerSpeechState::Finalizing,
+            ForwardAsrEvents::new(
+                vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                    text: "there is also a".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                })],
+                CallerSpeechState::Finalizing,
+            ),
         )
         .await;
 
@@ -4826,11 +4905,13 @@ mod tests {
             Some("stream-1"),
             Some(&text_calls),
             None,
-            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
-                text: "behavior".to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            })],
-            CallerSpeechState::Finalizing,
+            ForwardAsrEvents::new(
+                vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                    text: "behavior".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                })],
+                CallerSpeechState::Finalizing,
+            ),
         )
         .await;
 
@@ -4871,10 +4952,13 @@ mod tests {
             Some("stream-1"),
             Some(&text_calls),
             None,
-            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
-                text: "Whereas I said".to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            })],
+            ForwardAsrEvents::new(
+                vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                    text: "Whereas I said".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                })],
+                CallerSpeechState::Finalizing,
+            ),
         )
         .await;
 
@@ -4888,10 +4972,13 @@ mod tests {
             Some("stream-1"),
             Some(&text_calls),
             None,
-            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
-                text: "that the delay felt too long".to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            })],
+            ForwardAsrEvents::new(
+                vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                    text: "that the delay felt too long".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                })],
+                CallerSpeechState::Finalizing,
+            ),
         )
         .await;
 
@@ -4929,10 +5016,13 @@ mod tests {
             Some("stream-1"),
             Some(&text_calls),
             None,
-            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
-                text: "I also".to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            })],
+            ForwardAsrEvents::new(
+                vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                    text: "I also".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                })],
+                CallerSpeechState::Finalizing,
+            ),
         )
         .await;
 
@@ -4946,10 +5036,13 @@ mod tests {
             Some("stream-1"),
             Some(&text_calls),
             None,
-            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
-                text: "noticed the missing section".to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            })],
+            ForwardAsrEvents::new(
+                vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                    text: "noticed the missing section".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                })],
+                CallerSpeechState::Finalizing,
+            ),
         )
         .await;
 
@@ -4987,11 +5080,13 @@ mod tests {
             Some("stream-1"),
             Some(&text_calls),
             None,
-            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
-                text: "there is also a".to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            })],
-            CallerSpeechState::Finalizing,
+            ForwardAsrEvents::new(
+                vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                    text: "there is also a".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                })],
+                CallerSpeechState::Finalizing,
+            ),
         )
         .await;
 
@@ -5004,8 +5099,7 @@ mod tests {
             Some("stream-1"),
             Some(&text_calls),
             None,
-            Vec::new(),
-            CallerSpeechState::Finalizing,
+            ForwardAsrEvents::new(Vec::new(), CallerSpeechState::Finalizing),
         )
         .await;
 
@@ -5043,7 +5137,15 @@ mod tests {
             vec![
                 AsrTranscriptEvent::emit(TranscriptEvent::Partial {
                     text: "hello wor".to_string(),
-                    update: motlie_model::TranscriptionUpdate::default(),
+                    update: motlie_model::TranscriptionUpdate {
+                        segments: vec![motlie_model::TranscriptSegment {
+                            start_ms: 0,
+                            end_ms: 420,
+                            text: "hello wor".to_string(),
+                            confidence: Some(0.81),
+                            final_segment: false,
+                        }],
+                    },
                 }),
                 AsrTranscriptEvent::emit(TranscriptEvent::Final {
                     text: "hello world".to_string(),
@@ -5073,10 +5175,14 @@ mod tests {
             GatewayTextFrame::CallerPartial {
                 utterance_id,
                 text,
+                confidence: Some(confidence),
+                stability: None,
                 speech_state: CallerSpeechState::Speaking,
                 reply_allowed: false,
                 ..
-            } if utterance_id == quality_session.utterance_id && text == "hello wor"
+            } if utterance_id == quality_session.utterance_id
+                && text == "hello wor"
+                && (confidence - 0.81).abs() < f32::EPSILON
         ));
         let final_turn = time::timeout(Duration::from_secs(1), text_rx.recv())
             .await
@@ -5141,6 +5247,7 @@ mod tests {
                 GatewayTextFrame::CallerPartial {
                     utterance_id,
                     text: emitted_text,
+                    confidence: None,
                     speech_state,
                     reply_allowed: false,
                     ..

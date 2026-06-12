@@ -4,6 +4,7 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-12 | @codex-366-impl | Addressed #481: opt-in `caller.partial` frames now carry optional backend `confidence` and gateway-estimated `stability` scores while final `caller.turn` remains authoritative. |
 | 2026-06-11 | @codex-m6-ds-rv | Reconciled #464 speech-state docs with gateway emission: `speaking`, `endpoint_candidate`, and `finalizing` are emitted from active speech, endpoint wait, and ASR finalization paths. |
 | 2026-06-11 | @codex-366-impl | Corrected #464 speech-state documentation before endpoint/finalizing emission was wired. |
 | 2026-06-11 | @codex-366-impl | Clarified #464 stopping point: advisory partial text is implemented, while confidence/stability scoring depends on model contract issue #480 and follow-up gateway protocol work. |
@@ -26,7 +27,7 @@ motlie.telnyx.text.partials.v1
 When the extension is negotiated, the gateway may send advisory ASR partial hypotheses before the final caller turn:
 
 ```json
-{"type":"caller.partial","utterance_id":"utt_123","sequence":12,"text":"can you check whether","speech_state":"speaking","reply_allowed":false}
+{"type":"caller.partial","utterance_id":"utt_123","sequence":12,"text":"can you check whether","confidence":0.74,"stability":0.63,"speech_state":"speaking","reply_allowed":false}
 ```
 
 The committed turn remains the existing final frame:
@@ -40,10 +41,12 @@ The extension is model-agnostic:
 - `utterance_id` is a gateway-generated join key for current speech.
 - `sequence` preserves stream ordering.
 - `text` is the current best hypothesis.
+- `confidence` is optional backend/model confidence from `motlie_model::TranscriptSegment.confidence`; it is normalized to `0.0..=1.0`, uncalibrated across backends, and omitted rather than synthesized when the backend does not provide it.
+- `stability` is optional gateway-estimated interim survival likelihood from current/prior partial continuity for the same utterance; it is clearly labeled as stability, not backend confidence, and is omitted until there is survival evidence.
 - `speech_state` is normalized: `speaking` while speech frames are feeding ASR, `endpoint_candidate` while the low-energy endpoint window is active, and `finalizing` for partials produced by ASR finish-pad/finalization.
 - `reply_allowed` is a policy flag. The first implementation emits `false`; agents should treat partials as planning context, not permission to speak over the caller.
 
-Confidence and stability scoring are intentionally not part of the #464 stopping point. Industry streaming ASR contracts usually expose partial hypotheses with confidence and stability, but `motlie_model::TranscriptSegment` cannot carry those signals yet. Issue #480 tracks the model-layer contract work needed before the gateway can expose backend-derived `confidence` or normalized interim `stability` without inventing misleading scores.
+Issue #480 supplied the model-layer confidence carrier. Issue #481 layers the scoring fields onto the shared protocol without changing negotiation: the extension remains `motlie.telnyx.text.partials.v1`, and scoring fields are additive and optional.
 
 ## Negotiation
 
@@ -80,9 +83,11 @@ Advisory partials let capable agents:
 - batch or suppress partial hypotheses locally without the gateway embedding agent-specific NLP policy;
 - improve perceived latency for future streamed responders while preserving neutral behavior for current turn-based agents.
 
+`bins/telnyx-agent` consumes partial scoring by aggregating latest/max confidence and stability per utterance for logs and future planning, but it still sends no speech until the final `caller.turn` arrives while `reply_allowed=false`.
+
 ## Non-Goals
 
 - Do not emit ASR partials by default.
-- Do not expose backend-specific ASR confidence schemas or gateway-invented confidence before #480 defines the model contract.
+- Do not expose backend-specific ASR confidence schemas or treat gateway-estimated stability as confidence.
 - Do not let partials replace final `caller.turn`.
 - Do not allow early spoken replies from partials until a later policy sets `reply_allowed=true` and defines interruption semantics.

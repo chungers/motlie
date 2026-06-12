@@ -120,7 +120,7 @@ pub enum CallerSpeechState {
     Finalizing,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GatewayTextFrame {
     #[serde(rename = "session.start")]
@@ -142,6 +142,10 @@ pub enum GatewayTextFrame {
         utterance_id: String,
         sequence: u64,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confidence: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stability: Option<f32>,
         speech_state: CallerSpeechState,
         reply_allowed: bool,
     },
@@ -285,6 +289,8 @@ mod tests {
             utterance_id: "utt-test".to_string(),
             sequence: 2,
             text: "hello wor".to_string(),
+            confidence: None,
+            stability: None,
             speech_state: CallerSpeechState::Speaking,
             reply_allowed: false,
         };
@@ -297,6 +303,30 @@ mod tests {
         assert!(encoded.get("stability").is_none());
         assert_eq!(encoded["speech_state"], "speaking");
         assert_eq!(encoded["reply_allowed"], false);
+    }
+
+    #[test]
+    fn serializes_advisory_caller_partial_scoring_when_present() {
+        let frame = GatewayTextFrame::CallerPartial {
+            utterance_id: "utt-test".to_string(),
+            sequence: 2,
+            text: "hello wor".to_string(),
+            confidence: Some(0.82),
+            stability: Some(0.67),
+            speech_state: CallerSpeechState::EndpointCandidate,
+            reply_allowed: false,
+        };
+
+        let encoded = serde_json::to_value(&frame).expect("frame serializes");
+        assert_eq!(encoded["type"], "caller.partial");
+        let confidence = encoded["confidence"].as_f64().expect("numeric confidence");
+        let stability = encoded["stability"].as_f64().expect("numeric stability");
+        assert!((confidence - 0.82).abs() < 0.000_001);
+        assert!((stability - 0.67).abs() < 0.000_001);
+
+        let decoded: GatewayTextFrame =
+            serde_json::from_value(encoded).expect("frame deserializes");
+        assert_eq!(decoded, frame);
     }
 
     #[test]
