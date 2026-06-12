@@ -3244,7 +3244,7 @@ fn quality_help() -> String {
         "quality endpoint min-turn-words <n>            range=0..50 default=2 report_only",
         "quality endpoint min-turn-chars <n>            range=0..200 default=6 report_only",
         "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms report_only",
-        "quality endpoint final-settle-ms <ms>          range=0..5000 default=350ms applies=next_asr_session",
+        "quality endpoint final-settle-ms <ms>          range=0..5000 default=800ms applies=next_asr_session",
         "quality endpoint max-turn-words <n>            range=1..500 default=80 report_only",
         "quality endpoint max-turn-duration-ms <ms>     range=1000..120000 default=12000ms report_only",
         "quality speech status",

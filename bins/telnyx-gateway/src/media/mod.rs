@@ -2744,6 +2744,14 @@ fn final_fragment_hold_reason(text: &str, _quality: &VoiceQualityConfig) -> Opti
     if trimmed.ends_with(',') || trimmed.ends_with(':') || trimmed.ends_with(';') {
         return Some("trailing_punctuation");
     }
+    let first_word = trimmed
+        .split_whitespace()
+        .next()
+        .map(normalize_tail_word)
+        .unwrap_or_default();
+    if is_fragment_lead_word(&first_word) {
+        return Some("lead_word");
+    }
     let last_word = trimmed
         .split_whitespace()
         .last()
@@ -2767,10 +2775,28 @@ fn normalize_tail_word(word: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn is_fragment_lead_word(word: &str) -> bool {
+    matches!(
+        word,
+        "although"
+            | "because"
+            | "whereas"
+            | "while"
+            | "when"
+            | "if"
+            | "unless"
+            | "since"
+            | "before"
+            | "after"
+            | "though"
+    )
+}
+
 fn is_fragment_tail_word(word: &str) -> bool {
     matches!(
         word,
         "a" | "an"
+            | "also"
             | "the"
             | "and"
             | "or"
@@ -4820,6 +4846,122 @@ mod tests {
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.final_transcript, "there is also a behavior");
+    }
+
+    #[tokio::test]
+    async fn final_settle_holds_and_merges_leading_fragment_final() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        let mut media_state = MediaSocketState::new();
+        media_state.media_format = Some(MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        });
+        media_state.quality_config.endpoint.final_settle_ms = 5_000;
+
+        record_and_forward_asr_events(
+            &state,
+            &mut media_state,
+            &gateway_call_id,
+            Some("stream-1"),
+            Some(&text_calls),
+            None,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "Whereas I said".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+        )
+        .await;
+
+        assert!(media_state.pending_final.is_some());
+        assert!(text_rx.try_recv().is_err());
+
+        record_and_forward_asr_events(
+            &state,
+            &mut media_state,
+            &gateway_call_id,
+            Some("stream-1"),
+            Some(&text_calls),
+            None,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "that the delay felt too long".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+        )
+        .await;
+
+        let frame = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            frame,
+            GatewayTextFrame::CallerTurn { text, .. } if text == "Whereas I said that the delay felt too long"
+        ));
+        assert!(media_state.pending_final.is_none());
+    }
+
+    #[tokio::test]
+    async fn final_settle_holds_and_merges_also_tail_final() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        let mut media_state = MediaSocketState::new();
+        media_state.media_format = Some(MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        });
+        media_state.quality_config.endpoint.final_settle_ms = 5_000;
+
+        record_and_forward_asr_events(
+            &state,
+            &mut media_state,
+            &gateway_call_id,
+            Some("stream-1"),
+            Some(&text_calls),
+            None,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "I also".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+        )
+        .await;
+
+        assert!(media_state.pending_final.is_some());
+        assert!(text_rx.try_recv().is_err());
+
+        record_and_forward_asr_events(
+            &state,
+            &mut media_state,
+            &gateway_call_id,
+            Some("stream-1"),
+            Some(&text_calls),
+            None,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "noticed the missing section".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+        )
+        .await;
+
+        let frame = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            frame,
+            GatewayTextFrame::CallerTurn { text, .. } if text == "I also noticed the missing section"
+        ));
+        assert!(media_state.pending_final.is_none());
     }
 
     #[tokio::test]

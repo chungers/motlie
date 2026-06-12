@@ -17,7 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-11 PDT | @codex-366-impl | Added generic `endpoint.final_settle_ms` to the media-path endpointing knobs: incomplete final fragments can be held/merged before live `caller.turn` or conversation dispatch, while `endpoint.merge_window_ms` remains report-only/handler-local smoke-test guidance. |
+| 2026-06-11 PDT | @codex-366-impl | Calibrated generic `endpoint.final_settle_ms` to an 800 ms default for the media-path endpointing knobs: incomplete final fragments can be held/merged before live `caller.turn` or conversation dispatch, while `endpoint.merge_window_ms` remains report-only/handler-local smoke-test guidance. |
 | 2026-06-11 PDT | @codex-366-impl | Retuned generic balanced endpointing defaults after live-call last-word truncation: endpoint trailing silence is now 900 ms and ASR finish pad is now 320 ms; both remain live-adjustable for the next ASR session. |
 | 2026-06-11 PDT | @codex-366-impl | Added PR #484 confidence-carrier integration notes: backend-native tail confidence can explain smoke-test endpoint holds, but it is not a calibrated stability signal for agent protocol timing. |
 | 2026-06-11 PDT | @codex-366-impl | Added live smoke-call recovery details: smoke-test final coalescing now has a 900 ms settle floor and active-playback hold, and outbound pacing rollups separate true underrun, append starvation, post-mark wait, and first-frame idle gaps. |
@@ -196,7 +196,7 @@ Spans must not inline `config { ... }`. Instead, the gateway emits one `call.con
       "min_turn_words": 2,
       "min_turn_chars": 6,
       "merge_window_ms": 350,
-      "final_settle_ms": 350,
+      "final_settle_ms": 800,
       "max_turn_words": 80,
       "max_turn_duration_ms": 12000
     },
@@ -927,7 +927,7 @@ Prompt requirements:
 | `endpoint.min_turn_words` | `ReportOnlyCount` | `0..50` | `2` | clamp to range | report only | Short-turn label threshold only. |
 | `endpoint.min_turn_chars` | `ReportOnlyCount` | `0..200` | `6` | clamp to range | report only | Tiny-turn label threshold only. |
 | `endpoint.merge_window_ms` | `ReportOnlyDurationMs` | `0..5000` | `350` | clamp to range | report only; smoke-test handler reads the ASR-session snapshot | Adjacent-turn recommendation and deterministic smoke-test final-fragment debounce only. |
-| `endpoint.final_settle_ms` | `DurationMs` | `0..5000` | `350` | clamp to range | next ASR session | Bounded media-path hold/merge for structurally incomplete final fragments before live dispatch. |
+| `endpoint.final_settle_ms` | `DurationMs` | `0..5000` | `800` | clamp to range | next ASR session | Bounded media-path hold/merge for structurally incomplete final fragments before live dispatch. |
 | `endpoint.max_turn_words` | `ReportOnlyCount` | `1..500` | `80` | clamp to range | report only | Overmerged-turn label threshold only. |
 | `endpoint.max_turn_duration_ms` | `ReportOnlyDurationMs` | `1000..120000` | `12000` | clamp to range | report only | Long-turn label threshold only. |
 | `asr.finish_pad_ms` | `DurationMs` | `0..2000` | `320` | clamp to range | next ASR session | Short final ASR flush pad after endpoint decision; separate from endpoint tail. |
@@ -1002,7 +1002,7 @@ trailing_silence_ms = 900
 min_turn_words = 2
 min_turn_chars = 6
 merge_window_ms = 350
-final_settle_ms = 350
+final_settle_ms = 800
 max_turn_words = 80
 max_turn_duration_ms = 12000
 
@@ -1105,7 +1105,7 @@ quality endpoint trailing-silence-ms 900
 quality endpoint min-turn-words 2
 quality endpoint min-turn-chars 6
 quality endpoint merge-window-ms 350
-quality endpoint final-settle-ms 350
+quality endpoint final-settle-ms 800
 quality endpoint max-turn-words 80
 quality endpoint max-turn-duration-ms 12000
 quality asr finish-pad-ms 320
@@ -1290,7 +1290,7 @@ This supports call-to-call tuning loops such as:
 
 ```text
 quality endpoint trailing-silence-ms 900
-quality endpoint final-settle-ms 350
+quality endpoint final-settle-ms 800
 quality speech rms-threshold 220
 quality barge-in clear-timeout-ms 750
 quality tts chunking off
@@ -1305,7 +1305,7 @@ Gateway socket input examples:
 ```text
 quality status
 quality endpoint trailing-silence-ms 950
-quality endpoint final-settle-ms 500
+quality endpoint final-settle-ms 800
 quality speech rms-threshold 220
 quality barge-in clear-timeout-ms 750
 quality tts chunking off

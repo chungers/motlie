@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-11 PDT | @codex-366-impl | Added generic `endpoint.final_settle_ms` media-path coalescing for structurally incomplete final fragments; live `caller.turn` and conversation handlers now receive merged finals when ASR splits a thought at a dangling tail, without smoke-test-specific logic. |
+| 2026-06-11 PDT | @codex-366-impl | Calibrated generic `endpoint.final_settle_ms` from live smoke testing: default is 800 ms, and the incomplete-fragment detector now handles dangling tails plus lead-word fragments such as `whereas ...`; live `caller.turn` and conversation handlers receive merged finals without smoke-test-specific logic. |
 | 2026-06-11 PDT | @codex-366-impl | Retuned generic balanced endpointing defaults after live-call last-word truncation: endpoint trailing silence is now 900 ms and ASR finish pad is now 320 ms; both remain live-adjustable for the next ASR session. |
 | 2026-06-11 PDT | @codex-366-impl | Pulled in PR #484's ASR confidence carrier and used backend-native low-confidence non-terminal tails as a bounded smoke-test final hold signal; calibrated stability/protocol exposure remains follow-up work. |
 | 2026-06-11 PDT | @codex-366-impl | Added follow-up PR #464 live smoke-call fixes: smoke-test finals now settle for at least 900 ms, keep merging behind active playback, and outbound pacing metrics distinguish true underrun from append starvation, post-mark wait, and first-frame idle gaps. |
@@ -575,7 +575,7 @@ Verification (@codex-366-impl, 2026-06-05 23:34 PDT): `cargo build -p motlie-tel
 
 - [x] Finalize the active ASR session locally after the trailing-silence pad so live final transcripts do not wait for a later utterance. (@codex-366-impl, 2026-06-07: implemented in PR #417 with local endpoint finalization and regression coverage for sustained silence, short pauses, and resumed speech.)
   DESIGN reference: `Inbound Call Handler Design`, `Real-Time Latency Requirements`
-- [x] Hold and merge structurally incomplete ASR final fragments before live text/conversation dispatch. (@codex-366-impl, 2026-06-11 PDT: added `endpoint.final_settle_ms`, default 350 ms, to briefly hold dangling-tail finals and merge them with a continuation final, or flush on timeout/stream end.)
+- [x] Hold and merge structurally incomplete ASR final fragments before live text/conversation dispatch. (@codex-366-impl, 2026-06-11 PDT: added `endpoint.final_settle_ms`, default 800 ms, to briefly hold dangling-tail finals and merge them with a continuation final, or flush on timeout/stream end.)
   DESIGN reference: `Milestone 5: Conversational Realism Latency Improvements`, `Telnyx Interaction Quality Design`
 - [x] Trigger drop-and-regenerate barge-in from meaningful partial ASR and frame-level speech onset while playback is active. (@codex-366-impl, 2026-06-07 18:16 PDT: frame-level speech onset now reuses the conversation cancel/clear path for attached calls; final transcripts still invoke the handler and regenerate responses.)
   DESIGN reference: `Milestone 5: Conversational Realism Latency Improvements`, `Returning TTS Audio`
