@@ -232,7 +232,7 @@ impl Default for TtsQualityConfig {
         Self {
             chunking_enabled: true,
             max_text_chunk_chars: 90,
-            first_chunk_max_chars: 0,
+            first_chunk_max_chars: 40,
             prebuffer_chunks: 1,
         }
     }
@@ -872,7 +872,7 @@ impl VoiceQualityConfig {
         self.outcome(
             "endpoint.merge_window_ms",
             clamped.value,
-            ApplyBoundary::ReportOnly,
+            ApplyBoundary::NewTurn,
             clamped.clamped,
         )
     }
@@ -1440,7 +1440,7 @@ mod tests {
         assert_eq!(config.asr.finish_pad_ms, 320);
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
-        assert_eq!(config.tts.first_chunk_max_chars, 0);
+        assert_eq!(config.tts.first_chunk_max_chars, 40);
         assert_eq!(config.tts.prebuffer_chunks, 1);
     }
 
@@ -1517,11 +1517,11 @@ mod tests {
     }
 
     #[test]
-    fn report_only_knobs_do_not_get_live_apply_boundary() {
+    fn merge_window_applies_to_new_conversation_turns() {
         let mut config = VoiceQualityConfig::default();
         let outcome = config.set_endpoint_merge_window_ms(9_999);
         assert_eq!(config.endpoint.merge_window_ms, 5_000);
-        assert_eq!(outcome.apply_boundary, ApplyBoundary::ReportOnly);
+        assert_eq!(outcome.apply_boundary, ApplyBoundary::NewTurn);
     }
 
     #[test]

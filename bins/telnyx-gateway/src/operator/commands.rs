@@ -3101,7 +3101,7 @@ fn quality_help() -> String {
         "quality endpoint trailing-silence-ms <ms>      range=100..5000 default=900ms applies=next_asr_session",
         "quality endpoint min-turn-words <n>            range=0..50 default=2 report_only",
         "quality endpoint min-turn-chars <n>            range=0..200 default=6 report_only",
-        "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms report_only",
+        "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms applies=new_turn",
         "quality endpoint final-settle-ms <ms>          range=0..5000 default=800ms applies=next_asr_session",
         "quality endpoint max-turn-words <n>            range=1..500 default=80 report_only",
         "quality endpoint max-turn-duration-ms <ms>     range=1000..120000 default=12000ms report_only",
@@ -3122,7 +3122,7 @@ fn quality_help() -> String {
         "quality tts status",
         "quality tts chunking on|off                    bool default=true applies=new_playback_request",
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
-        "quality tts first-chunk-max-chars <n>          range=0|40..500 default=0 applies=new_playback_request",
+        "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
         "quality logging on <path>",
         "quality logging off",
@@ -4951,9 +4951,9 @@ mod tests {
         let report_output = engine
             .run_line("quality endpoint merge-window-ms 9999")
             .await
-            .expect("set report-only merge window");
+            .expect("set merge window");
         assert!(report_output.lines[0].contains("key=endpoint.merge_window_ms"));
-        assert!(report_output.lines[0].contains("applies=report_only"));
+        assert!(report_output.lines[0].contains("applies=new_turn"));
         assert_eq!(
             state.read().await.quality.config.endpoint.merge_window_ms,
             5_000
