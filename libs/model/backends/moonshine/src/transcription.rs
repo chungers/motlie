@@ -1100,6 +1100,7 @@ impl MoonshineStream {
                 start_ms: 0,
                 end_ms: samples_to_ms(self.total_samples),
                 text,
+                confidence: None,
                 final_segment: false,
             }],
         }))
@@ -1121,6 +1122,7 @@ impl MoonshineStream {
                     start_ms: 0,
                     end_ms: samples_to_ms(self.total_samples),
                     text,
+                    confidence: None,
                     final_segment: true,
                 }],
             }),

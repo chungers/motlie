@@ -99,12 +99,14 @@ mod tests {
                 start_ms: 0,
                 end_ms: 100,
                 text: " Hello ".into(),
+                confidence: None,
                 final_segment: true,
             },
             TranscriptSegment {
                 start_ms: 100,
                 end_ms: 200,
                 text: "world".into(),
+                confidence: Some(0.8),
                 final_segment: true,
             },
         ]);
@@ -118,12 +120,14 @@ mod tests {
                 start_ms: 0,
                 end_ms: 100,
                 text: " ".into(),
+                confidence: None,
                 final_segment: false,
             },
             TranscriptSegment {
                 start_ms: 100,
                 end_ms: 200,
                 text: "\n".into(),
+                confidence: None,
                 final_segment: true,
             },
         ]);
