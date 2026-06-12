@@ -155,7 +155,7 @@ pub struct EndpointQualityConfig {
 impl Default for EndpointQualityConfig {
     fn default() -> Self {
         Self {
-            trailing_silence_ms: 650,
+            trailing_silence_ms: 900,
             min_turn_words: 2,
             min_turn_chars: 6,
             merge_window_ms: 350,
@@ -177,7 +177,7 @@ impl Default for AsrQualityConfig {
         Self {
             repeated_token_run_threshold: 16,
             repeated_q_run_threshold: 8,
-            finish_pad_ms: 160,
+            finish_pad_ms: 320,
         }
     }
 }
@@ -1654,11 +1654,11 @@ mod tests {
     fn balanced_defaults_match_live_call_tuned_values() {
         let config = VoiceQualityConfig::default();
         assert_eq!(config.profile, QualityProfile::Balanced);
-        assert_eq!(config.endpoint.trailing_silence_ms, 650);
+        assert_eq!(config.endpoint.trailing_silence_ms, 900);
         assert_eq!(config.speech.rms_threshold, 220.0);
         assert_eq!(config.speech.peak_threshold, 1_100);
         assert_eq!(config.speech.onset_min_silence_ms, 180);
-        assert_eq!(config.asr.finish_pad_ms, 160);
+        assert_eq!(config.asr.finish_pad_ms, 320);
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
         assert_eq!(config.tts.first_chunk_max_chars, 0);
