@@ -48,6 +48,7 @@ impl ScenarioRunner for TtsRunner {
         let tts_metrics = TtsPerformanceMetrics {
             text_chars: Some(tts_scenario.input.text.chars().count() as u64),
             synthesis_latency_ms: Some(eval.synthesis_latency_ms),
+            ttfa_first_chunk_ms: eval.ttfa_first_chunk_ms,
             audio_duration_ms: Some(eval.audio_duration_ms),
             real_time_factor: (eval.audio_duration_ms > 0)
                 .then(|| eval.synthesis_latency_ms as f64 / eval.audio_duration_ms as f64),
@@ -90,6 +91,7 @@ impl ScenarioRunner for TtsRunner {
 struct TtsEvalOutput {
     startup_ms: u64,
     synthesis_latency_ms: u64,
+    ttfa_first_chunk_ms: Option<u64>,
     audio_duration_ms: u64,
     sample_count: u64,
     sample_rate_hz: u64,
@@ -157,6 +159,7 @@ where
         .context("failed to open typed speech stream")?;
     let mut sample_count = 0_u64;
     let mut chunk_count = 0_u64;
+    let mut ttfa_first_chunk_ms = None;
     while let Some(chunk) = stream
         .next_chunk()
         .await
@@ -164,6 +167,9 @@ where
     {
         sample_count = sample_count.saturating_add(chunk.samples().len() as u64);
         chunk_count = chunk_count.saturating_add(1);
+        if ttfa_first_chunk_ms.is_none() {
+            ttfa_first_chunk_ms = Some(elapsed_ms(synthesis_started_at.elapsed()));
+        }
         context.metrics_sampler.sample();
     }
     stream
@@ -177,6 +183,7 @@ where
     Ok(TtsEvalOutput {
         startup_ms,
         synthesis_latency_ms,
+        ttfa_first_chunk_ms,
         audio_duration_ms,
         sample_count,
         sample_rate_hz: u64::from(RATE_HZ),

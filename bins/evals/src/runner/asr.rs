@@ -75,6 +75,7 @@ impl ScenarioRunner for AsrRunner {
         let asr_metrics = AsrPerformanceMetrics {
             audio_duration_ms: Some(decoded.duration_ms),
             transcription_latency_ms: Some(eval.transcription_latency_ms),
+            ttfp_first_partial_ms: eval.ttfp_first_partial_ms,
             real_time_factor: (decoded.duration_ms > 0)
                 .then(|| eval.transcription_latency_ms as f64 / decoded.duration_ms as f64),
             transcript_chars: Some(transcript.chars().count() as u64),
@@ -119,6 +120,7 @@ struct DecodedAsrAudio {
 struct AsrEvalOutput {
     startup_ms: u64,
     transcription_latency_ms: u64,
+    ttfp_first_partial_ms: Option<u64>,
     segments: Vec<TranscriptSegment>,
 }
 
@@ -151,7 +153,7 @@ async fn run_selected_asr(
             context,
             crate::runner::support::start_options(context, prepared),
             i16_audio,
-            params,
+            streaming_transcription_params(params),
             streaming_chunk_ms,
             motlie_models::asr::sherpa_onnx_streaming_en::start_typed,
         )
@@ -164,7 +166,7 @@ async fn run_selected_asr(
             context,
             crate::runner::support::start_options(context, prepared),
             i16_audio,
-            params,
+            streaming_transcription_params(params),
             streaming_chunk_ms,
             motlie_models::asr::moonshine_streaming_en::start_typed,
         )
@@ -172,6 +174,12 @@ async fn run_selected_asr(
     }
 
     bail!("ASR bundle `{bundle_id}` is not enabled or not supported by the eval runner")
+}
+
+#[allow(dead_code)]
+fn streaming_transcription_params(mut params: TranscriptionParams) -> TranscriptionParams {
+    params.emit_partials = true;
+    params
 }
 
 #[allow(dead_code)]
@@ -206,6 +214,7 @@ where
     Ok(AsrEvalOutput {
         startup_ms,
         transcription_latency_ms,
+        ttfp_first_partial_ms: None,
         segments: update.segments,
     })
 }
@@ -238,14 +247,23 @@ where
         .context("failed to open streaming ASR session")?;
     let chunk_samples = streaming_chunk_samples(chunk_ms);
     let mut segments = Vec::new();
+    let mut first_audio_submitted_at = None;
+    let mut ttfp_first_partial_ms = None;
     for chunk in audio.into_samples().chunks(chunk_samples) {
+        let audio_chunk = AudioBuf::<i16, ASR_SAMPLE_RATE_HZ, Mono>::new(chunk.to_vec());
+        if first_audio_submitted_at.is_none() {
+            first_audio_submitted_at = Some(std::time::Instant::now());
+        }
         if let Some(update) = session
-            .ingest(AudioBuf::<i16, ASR_SAMPLE_RATE_HZ, Mono>::new(
-                chunk.to_vec(),
-            ))
+            .ingest(audio_chunk)
             .await
             .context("streaming ASR ingest failed")?
         {
+            if ttfp_first_partial_ms.is_none() && has_partial_transcript(&update) {
+                if let Some(submitted_at) = first_audio_submitted_at.as_ref() {
+                    ttfp_first_partial_ms = Some(elapsed_ms(submitted_at.elapsed()));
+                }
+            }
             segments.extend(final_segments(update));
         }
     }
@@ -261,6 +279,7 @@ where
     Ok(AsrEvalOutput {
         startup_ms,
         transcription_latency_ms,
+        ttfp_first_partial_ms,
         segments,
     })
 }
@@ -356,6 +375,14 @@ fn final_segments(update: TranscriptionUpdate) -> Vec<TranscriptSegment> {
         .into_iter()
         .filter(|segment| segment.final_segment)
         .collect()
+}
+
+#[allow(dead_code)]
+fn has_partial_transcript(update: &TranscriptionUpdate) -> bool {
+    update
+        .segments
+        .iter()
+        .any(|segment| !segment.final_segment && !segment.text.trim().is_empty())
 }
 
 #[allow(dead_code)]

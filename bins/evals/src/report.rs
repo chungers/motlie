@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::metrics::CapabilityPerformanceMetrics;
 use crate::result::{
     terminal_outcome, AcceptanceStatus, OutcomeReason, ResultRecord, TerminalOutcome,
-    RESULT_SCHEMA_VERSION,
+    MIN_AGGREGATE_SCHEMA_VERSION, RESULT_SCHEMA_VERSION,
 };
 use crate::snapshot::{load_snapshot, EvalSnapshot};
 
@@ -224,6 +225,9 @@ fn render_records_markdown(
         ));
     }
 
+    out.push_str("\n## Latency Metrics\n\n");
+    render_latency_metrics(&mut out, records);
+
     out.push_str("\n## Model x Capability\n\n");
     render_slice(
         &mut out,
@@ -370,6 +374,92 @@ fn render_platform_notes(out: &mut String, records: &[ResultRecord]) {
     } else {
         out.push_str("- No platform-specific caveats detected in the input records.\n");
     }
+}
+
+fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
+    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
+    out.push_str("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+
+    let mut row_count = 0_u64;
+    for record in records {
+        if !matches!(
+            record.coverage.capability.as_str(),
+            "chat" | "perf" | "asr" | "tts"
+        ) {
+            continue;
+        }
+
+        let metrics = latency_metric_cells(&record.performance.capability_metrics);
+        out.push_str(&format!(
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            record.coverage.cell_id,
+            record.coverage.host_slug,
+            record.coverage.capability,
+            format_optional_u64(metrics.ttft_first_token_ms),
+            format_optional_u64(metrics.ttft_first_answer_token_ms),
+            format_optional_f64(metrics.mean_ttft_first_token_ms),
+            format_optional_f64(metrics.p95_ttft_first_token_ms),
+            format_optional_f64(metrics.mean_ttft_first_answer_token_ms),
+            format_optional_f64(metrics.p95_ttft_first_answer_token_ms),
+            format_optional_u64(metrics.ttfp_first_partial_ms),
+            format_optional_u64(metrics.ttfa_first_chunk_ms),
+        ));
+        row_count += 1;
+    }
+
+    if row_count == 0 {
+        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null |\n");
+    }
+}
+
+#[derive(Default)]
+struct LatencyMetricCells {
+    ttft_first_token_ms: Option<u64>,
+    ttft_first_answer_token_ms: Option<u64>,
+    mean_ttft_first_token_ms: Option<f64>,
+    p95_ttft_first_token_ms: Option<f64>,
+    mean_ttft_first_answer_token_ms: Option<f64>,
+    p95_ttft_first_answer_token_ms: Option<f64>,
+    ttfp_first_partial_ms: Option<u64>,
+    ttfa_first_chunk_ms: Option<u64>,
+}
+
+fn latency_metric_cells(metrics: &CapabilityPerformanceMetrics) -> LatencyMetricCells {
+    match metrics {
+        CapabilityPerformanceMetrics::Chat(metrics) => LatencyMetricCells {
+            ttft_first_token_ms: metrics.ttft_first_token_ms,
+            ttft_first_answer_token_ms: metrics.ttft_first_answer_token_ms,
+            ..Default::default()
+        },
+        CapabilityPerformanceMetrics::Perf(metrics) => LatencyMetricCells {
+            mean_ttft_first_token_ms: metrics.mean_ttft_first_token_ms,
+            p95_ttft_first_token_ms: metrics.p95_ttft_first_token_ms,
+            mean_ttft_first_answer_token_ms: metrics.mean_ttft_first_answer_token_ms,
+            p95_ttft_first_answer_token_ms: metrics.p95_ttft_first_answer_token_ms,
+            ..Default::default()
+        },
+        CapabilityPerformanceMetrics::Asr(metrics) => LatencyMetricCells {
+            ttfp_first_partial_ms: metrics.ttfp_first_partial_ms,
+            ..Default::default()
+        },
+        CapabilityPerformanceMetrics::Tts(metrics) => LatencyMetricCells {
+            ttfa_first_chunk_ms: metrics.ttfa_first_chunk_ms,
+            ..Default::default()
+        },
+        _ => LatencyMetricCells::default(),
+    }
+}
+
+fn format_optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn format_optional_f64(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "null".to_owned())
 }
 
 fn render_missing_coverage(
@@ -526,10 +616,10 @@ fn read_jsonl_with_validation(
 }
 
 fn validate_aggregate_record(record: &ResultRecord) -> std::result::Result<(), String> {
-    if record.schema_version != RESULT_SCHEMA_VERSION {
+    if !(MIN_AGGREGATE_SCHEMA_VERSION..=RESULT_SCHEMA_VERSION).contains(&record.schema_version) {
         return Err(format!(
-            "unsupported schema_version {}; expected {}",
-            record.schema_version, RESULT_SCHEMA_VERSION
+            "unsupported schema_version {}; expected {}..={}",
+            record.schema_version, MIN_AGGREGATE_SCHEMA_VERSION, RESULT_SCHEMA_VERSION
         ));
     }
 
@@ -685,12 +775,15 @@ fn take_value(args: &[String], index: &mut usize, flag: &str) -> Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::{
+        AsrPerformanceMetrics, CapabilityPerformanceMetrics, TtsPerformanceMetrics,
+    };
+    use crate::platform::PlatformSnapshot;
     use crate::result::{
         AcceleratorClass, AcceleratorSection, AcceptanceSection, ApplicabilityDecision,
         CoverageSection, EvalDepth, IdentitySection, ProfileSection, RuntimeSection,
         SelectionSection,
     };
-    use crate::{metrics::CapabilityPerformanceMetrics, platform::PlatformSnapshot};
 
     #[test]
     fn aggregate_markdown_includes_quant_and_accelerator_slices() {
@@ -703,10 +796,49 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_markdown_includes_latency_columns() {
+        let mut asr_record = test_record();
+        asr_record.coverage.capability = "asr".to_owned();
+        asr_record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::Asr(AsrPerformanceMetrics {
+                ttfp_first_partial_ms: Some(42),
+                ..Default::default()
+            });
+
+        let mut tts_record = test_record();
+        tts_record.coverage.capability = "tts".to_owned();
+        tts_record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::Tts(TtsPerformanceMetrics {
+                ttfa_first_chunk_ms: Some(17),
+                ..Default::default()
+            });
+
+        let markdown = render_records_markdown(
+            &[asr_record, tts_record],
+            &[PathBuf::from("results.jsonl")],
+            None,
+        );
+
+        assert!(markdown.contains("ttft_first_token_ms"));
+        assert!(markdown.contains("ttfp_first_partial_ms"));
+        assert!(markdown.contains("ttfa_first_chunk_ms"));
+        assert!(markdown.contains("| 42 | null |"));
+        assert!(markdown.contains("| null | 17 |"));
+    }
+
+    #[test]
     fn aggregate_validation_accepts_snapshot_record() {
         let record = test_record();
 
         validate_aggregate_record(&record).expect("snapshot record should validate");
+    }
+
+    #[test]
+    fn aggregate_validation_accepts_previous_schema_version() {
+        let mut record = test_record();
+        record.schema_version = MIN_AGGREGATE_SCHEMA_VERSION;
+
+        validate_aggregate_record(&record).expect("v3 snapshot record should remain valid");
     }
 
     #[test]
@@ -784,7 +916,7 @@ mod tests {
 
     fn test_record() -> ResultRecord {
         ResultRecord {
-            schema_version: 3,
+            schema_version: RESULT_SCHEMA_VERSION,
             identity: IdentitySection {
                 run_id: "run".to_owned(),
                 git_sha: None,
