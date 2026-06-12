@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
-use motlie_telnyx_gateway::text_calls::turns::{
+use motlie_agent::voice::telnyx::text::{
     AcceptCallResponse, CallConnectedPayload, CallOfferPayload, TEXT_CALL_PROTOCOL,
 };
 use sha2::{Digest, Sha256};
@@ -170,6 +170,7 @@ fn accept_response(state: &AgentState, call_id: &str) -> (StatusCode, Json<Accep
             .replace("https://", "wss://")
             .replace("http://", "ws://"),
         accept: true,
+        extensions: Vec::new(),
     };
     (StatusCode::OK, Json(response))
 }
@@ -394,7 +395,7 @@ fn subscription_id_for_routing_value(routing_value: &str) -> String {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-    use motlie_telnyx_gateway::text_calls::turns::{TextCallDirection, TextCallInfo};
+    use motlie_agent::voice::telnyx::text::{TextCallDirection, TextCallInfo};
 
     const TEST_SECRET: &[u8] = b"callback-test-secret";
 

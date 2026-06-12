@@ -54,6 +54,7 @@ futures-util = "0.3"
 hex = "0.4"
 hound = "3.5"
 hmac = "0.12"
+motlie-agent = { path = "../../libs/agent", default-features = false }
 motlie-driver = { path = "../../libs/driver" }
 motlie-model = { path = "../../libs/model" }
 motlie-model-moonshine = { path = "../../libs/model/backends/moonshine", optional = true }

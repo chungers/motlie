@@ -12,16 +12,22 @@ use uuid::Uuid;
 use crate::operator::state::InboundSubscription;
 
 use super::turns::{
-    AcceptCallResponse, CallConnectedPayload, CallOfferPayload, TextCallInfo, TEXT_CALL_PROTOCOL,
+    AcceptCallResponse, CallConnectedPayload, CallOfferPayload, TextCallInfo,
+    TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CallbackDecision {
-    Accept { call_url: String },
+    Accept {
+        call_url: String,
+        emit_partials: bool,
+    },
     Decline,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,9 +155,14 @@ async fn classify_callback_response(response: reqwest::Response) -> CallbackDeci
             reason: "accept response missing accept=true".to_string(),
         };
     }
+    let emit_partials = accepted
+        .extensions
+        .iter()
+        .any(|value| value == TEXT_CALL_PARTIALS_EXTENSION);
     match validate_call_url(&accepted.call_url) {
         Ok(()) => CallbackDecision::Accept {
             call_url: accepted.call_url,
+            emit_partials,
         },
         Err(error) => CallbackDecision::Failed {
             reason: format!("invalid call_url: {error:#}"),
@@ -309,6 +320,45 @@ mod tests {
             decision,
             CallbackDecision::Accept {
                 call_url: "ws://127.0.0.1/text-call".to_string(),
+                emit_partials: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_response_can_opt_into_advisory_partials() {
+        async fn handler() -> Json<serde_json::Value> {
+            Json(json!({
+                "protocol": TEXT_CALL_PROTOCOL,
+                "call_url": "ws://127.0.0.1/text-call",
+                "accept": true,
+                "extensions": [TEXT_CALL_PARTIALS_EXTENSION]
+            }))
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/offer", post(handler)))
+                .await
+                .expect("serve fake callback");
+        });
+
+        let secret_ref = install_test_callback_secret("MOTLIE_TEST_CALLBACK_SECRET_PARTIALS");
+        let client = callback_http_client().expect("client");
+        let decision = post_callback(
+            &client,
+            &format!("http://{addr}/offer"),
+            Some(&secret_ref),
+            &json!({"type":"call.offer"}),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            decision,
+            CallbackDecision::Accept {
+                call_url: "ws://127.0.0.1/text-call".to_string(),
+                emit_partials: true,
             }
         );
     }

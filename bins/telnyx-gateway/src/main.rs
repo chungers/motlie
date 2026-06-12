@@ -4,19 +4,19 @@ use std::sync::Arc;
 use clap::Parser;
 use motlie_driver::CommandEngine;
 use motlie_telnyx_gateway::adapter::{
-    AsrRegistry, EchoAsrFactory, SharedAsrFactory, SharedAsrRegistry, SherpaAsrArtifact,
-    default_artifact_root,
+    default_artifact_root, AsrRegistry, EchoAsrFactory, SharedAsrFactory, SharedAsrRegistry,
+    SherpaAsrArtifact,
 };
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
-use motlie_telnyx_gateway::conversation::{ConversationRuntime, default_conversation_handler};
+use motlie_telnyx_gateway::conversation::{default_conversation_handler, ConversationRuntime};
 use motlie_telnyx_gateway::media::SharedMediaRegistry;
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
 use motlie_telnyx_gateway::operator::script::run_repl_file;
-use motlie_telnyx_gateway::operator::state::{LogLevel, SharedState, shared_state};
+use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel, SharedState};
 use motlie_telnyx_gateway::quality::{QualityEventSink, VoiceQualityConfig};
 use motlie_telnyx_gateway::replay::ReplayBackend;
-use motlie_telnyx_gateway::serve::{AppServices, serve};
+use motlie_telnyx_gateway::serve::{serve, AppServices};
 use motlie_telnyx_gateway::text_calls::SharedTextCallRegistry;
 use motlie_telnyx_gateway::tts::{SharedTtsFactory, SharedTtsRegistry, TtsRegistry};
 use tokio::time::{self, Duration};
@@ -146,7 +146,8 @@ async fn main() -> anyhow::Result<()> {
         tts,
         conversation,
         motlie_telnyx_gateway::adapter::LiveAsrBackend::default(),
-    );
+    )
+    .with_text_calls(text_calls.clone());
     let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
 
     if let Some(path) = &cli.load {
