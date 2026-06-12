@@ -231,7 +231,24 @@ impl Default for TtsQualityConfig {
             chunking_enabled: true,
             max_text_chunk_chars: 90,
             first_chunk_max_chars: 0,
-            prebuffer_chunks: 1,
+            prebuffer_chunks: 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnsetDuringPlaybackPolicy {
+    #[default]
+    DeferToPartial,
+    Trust,
+}
+
+impl OnsetDuringPlaybackPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DeferToPartial => "defer_to_partial",
+            Self::Trust => "trust",
         }
     }
 }
@@ -240,6 +257,8 @@ impl Default for TtsQualityConfig {
 pub struct BargeInQualityConfig {
     pub enabled: bool,
     pub speech_onset_cancel_enabled: bool,
+    #[serde(default)]
+    pub onset_during_playback: OnsetDuringPlaybackPolicy,
     pub partial_asr_cancel_enabled: bool,
     pub final_asr_cancel_enabled: bool,
     pub clear_timeout_ms: u64,
@@ -250,9 +269,37 @@ impl Default for BargeInQualityConfig {
         Self {
             enabled: true,
             speech_onset_cancel_enabled: true,
+            onset_during_playback: OnsetDuringPlaybackPolicy::DeferToPartial,
             partial_asr_cancel_enabled: true,
             final_asr_cancel_enabled: true,
             clear_timeout_ms: 1_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EchoSuppressionQualityConfig {
+    pub enabled: bool,
+    pub min_text_chars: usize,
+    pub tail_window_ms: u64,
+    pub short_token_coverage_percent: u64,
+    pub short_longest_token_run: usize,
+    pub long_min_tokens: usize,
+    pub long_token_coverage_percent: u64,
+    pub long_longest_token_run: usize,
+}
+
+impl Default for EchoSuppressionQualityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_text_chars: 10,
+            tail_window_ms: 2_000,
+            short_token_coverage_percent: 66,
+            short_longest_token_run: 2,
+            long_min_tokens: 4,
+            long_token_coverage_percent: 60,
+            long_longest_token_run: 3,
         }
     }
 }
@@ -337,6 +384,8 @@ pub struct VoiceQualityConfig {
     pub text_call: TextCallQualityConfig,
     pub tts: TtsQualityConfig,
     pub barge_in: BargeInQualityConfig,
+    #[serde(default)]
+    pub echo_suppression: EchoSuppressionQualityConfig,
     pub logging: LoggingQualityConfig,
     pub quality_judge: QualityJudgeConfig,
     pub targets: QualityTargetsConfig,
@@ -367,6 +416,7 @@ impl VoiceQualityConfig {
             text_call: TextCallQualityConfig::default(),
             tts: TtsQualityConfig::default(),
             barge_in: BargeInQualityConfig::default(),
+            echo_suppression: EchoSuppressionQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
             quality_judge: QualityJudgeConfig::default(),
             targets: QualityTargetsConfig::default(),
@@ -521,6 +571,48 @@ impl VoiceQualityConfig {
             self.barge_in.clear_timeout_ms,
             100,
             10_000,
+        )?;
+        ensure_usize(
+            "echo_suppression.min_text_chars",
+            self.echo_suppression.min_text_chars,
+            1,
+            500,
+        )?;
+        ensure_u64(
+            "echo_suppression.tail_window_ms",
+            self.echo_suppression.tail_window_ms,
+            0,
+            10_000,
+        )?;
+        ensure_u64(
+            "echo_suppression.short_token_coverage_percent",
+            self.echo_suppression.short_token_coverage_percent,
+            0,
+            100,
+        )?;
+        ensure_usize(
+            "echo_suppression.short_longest_token_run",
+            self.echo_suppression.short_longest_token_run,
+            1,
+            64,
+        )?;
+        ensure_usize(
+            "echo_suppression.long_min_tokens",
+            self.echo_suppression.long_min_tokens,
+            2,
+            64,
+        )?;
+        ensure_u64(
+            "echo_suppression.long_token_coverage_percent",
+            self.echo_suppression.long_token_coverage_percent,
+            0,
+            100,
+        )?;
+        ensure_usize(
+            "echo_suppression.long_longest_token_run",
+            self.echo_suppression.long_longest_token_run,
+            1,
+            64,
         )?;
         ensure_usize(
             "logging.queue_capacity",
@@ -694,6 +786,9 @@ impl VoiceQualityConfig {
             if let Some(value) = barge_in.speech_onset_cancel_enabled {
                 self.set_barge_in_speech_onset_cancel_enabled(value);
             }
+            if let Some(value) = barge_in.onset_during_playback {
+                self.set_barge_in_onset_during_playback(value);
+            }
             if let Some(value) = barge_in.partial_asr_cancel_enabled {
                 self.set_barge_in_partial_asr_cancel_enabled(value);
             }
@@ -702,6 +797,32 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = barge_in.clear_timeout_ms {
                 self.set_barge_in_clear_timeout_ms(value);
+            }
+        }
+        if let Some(echo) = patch.echo_suppression {
+            if let Some(value) = echo.enabled {
+                self.set_echo_suppression_enabled(value);
+            }
+            if let Some(value) = echo.min_text_chars {
+                self.set_echo_suppression_min_text_chars(value);
+            }
+            if let Some(value) = echo.tail_window_ms {
+                self.set_echo_suppression_tail_window_ms(value);
+            }
+            if let Some(value) = echo.short_token_coverage_percent {
+                self.set_echo_suppression_short_token_coverage_percent(value);
+            }
+            if let Some(value) = echo.short_longest_token_run {
+                self.set_echo_suppression_short_longest_token_run(value);
+            }
+            if let Some(value) = echo.long_min_tokens {
+                self.set_echo_suppression_long_min_tokens(value);
+            }
+            if let Some(value) = echo.long_token_coverage_percent {
+                self.set_echo_suppression_long_token_coverage_percent(value);
+            }
+            if let Some(value) = echo.long_longest_token_run {
+                self.set_echo_suppression_long_longest_token_run(value);
             }
         }
         if let Some(logging) = patch.logging {
@@ -1045,6 +1166,19 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_barge_in_onset_during_playback(
+        &mut self,
+        value: OnsetDuringPlaybackPolicy,
+    ) -> QualityMutationOutcome {
+        self.barge_in.onset_during_playback = value;
+        self.outcome(
+            "barge_in.onset_during_playback",
+            value.label(),
+            ApplyBoundary::NextAsrSession,
+            false,
+        )
+    }
+
     pub fn set_barge_in_partial_asr_cancel_enabled(
         &mut self,
         value: bool,
@@ -1075,6 +1209,105 @@ impl VoiceQualityConfig {
             "barge_in.clear_timeout_ms",
             clamped.value,
             ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_enabled(&mut self, value: bool) -> QualityMutationOutcome {
+        self.echo_suppression.enabled = value;
+        self.outcome(
+            "echo_suppression.enabled",
+            value,
+            ApplyBoundary::NextAsrSession,
+            false,
+        )
+    }
+
+    pub fn set_echo_suppression_min_text_chars(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 500);
+        self.echo_suppression.min_text_chars = clamped.value;
+        self.outcome(
+            "echo_suppression.min_text_chars",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_tail_window_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 10_000);
+        self.echo_suppression.tail_window_ms = clamped.value;
+        self.outcome(
+            "echo_suppression.tail_window_ms",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_short_token_coverage_percent(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 100);
+        self.echo_suppression.short_token_coverage_percent = clamped.value;
+        self.outcome(
+            "echo_suppression.short_token_coverage_percent",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_short_longest_token_run(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 64);
+        self.echo_suppression.short_longest_token_run = clamped.value;
+        self.outcome(
+            "echo_suppression.short_longest_token_run",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_long_min_tokens(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 2, 64);
+        self.echo_suppression.long_min_tokens = clamped.value;
+        self.outcome(
+            "echo_suppression.long_min_tokens",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_long_token_coverage_percent(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 100);
+        self.echo_suppression.long_token_coverage_percent = clamped.value;
+        self.outcome(
+            "echo_suppression.long_token_coverage_percent",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_long_longest_token_run(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 64);
+        self.echo_suppression.long_longest_token_run = clamped.value;
+        self.outcome(
+            "echo_suppression.long_longest_token_run",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
             clamped.clamped,
         )
     }
@@ -1301,6 +1534,8 @@ pub struct QualityConfigPatch {
     #[serde(default)]
     pub barge_in: Option<BargeInQualityConfigPatch>,
     #[serde(default)]
+    pub echo_suppression: Option<EchoSuppressionQualityConfigPatch>,
+    #[serde(default)]
     pub logging: Option<LoggingQualityConfigPatch>,
     #[serde(default)]
     pub quality_judge: Option<QualityJudgeConfigPatch>,
@@ -1355,9 +1590,22 @@ pub struct TtsQualityConfigPatch {
 pub struct BargeInQualityConfigPatch {
     pub enabled: Option<bool>,
     pub speech_onset_cancel_enabled: Option<bool>,
+    pub onset_during_playback: Option<OnsetDuringPlaybackPolicy>,
     pub partial_asr_cancel_enabled: Option<bool>,
     pub final_asr_cancel_enabled: Option<bool>,
     pub clear_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct EchoSuppressionQualityConfigPatch {
+    pub enabled: Option<bool>,
+    pub min_text_chars: Option<usize>,
+    pub tail_window_ms: Option<u64>,
+    pub short_token_coverage_percent: Option<u64>,
+    pub short_longest_token_run: Option<usize>,
+    pub long_min_tokens: Option<usize>,
+    pub long_token_coverage_percent: Option<u64>,
+    pub long_longest_token_run: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1414,7 +1662,7 @@ mod tests {
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
         assert_eq!(config.tts.first_chunk_max_chars, 0);
-        assert_eq!(config.tts.prebuffer_chunks, 1);
+        assert_eq!(config.tts.prebuffer_chunks, 2);
     }
 
     #[test]

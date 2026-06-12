@@ -198,7 +198,25 @@ Spans must not inline `config { ... }`. Instead, the gateway emits one `call.con
       "chunking_enabled": true,
       "max_text_chunk_chars": 90,
       "first_chunk_max_chars": 0,
-      "prebuffer_chunks": 1
+      "prebuffer_chunks": 2
+    },
+    "barge_in": {
+      "enabled": true,
+      "speech_onset_cancel_enabled": true,
+      "onset_during_playback": "defer_to_partial",
+      "partial_asr_cancel_enabled": true,
+      "final_asr_cancel_enabled": true,
+      "clear_timeout_ms": 1000
+    },
+    "echo_suppression": {
+      "enabled": true,
+      "min_text_chars": 10,
+      "tail_window_ms": 2000,
+      "short_token_coverage_percent": 66,
+      "short_longest_token_run": 2,
+      "long_min_tokens": 4,
+      "long_token_coverage_percent": 60,
+      "long_longest_token_run": 3
     },
     "asr": {
       "finish_pad_ms": 160,
@@ -913,12 +931,21 @@ Prompt requirements:
 | `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. |
 | `tts.max_text_chunk_chars` | `Count` | `40..500` | `90` | clamp to range | new playback request | Packs complete sentence segments up to this size before falling back to word splits for oversized segments. |
 | `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `0` | `0` disables, otherwise clamp to range | new playback request | Optional sentence-boundary first-chunk ramp for pipelining streaming LLM output into TTS. |
-| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Configured prepared text chunks required before playback starts; multi-chunk non-append speech uses an effective minimum of two chunks to reduce mid-utterance starvation. |
+| `tts.prebuffer_chunks` | `Count` | `1..64` | `2` | clamp to range | new playback request | Prepared text chunks required before playback starts; the live-tuned two-chunk smoothing behavior is the default, and lower values are honored explicitly. |
 | `barge_in.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables barge-in path. |
-| `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path; while assistant playback is active, media-level cancellation defers to partial/final ASR confirmation so assistant echo can be suppressed instead of cutting itself off. |
+| `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. During active playback, `barge_in.onset_during_playback` decides whether onset trusts the caller interruption immediately or defers only likely assistant echo to partial/final ASR confirmation. |
+| `barge_in.onset_during_playback` | `OnsetDuringPlaybackPolicy` enum | `defer_to_partial`, `trust` | `defer_to_partial` | reject unknown | next ASR session | Distinguishes audible assistant echo from real caller interruption. The default keeps the live-tuned echo guard but still allows onset cancellation when active playback is not yet audible or has no echo signature. |
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
 | `barge_in.final_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Final ASR cancel path. |
 | `barge_in.clear_timeout_ms` | `DurationMs` | `100..10000` | `1000` | clamp to range | new cancel request | Clear/terminal wait. |
+| `echo_suppression.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables the text-domain last line of defense for assistant echo suppression before forwarding transcripts. |
+| `echo_suppression.min_text_chars` | `Count` | `1..500` | `10` | clamp to range | next ASR session | Minimum normalized transcript length before text-similarity echo suppression is considered. |
+| `echo_suppression.tail_window_ms` | `DurationMs` | `0..10000` | `2000` | clamp to range | next ASR session | Window after outbound TTS tail in which normalized text-similarity echo suppression is eligible. |
+| `echo_suppression.short_token_coverage_percent` | `RatioPercent` | `0..100` | `66` | clamp to range | next ASR session | Short-utterance token coverage threshold for text echo suppression. |
+| `echo_suppression.short_longest_token_run` | `Count` | `1..64` | `2` | clamp to range | next ASR session | Short-utterance contiguous token-run threshold for text echo suppression. |
+| `echo_suppression.long_min_tokens` | `Count` | `2..64` | `4` | clamp to range | next ASR session | Token count where long-utterance thresholds take over. |
+| `echo_suppression.long_token_coverage_percent` | `RatioPercent` | `0..100` | `60` | clamp to range | next ASR session | Long-utterance token coverage threshold for text echo suppression. |
+| `echo_suppression.long_longest_token_run` | `Count` | `1..64` | `3` | clamp to range | next ASR session | Long-utterance contiguous token-run threshold for text echo suppression. |
 | `logging.enabled` | `bool` | `true,false` | `false` | reject non-bool | immediate | Enables writer, not media blocking. |
 | `logging.queue_capacity` | `Count` | `1024..1048576` | `65536` | clamp to range | next writer start | Bounded event queue size. |
 | `logging.per_frame_sample_rate` | `Ratio` | `0.0..1.0` | `0.0` | reject NaN, clamp to range | immediate | `asr.ingest_frame` sampling. |
@@ -977,7 +1004,7 @@ repeated_q_run_threshold = 8
 chunking_enabled = true
 max_text_chunk_chars = 90
 first_chunk_max_chars = 0
-prebuffer_chunks = 1
+prebuffer_chunks = 2
 
 [voice_quality.text_call]
 max_active_turns = 32
@@ -989,9 +1016,20 @@ callback_timeout_ms = 5000
 [voice_quality.barge_in]
 enabled = true
 speech_onset_cancel_enabled = true
+onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
 clear_timeout_ms = 1000
+
+[voice_quality.echo_suppression]
+enabled = true
+min_text_chars = 10
+tail_window_ms = 2000
+short_token_coverage_percent = 66
+short_longest_token_run = 2
+long_min_tokens = 4
+long_token_coverage_percent = 60
+long_longest_token_run = 3
 
 [voice_quality.logging]
 enabled = false

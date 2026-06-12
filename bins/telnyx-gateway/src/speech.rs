@@ -1185,11 +1185,7 @@ async fn run_speech_job_inner(job: &SpeechJob) -> Result<SpeechJobOutcome, Speec
 }
 
 fn effective_prebuffer_chunks(configured_chunks: usize, text_chunk_count: usize) -> usize {
-    if text_chunk_count > 1 {
-        configured_chunks.max(2).min(text_chunk_count)
-    } else {
-        configured_chunks.max(1)
-    }
+    configured_chunks.max(1).min(text_chunk_count.max(1))
 }
 
 fn prepared_frame_count(chunks: &[PreparedSpeechChunk]) -> usize {
@@ -1607,6 +1603,13 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn effective_prebuffer_chunks_honors_configured_value() {
+        assert_eq!(effective_prebuffer_chunks(1, 2), 1);
+        assert_eq!(effective_prebuffer_chunks(2, 3), 2);
+        assert_eq!(effective_prebuffer_chunks(64, 3), 3);
+    }
+
     #[tokio::test]
     async fn queue_speech_waits_for_all_chunks_before_enqueuing_frames() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
@@ -1717,7 +1720,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.quality.config.set_tts_max_text_chunk_chars(40);
-            assert_eq!(guard.quality.config.tts.prebuffer_chunks, 1);
+            assert_eq!(guard.quality.config.tts.prebuffer_chunks, 2);
             let config_id = guard.quality.config.config_id();
             guard.quality.config_id = config_id;
         }

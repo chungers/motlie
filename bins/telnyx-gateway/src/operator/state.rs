@@ -1138,28 +1138,40 @@ impl GatewayState {
         });
     }
 
-    pub fn mark_tts_first_audio_latency(
+    pub fn mark_tts_first_audio_latency_and_pacing(
         &mut self,
         gateway_call_id: &str,
         playback_id: &str,
         latency_ms: u64,
+        pre_audio_wait_ticks: usize,
+        underrun_ticks: usize,
     ) {
         self.update_tts(gateway_call_id, playback_id, |tts| {
             if tts.first_audio_latency_ms.is_none() {
                 tts.first_audio_latency_ms = Some(latency_ms);
             }
+            tts.pre_audio_wait_ticks = tts
+                .pre_audio_wait_ticks
+                .saturating_add(pre_audio_wait_ticks);
+            tts.underrun_ticks = tts.underrun_ticks.saturating_add(underrun_ticks);
         });
     }
 
-    pub fn mark_tts_pre_audio_wait(&mut self, gateway_call_id: &str, playback_id: &str) {
+    pub fn mark_tts_pacing_counts(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        pre_audio_wait_ticks: usize,
+        underrun_ticks: usize,
+    ) {
+        if pre_audio_wait_ticks == 0 && underrun_ticks == 0 {
+            return;
+        }
         self.update_tts(gateway_call_id, playback_id, |tts| {
-            tts.pre_audio_wait_ticks = tts.pre_audio_wait_ticks.saturating_add(1);
-        });
-    }
-
-    pub fn mark_tts_underrun(&mut self, gateway_call_id: &str, playback_id: &str) {
-        self.update_tts(gateway_call_id, playback_id, |tts| {
-            tts.underrun_ticks = tts.underrun_ticks.saturating_add(1);
+            tts.pre_audio_wait_ticks = tts
+                .pre_audio_wait_ticks
+                .saturating_add(pre_audio_wait_ticks);
+            tts.underrun_ticks = tts.underrun_ticks.saturating_add(underrun_ticks);
         });
     }
 

@@ -16,7 +16,9 @@ use crate::operator::state::{
     asr_warm_key, tts_warm_key, CallStatus, ConversationMode, ConversationStatus, GatewayState,
     InboundMode, LogLevel, SharedState,
 };
-use crate::quality::{QualityEventSink, QualityProfile, RedactionMode, VoiceQualityConfig};
+use crate::quality::{
+    OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, VoiceQualityConfig,
+};
 use crate::speech;
 use crate::text_calls::{SharedTextCallRegistry, TextCallStreamServices};
 use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
@@ -547,6 +549,10 @@ pub enum QualityCommand {
         #[command(subcommand)]
         command: QualityBargeInCommand,
     },
+    EchoSuppression {
+        #[command(subcommand)]
+        command: QualityEchoSuppressionCommand,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -577,6 +583,21 @@ pub enum OnOffArg {
 impl OnOffArg {
     fn enabled(self) -> bool {
         matches!(self, Self::On)
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum OnsetDuringPlaybackArg {
+    DeferToPartial,
+    Trust,
+}
+
+impl From<OnsetDuringPlaybackArg> for OnsetDuringPlaybackPolicy {
+    fn from(value: OnsetDuringPlaybackArg) -> Self {
+        match value {
+            OnsetDuringPlaybackArg::DeferToPartial => Self::DeferToPartial,
+            OnsetDuringPlaybackArg::Trust => Self::Trust,
+        }
     }
 }
 
@@ -672,9 +693,24 @@ pub enum QualityBargeInCommand {
     On,
     Off,
     SpeechOnset { state: OnOffArg },
+    OnsetDuringPlayback { policy: OnsetDuringPlaybackArg },
     PartialAsr { state: OnOffArg },
     FinalAsr { state: OnOffArg },
     ClearTimeoutMs { ms: u64 },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityEchoSuppressionCommand {
+    Status,
+    On,
+    Off,
+    MinTextChars { n: usize },
+    TailWindowMs { ms: u64 },
+    ShortTokenCoveragePercent { n: u64 },
+    ShortLongestTokenRun { n: usize },
+    LongMinTokens { n: usize },
+    LongTokenCoveragePercent { n: u64 },
+    LongLongestTokenRun { n: usize },
 }
 
 #[async_trait]
@@ -2302,6 +2338,9 @@ async fn quality_command(
         QualityCommand::Logging { command } => quality_logging_command(context, command).await,
         QualityCommand::Judge { command } => quality_judge_command(context, command).await,
         QualityCommand::BargeIn { command } => quality_barge_in_command(context, command).await,
+        QualityCommand::EchoSuppression { command } => {
+            quality_echo_suppression_command(context, command).await
+        }
     }
 }
 
@@ -2365,6 +2404,18 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
         format!(
             "tts.prebuffer_chunks={}",
             quality.config.tts.prebuffer_chunks
+        ),
+        format!(
+            "barge_in.onset_during_playback={}",
+            quality.config.barge_in.onset_during_playback.label()
+        ),
+        format!(
+            "echo_suppression.enabled={}",
+            quality.config.echo_suppression.enabled
+        ),
+        format!(
+            "echo_suppression.tail_window_ms={}",
+            quality.config.echo_suppression.tail_window_ms
         ),
     ];
     Ok(CommandOutput {
@@ -2727,9 +2778,10 @@ async fn quality_barge_in_command(
             let guard = context.state.read().await;
             let barge_in = &guard.quality.config.barge_in;
             Ok(CommandOutput::text(format!(
-                "enabled={}\nspeech_onset_cancel_enabled={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\nclear_timeout_ms={}",
+                "enabled={}\nspeech_onset_cancel_enabled={}\nonset_during_playback={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\nclear_timeout_ms={}",
                 barge_in.enabled,
                 barge_in.speech_onset_cancel_enabled,
+                barge_in.onset_during_playback.label(),
                 barge_in.partial_asr_cancel_enabled,
                 barge_in.final_asr_cancel_enabled,
                 barge_in.clear_timeout_ms
@@ -2740,6 +2792,12 @@ async fn quality_barge_in_command(
         QualityBargeInCommand::SpeechOnset { state } => {
             mutate_quality_config(context, |config| {
                 Ok(config.set_barge_in_speech_onset_cancel_enabled(state.enabled()))
+            })
+            .await
+        }
+        QualityBargeInCommand::OnsetDuringPlayback { policy } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_barge_in_onset_during_playback(policy.into()))
             })
             .await
         }
@@ -2758,6 +2816,90 @@ async fn quality_barge_in_command(
         QualityBargeInCommand::ClearTimeoutMs { ms } => {
             mutate_quality_config(context, |config| {
                 Ok(config.set_barge_in_clear_timeout_ms(ms))
+            })
+            .await
+        }
+    }
+}
+
+async fn quality_echo_suppression_command(
+    context: &mut GatewayContext,
+    command: QualityEchoSuppressionCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityEchoSuppressionCommand::Status => {
+            let guard = context.state.read().await;
+            let echo = &guard.quality.config.echo_suppression;
+            Ok(CommandOutput::text(format!(
+                "enabled={}
+min_text_chars={}
+tail_window_ms={}
+short_token_coverage_percent={}
+short_longest_token_run={}
+long_min_tokens={}
+long_token_coverage_percent={}
+long_longest_token_run={}",
+                echo.enabled,
+                echo.min_text_chars,
+                echo.tail_window_ms,
+                echo.short_token_coverage_percent,
+                echo.short_longest_token_run,
+                echo.long_min_tokens,
+                echo.long_token_coverage_percent,
+                echo.long_longest_token_run
+            )))
+        }
+        QualityEchoSuppressionCommand::On => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_enabled(true))
+            })
+            .await
+        }
+        QualityEchoSuppressionCommand::Off => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_enabled(false))
+            })
+            .await
+        }
+        QualityEchoSuppressionCommand::MinTextChars { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_min_text_chars(n))
+            })
+            .await
+        }
+        QualityEchoSuppressionCommand::TailWindowMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_tail_window_ms(ms))
+            })
+            .await
+        }
+        QualityEchoSuppressionCommand::ShortTokenCoveragePercent { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_short_token_coverage_percent(n))
+            })
+            .await
+        }
+        QualityEchoSuppressionCommand::ShortLongestTokenRun { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_short_longest_token_run(n))
+            })
+            .await
+        }
+        QualityEchoSuppressionCommand::LongMinTokens { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_long_min_tokens(n))
+            })
+            .await
+        }
+        QualityEchoSuppressionCommand::LongTokenCoveragePercent { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_long_token_coverage_percent(n))
+            })
+            .await
+        }
+        QualityEchoSuppressionCommand::LongLongestTokenRun { n } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_echo_suppression_long_longest_token_run(n))
             })
             .await
         }
@@ -3096,7 +3238,7 @@ fn quality_help() -> String {
         "quality tts chunking on|off                    bool default=true applies=new_playback_request",
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=0 applies=new_playback_request",
-        "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
+        "quality tts prebuffer-chunks <n>               range=1..64 default=2 applies=new_playback_request",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
@@ -3104,9 +3246,18 @@ fn quality_help() -> String {
         "quality judge status|on|off",
         "quality barge-in status|on|off                 bool default=true applies=next_asr_session",
         "quality barge-in speech-onset on|off           bool default=true applies=next_asr_session",
+        "quality barge-in onset-during-playback defer-to-partial|trust default=defer_to_partial applies=next_asr_session",
         "quality barge-in partial-asr on|off            bool default=true applies=next_asr_session",
         "quality barge-in final-asr on|off              bool default=true applies=next_asr_session",
         "quality barge-in clear-timeout-ms <ms>         range=100..10000 default=1000ms applies=new_turn",
+        "quality echo-suppression status|on|off         bool default=true applies=next_asr_session",
+        "quality echo-suppression min-text-chars <n>    range=1..500 default=10 applies=next_asr_session",
+        "quality echo-suppression tail-window-ms <ms>   range=0..10000 default=2000 applies=next_asr_session",
+        "quality echo-suppression short-token-coverage-percent <n> range=0..100 default=66 applies=next_asr_session",
+        "quality echo-suppression short-longest-token-run <n> range=1..64 default=2 applies=next_asr_session",
+        "quality echo-suppression long-min-tokens <n>   range=2..64 default=4 applies=next_asr_session",
+        "quality echo-suppression long-token-coverage-percent <n> range=0..100 default=60 applies=next_asr_session",
+        "quality echo-suppression long-longest-token-run <n> range=1..64 default=3 applies=next_asr_session",
         "",
         "M6 quality commands use the existing line-oriented operator dispatcher.",
         "Transcript text remains disabled unless explicitly enabled.",
@@ -4890,6 +5041,18 @@ mod tests {
             .lines
             .iter()
             .any(|line| line == "redaction_mode=metrics-only"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "barge_in.onset_during_playback=defer_to_partial"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "echo_suppression.enabled=true"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "echo_suppression.tail_window_ms=2000"));
     }
 
     #[tokio::test]
@@ -5039,6 +5202,78 @@ mod tests {
         assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
         assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
         assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
+    }
+
+    #[tokio::test]
+    async fn quality_barge_in_and_echo_commands_update_live_config_knobs() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let onset_output = engine
+            .run_line("quality barge-in onset-during-playback trust")
+            .await
+            .expect("set onset during playback policy");
+        assert!(onset_output.lines[0].contains("key=barge_in.onset_during_playback"));
+        assert!(onset_output.lines[0].contains("value=trust"));
+        assert!(onset_output.lines[0].contains("applies=next_asr_session"));
+
+        let disabled = engine
+            .run_line("quality echo-suppression off")
+            .await
+            .expect("disable echo suppression");
+        assert!(disabled.lines[0].contains("key=echo_suppression.enabled"));
+        assert!(disabled.lines[0].contains("value=false"));
+        let tail = engine
+            .run_line("quality echo-suppression tail-window-ms 50")
+            .await
+            .expect("set echo tail window");
+        assert!(tail.lines[0].contains("key=echo_suppression.tail_window_ms"));
+        let short = engine
+            .run_line("quality echo-suppression short-token-coverage-percent 101")
+            .await
+            .expect("set echo short coverage");
+        assert!(short.lines[0].contains("value=100"));
+        assert!(short.lines[0].contains("clamped=true"));
+
+        let barge_status = engine
+            .run_line("quality barge-in status")
+            .await
+            .expect("barge status");
+        assert!(barge_status
+            .lines
+            .iter()
+            .any(|line| line == "onset_during_playback=trust"));
+        let echo_status = engine
+            .run_line("quality echo-suppression status")
+            .await
+            .expect("echo status");
+        assert!(echo_status.lines.iter().any(|line| line == "enabled=false"));
+        assert!(echo_status
+            .lines
+            .iter()
+            .any(|line| line == "tail_window_ms=50"));
+        assert!(echo_status
+            .lines
+            .iter()
+            .any(|line| line == "short_token_coverage_percent=100"));
+
+        let guard = state.read().await;
+        assert_eq!(
+            guard.quality.config.barge_in.onset_during_playback,
+            OnsetDuringPlaybackPolicy::Trust
+        );
+        assert!(!guard.quality.config.echo_suppression.enabled);
+        assert_eq!(guard.quality.config.echo_suppression.tail_window_ms, 50);
+        assert_eq!(
+            guard
+                .quality
+                .config
+                .echo_suppression
+                .short_token_coverage_percent,
+            100
+        );
     }
 
     #[tokio::test]

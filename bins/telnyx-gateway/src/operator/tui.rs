@@ -631,12 +631,24 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             quality.speech.onset_min_silence_ms
         )),
         Line::from(format!(
-            "barge-in: enabled={} onset={} partial={} final={} clear={}ms",
+            "barge-in: enabled={} onset={} playback={} partial={} final={} clear={}ms",
             quality.barge_in.enabled,
             quality.barge_in.speech_onset_cancel_enabled,
+            quality.barge_in.onset_during_playback.label(),
             quality.barge_in.partial_asr_cancel_enabled,
             quality.barge_in.final_asr_cancel_enabled,
             quality.barge_in.clear_timeout_ms
+        )),
+        Line::from(format!(
+            "echo: enabled={} min_chars={} tail={}ms short={}%/run{} long_min={} long={}%/run{}",
+            quality.echo_suppression.enabled,
+            quality.echo_suppression.min_text_chars,
+            quality.echo_suppression.tail_window_ms,
+            quality.echo_suppression.short_token_coverage_percent,
+            quality.echo_suppression.short_longest_token_run,
+            quality.echo_suppression.long_min_tokens,
+            quality.echo_suppression.long_token_coverage_percent,
+            quality.echo_suppression.long_longest_token_run
         )),
         Line::from(format!(
             "tts: chunking={} max_chars={} first={} prebuf={} backend={} warm={} conversation_backend={}",
