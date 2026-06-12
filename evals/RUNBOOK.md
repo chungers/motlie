@@ -64,7 +64,9 @@ token value.
 
 ASR/TTS latency coverage is a two-phase protocol at a single git pin. The CLI
 override takes precedence over per-scenario `warmup_iterations`; when no CLI
-override is present, each scenario's default applies.
+override is present, each scenario's default applies. The override flags apply
+only to ASR/TTS cells; direct `evals run` invocations reject them for non-audio
+scenarios.
 
 1. Check out the exact `evals/<cycle>` SHA that will identify both datasets.
 2. Run the matrix COLD with `--cold`, which sets audio `warmup_iterations = 0`
@@ -95,10 +97,15 @@ cargo run -p evals -- matrix \
    dirs and results PR/summary text as cold vs warm.
 
 Why both: the stop/start between phases guarantees there is no harness-process
-or backend cache carryover from cold into warm. Cold exposes first-call premiums
-such as ORT graph optimization, allocation, and first-kernel costs; warm reports
-steady-state latency after the configured discarded warmup passes. Both datasets
-are retained rather than replacing one with the other.
+or backend cache carryover from cold into warm. Matrix children are per-cell
+processes, so each cold audio cell measures a process-cold first call that pays
+ORT session/graph initialization, allocation, and first-kernel costs. It is not
+disk-cold: model weights are usually already in the OS page cache after
+prefetch/build, so cold I/O is outside this protocol. Warm reports steady-state
+latency after the configured discarded warmup passes. Cold is one first-call draw
+per matrix run; if cold variance is needed, repeat the whole cold phase and keep
+those cold runs separate rather than averaging them into warm statistics. Both
+datasets are retained rather than replacing one with the other.
 
 ## CYCLE COMPLETE (2026-06-11 ~02:5x PDT) — final summary
 - **Final coverage:** `evals/results/final-coverage-2026-06-11.md` — 143 records over 8 final-pin + supplement runs: **95 passed / 43 blocked / 4 failed / 1 skipped**. Every blocked/failed row carries a structured reason + committed failure doc; the dominant blocked class is the documented `apple-metal` mistralrs platform gap (honest CPU-fallback) and the dgx `-lcudnn` host issue.

@@ -59,7 +59,11 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
     let options = RunOptions::parse(args)?;
     let mut scenario = scenario::load_scenario(&options.eval_root, &options.scenario)
         .with_context(|| format!("failed to load scenario `{}`", options.scenario))?;
-    scenario.apply_audio_iteration_overrides(options.audio_iteration_overrides);
+    if !options.audio_iteration_overrides.is_empty()
+        && !scenario.apply_audio_iteration_overrides(options.audio_iteration_overrides)
+    {
+        bail!("audio iteration overrides (--cold/--warmup-iterations/--iterations) apply only to ASR/TTS scenarios");
+    }
     let output_sink = options
         .jsonl
         .clone()
@@ -510,6 +514,23 @@ mod tests {
             .await
             .expect_err("unknown command should fail");
         assert!(error.to_string().contains("unknown evals command"));
+    }
+
+    #[tokio::test]
+    async fn audio_run_overrides_reject_non_audio_scenarios() {
+        let error = run([
+            "evals".to_owned(),
+            "run".to_owned(),
+            "--bundle".to_owned(),
+            "qwen3_4b".to_owned(),
+            "--scenario".to_owned(),
+            "chat_smoke".to_owned(),
+            "--cold".to_owned(),
+        ])
+        .await
+        .expect_err("audio overrides should reject non-audio scenarios");
+
+        assert!(error.to_string().contains("apply only to ASR/TTS"));
     }
 
     #[test]
