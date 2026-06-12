@@ -19,7 +19,7 @@ use motlie_voice::app::TranscriptEvent;
 #[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 use tokio::sync::Mutex;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AsrTranscriptEvent {
     pub event: TranscriptEvent,
     pub decision: AsrTranscriptDecision,

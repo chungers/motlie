@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::Context;
 
 use crate::operator::state::{GatewayState, InboundMode};
+use crate::tts::LiveTtsBackend;
 
 pub fn render_state_dump(state: &GatewayState) -> String {
     let mut lines = vec![
@@ -45,6 +46,12 @@ pub fn render_state_dump(state: &GatewayState) -> String {
     ) {
         lines.push(format!("telnyx number use {number}"));
         lines.push(format!("telnyx number bind {number} {connection_id}"));
+    }
+    if state.conversation_tts_backend != LiveTtsBackend::default() {
+        lines.push(format!(
+            "tts use {}",
+            state.conversation_tts_backend.label()
+        ));
     }
     lines.extend(render_quality_dump(state));
     match state.inbound_mode {

@@ -1146,11 +1146,16 @@ fn print_segment_events(segments: &[TranscriptSegment]) {
         } else {
             "[partial]"
         };
+        let confidence = segment
+            .confidence
+            .map(|confidence| format!(" confidence={confidence:.3}"))
+            .unwrap_or_default();
         println!(
-            "{marker} [{:.2}s - {:.2}s] {}",
+            "{marker} [{:.2}s - {:.2}s] {}{}",
             segment.start_ms as f64 / 1000.0,
             segment.end_ms as f64 / 1000.0,
-            segment.text
+            segment.text,
+            confidence
         );
     }
 }

@@ -4,6 +4,10 @@
 
 | Date (PDT) | Who | Summary |
 |------------|-----|---------|
+| 2026-06-11 PDT | @codex-366-impl | Clarified `caller.partial` #464 scope: advisory text is implemented, while `confidence`/`stability` fields wait for model contract issue #480 and follow-up gateway protocol work. |
+| 2026-06-11 PDT | @codex-366-impl | Added `motlie.telnyx.text.partials.v1`: an opt-in advisory `caller.partial` frame for model-agnostic ASR hypotheses before final `caller.turn`. |
+| 2026-06-10 23:17 PDT | @codex-m6-ds-rv | PR #464 round-1 fixes: gated Channel/tmux behind the default `channel` feature so gateway uses the serde-only protocol surface, and made text-call registry attach/removal owner-token safe. |
+| 2026-06-10 20:42 PDT | @codex-m6-ds-rv | Added issue #460 Telnyx text stream protocol contract: shared `motlie.telnyx.text.v1` frame ownership, debug socket extension, and command/stream state machine. |
 | 2026-06-09 16:22 PDT | @codex-421-design | PR #425 api-rv hardening: `ChannelConfig.coalesce_max_wait` caps sustained debounce, and the channel re-checks no-barge-in after coalescing immediately before payload delivery, requeueing/deferring if typing appears during the coalesce window. |
 | 2026-06-09 15:55 PDT | @codex-421-design | PR #425 CLI completion: mstream send, broadcast, and timer now expose `--no-prompt-submit`, keep `--no-enter` as a hidden deprecated alias for one release, and retain the same prompt-submit behavior. |
 | 2026-06-09 15:22 PDT | @codex-421-design | PR #425 round-2 fix: quiet guard now merges stable-id and session-name client activity so no-enter payload delivery is guarded even when client session ids are unavailable; coalescing wait and drain are one atomic queue decision. |
@@ -32,6 +36,66 @@ Product mode is mixed:
 - Its first implementation consumers are brownfield mstream call paths.
 - The future M4 Telnyx transcript sink reuses the crate API, but cross-process
   sharing with mstream is explicitly out of scope for #421.
+
+
+## Telnyx Text Stream Protocol (#460)
+
+`libs/agent` owns the Rust contract for the Telnyx text-call protocol so the
+gateway, `telnyx-agent`, and the debug operator socket do not depend on each
+other for wire structs. The protocol module is
+`motlie_agent::voice::telnyx::text`, and the public protocol string remains
+`motlie.telnyx.text.v1`. The protocol module is intentionally serde-only and
+available with `default-features = false`; the Channel/tmux automation surface
+stays behind the default `channel` feature so gateway protocol peers do not
+link tmux or SSH machinery to use these wire structs.
+
+The public JSONL/WebSocket frame names and fields are preserved:
+
+| Direction | Frames | Notes |
+|-----------|--------|-------|
+| gateway -> agent | `session.start`, optional advisory `caller.partial`, `caller.turn`, `playback.started`, `playback.finished`, `turn.superseded`, `session.end`, `error` | `call_id` is present on `session.start`; committed turn-scoped frames carry `turn_id`; advisory partials carry `utterance_id`; all stream frames carry monotonic `sequence`. |
+| agent -> gateway | `agent.turn.partial`, `agent.turn`, `agent.close` | `agent.turn.partial.append` defaults to `true` for compatibility. |
+| HTTP callback | `call.offer`, `call.connected`, `AcceptCallResponse` | Used by inbound and outbound text-call setup before the JSONL stream starts; `AcceptCallResponse.extensions` opts into optional stream extensions. |
+
+Correlation is intentionally narrow on the wire: `call_id` binds the stream to
+the call, `turn_id` joins committed caller turn, agent response, playback
+lifecycle, and quality spans, and `sequence` preserves gateway emission order
+for replay. `utterance_id` is exposed only by the optional
+`motlie.telnyx.text.partials.v1` extension and on the matching final
+`caller.turn`; backend-specific ASR internals remain private.
+
+### Debug Socket Extension
+
+The operator socket has a versioned debug extension,
+`motlie.telnyx.text.debug.v1`, for local live testing. This extension is not
+part of the public text-call WebSocket protocol. A socket connection starts in
+command mode, enters stream mode with either:
+
+```json
+{"type":"debug.attach","protocol":"motlie.telnyx.text.v1","extension":"motlie.telnyx.text.debug.v1","call_id":"gwc_..."}
+```
+
+or the operator shorthand:
+
+```text
+stream attach gwc_...
+```
+
+After attach, the same socket emits public gateway frames as JSONL and accepts
+public agent frames as JSONL. A local client can request advisory ASR partials
+by adding `"extensions":["motlie.telnyx.text.partials.v1"]` to `debug.attach`
+or by using `stream attach --partials gwc_...`. The local client returns to
+command mode with:
+
+```json
+{"type":"debug.detach","reason":"done"}
+```
+
+`debug.detach` only detaches the local debug stream and must not hang up the
+call. `agent.close` remains the call-affecting frame. This state machine lets a
+human or test agent attach to a live call, speak through the same text-response
+path used by `telnyx-agent`, and then downgrade the connection back to normal
+operator commands without losing the Unix socket.
 
 ## Problem
 

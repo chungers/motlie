@@ -5274,6 +5274,8 @@ name = "motlie-agent"
 version = "0.1.0"
 dependencies = [
  "motlie-tmux",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5604,7 +5606,6 @@ dependencies = [
  "hex",
  "hmac",
  "motlie-agent",
- "motlie-telnyx-gateway",
  "motlie-tmux",
  "reqwest 0.13.4",
  "serde",
@@ -5631,6 +5632,7 @@ dependencies = [
  "hex",
  "hmac",
  "hound",
+ "motlie-agent",
  "motlie-driver",
  "motlie-model",
  "motlie-model-kokoro",
@@ -8672,8 +8674,6 @@ dependencies = [
 [[package]]
 name = "sherpa-onnx"
 version = "1.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f70620e4fa58e4cb1acf4e0a9c2cbc7496ea8284f80e55be23d443b92e563e49"
 dependencies = [
  "serde",
  "serde_json",

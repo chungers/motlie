@@ -246,6 +246,10 @@ pub struct SendRequest {
     pub submit_retries: u8,
     #[serde(default = "default_submit_retry_delay_ms")]
     pub submit_retry_delay_ms: u64,
+    #[serde(default)]
+    pub verify_delivery: bool,
+    #[serde(default = "default_input_quiet_for")]
+    pub input_quiet_for_secs: Option<u64>,
     pub require_state: Option<AgentState>,
     pub set_state: Option<AgentState>,
 }
@@ -268,6 +272,10 @@ pub struct BroadcastRequest {
     pub submit_retries: u8,
     #[serde(default = "default_submit_retry_delay_ms")]
     pub submit_retry_delay_ms: u64,
+    #[serde(default)]
+    pub verify_delivery: bool,
+    #[serde(default = "default_input_quiet_for")]
+    pub input_quiet_for_secs: Option<u64>,
     pub role: Option<String>,
     pub state: Option<AgentState>,
 }
@@ -310,11 +318,17 @@ pub struct TimerStartRequest {
     pub every_secs: u64,
     pub target: String,
     pub prompt: String,
+    #[serde(default = "default_paste_mode")]
+    pub paste_mode: PasteMode,
     pub enter: bool,
+    #[serde(default = "default_submit_settle_ms")]
+    pub settle_ms: u64,
     #[serde(default = "default_timer_submit_retries")]
     pub submit_retries: u8,
     #[serde(default = "default_timer_submit_retry_delay_ms")]
     pub submit_retry_delay_ms: u64,
+    #[serde(default)]
+    pub verify_delivery: bool,
     #[serde(default = "default_timer_input_quiet_for")]
     pub input_quiet_for_secs: Option<u64>,
 }
@@ -360,9 +374,19 @@ fn default_timer_input_quiet_for() -> Option<u64> {
     Some(DEFAULT_TIMER_INPUT_QUIET_FOR_SECS)
 }
 
+fn default_input_quiet_for() -> Option<u64> {
+    Some(DEFAULT_TIMER_INPUT_QUIET_FOR_SECS)
+}
+
+fn default_paste_mode() -> PasteMode {
+    PasteMode::Bracketed
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRequest {
     pub workstream: String,
+    #[serde(default)]
+    pub target: Option<String>,
     pub after: Option<String>,
     pub max_chars: usize,
 }

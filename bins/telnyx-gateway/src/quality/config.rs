@@ -142,12 +142,83 @@ impl Default for SpeechQualityConfig {
     }
 }
 
+fn default_final_settle_trailing_punctuation() -> Vec<String> {
+    vec![",".to_string(), ":".to_string(), ";".to_string()]
+}
+
+fn default_final_settle_lead_words() -> Vec<String> {
+    [
+        "although", "because", "whereas", "while", "when", "if", "unless", "since", "before",
+        "after", "though",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn default_final_settle_tail_words() -> Vec<String> {
+    [
+        "a", "an", "also", "the", "and", "or", "but", "if", "then", "than", "because", "so", "to",
+        "of", "for", "with", "without", "in", "on", "at", "by", "from", "as", "is", "are", "was",
+        "were", "be", "being", "been", "this", "that", "these", "those", "my", "your", "our",
+        "their", "his", "her", "its",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn default_final_settle_dangling_suffixes() -> Vec<String> {
+    vec!["'".to_string(), "-".to_string()]
+}
+
+fn default_conversation_tail_words() -> Vec<String> {
+    [
+        "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could",
+        "did", "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might",
+        "must", "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were",
+        "where", "will", "with", "would",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn default_conversation_incomplete_tail_hold_ms() -> u64 {
+    2_500
+}
+
+fn default_conversation_low_confidence_threshold_percent() -> u64 {
+    45
+}
+
+fn default_conversation_playback_hold_poll_ms() -> u64 {
+    100
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EndpointQualityConfig {
     pub trailing_silence_ms: u64,
     pub min_turn_words: usize,
     pub min_turn_chars: usize,
     pub merge_window_ms: u64,
+    pub final_settle_ms: u64,
+    #[serde(default = "default_final_settle_trailing_punctuation")]
+    pub final_settle_trailing_punctuation: Vec<String>,
+    #[serde(default = "default_final_settle_lead_words")]
+    pub final_settle_lead_words: Vec<String>,
+    #[serde(default = "default_final_settle_tail_words")]
+    pub final_settle_tail_words: Vec<String>,
+    #[serde(default = "default_final_settle_dangling_suffixes")]
+    pub final_settle_dangling_suffixes: Vec<String>,
+    #[serde(default = "default_conversation_tail_words")]
+    pub conversation_tail_words: Vec<String>,
+    #[serde(default = "default_conversation_incomplete_tail_hold_ms")]
+    pub conversation_incomplete_tail_hold_ms: u64,
+    #[serde(default = "default_conversation_low_confidence_threshold_percent")]
+    pub conversation_low_confidence_threshold_percent: u64,
+    #[serde(default = "default_conversation_playback_hold_poll_ms")]
+    pub conversation_playback_hold_poll_ms: u64,
     pub max_turn_words: usize,
     pub max_turn_duration_ms: u64,
 }
@@ -155,14 +226,102 @@ pub struct EndpointQualityConfig {
 impl Default for EndpointQualityConfig {
     fn default() -> Self {
         Self {
-            trailing_silence_ms: 650,
+            trailing_silence_ms: 900,
             min_turn_words: 2,
             min_turn_chars: 6,
             merge_window_ms: 350,
+            final_settle_ms: 800,
+            final_settle_trailing_punctuation: default_final_settle_trailing_punctuation(),
+            final_settle_lead_words: default_final_settle_lead_words(),
+            final_settle_tail_words: default_final_settle_tail_words(),
+            final_settle_dangling_suffixes: default_final_settle_dangling_suffixes(),
+            conversation_tail_words: default_conversation_tail_words(),
+            conversation_incomplete_tail_hold_ms: default_conversation_incomplete_tail_hold_ms(),
+            conversation_low_confidence_threshold_percent:
+                default_conversation_low_confidence_threshold_percent(),
+            conversation_playback_hold_poll_ms: default_conversation_playback_hold_poll_ms(),
             max_turn_words: 80,
             max_turn_duration_ms: 12_000,
         }
     }
+}
+
+impl EndpointQualityConfig {
+    pub fn final_fragment_hold_reason(&self, text: &str) -> Option<&'static str> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || has_terminal_punctuation(trimmed) {
+            return None;
+        }
+        if matches_config_suffix(&self.final_settle_trailing_punctuation, trimmed) {
+            return Some("trailing_punctuation");
+        }
+        let first_word = trimmed
+            .split_whitespace()
+            .next()
+            .map(normalize_fragment_word)
+            .unwrap_or_default();
+        if config_word_list_contains(&self.final_settle_lead_words, &first_word) {
+            return Some("lead_word");
+        }
+        let last_word = trimmed
+            .split_whitespace()
+            .last()
+            .map(normalize_fragment_word)
+            .unwrap_or_default();
+        if matches_config_suffix(&self.final_settle_dangling_suffixes, &last_word) {
+            return Some("dangling_tail");
+        }
+        config_word_list_contains(&self.final_settle_tail_words, &last_word).then_some("tail_word")
+    }
+
+    pub fn conversation_incomplete_tail_reason(&self, text: &str) -> Option<&'static str> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || has_terminal_punctuation(trimmed) {
+            return None;
+        }
+        if matches_config_suffix(&self.final_settle_dangling_suffixes, trimmed) {
+            return Some("dangling_tail");
+        }
+        let tail = trimmed
+            .split_whitespace()
+            .last()
+            .map(normalize_fragment_word)
+            .unwrap_or_default();
+        config_word_list_contains(&self.conversation_tail_words, &tail).then_some("tail_word")
+    }
+
+    pub fn conversation_low_confidence_threshold(&self) -> f32 {
+        self.conversation_low_confidence_threshold_percent as f32 / 100.0
+    }
+
+    pub fn conversation_low_confidence_hold_allowed(&self, text: &str) -> bool {
+        let trimmed = text.trim();
+        !trimmed.is_empty() && !has_terminal_punctuation(trimmed)
+    }
+}
+
+fn has_terminal_punctuation(text: &str) -> bool {
+    text.chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_some_and(|ch| matches!(ch, '.' | '?' | '!'))
+}
+
+fn normalize_fragment_word(word: &str) -> String {
+    word.trim_matches(|ch: char| ch.is_ascii_punctuation() && ch != '\'' && ch != '-')
+        .to_ascii_lowercase()
+}
+
+fn config_word_list_contains(words: &[String], word: &str) -> bool {
+    words
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(word))
+}
+
+fn matches_config_suffix(suffixes: &[String], text: &str) -> bool {
+    suffixes
+        .iter()
+        .any(|suffix| !suffix.is_empty() && text.ends_with(suffix))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -177,7 +336,7 @@ impl Default for AsrQualityConfig {
         Self {
             repeated_token_run_threshold: 16,
             repeated_q_run_threshold: 8,
-            finish_pad_ms: 160,
+            finish_pad_ms: 320,
         }
     }
 }
@@ -230,8 +389,25 @@ impl Default for TtsQualityConfig {
         Self {
             chunking_enabled: true,
             max_text_chunk_chars: 90,
-            first_chunk_max_chars: 0,
-            prebuffer_chunks: 1,
+            first_chunk_max_chars: 40,
+            prebuffer_chunks: 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnsetDuringPlaybackPolicy {
+    #[default]
+    DeferToPartial,
+    Trust,
+}
+
+impl OnsetDuringPlaybackPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DeferToPartial => "defer_to_partial",
+            Self::Trust => "trust",
         }
     }
 }
@@ -240,6 +416,8 @@ impl Default for TtsQualityConfig {
 pub struct BargeInQualityConfig {
     pub enabled: bool,
     pub speech_onset_cancel_enabled: bool,
+    #[serde(default)]
+    pub onset_during_playback: OnsetDuringPlaybackPolicy,
     pub partial_asr_cancel_enabled: bool,
     pub final_asr_cancel_enabled: bool,
     pub clear_timeout_ms: u64,
@@ -250,9 +428,37 @@ impl Default for BargeInQualityConfig {
         Self {
             enabled: true,
             speech_onset_cancel_enabled: true,
+            onset_during_playback: OnsetDuringPlaybackPolicy::DeferToPartial,
             partial_asr_cancel_enabled: true,
             final_asr_cancel_enabled: true,
             clear_timeout_ms: 1_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EchoSuppressionQualityConfig {
+    pub enabled: bool,
+    pub min_text_chars: usize,
+    pub tail_window_ms: u64,
+    pub short_token_coverage_percent: u64,
+    pub short_longest_token_run: usize,
+    pub long_min_tokens: usize,
+    pub long_token_coverage_percent: u64,
+    pub long_longest_token_run: usize,
+}
+
+impl Default for EchoSuppressionQualityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_text_chars: 10,
+            tail_window_ms: 2_000,
+            short_token_coverage_percent: 66,
+            short_longest_token_run: 2,
+            long_min_tokens: 4,
+            long_token_coverage_percent: 60,
+            long_longest_token_run: 3,
         }
     }
 }
@@ -337,6 +543,8 @@ pub struct VoiceQualityConfig {
     pub text_call: TextCallQualityConfig,
     pub tts: TtsQualityConfig,
     pub barge_in: BargeInQualityConfig,
+    #[serde(default)]
+    pub echo_suppression: EchoSuppressionQualityConfig,
     pub logging: LoggingQualityConfig,
     pub quality_judge: QualityJudgeConfig,
     pub targets: QualityTargetsConfig,
@@ -367,6 +575,7 @@ impl VoiceQualityConfig {
             text_call: TextCallQualityConfig::default(),
             tts: TtsQualityConfig::default(),
             barge_in: BargeInQualityConfig::default(),
+            echo_suppression: EchoSuppressionQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
             quality_judge: QualityJudgeConfig::default(),
             targets: QualityTargetsConfig::default(),
@@ -374,15 +583,18 @@ impl VoiceQualityConfig {
         match profile {
             QualityProfile::Fast => {
                 config.endpoint.trailing_silence_ms = 550;
+                config.endpoint.final_settle_ms = 350;
                 config.asr.finish_pad_ms = 80;
             }
             QualityProfile::Balanced => {}
             QualityProfile::Complete => {
                 config.endpoint.trailing_silence_ms = 1_100;
+                config.endpoint.final_settle_ms = 1_000;
                 config.asr.finish_pad_ms = 320;
             }
             QualityProfile::Noisy => {
                 config.endpoint.trailing_silence_ms = 950;
+                config.endpoint.final_settle_ms = 900;
                 config.speech.rms_threshold = 260.0;
                 config.speech.peak_threshold = 1_200;
                 config.asr.finish_pad_ms = 240;
@@ -451,6 +663,60 @@ impl VoiceQualityConfig {
             self.endpoint.merge_window_ms,
             0,
             5_000,
+        )?;
+        ensure_u64(
+            "endpoint.final_settle_ms",
+            self.endpoint.final_settle_ms,
+            0,
+            5_000,
+        )?;
+        ensure_string_list(
+            "endpoint.final_settle_trailing_punctuation",
+            &self.endpoint.final_settle_trailing_punctuation,
+            8,
+            32,
+        )?;
+        ensure_string_list(
+            "endpoint.final_settle_lead_words",
+            &self.endpoint.final_settle_lead_words,
+            40,
+            256,
+        )?;
+        ensure_string_list(
+            "endpoint.final_settle_tail_words",
+            &self.endpoint.final_settle_tail_words,
+            64,
+            256,
+        )?;
+        ensure_string_list(
+            "endpoint.final_settle_dangling_suffixes",
+            &self.endpoint.final_settle_dangling_suffixes,
+            8,
+            32,
+        )?;
+        ensure_string_list(
+            "endpoint.conversation_tail_words",
+            &self.endpoint.conversation_tail_words,
+            64,
+            256,
+        )?;
+        ensure_u64(
+            "endpoint.conversation_incomplete_tail_hold_ms",
+            self.endpoint.conversation_incomplete_tail_hold_ms,
+            0,
+            10_000,
+        )?;
+        ensure_u64(
+            "endpoint.conversation_low_confidence_threshold_percent",
+            self.endpoint.conversation_low_confidence_threshold_percent,
+            0,
+            100,
+        )?;
+        ensure_u64(
+            "endpoint.conversation_playback_hold_poll_ms",
+            self.endpoint.conversation_playback_hold_poll_ms,
+            10,
+            1_000,
         )?;
         ensure_usize(
             "endpoint.max_turn_words",
@@ -521,6 +787,48 @@ impl VoiceQualityConfig {
             self.barge_in.clear_timeout_ms,
             100,
             10_000,
+        )?;
+        ensure_usize(
+            "echo_suppression.min_text_chars",
+            self.echo_suppression.min_text_chars,
+            1,
+            500,
+        )?;
+        ensure_u64(
+            "echo_suppression.tail_window_ms",
+            self.echo_suppression.tail_window_ms,
+            0,
+            10_000,
+        )?;
+        ensure_u64(
+            "echo_suppression.short_token_coverage_percent",
+            self.echo_suppression.short_token_coverage_percent,
+            0,
+            100,
+        )?;
+        ensure_usize(
+            "echo_suppression.short_longest_token_run",
+            self.echo_suppression.short_longest_token_run,
+            1,
+            64,
+        )?;
+        ensure_usize(
+            "echo_suppression.long_min_tokens",
+            self.echo_suppression.long_min_tokens,
+            2,
+            64,
+        )?;
+        ensure_u64(
+            "echo_suppression.long_token_coverage_percent",
+            self.echo_suppression.long_token_coverage_percent,
+            0,
+            100,
+        )?;
+        ensure_usize(
+            "echo_suppression.long_longest_token_run",
+            self.echo_suppression.long_longest_token_run,
+            1,
+            64,
         )?;
         ensure_usize(
             "logging.queue_capacity",
@@ -638,6 +946,33 @@ impl VoiceQualityConfig {
             if let Some(value) = endpoint.merge_window_ms {
                 self.set_endpoint_merge_window_ms(value);
             }
+            if let Some(value) = endpoint.final_settle_ms {
+                self.set_endpoint_final_settle_ms(value);
+            }
+            if let Some(value) = endpoint.final_settle_trailing_punctuation {
+                self.endpoint.final_settle_trailing_punctuation = value;
+            }
+            if let Some(value) = endpoint.final_settle_lead_words {
+                self.endpoint.final_settle_lead_words = value;
+            }
+            if let Some(value) = endpoint.final_settle_tail_words {
+                self.endpoint.final_settle_tail_words = value;
+            }
+            if let Some(value) = endpoint.final_settle_dangling_suffixes {
+                self.endpoint.final_settle_dangling_suffixes = value;
+            }
+            if let Some(value) = endpoint.conversation_tail_words {
+                self.endpoint.conversation_tail_words = value;
+            }
+            if let Some(value) = endpoint.conversation_incomplete_tail_hold_ms {
+                self.set_endpoint_conversation_incomplete_tail_hold_ms(value);
+            }
+            if let Some(value) = endpoint.conversation_low_confidence_threshold_percent {
+                self.set_endpoint_conversation_low_confidence_threshold_percent(value);
+            }
+            if let Some(value) = endpoint.conversation_playback_hold_poll_ms {
+                self.set_endpoint_conversation_playback_hold_poll_ms(value);
+            }
             if let Some(value) = endpoint.max_turn_words {
                 self.set_endpoint_max_turn_words(value);
             }
@@ -694,6 +1029,9 @@ impl VoiceQualityConfig {
             if let Some(value) = barge_in.speech_onset_cancel_enabled {
                 self.set_barge_in_speech_onset_cancel_enabled(value);
             }
+            if let Some(value) = barge_in.onset_during_playback {
+                self.set_barge_in_onset_during_playback(value);
+            }
             if let Some(value) = barge_in.partial_asr_cancel_enabled {
                 self.set_barge_in_partial_asr_cancel_enabled(value);
             }
@@ -702,6 +1040,32 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = barge_in.clear_timeout_ms {
                 self.set_barge_in_clear_timeout_ms(value);
+            }
+        }
+        if let Some(echo) = patch.echo_suppression {
+            if let Some(value) = echo.enabled {
+                self.set_echo_suppression_enabled(value);
+            }
+            if let Some(value) = echo.min_text_chars {
+                self.set_echo_suppression_min_text_chars(value);
+            }
+            if let Some(value) = echo.tail_window_ms {
+                self.set_echo_suppression_tail_window_ms(value);
+            }
+            if let Some(value) = echo.short_token_coverage_percent {
+                self.set_echo_suppression_short_token_coverage_percent(value);
+            }
+            if let Some(value) = echo.short_longest_token_run {
+                self.set_echo_suppression_short_longest_token_run(value);
+            }
+            if let Some(value) = echo.long_min_tokens {
+                self.set_echo_suppression_long_min_tokens(value);
+            }
+            if let Some(value) = echo.long_token_coverage_percent {
+                self.set_echo_suppression_long_token_coverage_percent(value);
+            }
+            if let Some(value) = echo.long_longest_token_run {
+                self.set_echo_suppression_long_longest_token_run(value);
             }
         }
         if let Some(logging) = patch.logging {
@@ -770,6 +1134,7 @@ impl VoiceQualityConfig {
                 self.targets.max_inappropriate_cancel_rate = clamp_ratio(value)?;
             }
         }
+        self.validate_resolved()?;
         Ok(())
     }
 
@@ -858,7 +1223,60 @@ impl VoiceQualityConfig {
         self.outcome(
             "endpoint.merge_window_ms",
             clamped.value,
-            ApplyBoundary::ReportOnly,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_endpoint_final_settle_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 5_000);
+        self.endpoint.final_settle_ms = clamped.value;
+        self.outcome(
+            "endpoint.final_settle_ms",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_endpoint_conversation_incomplete_tail_hold_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 10_000);
+        self.endpoint.conversation_incomplete_tail_hold_ms = clamped.value;
+        self.outcome(
+            "endpoint.conversation_incomplete_tail_hold_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_endpoint_conversation_low_confidence_threshold_percent(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 100);
+        self.endpoint.conversation_low_confidence_threshold_percent = clamped.value;
+        self.outcome(
+            "endpoint.conversation_low_confidence_threshold_percent",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_endpoint_conversation_playback_hold_poll_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 10, 1_000);
+        self.endpoint.conversation_playback_hold_poll_ms = clamped.value;
+        self.outcome(
+            "endpoint.conversation_playback_hold_poll_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
             clamped.clamped,
         )
     }
@@ -1045,6 +1463,19 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_barge_in_onset_during_playback(
+        &mut self,
+        value: OnsetDuringPlaybackPolicy,
+    ) -> QualityMutationOutcome {
+        self.barge_in.onset_during_playback = value;
+        self.outcome(
+            "barge_in.onset_during_playback",
+            value.label(),
+            ApplyBoundary::NextAsrSession,
+            false,
+        )
+    }
+
     pub fn set_barge_in_partial_asr_cancel_enabled(
         &mut self,
         value: bool,
@@ -1075,6 +1506,105 @@ impl VoiceQualityConfig {
             "barge_in.clear_timeout_ms",
             clamped.value,
             ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_enabled(&mut self, value: bool) -> QualityMutationOutcome {
+        self.echo_suppression.enabled = value;
+        self.outcome(
+            "echo_suppression.enabled",
+            value,
+            ApplyBoundary::NextAsrSession,
+            false,
+        )
+    }
+
+    pub fn set_echo_suppression_min_text_chars(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 500);
+        self.echo_suppression.min_text_chars = clamped.value;
+        self.outcome(
+            "echo_suppression.min_text_chars",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_tail_window_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 10_000);
+        self.echo_suppression.tail_window_ms = clamped.value;
+        self.outcome(
+            "echo_suppression.tail_window_ms",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_short_token_coverage_percent(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 100);
+        self.echo_suppression.short_token_coverage_percent = clamped.value;
+        self.outcome(
+            "echo_suppression.short_token_coverage_percent",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_short_longest_token_run(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 64);
+        self.echo_suppression.short_longest_token_run = clamped.value;
+        self.outcome(
+            "echo_suppression.short_longest_token_run",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_long_min_tokens(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 2, 64);
+        self.echo_suppression.long_min_tokens = clamped.value;
+        self.outcome(
+            "echo_suppression.long_min_tokens",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_long_token_coverage_percent(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 100);
+        self.echo_suppression.long_token_coverage_percent = clamped.value;
+        self.outcome(
+            "echo_suppression.long_token_coverage_percent",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_suppression_long_longest_token_run(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 64);
+        self.echo_suppression.long_longest_token_run = clamped.value;
+        self.outcome(
+            "echo_suppression.long_longest_token_run",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
             clamped.clamped,
         )
     }
@@ -1279,6 +1809,30 @@ fn ensure_f32(name: &'static str, value: f32, min: f32, max: f32) -> Result<()> 
     Ok(())
 }
 
+fn ensure_string_list(
+    name: &'static str,
+    values: &[String],
+    max_items: usize,
+    max_chars: usize,
+) -> Result<()> {
+    if values.len() > max_items {
+        anyhow::bail!("{name} must have at most {max_items} entries");
+    }
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("{name} entries must be non-empty when present");
+        }
+        if trimmed != value {
+            anyhow::bail!("{name} entries must not have surrounding whitespace");
+        }
+        if value.chars().count() > max_chars {
+            anyhow::bail!("{name} entries must be at most {max_chars} characters");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct QualityConfigDocument {
     #[serde(default)]
@@ -1300,6 +1854,8 @@ pub struct QualityConfigPatch {
     pub tts: Option<TtsQualityConfigPatch>,
     #[serde(default)]
     pub barge_in: Option<BargeInQualityConfigPatch>,
+    #[serde(default)]
+    pub echo_suppression: Option<EchoSuppressionQualityConfigPatch>,
     #[serde(default)]
     pub logging: Option<LoggingQualityConfigPatch>,
     #[serde(default)]
@@ -1323,6 +1879,15 @@ pub struct EndpointQualityConfigPatch {
     pub min_turn_words: Option<usize>,
     pub min_turn_chars: Option<usize>,
     pub merge_window_ms: Option<u64>,
+    pub final_settle_ms: Option<u64>,
+    pub final_settle_trailing_punctuation: Option<Vec<String>>,
+    pub final_settle_lead_words: Option<Vec<String>>,
+    pub final_settle_tail_words: Option<Vec<String>>,
+    pub final_settle_dangling_suffixes: Option<Vec<String>>,
+    pub conversation_tail_words: Option<Vec<String>>,
+    pub conversation_incomplete_tail_hold_ms: Option<u64>,
+    pub conversation_low_confidence_threshold_percent: Option<u64>,
+    pub conversation_playback_hold_poll_ms: Option<u64>,
     pub max_turn_words: Option<usize>,
     pub max_turn_duration_ms: Option<u64>,
 }
@@ -1355,9 +1920,22 @@ pub struct TtsQualityConfigPatch {
 pub struct BargeInQualityConfigPatch {
     pub enabled: Option<bool>,
     pub speech_onset_cancel_enabled: Option<bool>,
+    pub onset_during_playback: Option<OnsetDuringPlaybackPolicy>,
     pub partial_asr_cancel_enabled: Option<bool>,
     pub final_asr_cancel_enabled: Option<bool>,
     pub clear_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct EchoSuppressionQualityConfigPatch {
+    pub enabled: Option<bool>,
+    pub min_text_chars: Option<usize>,
+    pub tail_window_ms: Option<u64>,
+    pub short_token_coverage_percent: Option<u64>,
+    pub short_longest_token_run: Option<usize>,
+    pub long_min_tokens: Option<usize>,
+    pub long_token_coverage_percent: Option<u64>,
+    pub long_longest_token_run: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1406,15 +1984,16 @@ mod tests {
     fn balanced_defaults_match_live_call_tuned_values() {
         let config = VoiceQualityConfig::default();
         assert_eq!(config.profile, QualityProfile::Balanced);
-        assert_eq!(config.endpoint.trailing_silence_ms, 650);
+        assert_eq!(config.endpoint.trailing_silence_ms, 900);
         assert_eq!(config.speech.rms_threshold, 220.0);
         assert_eq!(config.speech.peak_threshold, 1_100);
         assert_eq!(config.speech.onset_min_silence_ms, 180);
-        assert_eq!(config.asr.finish_pad_ms, 160);
+        assert_eq!(config.endpoint.final_settle_ms, 800);
+        assert_eq!(config.asr.finish_pad_ms, 320);
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
-        assert_eq!(config.tts.first_chunk_max_chars, 0);
-        assert_eq!(config.tts.prebuffer_chunks, 1);
+        assert_eq!(config.tts.first_chunk_max_chars, 40);
+        assert_eq!(config.tts.prebuffer_chunks, 2);
     }
 
     #[test]
@@ -1490,11 +2069,56 @@ mod tests {
     }
 
     #[test]
-    fn report_only_knobs_do_not_get_live_apply_boundary() {
+    fn merge_window_applies_to_new_conversation_turns() {
         let mut config = VoiceQualityConfig::default();
         let outcome = config.set_endpoint_merge_window_ms(9_999);
         assert_eq!(config.endpoint.merge_window_ms, 5_000);
-        assert_eq!(outcome.apply_boundary, ApplyBoundary::ReportOnly);
+        assert_eq!(outcome.apply_boundary, ApplyBoundary::NewTurn);
+    }
+
+    #[test]
+    fn final_settle_knob_clamps_and_applies_at_next_session() {
+        let mut config = VoiceQualityConfig::default();
+        let outcome = config.set_endpoint_final_settle_ms(9_999);
+        assert_eq!(config.endpoint.final_settle_ms, 5_000);
+        assert_eq!(outcome.apply_boundary, ApplyBoundary::NextAsrSession);
+    }
+
+    #[test]
+    fn endpoint_fragment_classifiers_follow_configured_policy() {
+        let mut endpoint = EndpointQualityConfig::default();
+        assert_eq!(
+            endpoint.final_fragment_hold_reason("we also"),
+            Some("tail_word")
+        );
+        assert_eq!(
+            endpoint.conversation_incomplete_tail_reason("the endpoints are"),
+            Some("tail_word")
+        );
+
+        endpoint.final_settle_tail_words.clear();
+        endpoint.conversation_tail_words.clear();
+        assert_eq!(endpoint.final_fragment_hold_reason("we also"), None);
+        assert_eq!(
+            endpoint.conversation_incomplete_tail_reason("the endpoints are"),
+            None
+        );
+    }
+
+    #[test]
+    fn endpoint_policy_lists_reject_ambiguous_entries() {
+        let mut config = VoiceQualityConfig::default();
+        config
+            .endpoint
+            .final_settle_tail_words
+            .push(" spaced".to_string());
+
+        let error = config
+            .validate_resolved()
+            .expect_err("policy list entries with surrounding whitespace should be rejected");
+        assert!(error
+            .to_string()
+            .contains("endpoint.final_settle_tail_words"));
     }
 
     #[test]

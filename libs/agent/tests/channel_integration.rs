@@ -1,3 +1,5 @@
+#![cfg(feature = "channel")]
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use motlie_agent::{
@@ -187,6 +189,7 @@ async fn writable_activity_during_coalesce_redefers_before_payload_delivery() {
                 ManagedMessage::new(MessageSource::human("mstream.send"), "do not interleave"),
                 SendOptions {
                     submit: typing_only_policy(),
+                    quiet_guard: QuietGuardPolicy::Default,
                     timeout: Duration::from_secs(30),
                 },
             )
@@ -283,6 +286,7 @@ async fn typing_only_send_defers_when_client_session_id_is_missing_but_name_matc
                         retry_delay: Duration::ZERO,
                         require_verification: false,
                     },
+                    quiet_guard: QuietGuardPolicy::Default,
                     timeout: Duration::from_secs(30),
                 },
             )
@@ -368,6 +372,7 @@ async fn concurrent_senders_defer_by_stable_session_id_then_dedup_and_coalesce()
     let mut events = manager.subscribe();
     let options = SendOptions {
         submit: submit_policy(),
+        quiet_guard: QuietGuardPolicy::Default,
         timeout: Duration::from_secs(30),
     };
 
