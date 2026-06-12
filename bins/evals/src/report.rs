@@ -390,6 +390,9 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
         }
 
         let metrics = latency_metric_cells(&record.performance.capability_metrics);
+        if !metrics.has_any_value() {
+            continue;
+        }
         out.push_str(&format!(
             "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             record.coverage.cell_id,
@@ -422,6 +425,19 @@ struct LatencyMetricCells {
     p95_ttft_first_answer_token_ms: Option<f64>,
     ttfp_first_partial_ms: Option<u64>,
     ttfa_first_chunk_ms: Option<u64>,
+}
+
+impl LatencyMetricCells {
+    fn has_any_value(&self) -> bool {
+        self.ttft_first_token_ms.is_some()
+            || self.ttft_first_answer_token_ms.is_some()
+            || self.mean_ttft_first_token_ms.is_some()
+            || self.p95_ttft_first_token_ms.is_some()
+            || self.mean_ttft_first_answer_token_ms.is_some()
+            || self.p95_ttft_first_answer_token_ms.is_some()
+            || self.ttfp_first_partial_ms.is_some()
+            || self.ttfa_first_chunk_ms.is_some()
+    }
 }
 
 fn latency_metric_cells(metrics: &CapabilityPerformanceMetrics) -> LatencyMetricCells {
@@ -824,6 +840,44 @@ mod tests {
         assert!(markdown.contains("ttfa_first_chunk_ms"));
         assert!(markdown.contains("| 42 | null |"));
         assert!(markdown.contains("| null | 17 |"));
+    }
+
+    #[test]
+    fn aggregate_latency_metrics_skips_all_null_rows() {
+        let mut measured_null_record = test_record();
+        measured_null_record.coverage.cell_id = "measured_null".to_owned();
+        measured_null_record.coverage.capability = "asr".to_owned();
+        measured_null_record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::Asr(AsrPerformanceMetrics::default());
+
+        let mut unmeasured_record = test_record();
+        unmeasured_record.coverage.cell_id = "unmeasured".to_owned();
+        unmeasured_record.coverage.capability = "chat".to_owned();
+        unmeasured_record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::NotMeasured;
+
+        let mut measured_value_record = test_record();
+        measured_value_record.coverage.cell_id = "measured_value".to_owned();
+        measured_value_record.coverage.capability = "asr".to_owned();
+        measured_value_record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::Asr(AsrPerformanceMetrics {
+                ttfp_first_partial_ms: Some(42),
+                ..Default::default()
+            });
+
+        let mut markdown = String::new();
+        render_latency_metrics(
+            &mut markdown,
+            &[
+                measured_null_record,
+                unmeasured_record,
+                measured_value_record,
+            ],
+        );
+
+        assert!(!markdown.contains("measured_null"));
+        assert!(!markdown.contains("unmeasured"));
+        assert!(markdown.contains("measured_value"));
     }
 
     #[test]

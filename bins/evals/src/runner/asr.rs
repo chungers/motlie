@@ -13,7 +13,9 @@ use motlie_model::{
 use motlie_voice::pipeline::convert::{decode_samples_to_f32, downmix_to_mono, f32_to_i16_clamped};
 use motlie_voice::pipeline::resample::{LinearInterpolator, Resampler};
 
-use crate::metrics::{AsrPerformanceMetrics, CapabilityPerformanceMetrics, PerformanceMetrics};
+use crate::metrics::{
+    AsrPerformanceMetrics, CapabilityPerformanceMetrics, MetricUnavailable, PerformanceMetrics,
+};
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
@@ -82,9 +84,11 @@ impl ScenarioRunner for AsrRunner {
             segment_count: Some(eval.segments.len() as u64),
             word_error_rate,
         };
+        let unavailable = required_asr_metric_gaps(&asr_metrics, eval.mode);
         let performance = PerformanceMetrics {
             startup_ms: Some(eval.startup_ms),
             request_latencies_ms: vec![eval.transcription_latency_ms],
+            unavailable,
             capability_metrics: CapabilityPerformanceMetrics::Asr(asr_metrics),
             ..Default::default()
         };
@@ -121,7 +125,14 @@ struct AsrEvalOutput {
     startup_ms: u64,
     transcription_latency_ms: u64,
     ttfp_first_partial_ms: Option<u64>,
+    mode: AsrMode,
     segments: Vec<TranscriptSegment>,
+}
+
+#[derive(Clone, Copy)]
+enum AsrMode {
+    Batch,
+    Streaming,
 }
 
 #[allow(unused_variables)]
@@ -215,6 +226,7 @@ where
         startup_ms,
         transcription_latency_ms,
         ttfp_first_partial_ms: None,
+        mode: AsrMode::Batch,
         segments: update.segments,
     })
 }
@@ -271,7 +283,7 @@ where
         .finish()
         .await
         .context("streaming ASR finish failed")?;
-    segments.extend(final_update.segments);
+    segments.extend(final_segments(final_update));
     let transcription_latency_ms = elapsed_ms(transcription_started_at.elapsed());
     context.metrics_sampler.sample();
     handle.shutdown().await.context("ASR shutdown failed")?;
@@ -280,8 +292,28 @@ where
         startup_ms,
         transcription_latency_ms,
         ttfp_first_partial_ms,
+        mode: AsrMode::Streaming,
         segments,
     })
+}
+
+fn required_asr_metric_gaps(
+    metrics: &AsrPerformanceMetrics,
+    mode: AsrMode,
+) -> Vec<MetricUnavailable> {
+    if metrics.ttfp_first_partial_ms.is_some() {
+        return Vec::new();
+    }
+
+    let reason = match mode {
+        AsrMode::Batch => "metric_not_applicable_for_batch_engine",
+        AsrMode::Streaming => "metric_not_reported_by_backend",
+    };
+    vec![MetricUnavailable::new(
+        "ttfp_first_partial_ms",
+        reason,
+        "asr_runner",
+    )]
 }
 
 fn decode_wav_mono16k(path: &Path) -> Result<DecodedAsrAudio> {
@@ -470,5 +502,43 @@ mod tests {
     #[test]
     fn streaming_chunk_samples_clamps_to_one() {
         assert_eq!(streaming_chunk_samples(0), 1);
+    }
+
+    #[test]
+    fn final_segments_filters_partial_finish_updates() {
+        let update = TranscriptionUpdate {
+            segments: vec![
+                TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 100,
+                    text: "hel".to_owned(),
+                    final_segment: false,
+                },
+                TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 200,
+                    text: "hello".to_owned(),
+                    final_segment: true,
+                },
+            ],
+        };
+
+        let segments = final_segments(update);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "hello");
+    }
+
+    #[test]
+    fn asr_metric_gaps_distinguish_batch_and_streaming_null_ttfp() {
+        let metrics = AsrPerformanceMetrics::default();
+
+        let batch = required_asr_metric_gaps(&metrics, AsrMode::Batch);
+        let streaming = required_asr_metric_gaps(&metrics, AsrMode::Streaming);
+
+        assert_eq!(batch[0].metric, "ttfp_first_partial_ms");
+        assert_eq!(batch[0].reason, "metric_not_applicable_for_batch_engine");
+        assert_eq!(streaming[0].metric, "ttfp_first_partial_ms");
+        assert_eq!(streaming[0].reason, "metric_not_reported_by_backend");
     }
 }

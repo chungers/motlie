@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono, SpeechStream, SpeechSynthesizer, SynthesisRequest};
 use motlie_model::{BundleHandle, ModelError, SpeechParams, StartOptions};
 
-use crate::metrics::{CapabilityPerformanceMetrics, PerformanceMetrics, TtsPerformanceMetrics};
+use crate::metrics::{
+    CapabilityPerformanceMetrics, MetricUnavailable, PerformanceMetrics, TtsPerformanceMetrics,
+};
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
@@ -56,9 +58,11 @@ impl ScenarioRunner for TtsRunner {
             sample_rate_hz: Some(eval.sample_rate_hz),
             chunk_count: Some(eval.chunk_count),
         };
+        let unavailable = required_tts_metric_gaps(&tts_metrics);
         let performance = PerformanceMetrics {
             startup_ms: Some(eval.startup_ms),
             request_latencies_ms: vec![eval.synthesis_latency_ms],
+            unavailable,
             capability_metrics: CapabilityPerformanceMetrics::Tts(tts_metrics),
             ..Default::default()
         };
@@ -191,6 +195,18 @@ where
     })
 }
 
+fn required_tts_metric_gaps(metrics: &TtsPerformanceMetrics) -> Vec<MetricUnavailable> {
+    if metrics.ttfa_first_chunk_ms.is_some() {
+        return Vec::new();
+    }
+
+    vec![MetricUnavailable::new(
+        "ttfa_first_chunk_ms",
+        "metric_not_reported_by_backend",
+        "tts_runner",
+    )]
+}
+
 fn evaluate_assertions(
     audio_duration_ms: u64,
     sample_count: u64,
@@ -246,5 +262,14 @@ mod tests {
 
         assert_eq!(outcomes[0].name, "min_audio_duration_ms");
         assert_eq!(outcomes[0].status, AcceptanceStatus::Fail);
+    }
+
+    #[test]
+    fn tts_metric_gap_records_null_ttfa() {
+        let gaps = required_tts_metric_gaps(&TtsPerformanceMetrics::default());
+
+        assert_eq!(gaps[0].metric, "ttfa_first_chunk_ms");
+        assert_eq!(gaps[0].reason, "metric_not_reported_by_backend");
+        assert_eq!(gaps[0].source.as_deref(), Some("tts_runner"));
     }
 }

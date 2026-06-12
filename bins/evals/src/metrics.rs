@@ -82,9 +82,13 @@ pub struct AsrPerformanceMetrics {
     pub audio_duration_ms: Option<u64>,
     pub transcription_latency_ms: Option<u64>,
     /// Driver-measured wall time from submitting the first file-fed audio chunk
-    /// to receiving the first non-final partial transcript segment. Eval audio is
-    /// pushed as fast as the backend accepts chunks, so this is not comparable to
-    /// realtime telephony first-partial latency targets.
+    /// to receiving the first non-empty, non-final partial transcript segment.
+    /// The value is observed only at `ingest()` returns, so its resolution is
+    /// quantized by the scenario chunk size and cross-run comparisons require
+    /// constant chunking. Eval audio is pushed as fast as the backend accepts
+    /// chunks, so this is not comparable to realtime telephony first-partial
+    /// latency targets. Batch engines and streaming engines that emit no such
+    /// partial report `None` with a `MetricUnavailable` gap entry.
     #[serde(default)]
     pub ttfp_first_partial_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
