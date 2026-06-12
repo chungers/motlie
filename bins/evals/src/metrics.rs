@@ -79,8 +79,18 @@ pub struct ToolUsePerformanceMetrics {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AsrPerformanceMetrics {
+    #[serde(default)]
+    pub iterations: Option<u64>,
+    #[serde(default)]
+    pub successful_iterations: Option<u64>,
+    #[serde(default)]
+    pub failed_iterations: Option<u64>,
     pub audio_duration_ms: Option<u64>,
     pub transcription_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub mean_transcription_latency_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_transcription_latency_ms: Option<f64>,
     /// Driver-measured wall time from submitting the first file-fed audio chunk
     /// to receiving the first non-empty, non-final partial transcript segment.
     /// The value is observed only at `ingest()` returns, so its resolution is
@@ -91,6 +101,10 @@ pub struct AsrPerformanceMetrics {
     /// partial report `None` with a `MetricUnavailable` gap entry.
     #[serde(default)]
     pub ttfp_first_partial_ms: Option<u64>,
+    #[serde(default)]
+    pub mean_ttfp_first_partial_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_ttfp_first_partial_ms: Option<f64>,
     pub real_time_factor: Option<f64>,
     pub transcript_chars: Option<u64>,
     pub segment_count: Option<u64>,
@@ -99,12 +113,26 @@ pub struct AsrPerformanceMetrics {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TtsPerformanceMetrics {
+    #[serde(default)]
+    pub iterations: Option<u64>,
+    #[serde(default)]
+    pub successful_iterations: Option<u64>,
+    #[serde(default)]
+    pub failed_iterations: Option<u64>,
     pub text_chars: Option<u64>,
     pub synthesis_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub mean_synthesis_latency_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_synthesis_latency_ms: Option<f64>,
     /// Driver-measured wall time from `synthesize(request)` to the first audio
     /// chunk returned by `next_chunk()`.
     #[serde(default)]
     pub ttfa_first_chunk_ms: Option<u64>,
+    #[serde(default)]
+    pub mean_ttfa_first_chunk_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_ttfa_first_chunk_ms: Option<f64>,
     pub audio_duration_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
     pub sample_count: Option<u64>,
@@ -397,7 +425,11 @@ mod serde_tests {
         let tts: TtsPerformanceMetrics = serde_json::from_str("{}").unwrap();
 
         assert_eq!(asr.ttfp_first_partial_ms, None);
+        assert_eq!(asr.mean_ttfp_first_partial_ms, None);
+        assert_eq!(asr.p95_ttfp_first_partial_ms, None);
         assert_eq!(tts.ttfa_first_chunk_ms, None);
+        assert_eq!(tts.mean_ttfa_first_chunk_ms, None);
+        assert_eq!(tts.p95_ttfa_first_chunk_ms, None);
     }
 }
 

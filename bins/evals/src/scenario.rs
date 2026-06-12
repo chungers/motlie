@@ -262,6 +262,10 @@ pub struct AsrInput {
     pub reference_transcript: Option<String>,
     pub language: Option<String>,
     pub streaming_chunk_ms: Option<u64>,
+    #[serde(default = "default_perf_iterations")]
+    pub iterations: u64,
+    #[serde(default)]
+    pub warmup_iterations: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -282,6 +286,10 @@ pub struct TtsScenario {
 pub struct TtsInput {
     pub text: String,
     pub speaking_rate: Option<f32>,
+    #[serde(default = "default_perf_iterations")]
+    pub iterations: u64,
+    #[serde(default)]
+    pub warmup_iterations: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -568,6 +576,8 @@ capture_request_latency = true
             ScenarioKind::Asr(asr) => {
                 assert_eq!(asr.assertions.min_transcript_chars, Some(1));
                 assert_eq!(asr.input.language.as_deref(), Some("en"));
+                assert_eq!(asr.input.iterations, 3);
+                assert_eq!(asr.input.warmup_iterations, 1);
             }
             other => panic!("expected ASR scenario, got {other:?}"),
         }
@@ -582,6 +592,8 @@ capture_request_latency = true
             ScenarioKind::Tts(tts) => {
                 assert_eq!(tts.assertions.min_sample_count, Some(1));
                 assert_eq!(tts.input.text, "Hello from Motlie.");
+                assert_eq!(tts.input.iterations, 3);
+                assert_eq!(tts.input.warmup_iterations, 1);
             }
             other => panic!("expected TTS scenario, got {other:?}"),
         }
