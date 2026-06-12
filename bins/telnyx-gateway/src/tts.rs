@@ -18,6 +18,8 @@ use motlie_model::{ArtifactPolicy, ModelError, StartOptions};
 use std::path::{Path, PathBuf};
 #[cfg(any(feature = "kokoro", feature = "piper"))]
 use tokio::sync::Mutex;
+#[cfg(any(feature = "kokoro", feature = "piper"))]
+use tokio::task;
 
 pub const KOKORO_SAMPLE_RATE_HZ: u32 = 24_000;
 pub const PIPER_SAMPLE_RATE_HZ: u32 = 22_050;
@@ -247,13 +249,16 @@ impl OutboundTtsFactory for KokoroTtsFactory {
 
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
         let handle = self.handle().await?;
-        let audio = handle
-            .synthesize_buffered(SynthesisRequest {
+        let runtime = tokio::runtime::Handle::current();
+        let audio = task::spawn_blocking(move || {
+            runtime.block_on(handle.synthesize_buffered(SynthesisRequest {
                 text,
                 params: Default::default(),
-            })
-            .await
-            .context("synthesize Kokoro-82M speech")?;
+            }))
+        })
+        .await
+        .context("join Kokoro-82M synthesis task")?
+        .context("synthesize Kokoro-82M speech")?;
         Ok(vec![TtsAudio::new(
             audio.into_samples(),
             KOKORO_SAMPLE_RATE_HZ,
@@ -307,26 +312,28 @@ impl OutboundTtsFactory for PiperTtsFactory {
 
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
         let handle = self.handle().await?;
-        let mut stream = handle
-            .synthesize(SynthesisRequest {
-                text,
-                params: Default::default(),
-            })
-            .await
-            .context("open Piper speech stream")?;
-        let mut chunks = Vec::new();
-        while let Some(chunk) = stream
-            .next_chunk()
-            .await
-            .context("read Piper speech chunk")?
-        {
-            chunks.push(TtsAudio::new(chunk.into_samples(), PIPER_SAMPLE_RATE_HZ)?);
-        }
-        stream
-            .finish()
-            .await
-            .context("finish Piper speech stream")?;
-        Ok(chunks)
+        let runtime = tokio::runtime::Handle::current();
+        task::spawn_blocking(move || -> anyhow::Result<Vec<TtsAudio>> {
+            let mut stream = runtime
+                .block_on(handle.synthesize(SynthesisRequest {
+                    text,
+                    params: Default::default(),
+                }))
+                .context("open Piper speech stream")?;
+            let mut chunks = Vec::new();
+            while let Some(chunk) = runtime
+                .block_on(stream.next_chunk())
+                .context("read Piper speech chunk")?
+            {
+                chunks.push(TtsAudio::new(chunk.into_samples(), PIPER_SAMPLE_RATE_HZ)?);
+            }
+            runtime
+                .block_on(stream.finish())
+                .context("finish Piper speech stream")?;
+            Ok(chunks)
+        })
+        .await
+        .context("join Piper synthesis task")?
     }
 
     fn label(&self) -> &'static str {

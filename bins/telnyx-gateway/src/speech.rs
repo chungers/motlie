@@ -1654,7 +1654,8 @@ mod tests {
             &tts,
             LiveTtsBackend::Kokoro82m,
             gateway_call_id.clone(),
-            "Hello world. Second sentence blocks here.".to_string(),
+            "Hello world. Second sentence blocks here. Third sentence confirms chunking."
+                .to_string(),
             "test say",
         )
         .await
@@ -1693,7 +1694,7 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
         }
-        assert_eq!(frame_count, 10);
+        assert_eq!(frame_count, 15);
         assert!(
             saw_mark,
             "speech job should enqueue a mark after all chunks"
@@ -1701,7 +1702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_prebuffer_waits_for_two_chunks_when_speech_is_chunked() {
+    async fn default_prebuffer_waits_for_second_chunk_when_speech_is_chunked() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = {
             let mut guard = state.write().await;
@@ -1744,7 +1745,8 @@ mod tests {
             &tts,
             LiveTtsBackend::Kokoro82m,
             gateway_call_id.clone(),
-            "Hello world. Second sentence blocks here.".to_string(),
+            "Hello world. Second sentence blocks here. Third sentence confirms chunking."
+                .to_string(),
             "test say",
         )
         .await
@@ -1757,7 +1759,7 @@ mod tests {
             timeout(Duration::from_millis(200), rx.recv())
                 .await
                 .is_err(),
-            "default prebuffer should not start playback after one chunk"
+            "default prebuffer should wait for the second prepared chunk"
         );
 
         kokoro.release_second_call();
@@ -1781,7 +1783,7 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
         }
-        assert_eq!(frame_count, 10);
+        assert_eq!(frame_count, 15);
     }
 
     #[tokio::test]

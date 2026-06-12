@@ -725,6 +725,34 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
+    pub fn emit_quality_caller_partial_sent(
+        &mut self,
+        gateway_call_id: &str,
+        session: &ActiveAsrQualitySession,
+        text: &str,
+        confidence: Option<f32>,
+        stability: Option<f32>,
+        speech_state: &'static str,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::caller_partial_sent(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                session.config_id.clone(),
+                session.redaction_mode,
+            ),
+            session,
+            text,
+            confidence,
+            stability,
+            speech_state,
+            session.include_transcript_text,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
     pub fn emit_quality_span_finished(&mut self, gateway_call_id: &str, span: QualitySpanEmission) {
         if !self.quality.event_sink.is_enabled() {
             return;

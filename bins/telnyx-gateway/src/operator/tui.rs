@@ -616,11 +616,12 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             conversation_tts_warm
         )),
         Line::from(format!(
-            "endpoint: trailing={}ms min_words={} min_chars={} merge={}ms max_words={} max={}ms",
+            "endpoint: trailing={}ms min_words={} min_chars={} merge={}ms settle={}ms max_words={} max={}ms",
             quality.endpoint.trailing_silence_ms,
             quality.endpoint.min_turn_words,
             quality.endpoint.min_turn_chars,
             quality.endpoint.merge_window_ms,
+            quality.endpoint.final_settle_ms,
             quality.endpoint.max_turn_words,
             quality.endpoint.max_turn_duration_ms
         )),

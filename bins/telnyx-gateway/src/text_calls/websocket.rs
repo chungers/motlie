@@ -320,6 +320,8 @@ impl SharedTextCallRegistry {
         gateway_call_id: &str,
         utterance_id: String,
         text: String,
+        confidence: Option<f32>,
+        stability: Option<f32>,
         speech_state: CallerSpeechState,
     ) -> anyhow::Result<bool> {
         let handle = {
@@ -343,10 +345,16 @@ impl SharedTextCallRegistry {
             utterance_id,
             sequence: handle.next_sequence(),
             text,
+            confidence: Self::normalized_score(confidence),
+            stability: Self::normalized_score(stability),
             speech_state,
             reply_allowed: false,
         })?;
         Ok(true)
+    }
+
+    fn normalized_score(score: Option<f32>) -> Option<f32> {
+        score.filter(|score| score.is_finite() && *score >= 0.0 && *score <= 1.0)
     }
 
     pub async fn send_caller_turn(
@@ -1518,6 +1526,8 @@ mod tests {
                 "call-default",
                 "utt-default".to_string(),
                 "hello wor".to_string(),
+                None,
+                None,
                 CallerSpeechState::Speaking,
             )
             .await
@@ -1538,6 +1548,8 @@ mod tests {
                 "call-partials",
                 "utt-partial".to_string(),
                 "hello wor".to_string(),
+                Some(0.84),
+                Some(0.61),
                 CallerSpeechState::Speaking,
             )
             .await
@@ -1548,10 +1560,15 @@ mod tests {
             Some(GatewayTextFrame::CallerPartial {
                 utterance_id,
                 text,
+                confidence: Some(confidence),
+                stability: Some(stability),
                 speech_state: CallerSpeechState::Speaking,
                 reply_allowed: false,
                 ..
-            }) if utterance_id == "utt-partial" && text == "hello wor"
+            }) if utterance_id == "utt-partial"
+                && text == "hello wor"
+                && (confidence - 0.84).abs() < f32::EPSILON
+                && (stability - 0.61).abs() < f32::EPSILON
         ));
     }
 

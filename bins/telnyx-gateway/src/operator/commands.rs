@@ -627,6 +627,10 @@ pub enum QualityEndpointCommand {
     MinTurnWords { n: usize },
     MinTurnChars { n: usize },
     MergeWindowMs { ms: u64 },
+    FinalSettleMs { ms: u64 },
+    ConversationIncompleteTailHoldMs { ms: u64 },
+    ConversationLowConfidenceThresholdPercent { percent: u64 },
+    ConversationPlaybackHoldPollMs { ms: u64 },
     MaxTurnWords { n: usize },
     MaxTurnDurationMs { ms: u64 },
 }
@@ -1936,14 +1940,27 @@ async fn conversation_command(
             let enabled = state.enabled();
             context.conversation.set_smoke_test_enabled(enabled);
             let label = if enabled { "on" } else { "off" };
+            if enabled {
+                set_barge_in_enabled(context, false, "conversation smoke-test").await?;
+            }
             context
                 .state
                 .write()
                 .await
                 .log(LogLevel::Info, format!("conversation smoke-test {label}"));
-            Ok(CommandOutput::line(format!(
-                "conversation smoke-test: {label}"
-            )))
+            if enabled {
+                Ok(CommandOutput {
+                    lines: vec![
+                        format!("conversation smoke-test: {label}"),
+                        "conversation barge-in: off".to_string(),
+                    ],
+                    effects: Vec::new(),
+                })
+            } else {
+                Ok(CommandOutput::line(format!(
+                    "conversation smoke-test: {label}"
+                )))
+            }
         }
         ConversationCommand::BargeIn { state } => {
             if let Some(enabled) = state.and_then(ConversationBargeInArg::enabled) {
@@ -2376,6 +2393,10 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             "endpoint.merge_window_ms={}",
             quality.config.endpoint.merge_window_ms
         ),
+        format!(
+            "endpoint.final_settle_ms={}",
+            quality.config.endpoint.final_settle_ms
+        ),
         format!("asr.finish_pad_ms={}", quality.config.asr.finish_pad_ms),
         format!(
             "speech.rms_threshold={}",
@@ -2433,11 +2454,15 @@ async fn quality_endpoint_command(
             let guard = context.state.read().await;
             let endpoint = &guard.quality.config.endpoint;
             Ok(CommandOutput::text(format!(
-                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
+                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nfinal_settle_ms={}\nconversation_incomplete_tail_hold_ms={}\nconversation_low_confidence_threshold_percent={}\nconversation_playback_hold_poll_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
                 endpoint.trailing_silence_ms,
                 endpoint.min_turn_words,
                 endpoint.min_turn_chars,
                 endpoint.merge_window_ms,
+                endpoint.final_settle_ms,
+                endpoint.conversation_incomplete_tail_hold_ms,
+                endpoint.conversation_low_confidence_threshold_percent,
+                endpoint.conversation_playback_hold_poll_ms,
                 endpoint.max_turn_words,
                 endpoint.max_turn_duration_ms
             )))
@@ -2459,6 +2484,31 @@ async fn quality_endpoint_command(
                 context,
                 |config| Ok(config.set_endpoint_merge_window_ms(ms)),
             )
+            .await
+        }
+        QualityEndpointCommand::FinalSettleMs { ms } => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_endpoint_final_settle_ms(ms)),
+            )
+            .await
+        }
+        QualityEndpointCommand::ConversationIncompleteTailHoldMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_conversation_incomplete_tail_hold_ms(ms))
+            })
+            .await
+        }
+        QualityEndpointCommand::ConversationLowConfidenceThresholdPercent { percent } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_conversation_low_confidence_threshold_percent(percent))
+            })
+            .await
+        }
+        QualityEndpointCommand::ConversationPlaybackHoldPollMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_conversation_playback_hold_poll_ms(ms))
+            })
             .await
         }
         QualityEndpointCommand::MaxTurnWords { n } => {
@@ -3214,10 +3264,14 @@ fn quality_help() -> String {
         "quality status",
         "quality profile fast|balanced|complete|noisy  default=balanced applies=next_asr_session",
         "quality endpoint status",
-        "quality endpoint trailing-silence-ms <ms>      range=100..5000 default=650ms applies=next_asr_session",
+        "quality endpoint trailing-silence-ms <ms>      range=100..5000 default=900ms applies=next_asr_session",
         "quality endpoint min-turn-words <n>            range=0..50 default=2 report_only",
         "quality endpoint min-turn-chars <n>            range=0..200 default=6 report_only",
-        "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms report_only",
+        "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms applies=new_turn",
+        "quality endpoint final-settle-ms <ms>          range=0..5000 default=800ms applies=next_asr_session",
+        "quality endpoint conversation-incomplete-tail-hold-ms <ms> range=0..10000 default=2500ms applies=new_turn",
+        "quality endpoint conversation-low-confidence-threshold-percent <n> range=0..100 default=45 applies=new_turn",
+        "quality endpoint conversation-playback-hold-poll-ms <ms> range=10..1000 default=100ms applies=new_turn",
         "quality endpoint max-turn-words <n>            range=1..500 default=80 report_only",
         "quality endpoint max-turn-duration-ms <ms>     range=1000..120000 default=12000ms report_only",
         "quality speech status",
@@ -3225,7 +3279,7 @@ fn quality_help() -> String {
         "quality speech peak-threshold <value>          range=0..32767 default=1100 applies=next_asr_session",
         "quality speech onset-min-silence-ms <ms>       range=0..2000 default=180ms applies=next_asr_session",
         "quality asr status",
-        "quality asr finish-pad-ms <ms>                 range=0..2000 default=160ms applies=next_asr_session",
+        "quality asr finish-pad-ms <ms>                 range=0..2000 default=320ms applies=next_asr_session",
         "quality asr repeated-token-run-threshold <n>   range=2..128 default=16 applies=next_asr_session",
         "quality asr repeated-q-run-threshold <n>       range=2..64 default=8 applies=next_asr_session",
         "quality text-call status",
@@ -3237,7 +3291,7 @@ fn quality_help() -> String {
         "quality tts status",
         "quality tts chunking on|off                    bool default=true applies=new_playback_request",
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
-        "quality tts first-chunk-max-chars <n>          range=0|40..500 default=0 applies=new_playback_request",
+        "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=2 applies=new_playback_request",
         "quality logging on <path>",
         "quality logging off",
@@ -3571,14 +3625,15 @@ fn conversation_help() -> String {
         "  conversation status",
         "",
         "Smoke-test two-way loop:",
-        "  conversation smoke-test on",
-        "  conversation barge-in off    # optional: prevent echo tests from cutting TTS",
+        "  conversation smoke-test on   # also turns barge-in off for deterministic echo",
+        "  conversation barge-in on     # optional: explicitly test interruption behavior",
         "  answer    # or: dial <callee-e164>",
         "  conversation status",
         "  speak cancel",
         "  conversation smoke-test off",
         "",
         "Controls:",
+        "  smoke-test enablement turns barge-in off; turn it back on only to test interruption.",
         "  barge-in off keeps active TTS from being cleared by partial/final transcripts.",
         "  disapprove cancels active conversation TTS and leaves transcription-only mode.",
         "  mode manual records assistant proposals; approve/say speaks the pending proposal",
@@ -3732,7 +3787,9 @@ fn socket_help() -> String {
         "",
         "Debug text stream mode:",
         "  stream attach <call-id>",
+        "  stream attach --partials <call-id>",
         "  {\"type\":\"debug.attach\",\"protocol\":\"motlie.telnyx.text.v1\",\"extension\":\"motlie.telnyx.text.debug.v1\",\"call_id\":\"<call-id>\"}",
+        "  --partials enables advisory caller.partial frames with optional confidence/stability.",
         "  Stream mode sends motlie.telnyx.text.v1 JSONL frames and accepts agent frames.",
         "  While stream mode owns a call, command-mode speak <text> is rejected to avoid competing audio.",
         "  Send {\"type\":\"debug.detach\",\"reason\":\"done\"} to return to command mode.",
@@ -3752,7 +3809,7 @@ fn socket_help() -> String {
         "Agent workflows:",
         "  inbound: calls -> answer [call-id] -> conversation status [call-id]",
         "  outbound: dial <callee-e164> -> conversation status",
-        "  smoke test: conversation smoke-test on -> conversation barge-in off -> answer or dial",
+        "  smoke test: conversation smoke-test on -> answer or dial (barge-in defaults off)",
         "  stop assistant audio: conversation disapprove [call-id]",
         "  inspect: status, calls, call show [call-id], transcript follow [call-id]",
         "  call show includes TTS buffer/latency/underrun and echo-suppression counters",
@@ -4677,10 +4734,13 @@ mod tests {
             .run_line("conversation smoke-test on")
             .await
             .expect("enable smoke test");
-        assert_eq!(enabled.lines, vec!["conversation smoke-test: on"]);
+        assert_eq!(
+            enabled.lines,
+            vec!["conversation smoke-test: on", "conversation barge-in: off"]
+        );
         assert!(engine.context().conversation.smoke_test_enabled());
-        assert!(engine.context().conversation.barge_in_enabled());
-        assert!(state.read().await.quality.config.barge_in.enabled);
+        assert!(!engine.context().conversation.barge_in_enabled());
+        assert!(!state.read().await.quality.config.barge_in.enabled);
 
         let disabled = engine
             .run_line("conversation smoke-test off")
@@ -5083,12 +5143,43 @@ mod tests {
         let report_output = engine
             .run_line("quality endpoint merge-window-ms 9999")
             .await
-            .expect("set report-only merge window");
+            .expect("set merge window");
         assert!(report_output.lines[0].contains("key=endpoint.merge_window_ms"));
-        assert!(report_output.lines[0].contains("applies=report_only"));
+        assert!(report_output.lines[0].contains("applies=new_turn"));
         assert_eq!(
             state.read().await.quality.config.endpoint.merge_window_ms,
             5_000
+        );
+
+        let final_settle_output = engine
+            .run_line("quality endpoint final-settle-ms 9999")
+            .await
+            .expect("set final settle");
+        assert!(final_settle_output.lines[0].contains("key=endpoint.final_settle_ms"));
+        assert!(final_settle_output.lines[0].contains("applies=next_asr_session"));
+        assert!(final_settle_output.lines[0].contains("clamped=true"));
+        assert_eq!(
+            state.read().await.quality.config.endpoint.final_settle_ms,
+            5_000
+        );
+
+        let conversation_hold_output = engine
+            .run_line("quality endpoint conversation-incomplete-tail-hold-ms 99999")
+            .await
+            .expect("set conversation incomplete tail hold");
+        assert!(conversation_hold_output.lines[0]
+            .contains("key=endpoint.conversation_incomplete_tail_hold_ms"));
+        assert!(conversation_hold_output.lines[0].contains("applies=new_turn"));
+        assert!(conversation_hold_output.lines[0].contains("clamped=true"));
+        assert_eq!(
+            state
+                .read()
+                .await
+                .quality
+                .config
+                .endpoint
+                .conversation_incomplete_tail_hold_ms,
+            10_000
         );
     }
 
@@ -5290,6 +5381,10 @@ mod tests {
             config.set_endpoint_min_turn_words(4);
             config.set_endpoint_min_turn_chars(12);
             config.set_endpoint_merge_window_ms(444);
+            config.set_endpoint_final_settle_ms(333);
+            config.set_endpoint_conversation_incomplete_tail_hold_ms(2_345);
+            config.set_endpoint_conversation_low_confidence_threshold_percent(39);
+            config.set_endpoint_conversation_playback_hold_poll_ms(77);
             config.set_endpoint_max_turn_words(123);
             config.set_endpoint_max_turn_duration_ms(7_654);
             config.set_asr_repeated_token_run_threshold(42);
