@@ -25,6 +25,14 @@ use crate::tts::SharedTtsRegistry;
 const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
 const SMOKE_TEST_MIN_FINAL_DEBOUNCE_MS: u64 = 900;
 const SMOKE_TEST_PLAYBACK_HOLD_POLL_MS: u64 = 100;
+const SMOKE_TEST_INCOMPLETE_TAIL_HOLD_MS: u64 = 2_500;
+const SMOKE_TEST_LOW_CONFIDENCE_THRESHOLD: f32 = 0.45;
+const SMOKE_TEST_INCOMPLETE_TAIL_WORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "did",
+    "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might", "must",
+    "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were", "where",
+    "will", "with", "would",
+];
 
 pub type SharedConversationHandler = Arc<dyn ConversationHandler>;
 
@@ -373,6 +381,33 @@ async fn schedule_smoke_test_final(
                 continue;
             }
 
+            let hold_reason = {
+                let pending = runtime.smoke_test_pending_finals.lock().await;
+                let Some(entry) = pending.get(&gateway_call_id) else {
+                    return;
+                };
+                if entry.generation != generation {
+                    return;
+                }
+                smoke_test_final_hold_reason(entry)
+            };
+            if let Some(reason) = hold_reason {
+                let Some(next_generation) =
+                    defer_ready_smoke_test_final(&runtime, &gateway_call_id, generation).await
+                else {
+                    return;
+                };
+                generation = next_generation;
+                delay = Duration::from_millis(SMOKE_TEST_PLAYBACK_HOLD_POLL_MS);
+                tracing::debug!(
+                    gateway_call_id,
+                    generation,
+                    reason,
+                    "conversation.smoke_test.debounce_held_for_incomplete_tail"
+                );
+                continue;
+            }
+
             let Some(pending) =
                 take_ready_smoke_test_final(&runtime, &gateway_call_id, generation).await
             else {
@@ -452,6 +487,62 @@ fn merge_smoke_test_finals(existing: &str, next: &str) -> String {
         (true, false) => next.to_string(),
         (false, false) => format!("{existing} {next}"),
     }
+}
+
+fn smoke_test_final_hold_reason(pending: &PendingSmokeTestFinal) -> Option<&'static str> {
+    if pending.final_transcript_at.elapsed()
+        >= Duration::from_millis(SMOKE_TEST_INCOMPLETE_TAIL_HOLD_MS)
+    {
+        return None;
+    }
+    smoke_test_incomplete_tail_reason(pending.event.text())
+        .or_else(|| smoke_test_low_confidence_hold_reason(&pending.event))
+}
+
+fn smoke_test_incomplete_tail_reason(text: &str) -> Option<&'static str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || ends_with_terminal_punctuation(trimmed) {
+        return None;
+    }
+    if trimmed.ends_with('\'') || trimmed.ends_with('-') {
+        return Some("dangling_tail");
+    }
+    let tail = trimmed
+        .split_whitespace()
+        .last()?
+        .trim_matches(|character: char| {
+            !character.is_alphanumeric() && character != '\'' && character != '-'
+        })
+        .to_ascii_lowercase();
+    if SMOKE_TEST_INCOMPLETE_TAIL_WORDS.contains(&tail.as_str()) {
+        Some("tail_word")
+    } else {
+        None
+    }
+}
+
+fn smoke_test_low_confidence_hold_reason(event: &TranscriptEvent) -> Option<&'static str> {
+    let text = event.text().trim();
+    if text.is_empty() || ends_with_terminal_punctuation(text) {
+        return None;
+    }
+    let confidence = latest_transcript_confidence(event)?;
+    (confidence < SMOKE_TEST_LOW_CONFIDENCE_THRESHOLD).then_some("low_confidence_tail")
+}
+
+fn latest_transcript_confidence(event: &TranscriptEvent) -> Option<f32> {
+    let update = match event {
+        TranscriptEvent::Partial { update, .. } | TranscriptEvent::Final { update, .. } => update,
+    };
+    update.segments.iter().rev().find_map(|segment| {
+        segment
+            .confidence
+            .filter(|confidence| confidence.is_finite() && *confidence >= 0.0 && *confidence <= 1.0)
+    })
+}
+
+fn ends_with_terminal_punctuation(text: &str) -> bool {
+    text.ends_with('.') || text.ends_with('?') || text.ends_with('!')
 }
 
 async fn emit_smoke_final_debounce_span(
@@ -1217,6 +1308,22 @@ mod tests {
         call_id
     }
 
+    fn transcription_update_with_confidence(
+        text: &str,
+        confidence: Option<f32>,
+        final_segment: bool,
+    ) -> motlie_model::TranscriptionUpdate {
+        motlie_model::TranscriptionUpdate {
+            segments: vec![motlie_model::TranscriptSegment {
+                start_ms: 0,
+                end_ms: 100,
+                text: text.to_string(),
+                confidence,
+                final_segment,
+            }],
+        }
+    }
+
     async fn wait_for_smoke_test_final() {
         sleep(
             smoke_test_final_debounce(VoiceQualityConfig::default().endpoint.merge_window_ms)
@@ -1767,6 +1874,140 @@ mod tests {
             Some(
                 "I heard: Yeah, this is not the last fragment or frame didn't come through still."
             )
+        );
+    }
+
+    #[test]
+    fn smoke_test_incomplete_tail_detector_is_conservative() {
+        assert_eq!(
+            smoke_test_incomplete_tail_reason("Endpointing is still a problem, isn'"),
+            Some("dangling_tail")
+        );
+        assert_eq!(
+            smoke_test_incomplete_tail_reason("the endpoints are"),
+            Some("tail_word")
+        );
+        assert_eq!(smoke_test_incomplete_tail_reason("Can you hear me"), None);
+        assert_eq!(smoke_test_incomplete_tail_reason("Can you hear me?"), None);
+    }
+
+    #[tokio::test]
+    async fn smoke_test_holds_incomplete_tail_until_continuation_final() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        let runtime = test_runtime();
+        let media_registry = SharedMediaRegistry::default();
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "Endpointing is still a problem, isn'".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+        )
+        .await
+        .expect("incomplete final fragment should be accepted");
+        wait_for_smoke_test_final().await;
+
+        {
+            let guard = state.read().await;
+            let call = guard.calls.get(&gateway_call_id).expect("call exists");
+            assert_eq!(call.conversation.status, ConversationStatus::Idle);
+            assert!(call.conversation.last_user_text.is_none());
+            assert!(call.conversation.last_assistant_text.is_none());
+        }
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "it?".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+        )
+        .await
+        .expect("continuation final should be accepted");
+        wait_for_smoke_test_final().await;
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Proposed);
+        assert_eq!(
+            call.conversation.last_user_text.as_deref(),
+            Some("Endpointing is still a problem, isn' it?")
+        );
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("I heard: Endpointing is still a problem, isn' it?")
+        );
+    }
+
+    #[tokio::test]
+    async fn smoke_test_low_confidence_nonterminal_final_waits_for_continuation() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        let runtime = test_runtime();
+        let media_registry = SharedMediaRegistry::default();
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "The endpoint sounded glitchy".to_string(),
+                update: transcription_update_with_confidence(
+                    "The endpoint sounded glitchy",
+                    Some(0.2),
+                    true,
+                ),
+            },
+            None,
+        )
+        .await
+        .expect("low-confidence final should be accepted");
+        wait_for_smoke_test_final().await;
+
+        {
+            let guard = state.read().await;
+            let call = guard.calls.get(&gateway_call_id).expect("call exists");
+            assert_eq!(call.conversation.status, ConversationStatus::Idle);
+            assert!(call.conversation.last_user_text.is_none());
+            assert!(call.conversation.last_assistant_text.is_none());
+        }
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "today.".to_string(),
+                update: transcription_update_with_confidence("today.", Some(0.9), true),
+            },
+            None,
+        )
+        .await
+        .expect("continuation final should be accepted");
+        wait_for_smoke_test_final().await;
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Proposed);
+        assert_eq!(
+            call.conversation.last_user_text.as_deref(),
+            Some("The endpoint sounded glitchy today.")
+        );
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("I heard: The endpoint sounded glitchy today.")
         );
     }
 

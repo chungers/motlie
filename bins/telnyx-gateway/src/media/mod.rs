@@ -2537,7 +2537,7 @@ async fn reconcile_asr_final_events(
     let (mut latest_partial, include_transcript_text) = {
         let guard = state.read().await;
         (
-            None::<String>,
+            None::<(String, motlie_model::TranscriptionUpdate)>,
             guard.quality.config.logging.include_transcript_text,
         )
     };
@@ -2551,14 +2551,17 @@ async fn reconcile_asr_final_events(
         let AsrTranscriptEvent { event, decision } = event;
         match event {
             TranscriptEvent::Partial { text, update } => {
-                latest_partial = Some(text.clone());
+                latest_partial = Some((text.clone(), update.clone()));
                 reconciled.push(AsrTranscriptEvent {
                     event: TranscriptEvent::Partial { text, update },
                     decision,
                 });
             }
             TranscriptEvent::Final { text, update } => {
-                let reconciliation = reconcile_final_text(&text, latest_partial.as_deref());
+                let latest_partial_text = latest_partial
+                    .as_ref()
+                    .map(|(partial_text, _)| partial_text.as_str());
+                let reconciliation = reconcile_final_text(&text, latest_partial_text);
                 emit_asr_final_reconciliation(
                     state,
                     gateway_call_id,
@@ -2568,11 +2571,20 @@ async fn reconcile_asr_final_events(
                     &reconciliation,
                 )
                 .await;
+                let selected_update = match reconciliation.selected_source {
+                    FinalTextSource::LatestPartialExtension => latest_partial
+                        .as_ref()
+                        .map(|(_, partial_update)| {
+                            final_update_from_selected_partial(partial_update.clone())
+                        })
+                        .unwrap_or_else(|| update.clone()),
+                    FinalTextSource::AsrFinal => update,
+                };
                 latest_partial = None;
                 reconciled.push(AsrTranscriptEvent {
                     event: TranscriptEvent::Final {
                         text: reconciliation.selected_text,
-                        update,
+                        update: selected_update,
                     },
                     decision,
                 });
@@ -2580,6 +2592,15 @@ async fn reconcile_asr_final_events(
         }
     }
     reconciled
+}
+
+fn final_update_from_selected_partial(
+    mut update: motlie_model::TranscriptionUpdate,
+) -> motlie_model::TranscriptionUpdate {
+    for segment in &mut update.segments {
+        segment.final_segment = true;
+    }
+    update
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4183,6 +4204,47 @@ mod tests {
             FinalTextSource::LatestPartialExtension
         );
         assert_eq!(reconciliation.selected_text, "hello world");
+    }
+
+    #[tokio::test]
+    async fn final_reconciliation_keeps_selected_partial_update_metadata() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let update_with_confidence = |text: &str,
+                                      confidence: Option<f32>,
+                                      final_segment: bool|
+         -> motlie_model::TranscriptionUpdate {
+            motlie_model::TranscriptionUpdate {
+                segments: vec![motlie_model::TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 100,
+                    text: text.to_string(),
+                    confidence,
+                    final_segment,
+                }],
+            }
+        };
+        let events = vec![
+            AsrTranscriptEvent::emit(TranscriptEvent::Partial {
+                text: "hello world".to_string(),
+                update: update_with_confidence("hello world", Some(0.84), false),
+            }),
+            AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: "Hello wor.".to_string(),
+                update: update_with_confidence("Hello wor.", Some(0.12), true),
+            }),
+        ];
+
+        let reconciled = reconcile_asr_final_events(&state, "call-1", None, None, events).await;
+
+        match &reconciled[1].event {
+            TranscriptEvent::Final { text, update } => {
+                assert_eq!(text, "hello world");
+                let segment = update.segments.first().expect("segment exists");
+                assert_eq!(segment.confidence, Some(0.84));
+                assert!(segment.final_segment);
+            }
+            TranscriptEvent::Partial { .. } => panic!("expected final event"),
+        }
     }
 
     #[tokio::test]

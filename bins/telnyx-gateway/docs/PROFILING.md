@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-11 PDT | @codex-366-impl | Added PR #484 confidence-carrier integration notes: backend-native tail confidence can explain smoke-test endpoint holds, but it is not a calibrated stability signal for agent protocol timing. |
 | 2026-06-11 PDT | @codex-366-impl | Added live smoke-call recovery details: smoke-test final coalescing now has a 900 ms settle floor and active-playback hold, and outbound pacing rollups separate true underrun, append starvation, post-mark wait, and first-frame idle gaps. |
 | 2026-06-11 PDT | @codex-366-impl | Captured live-call audio stabilization for PR #464: live TTS synthesis is isolated onto blocking threads, chunked TTS uses the two-chunk prebuffer default for smoother playback, and smoke-test enablement turns barge-in off for deterministic echo validation. |
 | 2026-06-11 | @codex-366-impl | Captured live-call quality fixes: deterministic assistant-echo transcript suppression before `caller.turn`, text-call ownership gating for manual `speak`, and call/TUI diagnostics for first-audio, buffer, underrun, and echo-suppression counters. |
@@ -653,7 +654,8 @@ Per-turn deterministic metrics:
 | `agent_turn_to_playback_started_ms` | TTS queue/start time. | Impacts perceived speed. |
 | `finalize_to_first_audio_ms` | Final transcript to first outbound frame. | Confirms whether delay is handler/debounce/TTS/media rather than endpointing. |
 | `playback_finished.status` | Terminal outcome. | High canceled/superseded rates can indicate churn. |
-| `partial_count_before_final` | ASR stability. | High counts with poor final quality can indicate decoder instability. |
+| `partial_count_before_final` | ASR stability proxy. | High counts with poor final quality can indicate decoder instability. |
+| `tail_confidence` | Backend-native final/partial tail confidence when present. | Low values can justify a bounded smoke-test settle hold, but values are not calibrated across backends and are not stability. |
 | `suppressed_count` | Suppressed hallucination-like output. | Backend/model quality signal. |
 | `transport_confounders` | RTP loss/jitter/underrun rollups. | Exclude or stratify before tuning endpointing/ASR. |
 
