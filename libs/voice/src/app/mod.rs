@@ -16,7 +16,7 @@ pub struct CallContext {
     pub custom_state: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TranscriptEvent {
     Partial {
         text: String,

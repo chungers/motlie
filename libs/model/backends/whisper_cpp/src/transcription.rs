@@ -376,11 +376,13 @@ fn decode_samples(
             .to_owned();
         let t0 = segment.start_timestamp();
         let t1 = segment.end_timestamp();
+        let confidence = whisper_segment_confidence(&segment);
 
         segments.push(TranscriptSegment {
             start_ms: (t0 * 10) as u64,
             end_ms: (t1 * 10) as u64,
             text,
+            confidence,
             final_segment: true,
         });
     }
@@ -392,6 +394,16 @@ fn decode_samples(
     }
 
     Ok(TranscriptionUpdate { segments })
+}
+
+fn whisper_segment_confidence(segment: &whisper_rs::WhisperSegment<'_>) -> Option<f32> {
+    let last_token = segment.n_tokens().checked_sub(1)?;
+    let token = segment.get_token(last_token)?;
+    native_whisper_token_confidence(token.token_probability())
+}
+
+fn native_whisper_token_confidence(probability: f32) -> Option<f32> {
+    (probability.is_finite() && (0.0..=1.0).contains(&probability)).then_some(probability)
 }
 
 impl BatchTranscriber for WhisperCppHandle {
@@ -448,5 +460,19 @@ mod tests {
             .capabilities()
             .supports(CapabilityKind::Transcription));
         assert_eq!(bundle.metadata().quantization, QuantizationSupport::none());
+    }
+
+    #[test]
+    fn native_whisper_token_confidence_accepts_probability_range() {
+        assert_eq!(native_whisper_token_confidence(0.0), Some(0.0));
+        assert_eq!(native_whisper_token_confidence(0.75), Some(0.75));
+        assert_eq!(native_whisper_token_confidence(1.0), Some(1.0));
+    }
+
+    #[test]
+    fn native_whisper_token_confidence_rejects_non_probability_values() {
+        assert_eq!(native_whisper_token_confidence(-0.1), None);
+        assert_eq!(native_whisper_token_confidence(1.1), None);
+        assert_eq!(native_whisper_token_confidence(f32::NAN), None);
     }
 }

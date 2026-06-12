@@ -16,6 +16,7 @@ members = [
     "libs/model/backends/qwen3_tts_cpp",
     "libs/model/backends/sherpa_onnx",
     "libs/model/vendor/sherpa-onnx-sys",
+    "libs/model/vendor/sherpa-onnx",
     "libs/model/backends/whisper_cpp",
     "libs/models",
     "libs/tmux",
@@ -227,3 +228,4 @@ tempfile = "3.25.0"
 [patch.crates-io]
 ort-sys = { path = "third_party/ort-sys" }
 sherpa-onnx-sys = { path = "libs/model/vendor/sherpa-onnx-sys" }
+sherpa-onnx = { path = "libs/model/vendor/sherpa-onnx" }
