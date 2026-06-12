@@ -58,6 +58,54 @@ token value.
 3. **Close the tracking issue (#399-class) only after the full merge into main**, with the cycle closeout.
 4. **The `evals/<cycle>` branch is LEFT in place as the historical snapshot** — do not delete it.
 5. **Naming:** run-data dirs are chrono/ID-named by design (immutable records; the name is the identity: ts-pid-SHA-host-arch-accel). Files that represent CURRENT state in main (the coverage report, RUNBOOK) use STABLE names with dates inside the document; history is git + the run dirs.
+6. **ASR/TTS latency runs use the Cold/Warm Two-Phase Run protocol below.** Both phases are required for coverage whenever audio latency is reported.
+
+## Cold/Warm Two-Phase Run
+
+ASR/TTS latency coverage is a two-phase protocol at a single git pin. The CLI
+override takes precedence over per-scenario `warmup_iterations`; when no CLI
+override is present, each scenario's default applies. The override flags apply
+only to ASR/TTS cells; direct `evals run` invocations reject them for non-audio
+scenarios.
+
+1. Check out the exact `evals/<cycle>` SHA that will identify both datasets.
+2. Run the matrix COLD with `--cold`, which sets audio `warmup_iterations = 0`
+   and `iterations = 1` for a single first-call measurement:
+
+```sh
+cargo run -p evals -- matrix \
+  --snapshot evals/snapshots/curated-v2-smoke.toml \
+  --profile <host-profile> \
+  --results-root evals/results/cold \
+  --cold
+```
+
+3. Stop the harness process after the cold run finishes. Do not continue into
+   the warm phase from the same long-lived process.
+4. Start a fresh shell/process at the same git pin.
+5. Run the matrix WARM using the scenario defaults, or an explicit warm override
+   when the cycle calls for a specific value:
+
+```sh
+cargo run -p evals -- matrix \
+  --snapshot evals/snapshots/curated-v2-smoke.toml \
+  --profile <host-profile> \
+  --results-root evals/results/warm
+```
+
+6. Commit both cold and warm result directories from the same pin. Label the run
+   dirs and results PR/summary text as cold vs warm.
+
+Why both: the stop/start between phases guarantees there is no harness-process
+or backend cache carryover from cold into warm. Matrix children are per-cell
+processes, so each cold audio cell measures a process-cold first call that pays
+ORT session/graph initialization, allocation, and first-kernel costs. It is not
+disk-cold: model weights are usually already in the OS page cache after
+prefetch/build, so cold I/O is outside this protocol. Warm reports steady-state
+latency after the configured discarded warmup passes. Cold is one first-call draw
+per matrix run; if cold variance is needed, repeat the whole cold phase and keep
+those cold runs separate rather than averaging them into warm statistics. Both
+datasets are retained rather than replacing one with the other.
 
 ## CYCLE COMPLETE (2026-06-11 ~02:5x PDT) — final summary
 - **Final coverage:** `evals/results/final-coverage-2026-06-11.md` — 143 records over 8 final-pin + supplement runs: **95 passed / 43 blocked / 4 failed / 1 skipped**. Every blocked/failed row carries a structured reason + committed failure doc; the dominant blocked class is the documented `apple-metal` mistralrs platform gap (honest CPU-fallback) and the dgx `-lcudnn` host issue.

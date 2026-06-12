@@ -33,6 +33,20 @@ impl Scenario {
         self.kind.capability()
     }
 
+    pub fn apply_audio_iteration_overrides(&mut self, overrides: AudioIterationOverrides) -> bool {
+        match &mut self.kind {
+            ScenarioKind::Asr(scenario) => {
+                scenario.input.apply_iteration_overrides(overrides);
+                true
+            }
+            ScenarioKind::Tts(scenario) => {
+                scenario.input.apply_iteration_overrides(overrides);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn embeddings(&self) -> Option<&EmbeddingsScenario> {
         match &self.kind {
             ScenarioKind::Embeddings(scenario) => Some(scenario),
@@ -79,6 +93,25 @@ impl Scenario {
         self.profiles
             .get(profile_name)
             .and_then(|profile| profile.gates.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AudioIterationOverrides {
+    pub iterations: Option<u64>,
+    pub warmup_iterations: Option<u64>,
+}
+
+impl AudioIterationOverrides {
+    pub fn cold() -> Self {
+        Self {
+            iterations: Some(1),
+            warmup_iterations: Some(0),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.iterations.is_none() && self.warmup_iterations.is_none()
     }
 }
 
@@ -268,6 +301,17 @@ pub struct AsrInput {
     pub warmup_iterations: u64,
 }
 
+impl AsrInput {
+    fn apply_iteration_overrides(&mut self, overrides: AudioIterationOverrides) {
+        if let Some(iterations) = overrides.iterations {
+            self.iterations = iterations;
+        }
+        if let Some(warmup_iterations) = overrides.warmup_iterations {
+            self.warmup_iterations = warmup_iterations;
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AsrAssertions {
     pub min_transcript_chars: Option<usize>,
@@ -290,6 +334,17 @@ pub struct TtsInput {
     pub iterations: u64,
     #[serde(default = "default_audio_warmup_iterations")]
     pub warmup_iterations: u64,
+}
+
+impl TtsInput {
+    fn apply_iteration_overrides(&mut self, overrides: AudioIterationOverrides) {
+        if let Some(iterations) = overrides.iterations {
+            self.iterations = iterations;
+        }
+        if let Some(warmup_iterations) = overrides.warmup_iterations {
+            self.warmup_iterations = warmup_iterations;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -626,6 +681,67 @@ capture_request_latency = true
                 assert_eq!(tts.input.warmup_iterations, 1);
             }
             other => panic!("expected TTS scenario, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audio_iteration_overrides_apply_only_to_audio_scenarios() {
+        let raw_asr = r#"
+schema_version = 1
+id = "asr_override"
+capability = "asr"
+summary = "ASR override coverage."
+
+[bundle_filter]
+capability = "asr"
+
+[input]
+audio = "evals/fixtures/audio/hello.wav"
+iterations = 5
+warmup_iterations = 1
+
+[assertions]
+min_transcript_chars = 1
+
+[metrics]
+capture_request_latency = true
+"#;
+        let raw_chat = r#"
+schema_version = 1
+id = "chat_override"
+capability = "chat"
+summary = "Chat override coverage."
+
+[bundle_filter]
+capability = "chat"
+
+[input]
+prompt = "Say hello."
+
+[assertions]
+min_response_chars = 1
+
+[metrics]
+capture_request_latency = true
+"#;
+        let mut asr = toml::from_str::<Scenario>(raw_asr).unwrap();
+        let mut chat = toml::from_str::<Scenario>(raw_chat).unwrap();
+
+        assert!(asr.apply_audio_iteration_overrides(AudioIterationOverrides::cold()));
+        assert!(!chat.apply_audio_iteration_overrides(AudioIterationOverrides::cold()));
+
+        match asr.kind {
+            ScenarioKind::Asr(asr) => {
+                assert_eq!(asr.input.iterations, 1);
+                assert_eq!(asr.input.warmup_iterations, 0);
+            }
+            other => panic!("expected ASR scenario, got {other:?}"),
+        }
+        match chat.kind {
+            ScenarioKind::Chat(chat) => {
+                assert_eq!(chat.input.prompt, "Say hello.");
+            }
+            other => panic!("expected chat scenario, got {other:?}"),
         }
     }
 
