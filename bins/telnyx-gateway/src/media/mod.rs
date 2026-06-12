@@ -3612,9 +3612,12 @@ mod tests {
         assert_eq!(call.media.sample_rate_hz, Some(16_000));
         assert_eq!(call.transcripts.len(), 2 + finish_pad_silence_frames());
         assert_eq!(call.transcripts[0].text, "received 16000 samples");
+        let expected_final_samples =
+            16_000 + (16_000 * VoiceQualityConfig::default().asr.finish_pad_ms / 1_000);
+        let expected_final_text = format!("received {expected_final_samples} samples");
         assert_eq!(
             call.transcripts.last().map(|event| event.text.as_str()),
-            Some("received 18560 samples")
+            Some(expected_final_text.as_str())
         );
     }
 

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-11 PDT | @codex-366-impl | Retuned generic balanced endpointing defaults after live-call last-word truncation: endpoint trailing silence is now 900 ms and ASR finish pad is now 320 ms; both remain live-adjustable for the next ASR session. |
 | 2026-06-11 PDT | @codex-366-impl | Pulled in PR #484's ASR confidence carrier and used backend-native low-confidence non-terminal tails as a bounded smoke-test final hold signal; calibrated stability/protocol exposure remains follow-up work. |
 | 2026-06-11 PDT | @codex-366-impl | Added follow-up PR #464 live smoke-call fixes: smoke-test finals now settle for at least 900 ms, keep merging behind active playback, and outbound pacing metrics distinguish true underrun from append starvation, post-mark wait, and first-frame idle gaps. |
 | 2026-06-11 PDT | @codex-366-impl | Added PR #464 live-call audio stabilization: live TTS synthesis runs on blocking threads, default chunked playback starts after one prepared text chunk, and smoke-test enablement disables barge-in so repeat validation is not polluted by interruption cuts. |

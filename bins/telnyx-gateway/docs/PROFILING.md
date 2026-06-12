@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-11 PDT | @codex-366-impl | Retuned generic balanced endpointing defaults after live-call last-word truncation: endpoint trailing silence is now 900 ms and ASR finish pad is now 320 ms; both remain live-adjustable for the next ASR session. |
 | 2026-06-11 PDT | @codex-366-impl | Added PR #484 confidence-carrier integration notes: backend-native tail confidence can explain smoke-test endpoint holds, but it is not a calibrated stability signal for agent protocol timing. |
 | 2026-06-11 PDT | @codex-366-impl | Added live smoke-call recovery details: smoke-test final coalescing now has a 900 ms settle floor and active-playback hold, and outbound pacing rollups separate true underrun, append starvation, post-mark wait, and first-frame idle gaps. |
 | 2026-06-11 PDT | @codex-366-impl | Captured live-call audio stabilization for PR #464: live TTS synthesis is isolated onto blocking threads, chunked TTS honors the one-chunk prebuffer default for first-audio latency, and smoke-test enablement turns barge-in off for deterministic echo validation. |
@@ -190,7 +191,7 @@ Spans must not inline `config { ... }`. Instead, the gateway emits one `call.con
       "onset_min_silence_ms": 180
     },
     "endpoint": {
-      "trailing_silence_ms": 650,
+      "trailing_silence_ms": 900,
       "min_turn_words": 2,
       "min_turn_chars": 6,
       "merge_window_ms": 350,
@@ -204,7 +205,7 @@ Spans must not inline `config { ... }`. Instead, the gateway emits one `call.con
       "prebuffer_chunks": 1
     },
     "asr": {
-      "finish_pad_ms": 160,
+      "finish_pad_ms": 320,
       "repeated_token_run_threshold": 16,
       "repeated_q_run_threshold": 8
     },
@@ -866,7 +867,7 @@ Prompt requirements:
 |---|---|---:|---:|---|
 | Speech detection | `SPEECH_RMS_THRESHOLD` | hard-coded | `220.0` | false starts, missed speech |
 | Speech detection | `SPEECH_PEAK_THRESHOLD` | hard-coded | `1100` | noise vs speech distinction |
-| Endpointing | `ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS` | hard-coded live, replay default | `650 ms` | premature vs late endpointing |
+| Endpointing | `ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS` | REPL/socket/TUI implemented | `900 ms` | premature vs late endpointing |
 | Barge-in onset | `ASR_SPEECH_ONSET_MIN_SILENCE_MS` | hard-coded | `180 ms` | barge-in sensitivity |
 | Replay ASR | `--chunk-ms` | CLI implemented | `20` | streaming stability |
 | Replay ASR | `--trailing-silence-pad-ms` | CLI implemented | `800` | finalization behavior |
@@ -885,7 +886,7 @@ Prompt requirements:
 | Agent bridge | input backoff initial/max | CLI implemented | `250 ms` / `5000 ms` | queued transcription delay |
 | Agent bridge | trailing Enter delay | CLI implemented | `750 ms` | prompt submission reliability |
 | Agent bridge | trailing Enter enabled | CLI implemented | default on | prompt submission reliability |
-| ASR finish pad | `quality asr finish-pad-ms <ms>` | REPL/socket/TUI implemented | `160 ms` | ASR final flush without doubling endpoint tail |
+| ASR finish pad | `quality asr finish-pad-ms <ms>` | REPL/socket/TUI implemented | `320 ms` | ASR final flush without doubling endpoint tail |
 | ASR suppression | `quality asr repeated-token-run-threshold <n>`, `quality asr repeated-q-run-threshold <n>` | REPL/socket/TUI implemented | run `16`, q-run `8` | hallucination suppression |
 | TTS chunking | `quality tts chunking on|off` | REPL/socket/TUI implemented | default on | first-audio latency vs smoothness |
 | TTS first chunk ramp | `quality tts first-chunk-max-chars <n>` | REPL/socket/TUI implemented | `0` disabled | first-audio latency vs sentence-complete audio |
@@ -900,13 +901,13 @@ Prompt requirements:
 | `speech.rms_threshold` | `RmsThreshold(f32)` | `0.0..20000.0` | `220.0` | reject NaN, clamp to range with warning | next ASR session | Live speech gate. |
 | `speech.peak_threshold` | `PeakThreshold(i32)` | `0..32767` | `1100` | clamp to range | next ASR session | Live speech gate. |
 | `speech.onset_min_silence_ms` | `DurationMs` | `0..2000` | `180` | clamp to range | next ASR session | Barge-in onset sensitivity. |
-| `endpoint.trailing_silence_ms` | `DurationMs` | `100..5000` | `650` | clamp to range | next ASR session | Live endpointing. |
+| `endpoint.trailing_silence_ms` | `DurationMs` | `100..5000` | `900` | clamp to range | next ASR session | Live endpointing. |
 | `endpoint.min_turn_words` | `ReportOnlyCount` | `0..50` | `2` | clamp to range | report only | Short-turn label threshold only. |
 | `endpoint.min_turn_chars` | `ReportOnlyCount` | `0..200` | `6` | clamp to range | report only | Tiny-turn label threshold only. |
 | `endpoint.merge_window_ms` | `ReportOnlyDurationMs` | `0..5000` | `350` | clamp to range | report only; smoke-test handler reads the ASR-session snapshot | Adjacent-turn recommendation and deterministic smoke-test final-fragment debounce only. |
 | `endpoint.max_turn_words` | `ReportOnlyCount` | `1..500` | `80` | clamp to range | report only | Overmerged-turn label threshold only. |
 | `endpoint.max_turn_duration_ms` | `ReportOnlyDurationMs` | `1000..120000` | `12000` | clamp to range | report only | Long-turn label threshold only. |
-| `asr.finish_pad_ms` | `DurationMs` | `0..2000` | `160` | clamp to range | next ASR session | Short final ASR flush pad after endpoint decision; separate from endpoint tail. |
+| `asr.finish_pad_ms` | `DurationMs` | `0..2000` | `320` | clamp to range | next ASR session | Short final ASR flush pad after endpoint decision; separate from endpoint tail. |
 | `asr.repeated_token_run_threshold` | `Count` | `2..128` | `16` | clamp to range | next ASR session | Suppression policy. |
 | `asr.repeated_q_run_threshold` | `Count` | `2..64` | `8` | clamp to range | next ASR session | Suppression policy. |
 | `text_call.max_active_turns` | `Count` | `1..1024` | `32` | reject zero, clamp high | new text-call session or new turn | Backpressure cap. |
@@ -965,7 +966,7 @@ peak_threshold = 1100
 onset_min_silence_ms = 180
 
 [voice_quality.endpoint]
-trailing_silence_ms = 650
+trailing_silence_ms = 900
 min_turn_words = 2
 min_turn_chars = 6
 merge_window_ms = 350
@@ -973,7 +974,7 @@ max_turn_words = 80
 max_turn_duration_ms = 12000
 
 [voice_quality.asr]
-finish_pad_ms = 160
+finish_pad_ms = 320
 repeated_token_run_threshold = 16
 repeated_q_run_threshold = 8
 
@@ -1056,13 +1057,13 @@ quality profile balanced
 quality speech rms-threshold 220
 quality speech peak-threshold 1100
 quality speech onset-min-silence-ms 180
-quality endpoint trailing-silence-ms 650
+quality endpoint trailing-silence-ms 900
 quality endpoint min-turn-words 2
 quality endpoint min-turn-chars 6
 quality endpoint merge-window-ms 350
 quality endpoint max-turn-words 80
 quality endpoint max-turn-duration-ms 12000
-quality asr finish-pad-ms 160
+quality asr finish-pad-ms 320
 quality asr repeated-token-run-threshold 16
 quality asr repeated-q-run-threshold 8
 quality tts first-chunk-max-chars 0
@@ -1242,7 +1243,7 @@ Implementation requirements:
 This supports call-to-call tuning loops such as:
 
 ```text
-quality endpoint trailing-silence-ms 650
+quality endpoint trailing-silence-ms 900
 quality speech rms-threshold 220
 quality barge-in clear-timeout-ms 750
 quality tts chunking off
