@@ -17,7 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-12 PDT | @codex-366-impl | Added #481 protocol-scoring notes: `transcript.partial` logs can carry backend `transcript_confidence` and gateway `transcript_stability`, and opt-in text-call `caller.partial` forwards those as advisory `confidence`/`stability` fields. |
+| 2026-06-12 PDT | @codex-366-impl | Added #481/David stability ruling notes: `caller.partial.stability` is gateway-estimated stream convergence/churn only, never confidence/truth/probability/response input, and successful advisory partials emit `text_call.caller_partial.sent` for live-test analysis. |
 | 2026-06-11 PDT | @codex-366-impl | Generalized conversation final debounce from smoke-harness wording: coalescing handlers use the 350 ms `endpoint.merge_window_ms`, M4 `caller.turn` stays unmerged, and `tts.first_chunk_max_chars` defaults to 40 for lower first-audio latency. |
 | 2026-06-11 PDT | @codex-366-impl | Calibrated generic `endpoint.final_settle_ms` to an 800 ms default for the media-path endpointing knobs: incomplete final fragments can be held/merged before live `caller.turn` or conversation dispatch, while `endpoint.merge_window_ms` drives handler-local committed-turn coalescing only. |
 | 2026-06-11 PDT | @codex-366-impl | Retuned generic balanced endpointing defaults after live-call last-word truncation: endpoint trailing silence is now 900 ms and ASR finish pad is now 320 ms; both remain live-adjustable for the next ASR session. |
@@ -104,7 +104,7 @@ The gateway already emits several useful signals, but M6 requires a coherent lif
 | `media.speech.detected` | Emitted when speech energy first appears after quiet. | Start-of-speech and speech threshold tuning. | Needs an `asr_session_id`/`utterance_id` before `turn_id` exists. |
 | `media.frame.local_endpoint` | Debug-level low-energy tail logging after speech. | Endpoint tail diagnosis. | Needs span boundaries and `config_id` correlation. |
 | `asr.local_endpoint.finalizing` | Local endpoint gate decides to finish the ASR session. | Endpoint decision timing. | Needs link to final transcript and caller turn. |
-| `transcript.partial` | ASR partial transcript. | Partial quality and barge-in analysis. | Opt-in text-call partials forward optional `confidence` and `stability`; logs include numeric scores without requiring transcript text. |
+| `transcript.partial` | ASR partial transcript. | Partial quality and barge-in analysis. | Opt-in text-call partials forward optional `confidence` and `stability`; structured partial events include numeric scores without requiring transcript text. |
 | `transcript.final` | Final ASR transcript. | Best current proxy for caller-turn text. | Does not include the future `turn_id`; needs `asr_session_id` mapping. |
 | `transcript.suppressed_repeated_token` | ASR adapter suppression for repeated-token hallucination. | ASR stability signal. | Suppression thresholds should be config-backed and logged by `config_id`. |
 | `transcript.suppressed_assistant_echo` | Deterministic normalized token/substring match against active or just-finished assistant TTS. | Prevents acoustic assistant echo from becoming transcript history, `caller.turn`, or conversation input without LLM/NLP matching. | Needs live-call false-positive labeling in M6 reports. |
@@ -355,6 +355,22 @@ Early events often happen before a `turn_id` exists. M6 therefore requires a pre
   "utterance_id": "utt_...",
   "gateway_call_id": "gwc_...",
   "config_id": "cfg_..."
+}
+```
+
+When an opted-in advisory partial is successfully forwarded, emit the structured partial record. This is the live-test analysis hook for comparing `stability` against later partial survival and final text. `confidence` remains model-native when present. `stability` is gateway-estimated stream convergence/churn only: use it for preparation/routing/debounce analysis, never for truth, final response generation, model/ASR confidence, calibrated probability, or averaging/combining with `confidence`. Raw partial text follows `logging.include_transcript_text`.
+
+```json
+{
+  "event": "text_call.caller_partial.sent",
+  "asr_session_id": "asr_...",
+  "utterance_id": "utt_...",
+  "speech_state": "speaking",
+  "confidence": 0.74,
+  "stability": 0.63,
+  "text_words": 4,
+  "text_chars": 21,
+  "transcript_text_included": false
 }
 ```
 
@@ -662,7 +678,7 @@ Per-turn deterministic metrics:
 | `playback_finished.status` | Terminal outcome. | High canceled/superseded rates can indicate churn. |
 | `partial_count_before_final` | ASR stability proxy. | High counts with poor final quality can indicate decoder instability. |
 | `partial_confidence` / `transcript_confidence` | Backend-native partial/final tail confidence when present. | Advisory only; values are normalized but uncalibrated across backends and must be omitted when absent. |
-| `partial_stability` / `transcript_stability` | Gateway-estimated interim partial survival likelihood. | Useful for agent timing experiments; must not be interpreted as model confidence. |
+| `partial_stability` / `transcript_stability` | Gateway-estimated stream-convergence/churn signal. | Useful for preparation/routing/debounce experiments only; never interpret as truth, final response input, model/ASR confidence, calibrated probability, or a value to average/combine with `partial_confidence` / `transcript_confidence`. |
 | `suppressed_count` | Suppressed hallucination-like output. | Backend/model quality signal. |
 | `transport_confounders` | RTP loss/jitter/underrun rollups. | Exclude or stratify before tuning endpointing/ASR. |
 

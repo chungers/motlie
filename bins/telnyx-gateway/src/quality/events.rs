@@ -166,6 +166,31 @@ impl QualityEvent {
         Self::new(context, "text_call.caller_turn.sent", payload)
     }
 
+    pub fn caller_partial_sent(
+        context: QualityEventContext,
+        session: &ActiveAsrQualitySession,
+        text: &str,
+        confidence: Option<f32>,
+        stability: Option<f32>,
+        speech_state: impl Into<String>,
+        include_transcript_text: bool,
+    ) -> Self {
+        let mut payload = map_from_value(json!({
+            "asr_session_id": session.asr_session_id,
+            "utterance_id": session.utterance_id,
+            "speech_state": speech_state.into(),
+            "confidence": confidence,
+            "stability": stability,
+            "text_words": text.split_whitespace().count(),
+            "text_chars": text.chars().count(),
+            "transcript_text_included": include_transcript_text,
+        }));
+        if include_transcript_text {
+            payload.insert("text".to_string(), Value::String(text.to_string()));
+        }
+        Self::new(context, "text_call.caller_partial.sent", payload)
+    }
+
     pub fn span_finished(
         context: QualityEventContext,
         span_name: impl Into<String>,
@@ -398,6 +423,42 @@ mod tests {
             "reset account access",
             false,
         );
+        assert_eq!(event.payload["text_words"], 3);
+        assert_eq!(event.payload["transcript_text_included"], false);
+        assert!(!event.payload.contains_key("text"));
+    }
+
+    #[test]
+    fn caller_partial_event_carries_scores_and_redacts_text_by_default() {
+        let config = VoiceQualityConfig::default();
+        let session = ActiveAsrQualitySession::new(&config);
+        let event = QualityEvent::caller_partial_sent(
+            QualityEventContext::new(
+                1,
+                "run_test",
+                Some("gwc_test".to_string()),
+                config.config_id(),
+                config.logging.redaction_mode,
+            ),
+            &session,
+            "reset account access",
+            Some(0.82),
+            Some(0.67),
+            "speaking",
+            false,
+        );
+        assert_eq!(event.event, "text_call.caller_partial.sent");
+        assert_eq!(event.payload["asr_session_id"], session.asr_session_id);
+        assert_eq!(event.payload["utterance_id"], session.utterance_id);
+        assert_eq!(event.payload["speech_state"], "speaking");
+        let confidence = event.payload["confidence"]
+            .as_f64()
+            .expect("confidence should be numeric");
+        let stability = event.payload["stability"]
+            .as_f64()
+            .expect("stability should be numeric");
+        assert!((confidence - 0.82).abs() < 0.000_001);
+        assert!((stability - 0.67).abs() < 0.000_001);
         assert_eq!(event.payload["text_words"], 3);
         assert_eq!(event.payload["transcript_text_included"], false);
         assert!(!event.payload.contains_key("text"));

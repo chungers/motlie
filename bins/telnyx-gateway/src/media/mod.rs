@@ -3259,6 +3259,15 @@ struct PartialTurnCandidate {
     confidence: Option<f32>,
     stability: Option<f32>,
     speech_state: CallerSpeechState,
+    quality_session: ActiveAsrQualitySession,
+}
+
+fn caller_speech_state_label(state: CallerSpeechState) -> &'static str {
+    match state {
+        CallerSpeechState::Speaking => "speaking",
+        CallerSpeechState::EndpointCandidate => "endpoint_candidate",
+        CallerSpeechState::Finalizing => "finalizing",
+    }
 }
 
 fn transcript_event_confidence(event: &TranscriptEvent) -> Option<f32> {
@@ -3492,6 +3501,10 @@ async fn record_transcript_events(
         let asr_backend = call.and_then(|call| call.asr_backend);
         let previous_partial = call.and_then(|call| call.current_partial.clone());
         let transcript_confidence = transcript_event_confidence(&event.event);
+        // `caller.partial.stability` is a gateway stream-convergence/churn
+        // heuristic for preparation/routing/debounce analysis only. It is never
+        // truth, final response input, model/ASR confidence, calibrated
+        // probability, or a value to average/combine with model confidence.
         let transcript_stability = if matches!(kind, TranscriptKind::Partial) {
             partial_stability_score(
                 previous_partial.as_deref(),
@@ -3586,6 +3599,7 @@ async fn record_transcript_events(
                 confidence: transcript_confidence,
                 stability: transcript_stability,
                 speech_state: context.partial_speech_state,
+                quality_session: session.clone(),
             });
         }
         conversation_events.push(ConversationTranscriptEvent {
@@ -3617,22 +3631,33 @@ async fn record_transcript_events(
     drop(guard);
     if let Some(text_calls) = context.text_calls {
         for partial_turn in partial_turns {
-            if let Err(error) = text_calls
+            match text_calls
                 .send_caller_partial(
                     gateway_call_id,
-                    partial_turn.utterance_id,
-                    partial_turn.text,
+                    partial_turn.utterance_id.clone(),
+                    partial_turn.text.clone(),
                     partial_turn.confidence,
                     partial_turn.stability,
                     partial_turn.speech_state,
                 )
                 .await
             {
-                tracing::warn!(
+                Ok(true) => state.write().await.emit_quality_caller_partial_sent(
                     gateway_call_id,
-                    error = %error,
-                    "text_call.caller_partial.forward_failed"
-                );
+                    &partial_turn.quality_session,
+                    &partial_turn.text,
+                    partial_turn.confidence,
+                    partial_turn.stability,
+                    caller_speech_state_label(partial_turn.speech_state),
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        gateway_call_id,
+                        error = %error,
+                        "text_call.caller_partial.forward_failed"
+                    );
+                }
             }
         }
     }
@@ -5122,8 +5147,13 @@ mod tests {
         let mut text_rx = text_calls
             .insert_test_session_with_partials(gateway_call_id.clone(), true)
             .await;
+        let (quality_tx, mut quality_rx) = tokio::sync::mpsc::channel(16);
         let quality_session = {
             let mut guard = state.write().await;
+            guard.set_quality_event_sink(
+                crate::quality::QualityEventSink::with_sender(quality_tx),
+                None,
+            );
             guard.start_quality_asr_session(&gateway_call_id, Some("stream-1"), "test")
         };
         let format = MediaFormat {
@@ -5147,6 +5177,18 @@ mod tests {
                         }],
                     },
                 }),
+                AsrTranscriptEvent::emit(TranscriptEvent::Partial {
+                    text: "hello world".to_string(),
+                    update: motlie_model::TranscriptionUpdate {
+                        segments: vec![motlie_model::TranscriptSegment {
+                            start_ms: 0,
+                            end_ms: 520,
+                            text: "hello world".to_string(),
+                            confidence: Some(0.84),
+                            final_segment: false,
+                        }],
+                    },
+                }),
                 AsrTranscriptEvent::emit(TranscriptEvent::Final {
                     text: "hello world".to_string(),
                     update: motlie_model::TranscriptionUpdate::default(),
@@ -5165,13 +5207,13 @@ mod tests {
         .await;
 
         assert!(!outcome.reset_requested);
-        assert_eq!(outcome.conversation_events.len(), 2);
-        let partial = time::timeout(Duration::from_secs(1), text_rx.recv())
+        assert_eq!(outcome.conversation_events.len(), 3);
+        let first_partial = time::timeout(Duration::from_secs(1), text_rx.recv())
             .await
-            .expect("caller.partial should be emitted")
+            .expect("first caller.partial should be emitted")
             .expect("text-call session should stay open");
         assert!(matches!(
-            partial,
+            first_partial,
             GatewayTextFrame::CallerPartial {
                 utterance_id,
                 text,
@@ -5184,6 +5226,28 @@ mod tests {
                 && text == "hello wor"
                 && (confidence - 0.81).abs() < f32::EPSILON
         ));
+        let second_partial = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("second caller.partial should be emitted")
+            .expect("text-call session should stay open");
+        let second_stability = match second_partial {
+            GatewayTextFrame::CallerPartial {
+                utterance_id,
+                text,
+                confidence: Some(confidence),
+                stability: Some(stability),
+                speech_state: CallerSpeechState::Speaking,
+                reply_allowed: false,
+                ..
+            } if utterance_id == quality_session.utterance_id
+                && text == "hello world"
+                && (confidence - 0.84).abs() < f32::EPSILON =>
+            {
+                stability
+            }
+            other => panic!("unexpected second partial frame: {other:?}"),
+        };
+        assert!(second_stability > 0.0);
         let final_turn = time::timeout(Duration::from_secs(1), text_rx.recv())
             .await
             .expect("caller.turn should be emitted")
@@ -5196,6 +5260,40 @@ mod tests {
                 ..
             } if utterance_id == quality_session.utterance_id && text == "hello world"
         ));
+
+        let mut quality_events = Vec::new();
+        while quality_events.len() < 5 {
+            match time::timeout(Duration::from_millis(100), quality_rx.recv()).await {
+                Ok(Some(event)) => quality_events.push(event),
+                _ => break,
+            }
+        }
+        let partial_events = quality_events
+            .iter()
+            .filter(|event| event.event == "text_call.caller_partial.sent")
+            .collect::<Vec<_>>();
+        assert_eq!(partial_events.len(), 2);
+        let scored_partial = partial_events[1];
+        assert_eq!(
+            scored_partial.payload["asr_session_id"],
+            quality_session.asr_session_id
+        );
+        assert_eq!(
+            scored_partial.payload["utterance_id"],
+            quality_session.utterance_id
+        );
+        assert_eq!(scored_partial.payload["speech_state"], "speaking");
+        let logged_confidence = scored_partial.payload["confidence"]
+            .as_f64()
+            .expect("confidence should be numeric");
+        assert!((logged_confidence - 0.84).abs() < 0.000_001);
+        let logged_stability = scored_partial.payload["stability"]
+            .as_f64()
+            .expect("stability should be numeric");
+        assert!((logged_stability - second_stability as f64).abs() < 0.000_001);
+        assert_eq!(scored_partial.payload["text_chars"], 11);
+        assert_eq!(scored_partial.payload["transcript_text_included"], false);
+        assert!(!scored_partial.payload.contains_key("text"));
     }
 
     #[tokio::test]

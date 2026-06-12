@@ -142,8 +142,14 @@ pub enum GatewayTextFrame {
         utterance_id: String,
         sequence: u64,
         text: String,
+        /// Optional backend/model confidence for the current hypothesis.
+        /// It is omitted when the backend does not provide a native score.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         confidence: Option<f32>,
+        /// Optional gateway-estimated stream-convergence/churn signal.
+        /// Use only for preparation, routing, or debounce decisions. Never use
+        /// as truth, final response input, model/ASR confidence, calibrated
+        /// probability, or a value to average/combine with `confidence`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stability: Option<f32>,
         speech_state: CallerSpeechState,
