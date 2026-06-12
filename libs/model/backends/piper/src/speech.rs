@@ -419,12 +419,17 @@ fn piper_ort_target() -> OrtExecutionTarget {
 fn piper_cpu_offload_reason() -> String {
     if motlie_model::metrics_runtime::should_force_cpu() {
         "cuda_execution_provider=off;force_cpu=true".to_owned()
+    } else if !cfg!(feature = "cuda") {
+        "accelerator_feature=none".to_owned()
+    } else if !motlie_model_ort::cuda_ep_available() {
+        // The `cuda` Cargo feature is on, but the ONNX Runtime this binary
+        // linked against has no CUDA execution provider compiled in (e.g. the
+        // static linux-aarch64 archives are CPU-only; see issue #497).
+        "cuda_execution_provider=unavailable;ort_build=cpu_only".to_owned()
     } else if matches!(piper_ort_target(), OrtExecutionTarget::CpuOnly) {
         "cuda_execution_provider=off;target=cpu_only".to_owned()
-    } else if cfg!(feature = "cuda") {
-        "cuda_execution_provider=off".to_owned()
     } else {
-        "accelerator_feature=none".to_owned()
+        "cuda_execution_provider=off".to_owned()
     }
 }
 

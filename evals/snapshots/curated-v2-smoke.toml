@@ -680,6 +680,9 @@ quantization = "default"
 backend = "ort"
 features = ["model-moonshine-streaming"]
 profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "moonshine-cuda"]
+"cuda-workstation" = ["cuda", "moonshine-cuda"]
 [cells.artifact]
 requires_hf_token = false
 patterns = [

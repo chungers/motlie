@@ -5479,6 +5479,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "motlie-model",
+ "motlie-model-ort",
  "ndarray",
  "ort",
  "serde_json",
