@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-11 PDT | @codex-366-impl | Added live smoke-call recovery details: smoke-test final coalescing now has a 900 ms settle floor and active-playback hold, and outbound pacing rollups separate true underrun, append starvation, post-mark wait, and first-frame idle gaps. |
 | 2026-06-11 PDT | @codex-366-impl | Captured live-call audio stabilization for PR #464: live TTS synthesis is isolated onto blocking threads, chunked TTS uses the two-chunk prebuffer default for smoother playback, and smoke-test enablement turns barge-in off for deterministic echo validation. |
 | 2026-06-11 | @codex-366-impl | Captured live-call quality fixes: deterministic assistant-echo transcript suppression before `caller.turn`, text-call ownership gating for manual `speak`, and call/TUI diagnostics for first-audio, buffer, underrun, and echo-suppression counters. |
 | 2026-06-09 | @codex-m6-ds-rv | Resolved #427 pluggability follow-up: separated generic handler dispatch from smoke final coalescing, added `tts.first_chunk_max_chars` for sentence-boundary first-audio ramp experiments, and documented streaming-agent partial/voice-response contract notes. |
@@ -887,7 +888,7 @@ Prompt requirements:
 | Replay ASR | `--trailing-silence-pad-ms` | CLI implemented | `800` | finalization behavior |
 | ASR backend | `--backend`, `asr use` | CLI/REPL implemented | selected backend | backend comparison |
 | Codec eval | `--codec` in golden A/B | CLI implemented | selected matrix | Telnyx format comparison |
-| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` for normal conversation; smoke-test enablement sets `off` | interruption realism vs deterministic echo validation |
+| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` for normal conversation; smoke-test enablement sets `off` and uses a 900 ms final settle floor with active-playback hold | interruption realism vs deterministic echo validation |
 | Text-call | `quality text-call max-active-turns <n>` | REPL/socket/TUI implemented | `32` | runaway app-agent lag |
 | Text-call | `quality text-call media-ready-timeout-ms <ms>` | REPL/socket/TUI implemented | `20000 ms` | setup reliability |
 | Text-call | `quality text-call playback-wait-timeout-ms <ms>` | REPL/socket/TUI implemented | `180000 ms` | hung playback detection |

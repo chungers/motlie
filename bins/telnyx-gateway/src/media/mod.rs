@@ -457,6 +457,7 @@ struct OutboundPacingStats {
     frames_sent: u64,
     underrun_count: u64,
     append_starvation_ticks: u64,
+    post_mark_wait_ticks: u64,
     pre_audio_wait_ticks: u64,
     inter_frame_gap_ms: Vec<u64>,
     queue_depth_samples: Vec<u64>,
@@ -471,11 +472,16 @@ impl OutboundPacingStats {
         self.queue_depth_samples.push(queue_depth as u64);
     }
 
-    fn observe_underrun(&mut self, append_starved: bool) {
+    fn observe_underrun(&mut self) {
         self.underrun_count = self.underrun_count.saturating_add(1);
-        if append_starved {
-            self.append_starvation_ticks = self.append_starvation_ticks.saturating_add(1);
-        }
+    }
+
+    fn observe_append_starvation(&mut self) {
+        self.append_starvation_ticks = self.append_starvation_ticks.saturating_add(1);
+    }
+
+    fn observe_post_mark_wait(&mut self) {
+        self.post_mark_wait_ticks = self.post_mark_wait_ticks.saturating_add(1);
     }
 
     fn observe_pre_audio_wait(&mut self) {
@@ -489,6 +495,8 @@ impl OutboundPacingStats {
             "underrun_count": self.underrun_count,
             "append_starvation_ticks": self.append_starvation_ticks,
             "append_starvation_ms_estimate": self.append_starvation_ticks.saturating_mul(20),
+            "post_mark_wait_ticks": self.post_mark_wait_ticks,
+            "post_mark_wait_ms_estimate": self.post_mark_wait_ticks.saturating_mul(20),
             "pre_audio_wait_ticks": self.pre_audio_wait_ticks,
             "pre_audio_wait_ms_estimate": self.pre_audio_wait_ticks.saturating_mul(20),
             "inter_frame_gap_ms_p50": percentile_u64(&self.inter_frame_gap_ms, 50),
@@ -539,6 +547,7 @@ struct MediaSocketState {
     outbound_frame_count: usize,
     outbound_underrun_ticks: usize,
     outbound_pre_audio_wait_ticks: usize,
+    outbound_post_mark_wait_ticks: usize,
     outbound_pacing: OutboundPacingStats,
     playback_pacing_counters: HashMap<String, PlaybackPacingCounters>,
     last_outbound_frame_sent_at: Option<Instant>,
@@ -546,6 +555,7 @@ struct MediaSocketState {
     playback_started_at: HashMap<String, Instant>,
     playback_quality_contexts: HashMap<String, OutboundFrameQualityContext>,
     append_open_empty_playbacks: HashSet<String>,
+    mark_sent_playbacks: HashSet<String>,
     rollups_emitted: bool,
 }
 
@@ -579,6 +589,7 @@ impl MediaSocketState {
             outbound_frame_count: 0,
             outbound_underrun_ticks: 0,
             outbound_pre_audio_wait_ticks: 0,
+            outbound_post_mark_wait_ticks: 0,
             outbound_pacing: OutboundPacingStats::default(),
             playback_pacing_counters: HashMap::new(),
             last_outbound_frame_sent_at: None,
@@ -586,6 +597,7 @@ impl MediaSocketState {
             playback_started_at: HashMap::new(),
             playback_quality_contexts: HashMap::new(),
             append_open_empty_playbacks: HashSet::new(),
+            mark_sent_playbacks: HashSet::new(),
             rollups_emitted: false,
         }
     }
@@ -740,6 +752,28 @@ async fn send_outbound_or_silence(
             return Ok(());
         }
 
+        if media_state
+            .mark_sent_playbacks
+            .contains(playback_id.as_str())
+        {
+            media_state.outbound_post_mark_wait_ticks =
+                media_state.outbound_post_mark_wait_ticks.saturating_add(1);
+            media_state.outbound_pacing.observe_post_mark_wait();
+            if media_state.outbound_post_mark_wait_ticks <= 5
+                || media_state.outbound_post_mark_wait_ticks.is_multiple_of(50)
+            {
+                tracing::debug!(
+                    gateway_call_id = call_id,
+                    playback_id = playback_id.as_str(),
+                    post_mark_wait_ticks = media_state.outbound_post_mark_wait_ticks,
+                    post_mark_wait_ms_estimate =
+                        media_state.outbound_post_mark_wait_ticks.saturating_mul(20),
+                    "tts.outbound.post_mark_wait"
+                );
+            }
+            return Ok(());
+        }
+
         media_state.outbound_underrun_ticks = media_state.outbound_underrun_ticks.saturating_add(1);
         media_state
             .playback_pacing_counters
@@ -749,17 +783,31 @@ async fn send_outbound_or_silence(
         let append_starved = media_state
             .append_open_empty_playbacks
             .contains(playback_id.as_str());
-        media_state.outbound_pacing.observe_underrun(append_starved);
+        if append_starved {
+            media_state.outbound_pacing.observe_append_starvation();
+        } else {
+            media_state.outbound_pacing.observe_underrun();
+        }
         if media_state.outbound_underrun_ticks <= 5
             || media_state.outbound_underrun_ticks.is_multiple_of(50)
         {
-            tracing::warn!(
-                gateway_call_id = call_id,
-                playback_id = playback_id.as_str(),
-                underrun_ticks = media_state.outbound_underrun_ticks,
-                queue_depth = outbound_queue_depth(media_state),
-                "tts.outbound.underrun"
-            );
+            if append_starved {
+                tracing::warn!(
+                    gateway_call_id = call_id,
+                    playback_id = playback_id.as_str(),
+                    append_starvation_ticks = media_state.outbound_underrun_ticks,
+                    queue_depth = outbound_queue_depth(media_state),
+                    "tts.outbound.append_starvation"
+                );
+            } else {
+                tracing::warn!(
+                    gateway_call_id = call_id,
+                    playback_id = playback_id.as_str(),
+                    underrun_ticks = media_state.outbound_underrun_ticks,
+                    queue_depth = outbound_queue_depth(media_state),
+                    "tts.outbound.underrun"
+                );
+            }
         }
         return Ok(());
     }
@@ -878,6 +926,7 @@ async fn send_outbound_command(
                 .await
                 .mark_tts_mark_sent(&call_id, &playback_id, &playback_id);
             media_state.append_open_empty_playbacks.remove(&playback_id);
+            media_state.mark_sent_playbacks.insert(playback_id.clone());
             tracing::info!(gateway_call_id = call_id, playback_id, "tts.mark.sent");
             Ok(())
         }
@@ -1083,6 +1132,7 @@ async fn emit_playback_terminal_spans(
     }
     media_state.playback_quality_contexts.remove(playback_id);
     media_state.append_open_empty_playbacks.remove(playback_id);
+    media_state.mark_sent_playbacks.remove(playback_id);
 }
 
 fn log_outbound_frame_sent(media_state: &mut MediaSocketState, call_id: &str, playback_id: &str) {
@@ -1090,15 +1140,19 @@ fn log_outbound_frame_sent(media_state: &mut MediaSocketState, call_id: &str, pl
     let interval_ms = media_state
         .last_outbound_frame_sent_at
         .map(|last| now.duration_since(last).as_millis() as u64);
+    let first_frame_for_playback = !media_state.first_frame_sent_playbacks.contains(playback_id);
     media_state.last_outbound_frame_sent_at = Some(now);
     media_state.outbound_frame_count = media_state.outbound_frame_count.saturating_add(1);
-    media_state
-        .outbound_pacing
-        .observe_frame(interval_ms, outbound_queue_depth(media_state));
+    media_state.outbound_pacing.observe_frame(
+        (!first_frame_for_playback).then_some(interval_ms).flatten(),
+        outbound_queue_depth(media_state),
+    );
     media_state.outbound_underrun_ticks = 0;
     media_state.outbound_pre_audio_wait_ticks = 0;
+    media_state.outbound_post_mark_wait_ticks = 0;
 
-    let is_pacing_anomaly = interval_ms.is_some_and(|ms| !(15..=35).contains(&ms));
+    let is_pacing_anomaly =
+        !first_frame_for_playback && interval_ms.is_some_and(|ms| !(15..=35).contains(&ms));
     if media_state.outbound_frame_count <= 5
         || media_state.outbound_frame_count.is_multiple_of(50)
         || is_pacing_anomaly
@@ -3889,17 +3943,21 @@ mod tests {
         assert_eq!(payload["stale_frames"], 1);
 
         let mut outbound = OutboundPacingStats::default();
+        outbound.observe_frame(None, 4);
         outbound.observe_frame(Some(20), 4);
         outbound.observe_frame(Some(50), 2);
-        outbound.observe_underrun(false);
-        outbound.observe_underrun(true);
+        outbound.observe_underrun();
+        outbound.observe_append_starvation();
+        outbound.observe_post_mark_wait();
         outbound.observe_pre_audio_wait();
         let payload = outbound.rollup_payload(Some("tts_test"));
         assert_eq!(payload["playback_id"], "tts_test");
-        assert_eq!(payload["frames_sent"], 2);
-        assert_eq!(payload["underrun_count"], 2);
+        assert_eq!(payload["frames_sent"], 3);
+        assert_eq!(payload["underrun_count"], 1);
         assert_eq!(payload["append_starvation_ticks"], 1);
         assert_eq!(payload["append_starvation_ms_estimate"], 20);
+        assert_eq!(payload["post_mark_wait_ticks"], 1);
+        assert_eq!(payload["post_mark_wait_ms_estimate"], 20);
         assert_eq!(payload["pre_audio_wait_ticks"], 1);
         assert_eq!(payload["pre_audio_wait_ms_estimate"], 20);
         assert_eq!(payload["inter_frame_gap_ms_max"], 50);
