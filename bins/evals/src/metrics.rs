@@ -295,7 +295,11 @@ impl MetricsSampler {
             unavailable.push("process_swap_delta_peak_bytes".to_owned());
             unavailable_metrics.push(metric_unavailable(
                 "process_swap_delta_peak_bytes",
-                "metric_unavailable_on_platform",
+                if process_swap_metric_supported() {
+                    "metric_collection_failed"
+                } else {
+                    "metric_unavailable_on_platform"
+                },
                 process_swap_source(),
             ));
         }
@@ -386,6 +390,14 @@ fn current_resource_sample() -> ResourceSample {
         rss_bytes,
         process_swap_bytes: current_process_swap_bytes(),
     }
+}
+
+/// Whether the current platform implements per-process swap sampling.
+/// Only Linux does (procfs `VmSwap`); macOS is an acknowledged TODO
+/// (`mach_task_info_unimplemented`). Where this is false, a missing swap
+/// sample is a structural platform gap, not a collection failure.
+pub fn process_swap_metric_supported() -> bool {
+    cfg!(target_os = "linux")
 }
 
 fn current_process_swap_bytes() -> Option<u64> {
