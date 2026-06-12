@@ -58,11 +58,13 @@ impl ScenarioRunner for TtsRunner {
             iterations: Some(eval.iterations),
             successful_iterations: Some(eval.successful_iterations),
             failed_iterations: Some(eval.failed_iterations),
+            last_iteration_error: eval.last_iteration_error,
             text_chars: Some(tts_scenario.input.text.chars().count() as u64),
             synthesis_latency_ms: None,
             mean_synthesis_latency_ms: eval.mean_synthesis_latency_ms,
             p95_synthesis_latency_ms: eval.p95_synthesis_latency_ms,
             ttfa_first_chunk_ms: None,
+            ttfa_first_chunk_samples_ms: eval.ttfa_first_chunk_samples_ms,
             mean_ttfa_first_chunk_ms: eval.mean_ttfa_first_chunk_ms,
             p95_ttfa_first_chunk_ms: eval.p95_ttfa_first_chunk_ms,
             audio_duration_ms: Some(eval.audio_duration_ms),
@@ -113,7 +115,9 @@ struct TtsEvalOutput {
     iterations: u64,
     successful_iterations: u64,
     failed_iterations: u64,
+    last_iteration_error: Option<String>,
     request_latencies_ms: Vec<u64>,
+    ttfa_first_chunk_samples_ms: Vec<u64>,
     mean_synthesis_latency_ms: Option<f64>,
     p95_synthesis_latency_ms: Option<f64>,
     mean_ttfa_first_chunk_ms: Option<f64>,
@@ -136,6 +140,7 @@ struct TtsIterationSummary {
     iterations: u64,
     successful_iterations: u64,
     failed_iterations: u64,
+    last_iteration_error: Option<String>,
     request_latencies_ms: Vec<u64>,
     ttfa_first_chunk_ms: Vec<u64>,
     last_iteration: Option<TtsIterationMetrics>,
@@ -214,6 +219,7 @@ where
     let mut ttfa_first_chunk_ms = Vec::new();
     let mut successful_iterations = 0_u64;
     let mut failed_iterations = 0_u64;
+    let mut last_iteration_error = None;
     let mut last_iteration = None;
     for _ in 0..iterations {
         match run_one_typed_tts::<_, Sample, RATE_HZ>(&handle, request.clone()).await {
@@ -223,7 +229,10 @@ where
                 last_iteration = Some(iteration);
                 successful_iterations += 1;
             }
-            Err(_) => failed_iterations += 1,
+            Err(error) => {
+                failed_iterations += 1;
+                last_iteration_error = Some(error.to_string());
+            }
         }
         context.metrics_sampler.sample();
     }
@@ -237,6 +246,7 @@ where
             iterations,
             successful_iterations,
             failed_iterations,
+            last_iteration_error,
             request_latencies_ms,
             ttfa_first_chunk_ms,
             last_iteration,
@@ -315,11 +325,13 @@ fn tts_eval_output(
         iterations: summary.iterations,
         successful_iterations: summary.successful_iterations,
         failed_iterations: summary.failed_iterations,
+        last_iteration_error: summary.last_iteration_error,
         mean_synthesis_latency_ms,
         p95_synthesis_latency_ms,
         mean_ttfa_first_chunk_ms,
         p95_ttfa_first_chunk_ms,
         request_latencies_ms: summary.request_latencies_ms,
+        ttfa_first_chunk_samples_ms: summary.ttfa_first_chunk_ms,
         audio_duration_ms,
         sample_count,
         sample_rate_hz,
@@ -417,9 +429,10 @@ mod tests {
             10,
             20,
             TtsIterationSummary {
-                iterations: 3,
+                iterations: 4,
                 successful_iterations: 3,
-                failed_iterations: 0,
+                failed_iterations: 1,
+                last_iteration_error: Some("last failure".to_owned()),
                 request_latencies_ms: vec![30, 40, 50],
                 ttfa_first_chunk_ms: vec![10, 20, 30],
                 last_iteration: Some(TtsIterationMetrics {
@@ -437,6 +450,8 @@ mod tests {
         assert_eq!(output.request_latencies_ms, vec![30, 40, 50]);
         assert_eq!(output.mean_synthesis_latency_ms, Some(40.0));
         assert_eq!(output.p95_synthesis_latency_ms, Some(50.0));
+        assert_eq!(output.last_iteration_error.as_deref(), Some("last failure"));
+        assert_eq!(output.ttfa_first_chunk_samples_ms, vec![10, 20, 30]);
         assert_eq!(output.mean_ttfa_first_chunk_ms, Some(20.0));
         assert_eq!(output.p95_ttfa_first_chunk_ms, Some(30.0));
         assert_eq!(output.audio_duration_ms, 1000);

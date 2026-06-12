@@ -83,11 +83,13 @@ impl ScenarioRunner for AsrRunner {
             iterations: Some(eval.iterations),
             successful_iterations: Some(eval.successful_iterations),
             failed_iterations: Some(eval.failed_iterations),
+            last_iteration_error: eval.last_iteration_error,
             audio_duration_ms: Some(decoded.duration_ms),
             transcription_latency_ms: None,
             mean_transcription_latency_ms: eval.mean_transcription_latency_ms,
             p95_transcription_latency_ms: eval.p95_transcription_latency_ms,
             ttfp_first_partial_ms: None,
+            ttfp_first_partial_samples_ms: eval.ttfp_first_partial_samples_ms,
             mean_ttfp_first_partial_ms: eval.mean_ttfp_first_partial_ms,
             p95_ttfp_first_partial_ms: eval.p95_ttfp_first_partial_ms,
             real_time_factor: eval.mean_transcription_latency_ms.and_then(|value| {
@@ -140,7 +142,9 @@ struct AsrEvalOutput {
     iterations: u64,
     successful_iterations: u64,
     failed_iterations: u64,
+    last_iteration_error: Option<String>,
     request_latencies_ms: Vec<u64>,
+    ttfp_first_partial_samples_ms: Vec<u64>,
     mean_transcription_latency_ms: Option<f64>,
     p95_transcription_latency_ms: Option<f64>,
     mean_ttfp_first_partial_ms: Option<f64>,
@@ -165,6 +169,7 @@ struct AsrIterationSummary {
     iterations: u64,
     successful_iterations: u64,
     failed_iterations: u64,
+    last_iteration_error: Option<String>,
     request_latencies_ms: Vec<u64>,
     ttfp_first_partial_ms: Vec<u64>,
     segments: Vec<TranscriptSegment>,
@@ -270,6 +275,7 @@ where
     let mut ttfp_first_partial_ms = Vec::new();
     let mut successful_iterations = 0_u64;
     let mut failed_iterations = 0_u64;
+    let mut last_iteration_error = None;
     let mut segments = Vec::new();
     for _ in 0..iteration_config.iterations {
         match run_one_batch_asr(&handle, audio.clone(), params.clone()).await {
@@ -279,7 +285,10 @@ where
                 segments = iteration.segments;
                 successful_iterations += 1;
             }
-            Err(_) => failed_iterations += 1,
+            Err(error) => {
+                failed_iterations += 1;
+                last_iteration_error = Some(error.to_string());
+            }
         }
         context.metrics_sampler.sample();
     }
@@ -294,6 +303,7 @@ where
             iterations: iteration_config.iterations,
             successful_iterations,
             failed_iterations,
+            last_iteration_error,
             request_latencies_ms,
             ttfp_first_partial_ms,
             segments,
@@ -356,6 +366,7 @@ where
     let mut ttfp_first_partial_ms = Vec::new();
     let mut successful_iterations = 0_u64;
     let mut failed_iterations = 0_u64;
+    let mut last_iteration_error = None;
     let mut segments = Vec::new();
     for _ in 0..iteration_config.iterations {
         match run_one_streaming_asr(&handle, audio.clone(), params.clone(), chunk_ms).await {
@@ -365,7 +376,10 @@ where
                 segments = iteration.segments;
                 successful_iterations += 1;
             }
-            Err(_) => failed_iterations += 1,
+            Err(error) => {
+                failed_iterations += 1;
+                last_iteration_error = Some(error.to_string());
+            }
         }
         context.metrics_sampler.sample();
     }
@@ -380,6 +394,7 @@ where
             iterations: iteration_config.iterations,
             successful_iterations,
             failed_iterations,
+            last_iteration_error,
             request_latencies_ms,
             ttfp_first_partial_ms,
             segments,
@@ -454,11 +469,13 @@ fn asr_eval_output(
         iterations: summary.iterations,
         successful_iterations: summary.successful_iterations,
         failed_iterations: summary.failed_iterations,
+        last_iteration_error: summary.last_iteration_error,
         mean_transcription_latency_ms,
         p95_transcription_latency_ms,
         mean_ttfp_first_partial_ms,
         p95_ttfp_first_partial_ms,
         request_latencies_ms: summary.request_latencies_ms,
+        ttfp_first_partial_samples_ms: summary.ttfp_first_partial_ms,
         mode,
         segments: summary.segments,
     }
@@ -722,9 +739,10 @@ mod tests {
             20,
             AsrMode::Streaming,
             AsrIterationSummary {
-                iterations: 3,
+                iterations: 4,
                 successful_iterations: 3,
-                failed_iterations: 0,
+                failed_iterations: 1,
+                last_iteration_error: Some("last failure".to_owned()),
                 request_latencies_ms: vec![100, 200, 300],
                 ttfp_first_partial_ms: vec![10, 20, 30],
                 segments: Vec::new(),
@@ -735,6 +753,8 @@ mod tests {
         assert_eq!(output.request_latencies_ms, vec![100, 200, 300]);
         assert_eq!(output.mean_transcription_latency_ms, Some(200.0));
         assert_eq!(output.p95_transcription_latency_ms, Some(300.0));
+        assert_eq!(output.last_iteration_error.as_deref(), Some("last failure"));
+        assert_eq!(output.ttfp_first_partial_samples_ms, vec![10, 20, 30]);
         assert_eq!(output.mean_ttfp_first_partial_ms, Some(20.0));
         assert_eq!(output.p95_ttfp_first_partial_ms, Some(30.0));
     }
