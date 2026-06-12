@@ -148,6 +148,7 @@ pub struct EndpointQualityConfig {
     pub min_turn_words: usize,
     pub min_turn_chars: usize,
     pub merge_window_ms: u64,
+    pub final_settle_ms: u64,
     pub max_turn_words: usize,
     pub max_turn_duration_ms: u64,
 }
@@ -159,6 +160,7 @@ impl Default for EndpointQualityConfig {
             min_turn_words: 2,
             min_turn_chars: 6,
             merge_window_ms: 350,
+            final_settle_ms: 350,
             max_turn_words: 80,
             max_turn_duration_ms: 12_000,
         }
@@ -374,15 +376,18 @@ impl VoiceQualityConfig {
         match profile {
             QualityProfile::Fast => {
                 config.endpoint.trailing_silence_ms = 550;
+                config.endpoint.final_settle_ms = 150;
                 config.asr.finish_pad_ms = 80;
             }
             QualityProfile::Balanced => {}
             QualityProfile::Complete => {
                 config.endpoint.trailing_silence_ms = 1_100;
+                config.endpoint.final_settle_ms = 600;
                 config.asr.finish_pad_ms = 320;
             }
             QualityProfile::Noisy => {
                 config.endpoint.trailing_silence_ms = 950;
+                config.endpoint.final_settle_ms = 500;
                 config.speech.rms_threshold = 260.0;
                 config.speech.peak_threshold = 1_200;
                 config.asr.finish_pad_ms = 240;
@@ -449,6 +454,12 @@ impl VoiceQualityConfig {
         ensure_u64(
             "endpoint.merge_window_ms",
             self.endpoint.merge_window_ms,
+            0,
+            5_000,
+        )?;
+        ensure_u64(
+            "endpoint.final_settle_ms",
+            self.endpoint.final_settle_ms,
             0,
             5_000,
         )?;
@@ -637,6 +648,9 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = endpoint.merge_window_ms {
                 self.set_endpoint_merge_window_ms(value);
+            }
+            if let Some(value) = endpoint.final_settle_ms {
+                self.set_endpoint_final_settle_ms(value);
             }
             if let Some(value) = endpoint.max_turn_words {
                 self.set_endpoint_max_turn_words(value);
@@ -859,6 +873,17 @@ impl VoiceQualityConfig {
             "endpoint.merge_window_ms",
             clamped.value,
             ApplyBoundary::ReportOnly,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_endpoint_final_settle_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 5_000);
+        self.endpoint.final_settle_ms = clamped.value;
+        self.outcome(
+            "endpoint.final_settle_ms",
+            clamped.value,
+            ApplyBoundary::NextAsrSession,
             clamped.clamped,
         )
     }
@@ -1323,6 +1348,7 @@ pub struct EndpointQualityConfigPatch {
     pub min_turn_words: Option<usize>,
     pub min_turn_chars: Option<usize>,
     pub merge_window_ms: Option<u64>,
+    pub final_settle_ms: Option<u64>,
     pub max_turn_words: Option<usize>,
     pub max_turn_duration_ms: Option<u64>,
 }
@@ -1410,6 +1436,7 @@ mod tests {
         assert_eq!(config.speech.rms_threshold, 220.0);
         assert_eq!(config.speech.peak_threshold, 1_100);
         assert_eq!(config.speech.onset_min_silence_ms, 180);
+        assert_eq!(config.endpoint.final_settle_ms, 350);
         assert_eq!(config.asr.finish_pad_ms, 320);
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
@@ -1495,6 +1522,14 @@ mod tests {
         let outcome = config.set_endpoint_merge_window_ms(9_999);
         assert_eq!(config.endpoint.merge_window_ms, 5_000);
         assert_eq!(outcome.apply_boundary, ApplyBoundary::ReportOnly);
+    }
+
+    #[test]
+    fn final_settle_knob_clamps_and_applies_at_next_session() {
+        let mut config = VoiceQualityConfig::default();
+        let outcome = config.set_endpoint_final_settle_ms(9_999);
+        assert_eq!(config.endpoint.final_settle_ms, 5_000);
+        assert_eq!(outcome.apply_boundary, ApplyBoundary::NextAsrSession);
     }
 
     #[test]

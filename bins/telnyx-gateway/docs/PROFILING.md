@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-11 PDT | @codex-366-impl | Added generic `endpoint.final_settle_ms` to the media-path endpointing knobs: incomplete final fragments can be held/merged before live `caller.turn` or conversation dispatch, while `endpoint.merge_window_ms` remains report-only/handler-local smoke-test guidance. |
 | 2026-06-11 PDT | @codex-366-impl | Retuned generic balanced endpointing defaults after live-call last-word truncation: endpoint trailing silence is now 900 ms and ASR finish pad is now 320 ms; both remain live-adjustable for the next ASR session. |
 | 2026-06-11 PDT | @codex-366-impl | Added PR #484 confidence-carrier integration notes: backend-native tail confidence can explain smoke-test endpoint holds, but it is not a calibrated stability signal for agent protocol timing. |
 | 2026-06-11 PDT | @codex-366-impl | Added live smoke-call recovery details: smoke-test final coalescing now has a 900 ms settle floor and active-playback hold, and outbound pacing rollups separate true underrun, append starvation, post-mark wait, and first-frame idle gaps. |
@@ -195,6 +196,7 @@ Spans must not inline `config { ... }`. Instead, the gateway emits one `call.con
       "min_turn_words": 2,
       "min_turn_chars": 6,
       "merge_window_ms": 350,
+      "final_settle_ms": 350,
       "max_turn_words": 80,
       "max_turn_duration_ms": 12000
     },
@@ -369,6 +371,7 @@ Boundary rules:
 - Hot-reloaded ASR/endpoint config applies only when the next `asr.session.started` event is created.
 - `asr.finish_pad_ms` is separate from endpoint trailing silence. It is a short ASR flush pad after the endpoint decision, not another full endpoint wait.
 - `endpoint.merge_window_ms` may label adjacent turns as likely merge candidates in reports. The gateway-local smoke-test handler may also use it as a handler-local final-fragment debounce before producing its deterministic echo, but it must not merge live M4 `caller.turn` events on the app-agent protocol.
+- `endpoint.final_settle_ms` is the live media-path hold window for structurally incomplete final fragments. It runs before `caller.turn` / `ConversationHandler` dispatch, merges a pending fragment with a continuation final when one arrives, and otherwise flushes on timeout or stream end.
 
 ## Text-Call and App-Agent Spans
 
@@ -667,6 +670,7 @@ Report-only/advisory analysis knobs:
 | `endpoint.min_turn_words` | Label possible low-information fragments. | None; must not suppress `caller.turn`. |
 | `endpoint.min_turn_chars` | Label tiny text fragments. | None; must not suppress `caller.turn`. |
 | `endpoint.merge_window_ms` | Suggest adjacent-turn merge candidates in reports; handler-local smoke-test debounce for deterministic echo only. | None for M4 app-agent `caller.turn`; smoke-test handler may delay/merge only its local echo input. |
+| `endpoint.final_settle_ms` | Explain bounded live holds for dangling-tail final fragments. | Holds only structurally incomplete finals before `caller.turn`; merges with a continuation final or flushes on timeout/stream end. |
 | `endpoint.max_turn_words` | Flag likely overmerged turns. | None; must not split live turns. |
 | `endpoint.max_turn_duration_ms` | Flag long utterance or late endpointing. | None; must not force live endpointing. |
 
@@ -873,7 +877,7 @@ Prompt requirements:
 | Replay ASR | `--trailing-silence-pad-ms` | CLI implemented | `800` | finalization behavior |
 | ASR backend | `--backend`, `asr use` | CLI/REPL implemented | selected backend | backend comparison |
 | Codec eval | `--codec` in golden A/B | CLI implemented | selected matrix | Telnyx format comparison |
-| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` for normal conversation; smoke-test enablement sets `off` and uses a 900 ms final settle floor with active-playback hold | interruption realism vs deterministic echo validation |
+| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` for normal conversation; smoke-test enablement sets `off` and uses a 900 ms handler-local final debounce floor with active-playback hold | interruption realism vs deterministic echo validation |
 | Text-call | `quality text-call max-active-turns <n>` | REPL/socket/TUI implemented | `32` | runaway app-agent lag |
 | Text-call | `quality text-call media-ready-timeout-ms <ms>` | REPL/socket/TUI implemented | `20000 ms` | setup reliability |
 | Text-call | `quality text-call playback-wait-timeout-ms <ms>` | REPL/socket/TUI implemented | `180000 ms` | hung playback detection |
@@ -905,6 +909,7 @@ Prompt requirements:
 | `endpoint.min_turn_words` | `ReportOnlyCount` | `0..50` | `2` | clamp to range | report only | Short-turn label threshold only. |
 | `endpoint.min_turn_chars` | `ReportOnlyCount` | `0..200` | `6` | clamp to range | report only | Tiny-turn label threshold only. |
 | `endpoint.merge_window_ms` | `ReportOnlyDurationMs` | `0..5000` | `350` | clamp to range | report only; smoke-test handler reads the ASR-session snapshot | Adjacent-turn recommendation and deterministic smoke-test final-fragment debounce only. |
+| `endpoint.final_settle_ms` | `DurationMs` | `0..5000` | `350` | clamp to range | next ASR session | Bounded media-path hold/merge for structurally incomplete final fragments before live dispatch. |
 | `endpoint.max_turn_words` | `ReportOnlyCount` | `1..500` | `80` | clamp to range | report only | Overmerged-turn label threshold only. |
 | `endpoint.max_turn_duration_ms` | `ReportOnlyDurationMs` | `1000..120000` | `12000` | clamp to range | report only | Long-turn label threshold only. |
 | `asr.finish_pad_ms` | `DurationMs` | `0..2000` | `320` | clamp to range | next ASR session | Short final ASR flush pad after endpoint decision; separate from endpoint tail. |
@@ -970,6 +975,7 @@ trailing_silence_ms = 900
 min_turn_words = 2
 min_turn_chars = 6
 merge_window_ms = 350
+final_settle_ms = 350
 max_turn_words = 80
 max_turn_duration_ms = 12000
 
@@ -1061,6 +1067,7 @@ quality endpoint trailing-silence-ms 900
 quality endpoint min-turn-words 2
 quality endpoint min-turn-chars 6
 quality endpoint merge-window-ms 350
+quality endpoint final-settle-ms 350
 quality endpoint max-turn-words 80
 quality endpoint max-turn-duration-ms 12000
 quality asr finish-pad-ms 320
@@ -1174,6 +1181,7 @@ quality endpoint trailing-silence-ms <ms>
 quality endpoint min-turn-words <n>
 quality endpoint min-turn-chars <n>
 quality endpoint merge-window-ms <ms>
+quality endpoint final-settle-ms <ms>
 quality endpoint max-turn-words <n>
 quality endpoint max-turn-duration-ms <ms>
 quality speech status
@@ -1244,6 +1252,7 @@ This supports call-to-call tuning loops such as:
 
 ```text
 quality endpoint trailing-silence-ms 900
+quality endpoint final-settle-ms 350
 quality speech rms-threshold 220
 quality barge-in clear-timeout-ms 750
 quality tts chunking off
@@ -1258,6 +1267,7 @@ Gateway socket input examples:
 ```text
 quality status
 quality endpoint trailing-silence-ms 950
+quality endpoint final-settle-ms 500
 quality speech rms-threshold 220
 quality barge-in clear-timeout-ms 750
 quality tts chunking off

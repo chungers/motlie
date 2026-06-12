@@ -606,6 +606,7 @@ pub enum QualityEndpointCommand {
     MinTurnWords { n: usize },
     MinTurnChars { n: usize },
     MergeWindowMs { ms: u64 },
+    FinalSettleMs { ms: u64 },
     MaxTurnWords { n: usize },
     MaxTurnDurationMs { ms: u64 },
 }
@@ -2350,6 +2351,10 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             "endpoint.merge_window_ms={}",
             quality.config.endpoint.merge_window_ms
         ),
+        format!(
+            "endpoint.final_settle_ms={}",
+            quality.config.endpoint.final_settle_ms
+        ),
         format!("asr.finish_pad_ms={}", quality.config.asr.finish_pad_ms),
         format!(
             "speech.rms_threshold={}",
@@ -2395,11 +2400,12 @@ async fn quality_endpoint_command(
             let guard = context.state.read().await;
             let endpoint = &guard.quality.config.endpoint;
             Ok(CommandOutput::text(format!(
-                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
+                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nfinal_settle_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
                 endpoint.trailing_silence_ms,
                 endpoint.min_turn_words,
                 endpoint.min_turn_chars,
                 endpoint.merge_window_ms,
+                endpoint.final_settle_ms,
                 endpoint.max_turn_words,
                 endpoint.max_turn_duration_ms
             )))
@@ -2420,6 +2426,13 @@ async fn quality_endpoint_command(
             mutate_quality_config(
                 context,
                 |config| Ok(config.set_endpoint_merge_window_ms(ms)),
+            )
+            .await
+        }
+        QualityEndpointCommand::FinalSettleMs { ms } => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_endpoint_final_settle_ms(ms)),
             )
             .await
         }
@@ -3089,6 +3102,7 @@ fn quality_help() -> String {
         "quality endpoint min-turn-words <n>            range=0..50 default=2 report_only",
         "quality endpoint min-turn-chars <n>            range=0..200 default=6 report_only",
         "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms report_only",
+        "quality endpoint final-settle-ms <ms>          range=0..5000 default=350ms applies=next_asr_session",
         "quality endpoint max-turn-words <n>            range=1..500 default=80 report_only",
         "quality endpoint max-turn-duration-ms <ms>     range=1000..120000 default=12000ms report_only",
         "quality speech status",
@@ -4944,6 +4958,18 @@ mod tests {
             state.read().await.quality.config.endpoint.merge_window_ms,
             5_000
         );
+
+        let final_settle_output = engine
+            .run_line("quality endpoint final-settle-ms 9999")
+            .await
+            .expect("set final settle");
+        assert!(final_settle_output.lines[0].contains("key=endpoint.final_settle_ms"));
+        assert!(final_settle_output.lines[0].contains("applies=next_asr_session"));
+        assert!(final_settle_output.lines[0].contains("clamped=true"));
+        assert_eq!(
+            state.read().await.quality.config.endpoint.final_settle_ms,
+            5_000
+        );
     }
 
     #[tokio::test]
@@ -5072,6 +5098,7 @@ mod tests {
             config.set_endpoint_min_turn_words(4);
             config.set_endpoint_min_turn_chars(12);
             config.set_endpoint_merge_window_ms(444);
+            config.set_endpoint_final_settle_ms(333);
             config.set_endpoint_max_turn_words(123);
             config.set_endpoint_max_turn_duration_ms(7_654);
             config.set_asr_repeated_token_run_threshold(42);
