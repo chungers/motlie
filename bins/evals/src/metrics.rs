@@ -79,18 +79,49 @@ pub struct ToolUsePerformanceMetrics {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AsrPerformanceMetrics {
+    #[serde(default)]
+    pub iterations: Option<u64>,
+    #[serde(default)]
+    pub successful_iterations: Option<u64>,
+    #[serde(default)]
+    pub failed_iterations: Option<u64>,
+    #[serde(default)]
+    pub last_iteration_error: Option<String>,
     pub audio_duration_ms: Option<u64>,
     pub transcription_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub mean_transcription_latency_ms: Option<f64>,
+    /// `support::percentile` p95 over measured iterations, using a nearest
+    /// sorted-sample rank rather than interpolation. With small iteration
+    /// counts such as the curated smoke n=3, this is the sample maximum;
+    /// interpret it together with `iterations` and
+    /// `PerformanceMetrics::request_latencies_ms`.
+    #[serde(default)]
+    pub p95_transcription_latency_ms: Option<f64>,
     /// Driver-measured wall time from submitting the first file-fed audio chunk
-    /// to receiving the first non-empty, non-final partial transcript segment.
+    /// to receiving the first non-empty-after-trim, non-final partial
+    /// transcript segment.
     /// The value is observed only at `ingest()` returns, so its resolution is
     /// quantized by the scenario chunk size and cross-run comparisons require
     /// constant chunking. Eval audio is pushed as fast as the backend accepts
     /// chunks, so this is not comparable to realtime telephony first-partial
     /// latency targets. Batch engines and streaming engines that emit no such
     /// partial report `None` with a `MetricUnavailable` gap entry.
+    /// Schema v5 runners leave this single-shot field null; schema v4 cold-start
+    /// baseline records may populate it.
     #[serde(default)]
     pub ttfp_first_partial_ms: Option<u64>,
+    #[serde(default)]
+    pub ttfp_first_partial_samples_ms: Vec<u64>,
+    #[serde(default)]
+    pub mean_ttfp_first_partial_ms: Option<f64>,
+    /// `support::percentile` p95 over measured first-partial samples, using a
+    /// nearest sorted-sample rank rather than interpolation. With small
+    /// iteration counts such as the curated smoke n=3, this is the sample
+    /// maximum; interpret it together with `iterations` and
+    /// `ttfp_first_partial_samples_ms`.
+    #[serde(default)]
+    pub p95_ttfp_first_partial_ms: Option<f64>,
     pub real_time_factor: Option<f64>,
     pub transcript_chars: Option<u64>,
     pub segment_count: Option<u64>,
@@ -99,12 +130,42 @@ pub struct AsrPerformanceMetrics {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TtsPerformanceMetrics {
+    #[serde(default)]
+    pub iterations: Option<u64>,
+    #[serde(default)]
+    pub successful_iterations: Option<u64>,
+    #[serde(default)]
+    pub failed_iterations: Option<u64>,
+    #[serde(default)]
+    pub last_iteration_error: Option<String>,
     pub text_chars: Option<u64>,
     pub synthesis_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub mean_synthesis_latency_ms: Option<f64>,
+    /// `support::percentile` p95 over measured iterations, using a nearest
+    /// sorted-sample rank rather than interpolation. With small iteration
+    /// counts such as the curated smoke n=3, this is the sample maximum;
+    /// interpret it together with `iterations` and
+    /// `PerformanceMetrics::request_latencies_ms`.
+    #[serde(default)]
+    pub p95_synthesis_latency_ms: Option<f64>,
     /// Driver-measured wall time from `synthesize(request)` to the first audio
     /// chunk returned by `next_chunk()`.
+    /// Schema v5 runners leave this single-shot field null; schema v4 cold-start
+    /// baseline records may populate it.
     #[serde(default)]
     pub ttfa_first_chunk_ms: Option<u64>,
+    #[serde(default)]
+    pub ttfa_first_chunk_samples_ms: Vec<u64>,
+    #[serde(default)]
+    pub mean_ttfa_first_chunk_ms: Option<f64>,
+    /// `support::percentile` p95 over measured first-audio samples, using a
+    /// nearest sorted-sample rank rather than interpolation. With small
+    /// iteration counts such as the curated smoke n=3, this is the sample
+    /// maximum; interpret it together with `iterations` and
+    /// `ttfa_first_chunk_samples_ms`.
+    #[serde(default)]
+    pub p95_ttfa_first_chunk_ms: Option<f64>,
     pub audio_duration_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
     pub sample_count: Option<u64>,
@@ -397,7 +458,15 @@ mod serde_tests {
         let tts: TtsPerformanceMetrics = serde_json::from_str("{}").unwrap();
 
         assert_eq!(asr.ttfp_first_partial_ms, None);
+        assert_eq!(asr.last_iteration_error, None);
+        assert!(asr.ttfp_first_partial_samples_ms.is_empty());
+        assert_eq!(asr.mean_ttfp_first_partial_ms, None);
+        assert_eq!(asr.p95_ttfp_first_partial_ms, None);
         assert_eq!(tts.ttfa_first_chunk_ms, None);
+        assert_eq!(tts.last_iteration_error, None);
+        assert!(tts.ttfa_first_chunk_samples_ms.is_empty());
+        assert_eq!(tts.mean_ttfa_first_chunk_ms, None);
+        assert_eq!(tts.p95_ttfa_first_chunk_ms, None);
     }
 }
 

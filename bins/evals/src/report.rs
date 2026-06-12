@@ -377,8 +377,10 @@ fn render_platform_notes(out: &mut String, records: &[ResultRecord]) {
 }
 
 fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
-    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
-    out.push_str("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | mean_transcription_latency_ms | p95_transcription_latency_ms | mean_ttfp_first_partial_ms | p95_ttfp_first_partial_ms | mean_synthesis_latency_ms | p95_synthesis_latency_ms | mean_ttfa_first_chunk_ms | p95_ttfa_first_chunk_ms | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
+    out.push_str(
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+    );
 
     let mut row_count = 0_u64;
     for record in records {
@@ -394,7 +396,7 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
             continue;
         }
         out.push_str(&format!(
-            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             record.coverage.cell_id,
             record.coverage.host_slug,
             record.coverage.capability,
@@ -404,6 +406,14 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
             format_optional_f64(metrics.p95_ttft_first_token_ms),
             format_optional_f64(metrics.mean_ttft_first_answer_token_ms),
             format_optional_f64(metrics.p95_ttft_first_answer_token_ms),
+            format_optional_f64(metrics.mean_transcription_latency_ms),
+            format_optional_f64(metrics.p95_transcription_latency_ms),
+            format_optional_f64(metrics.mean_ttfp_first_partial_ms),
+            format_optional_f64(metrics.p95_ttfp_first_partial_ms),
+            format_optional_f64(metrics.mean_synthesis_latency_ms),
+            format_optional_f64(metrics.p95_synthesis_latency_ms),
+            format_optional_f64(metrics.mean_ttfa_first_chunk_ms),
+            format_optional_f64(metrics.p95_ttfa_first_chunk_ms),
             format_optional_u64(metrics.ttfp_first_partial_ms),
             format_optional_u64(metrics.ttfa_first_chunk_ms),
         ));
@@ -411,7 +421,7 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
     }
 
     if row_count == 0 {
-        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null |\n");
+        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |\n");
     }
 }
 
@@ -423,6 +433,14 @@ struct LatencyMetricCells {
     p95_ttft_first_token_ms: Option<f64>,
     mean_ttft_first_answer_token_ms: Option<f64>,
     p95_ttft_first_answer_token_ms: Option<f64>,
+    mean_transcription_latency_ms: Option<f64>,
+    p95_transcription_latency_ms: Option<f64>,
+    mean_ttfp_first_partial_ms: Option<f64>,
+    p95_ttfp_first_partial_ms: Option<f64>,
+    mean_synthesis_latency_ms: Option<f64>,
+    p95_synthesis_latency_ms: Option<f64>,
+    mean_ttfa_first_chunk_ms: Option<f64>,
+    p95_ttfa_first_chunk_ms: Option<f64>,
     ttfp_first_partial_ms: Option<u64>,
     ttfa_first_chunk_ms: Option<u64>,
 }
@@ -435,6 +453,14 @@ impl LatencyMetricCells {
             || self.p95_ttft_first_token_ms.is_some()
             || self.mean_ttft_first_answer_token_ms.is_some()
             || self.p95_ttft_first_answer_token_ms.is_some()
+            || self.mean_transcription_latency_ms.is_some()
+            || self.p95_transcription_latency_ms.is_some()
+            || self.mean_ttfp_first_partial_ms.is_some()
+            || self.p95_ttfp_first_partial_ms.is_some()
+            || self.mean_synthesis_latency_ms.is_some()
+            || self.p95_synthesis_latency_ms.is_some()
+            || self.mean_ttfa_first_chunk_ms.is_some()
+            || self.p95_ttfa_first_chunk_ms.is_some()
             || self.ttfp_first_partial_ms.is_some()
             || self.ttfa_first_chunk_ms.is_some()
     }
@@ -455,10 +481,18 @@ fn latency_metric_cells(metrics: &CapabilityPerformanceMetrics) -> LatencyMetric
             ..Default::default()
         },
         CapabilityPerformanceMetrics::Asr(metrics) => LatencyMetricCells {
+            mean_transcription_latency_ms: metrics.mean_transcription_latency_ms,
+            p95_transcription_latency_ms: metrics.p95_transcription_latency_ms,
+            mean_ttfp_first_partial_ms: metrics.mean_ttfp_first_partial_ms,
+            p95_ttfp_first_partial_ms: metrics.p95_ttfp_first_partial_ms,
             ttfp_first_partial_ms: metrics.ttfp_first_partial_ms,
             ..Default::default()
         },
         CapabilityPerformanceMetrics::Tts(metrics) => LatencyMetricCells {
+            mean_synthesis_latency_ms: metrics.mean_synthesis_latency_ms,
+            p95_synthesis_latency_ms: metrics.p95_synthesis_latency_ms,
+            mean_ttfa_first_chunk_ms: metrics.mean_ttfa_first_chunk_ms,
+            p95_ttfa_first_chunk_ms: metrics.p95_ttfa_first_chunk_ms,
             ttfa_first_chunk_ms: metrics.ttfa_first_chunk_ms,
             ..Default::default()
         },
@@ -817,7 +851,10 @@ mod tests {
         asr_record.coverage.capability = "asr".to_owned();
         asr_record.performance.capability_metrics =
             CapabilityPerformanceMetrics::Asr(AsrPerformanceMetrics {
-                ttfp_first_partial_ms: Some(42),
+                mean_transcription_latency_ms: Some(100.0),
+                p95_transcription_latency_ms: Some(120.0),
+                mean_ttfp_first_partial_ms: Some(42.0),
+                p95_ttfp_first_partial_ms: Some(48.0),
                 ..Default::default()
             });
 
@@ -825,7 +862,10 @@ mod tests {
         tts_record.coverage.capability = "tts".to_owned();
         tts_record.performance.capability_metrics =
             CapabilityPerformanceMetrics::Tts(TtsPerformanceMetrics {
-                ttfa_first_chunk_ms: Some(17),
+                mean_synthesis_latency_ms: Some(90.0),
+                p95_synthesis_latency_ms: Some(110.0),
+                mean_ttfa_first_chunk_ms: Some(17.0),
+                p95_ttfa_first_chunk_ms: Some(22.0),
                 ..Default::default()
             });
 
@@ -836,10 +876,45 @@ mod tests {
         );
 
         assert!(markdown.contains("ttft_first_token_ms"));
+        assert!(markdown.contains("mean_ttfp_first_partial_ms"));
+        assert!(markdown.contains("p95_ttfp_first_partial_ms"));
+        assert!(markdown.contains("mean_ttfa_first_chunk_ms"));
+        assert!(markdown.contains("p95_ttfa_first_chunk_ms"));
         assert!(markdown.contains("ttfp_first_partial_ms"));
         assert!(markdown.contains("ttfa_first_chunk_ms"));
-        assert!(markdown.contains("| 42 | null |"));
-        assert!(markdown.contains("| null | 17 |"));
+        assert!(markdown.contains("| 100.00 | 120.00 | 42.00 | 48.00 |"));
+        assert!(markdown.contains("| 90.00 | 110.00 | 17.00 | 22.00 |"));
+    }
+
+    #[test]
+    fn aggregate_latency_metrics_keeps_v4_single_shot_audio_columns() {
+        let mut cold_asr_record = test_record();
+        cold_asr_record.schema_version = 4;
+        cold_asr_record.coverage.cell_id = "cold_asr".to_owned();
+        cold_asr_record.coverage.capability = "asr".to_owned();
+        cold_asr_record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::Asr(AsrPerformanceMetrics {
+                ttfp_first_partial_ms: Some(110),
+                ..Default::default()
+            });
+
+        let mut cold_tts_record = test_record();
+        cold_tts_record.schema_version = 4;
+        cold_tts_record.coverage.cell_id = "cold_tts".to_owned();
+        cold_tts_record.coverage.capability = "tts".to_owned();
+        cold_tts_record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::Tts(TtsPerformanceMetrics {
+                ttfa_first_chunk_ms: Some(183),
+                ..Default::default()
+            });
+
+        let mut markdown = String::new();
+        render_latency_metrics(&mut markdown, &[cold_asr_record, cold_tts_record]);
+
+        assert!(markdown.contains("cold_asr"));
+        assert!(markdown.contains("cold_tts"));
+        assert!(markdown.contains("| 110 | null |"));
+        assert!(markdown.contains("| null | 183 |"));
     }
 
     #[test]
@@ -861,7 +936,7 @@ mod tests {
         measured_value_record.coverage.capability = "asr".to_owned();
         measured_value_record.performance.capability_metrics =
             CapabilityPerformanceMetrics::Asr(AsrPerformanceMetrics {
-                ttfp_first_partial_ms: Some(42),
+                mean_ttfp_first_partial_ms: Some(42.0),
                 ..Default::default()
             });
 

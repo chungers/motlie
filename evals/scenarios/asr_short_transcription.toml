@@ -11,6 +11,8 @@ backend = ["WhisperCpp", "SherpaOnnx", "Ort"]
 audio = "libs/models/examples/tts_qwen3_tts_cpp/assets/jarvis-ref-16k.wav"
 language = "en"
 streaming_chunk_ms = 200
+iterations = 3
+warmup_iterations = 1
 
 [assertions]
 min_transcript_chars = 1

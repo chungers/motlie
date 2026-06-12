@@ -9,6 +9,8 @@ backend = ["Ort", "Qwen3TtsCpp"]
 
 [input]
 text = "Hello from Motlie."
+iterations = 3
+warmup_iterations = 1
 
 [assertions]
 min_audio_duration_ms = 250

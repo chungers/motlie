@@ -262,6 +262,10 @@ pub struct AsrInput {
     pub reference_transcript: Option<String>,
     pub language: Option<String>,
     pub streaming_chunk_ms: Option<u64>,
+    #[serde(default = "default_perf_iterations")]
+    pub iterations: u64,
+    #[serde(default = "default_audio_warmup_iterations")]
+    pub warmup_iterations: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -282,6 +286,10 @@ pub struct TtsScenario {
 pub struct TtsInput {
     pub text: String,
     pub speaking_rate: Option<f32>,
+    #[serde(default = "default_perf_iterations")]
+    pub iterations: u64,
+    #[serde(default = "default_audio_warmup_iterations")]
+    pub warmup_iterations: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -309,6 +317,10 @@ pub struct PerfInput {
 
 fn default_perf_iterations() -> u64 {
     5
+}
+
+fn default_audio_warmup_iterations() -> u64 {
+    1
 }
 
 fn default_depth() -> EvalDepth {
@@ -560,6 +572,64 @@ capture_request_latency = true
     }
 
     #[test]
+    fn audio_scenarios_default_warmup_to_one_iteration() {
+        let raw_asr = r#"
+schema_version = 1
+id = "asr_default_warmup"
+capability = "asr"
+summary = "ASR default warmup coverage."
+
+[bundle_filter]
+capability = "asr"
+
+[input]
+audio = "evals/fixtures/audio/hello.wav"
+
+[assertions]
+min_transcript_chars = 1
+
+[metrics]
+capture_request_latency = true
+"#;
+        let raw_tts = r#"
+schema_version = 1
+id = "tts_default_warmup"
+capability = "tts"
+summary = "TTS default warmup coverage."
+
+[bundle_filter]
+capability = "tts"
+
+[input]
+text = "Hello."
+
+[assertions]
+min_sample_count = 1
+
+[metrics]
+capture_request_latency = true
+"#;
+
+        let asr = toml::from_str::<Scenario>(raw_asr).unwrap();
+        let tts = toml::from_str::<Scenario>(raw_tts).unwrap();
+
+        match asr.kind {
+            ScenarioKind::Asr(asr) => {
+                assert_eq!(asr.input.iterations, 5);
+                assert_eq!(asr.input.warmup_iterations, 1);
+            }
+            other => panic!("expected ASR scenario, got {other:?}"),
+        }
+        match tts.kind {
+            ScenarioKind::Tts(tts) => {
+                assert_eq!(tts.input.iterations, 5);
+                assert_eq!(tts.input.warmup_iterations, 1);
+            }
+            other => panic!("expected TTS scenario, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_asr_scenario_shape() {
         let scenario = load_scenario(&repo_eval_root(), "asr_short_transcription").unwrap();
 
@@ -568,6 +638,8 @@ capture_request_latency = true
             ScenarioKind::Asr(asr) => {
                 assert_eq!(asr.assertions.min_transcript_chars, Some(1));
                 assert_eq!(asr.input.language.as_deref(), Some("en"));
+                assert_eq!(asr.input.iterations, 3);
+                assert_eq!(asr.input.warmup_iterations, 1);
             }
             other => panic!("expected ASR scenario, got {other:?}"),
         }
@@ -582,6 +654,8 @@ capture_request_latency = true
             ScenarioKind::Tts(tts) => {
                 assert_eq!(tts.assertions.min_sample_count, Some(1));
                 assert_eq!(tts.input.text, "Hello from Motlie.");
+                assert_eq!(tts.input.iterations, 3);
+                assert_eq!(tts.input.warmup_iterations, 1);
             }
             other => panic!("expected TTS scenario, got {other:?}"),
         }

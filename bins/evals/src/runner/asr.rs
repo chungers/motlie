@@ -19,8 +19,8 @@ use crate::metrics::{
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
-    evaluate_performance_measured, evaluate_resource_status, observe_backend_accelerator,
-    prepare_bundle,
+    evaluate_performance_measured, evaluate_resource_status, mean, observe_backend_accelerator,
+    percentile, prepare_bundle,
 };
 use crate::runner::{RunContext, ScenarioRunner};
 use crate::scenario::{AsrAssertions, CapabilityName};
@@ -54,6 +54,10 @@ impl ScenarioRunner for AsrRunner {
             language: asr_scenario.input.language.clone(),
             emit_partials: false,
         };
+        let iteration_config = IterationConfig {
+            iterations: asr_scenario.input.iterations,
+            warmup_iterations: asr_scenario.input.warmup_iterations,
+        };
 
         let eval = run_selected_asr(
             &mut context,
@@ -65,6 +69,7 @@ impl ScenarioRunner for AsrRunner {
                 .input
                 .streaming_chunk_ms
                 .unwrap_or(DEFAULT_STREAMING_CHUNK_MS),
+            iteration_config,
         )
         .await?;
 
@@ -75,11 +80,21 @@ impl ScenarioRunner for AsrRunner {
             .as_ref()
             .map(|reference| word_error_rate(reference, &transcript));
         let asr_metrics = AsrPerformanceMetrics {
+            iterations: Some(eval.iterations),
+            successful_iterations: Some(eval.successful_iterations),
+            failed_iterations: Some(eval.failed_iterations),
+            last_iteration_error: eval.last_iteration_error,
             audio_duration_ms: Some(decoded.duration_ms),
-            transcription_latency_ms: Some(eval.transcription_latency_ms),
-            ttfp_first_partial_ms: eval.ttfp_first_partial_ms,
-            real_time_factor: (decoded.duration_ms > 0)
-                .then(|| eval.transcription_latency_ms as f64 / decoded.duration_ms as f64),
+            transcription_latency_ms: None,
+            mean_transcription_latency_ms: eval.mean_transcription_latency_ms,
+            p95_transcription_latency_ms: eval.p95_transcription_latency_ms,
+            ttfp_first_partial_ms: None,
+            ttfp_first_partial_samples_ms: eval.ttfp_first_partial_samples_ms,
+            mean_ttfp_first_partial_ms: eval.mean_ttfp_first_partial_ms,
+            p95_ttfp_first_partial_ms: eval.p95_ttfp_first_partial_ms,
+            real_time_factor: eval.mean_transcription_latency_ms.and_then(|value| {
+                (decoded.duration_ms > 0).then_some(value / decoded.duration_ms as f64)
+            }),
             transcript_chars: Some(transcript.chars().count() as u64),
             segment_count: Some(eval.segments.len() as u64),
             word_error_rate,
@@ -87,10 +102,10 @@ impl ScenarioRunner for AsrRunner {
         let unavailable = required_asr_metric_gaps(&asr_metrics, eval.mode);
         let performance = PerformanceMetrics {
             startup_ms: Some(eval.startup_ms),
-            request_latencies_ms: vec![eval.transcription_latency_ms],
+            warmup_ms: Some(eval.warmup_ms),
+            request_latencies_ms: eval.request_latencies_ms,
             unavailable,
             capability_metrics: CapabilityPerformanceMetrics::Asr(asr_metrics),
-            ..Default::default()
         };
         let resources = context.metrics_sampler.finish();
         let assertions =
@@ -123,9 +138,40 @@ struct DecodedAsrAudio {
 
 struct AsrEvalOutput {
     startup_ms: u64,
+    warmup_ms: u64,
+    iterations: u64,
+    successful_iterations: u64,
+    failed_iterations: u64,
+    last_iteration_error: Option<String>,
+    request_latencies_ms: Vec<u64>,
+    ttfp_first_partial_samples_ms: Vec<u64>,
+    mean_transcription_latency_ms: Option<f64>,
+    p95_transcription_latency_ms: Option<f64>,
+    mean_ttfp_first_partial_ms: Option<f64>,
+    p95_ttfp_first_partial_ms: Option<f64>,
+    mode: AsrMode,
+    segments: Vec<TranscriptSegment>,
+}
+
+struct AsrIterationMetrics {
     transcription_latency_ms: u64,
     ttfp_first_partial_ms: Option<u64>,
-    mode: AsrMode,
+    segments: Vec<TranscriptSegment>,
+}
+
+#[derive(Clone, Copy)]
+struct IterationConfig {
+    iterations: u64,
+    warmup_iterations: u64,
+}
+
+struct AsrIterationSummary {
+    iterations: u64,
+    successful_iterations: u64,
+    failed_iterations: u64,
+    last_iteration_error: Option<String>,
+    request_latencies_ms: Vec<u64>,
+    ttfp_first_partial_ms: Vec<u64>,
     segments: Vec<TranscriptSegment>,
 }
 
@@ -143,6 +189,7 @@ async fn run_selected_asr(
     i16_audio: AudioBuf<i16, ASR_SAMPLE_RATE_HZ, Mono>,
     params: TranscriptionParams,
     streaming_chunk_ms: u64,
+    iteration_config: IterationConfig,
 ) -> Result<AsrEvalOutput> {
     let bundle_id = prepared.bundle_id.as_str();
 
@@ -153,6 +200,7 @@ async fn run_selected_asr(
             crate::runner::support::start_options(context, prepared),
             f32_audio,
             params,
+            iteration_config,
             motlie_models::asr::whisper_base_en::start_typed,
         )
         .await;
@@ -166,6 +214,7 @@ async fn run_selected_asr(
             i16_audio,
             streaming_transcription_params(params),
             streaming_chunk_ms,
+            iteration_config,
             motlie_models::asr::sherpa_onnx_streaming_en::start_typed,
         )
         .await;
@@ -179,6 +228,7 @@ async fn run_selected_asr(
             i16_audio,
             streaming_transcription_params(params),
             streaming_chunk_ms,
+            iteration_config,
             motlie_models::asr::moonshine_streaming_en::start_typed,
         )
         .await;
@@ -199,6 +249,7 @@ async fn run_batch_asr<Handle, Start, StartFuture>(
     options: StartOptions,
     audio: AudioBuf<f32, ASR_SAMPLE_RATE_HZ, Mono>,
     params: TranscriptionParams,
+    iteration_config: IterationConfig,
     start: Start,
 ) -> Result<AsrEvalOutput>
 where
@@ -213,20 +264,71 @@ where
     observe_backend_accelerator(context, &handle);
     context.metrics_sampler.sample();
 
+    let warmup_started_at = std::time::Instant::now();
+    for _ in 0..iteration_config.warmup_iterations {
+        let _ = run_one_batch_asr(&handle, audio.clone(), params.clone()).await?;
+        context.metrics_sampler.sample();
+    }
+    let warmup_ms = elapsed_ms(warmup_started_at.elapsed());
+
+    let mut request_latencies_ms = Vec::new();
+    let mut ttfp_first_partial_ms = Vec::new();
+    let mut successful_iterations = 0_u64;
+    let mut failed_iterations = 0_u64;
+    let mut last_iteration_error = None;
+    let mut segments = Vec::new();
+    for _ in 0..iteration_config.iterations {
+        match run_one_batch_asr(&handle, audio.clone(), params.clone()).await {
+            Ok(iteration) => {
+                request_latencies_ms.push(iteration.transcription_latency_ms);
+                push_if_some(&mut ttfp_first_partial_ms, iteration.ttfp_first_partial_ms);
+                segments = iteration.segments;
+                successful_iterations += 1;
+            }
+            Err(error) => {
+                failed_iterations += 1;
+                last_iteration_error = Some(error.to_string());
+            }
+        }
+        context.metrics_sampler.sample();
+    }
+
+    handle.shutdown().await.context("ASR shutdown failed")?;
+
+    Ok(asr_eval_output(
+        startup_ms,
+        warmup_ms,
+        AsrMode::Batch,
+        AsrIterationSummary {
+            iterations: iteration_config.iterations,
+            successful_iterations,
+            failed_iterations,
+            last_iteration_error,
+            request_latencies_ms,
+            ttfp_first_partial_ms,
+            segments,
+        },
+    ))
+}
+
+async fn run_one_batch_asr<Handle>(
+    handle: &Handle,
+    audio: AudioBuf<f32, ASR_SAMPLE_RATE_HZ, Mono>,
+    params: TranscriptionParams,
+) -> Result<AsrIterationMetrics>
+where
+    Handle: BatchTranscriber<Input = AudioBuf<f32, ASR_SAMPLE_RATE_HZ, Mono>>,
+{
     let transcription_started_at = std::time::Instant::now();
     let update = handle
         .transcribe(audio, params)
         .await
         .context("batch transcription failed")?;
     let transcription_latency_ms = elapsed_ms(transcription_started_at.elapsed());
-    context.metrics_sampler.sample();
-    handle.shutdown().await.context("ASR shutdown failed")?;
 
-    Ok(AsrEvalOutput {
-        startup_ms,
+    Ok(AsrIterationMetrics {
         transcription_latency_ms,
         ttfp_first_partial_ms: None,
-        mode: AsrMode::Batch,
         segments: update.segments,
     })
 }
@@ -238,6 +340,7 @@ async fn run_streaming_asr<Handle, Start, StartFuture>(
     audio: AudioBuf<i16, ASR_SAMPLE_RATE_HZ, Mono>,
     params: TranscriptionParams,
     chunk_ms: u64,
+    iteration_config: IterationConfig,
     start: Start,
 ) -> Result<AsrEvalOutput>
 where
@@ -252,6 +355,62 @@ where
     observe_backend_accelerator(context, &handle);
     context.metrics_sampler.sample();
 
+    let warmup_started_at = std::time::Instant::now();
+    for _ in 0..iteration_config.warmup_iterations {
+        let _ = run_one_streaming_asr(&handle, audio.clone(), params.clone(), chunk_ms).await?;
+        context.metrics_sampler.sample();
+    }
+    let warmup_ms = elapsed_ms(warmup_started_at.elapsed());
+
+    let mut request_latencies_ms = Vec::new();
+    let mut ttfp_first_partial_ms = Vec::new();
+    let mut successful_iterations = 0_u64;
+    let mut failed_iterations = 0_u64;
+    let mut last_iteration_error = None;
+    let mut segments = Vec::new();
+    for _ in 0..iteration_config.iterations {
+        match run_one_streaming_asr(&handle, audio.clone(), params.clone(), chunk_ms).await {
+            Ok(iteration) => {
+                request_latencies_ms.push(iteration.transcription_latency_ms);
+                push_if_some(&mut ttfp_first_partial_ms, iteration.ttfp_first_partial_ms);
+                segments = iteration.segments;
+                successful_iterations += 1;
+            }
+            Err(error) => {
+                failed_iterations += 1;
+                last_iteration_error = Some(error.to_string());
+            }
+        }
+        context.metrics_sampler.sample();
+    }
+
+    handle.shutdown().await.context("ASR shutdown failed")?;
+
+    Ok(asr_eval_output(
+        startup_ms,
+        warmup_ms,
+        AsrMode::Streaming,
+        AsrIterationSummary {
+            iterations: iteration_config.iterations,
+            successful_iterations,
+            failed_iterations,
+            last_iteration_error,
+            request_latencies_ms,
+            ttfp_first_partial_ms,
+            segments,
+        },
+    ))
+}
+
+async fn run_one_streaming_asr<Handle>(
+    handle: &Handle,
+    audio: AudioBuf<i16, ASR_SAMPLE_RATE_HZ, Mono>,
+    params: TranscriptionParams,
+    chunk_ms: u64,
+) -> Result<AsrIterationMetrics>
+where
+    Handle: StreamingTranscriber<Input = AudioBuf<i16, ASR_SAMPLE_RATE_HZ, Mono>>,
+{
     let transcription_started_at = std::time::Instant::now();
     let mut session = handle
         .open_session(params)
@@ -285,23 +444,48 @@ where
         .context("streaming ASR finish failed")?;
     segments.extend(final_segments(final_update));
     let transcription_latency_ms = elapsed_ms(transcription_started_at.elapsed());
-    context.metrics_sampler.sample();
-    handle.shutdown().await.context("ASR shutdown failed")?;
 
-    Ok(AsrEvalOutput {
-        startup_ms,
+    Ok(AsrIterationMetrics {
         transcription_latency_ms,
         ttfp_first_partial_ms,
-        mode: AsrMode::Streaming,
         segments,
     })
+}
+
+fn asr_eval_output(
+    startup_ms: u64,
+    warmup_ms: u64,
+    mode: AsrMode,
+    summary: AsrIterationSummary,
+) -> AsrEvalOutput {
+    let mean_transcription_latency_ms = mean(&summary.request_latencies_ms);
+    let p95_transcription_latency_ms = percentile(&summary.request_latencies_ms, 0.95);
+    let mean_ttfp_first_partial_ms = mean(&summary.ttfp_first_partial_ms);
+    let p95_ttfp_first_partial_ms = percentile(&summary.ttfp_first_partial_ms, 0.95);
+
+    AsrEvalOutput {
+        startup_ms,
+        warmup_ms,
+        iterations: summary.iterations,
+        successful_iterations: summary.successful_iterations,
+        failed_iterations: summary.failed_iterations,
+        last_iteration_error: summary.last_iteration_error,
+        mean_transcription_latency_ms,
+        p95_transcription_latency_ms,
+        mean_ttfp_first_partial_ms,
+        p95_ttfp_first_partial_ms,
+        request_latencies_ms: summary.request_latencies_ms,
+        ttfp_first_partial_samples_ms: summary.ttfp_first_partial_ms,
+        mode,
+        segments: summary.segments,
+    }
 }
 
 fn required_asr_metric_gaps(
     metrics: &AsrPerformanceMetrics,
     mode: AsrMode,
 ) -> Vec<MetricUnavailable> {
-    if metrics.ttfp_first_partial_ms.is_some() {
+    if metrics.mean_ttfp_first_partial_ms.is_some() {
         return Vec::new();
     }
 
@@ -314,6 +498,12 @@ fn required_asr_metric_gaps(
         reason,
         "asr_runner",
     )]
+}
+
+fn push_if_some(values: &mut Vec<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        values.push(value);
+    }
 }
 
 fn decode_wav_mono16k(path: &Path) -> Result<DecodedAsrAudio> {
@@ -540,5 +730,32 @@ mod tests {
         assert_eq!(batch[0].reason, "metric_not_applicable_for_batch_engine");
         assert_eq!(streaming[0].metric, "ttfp_first_partial_ms");
         assert_eq!(streaming[0].reason, "metric_not_reported_by_backend");
+    }
+
+    #[test]
+    fn asr_eval_output_reports_mean_and_p95_over_iterations() {
+        let output = asr_eval_output(
+            10,
+            20,
+            AsrMode::Streaming,
+            AsrIterationSummary {
+                iterations: 4,
+                successful_iterations: 3,
+                failed_iterations: 1,
+                last_iteration_error: Some("last failure".to_owned()),
+                request_latencies_ms: vec![100, 200, 300],
+                ttfp_first_partial_ms: vec![10, 20, 30],
+                segments: Vec::new(),
+            },
+        );
+
+        assert_eq!(output.warmup_ms, 20);
+        assert_eq!(output.request_latencies_ms, vec![100, 200, 300]);
+        assert_eq!(output.mean_transcription_latency_ms, Some(200.0));
+        assert_eq!(output.p95_transcription_latency_ms, Some(300.0));
+        assert_eq!(output.last_iteration_error.as_deref(), Some("last failure"));
+        assert_eq!(output.ttfp_first_partial_samples_ms, vec![10, 20, 30]);
+        assert_eq!(output.mean_ttfp_first_partial_ms, Some(20.0));
+        assert_eq!(output.p95_ttfp_first_partial_ms, Some(30.0));
     }
 }
