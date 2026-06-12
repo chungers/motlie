@@ -160,7 +160,7 @@ impl Default for EndpointQualityConfig {
             min_turn_words: 2,
             min_turn_chars: 6,
             merge_window_ms: 350,
-            final_settle_ms: 350,
+            final_settle_ms: 800,
             max_turn_words: 80,
             max_turn_duration_ms: 12_000,
         }
@@ -376,18 +376,18 @@ impl VoiceQualityConfig {
         match profile {
             QualityProfile::Fast => {
                 config.endpoint.trailing_silence_ms = 550;
-                config.endpoint.final_settle_ms = 150;
+                config.endpoint.final_settle_ms = 350;
                 config.asr.finish_pad_ms = 80;
             }
             QualityProfile::Balanced => {}
             QualityProfile::Complete => {
                 config.endpoint.trailing_silence_ms = 1_100;
-                config.endpoint.final_settle_ms = 600;
+                config.endpoint.final_settle_ms = 1_000;
                 config.asr.finish_pad_ms = 320;
             }
             QualityProfile::Noisy => {
                 config.endpoint.trailing_silence_ms = 950;
-                config.endpoint.final_settle_ms = 500;
+                config.endpoint.final_settle_ms = 900;
                 config.speech.rms_threshold = 260.0;
                 config.speech.peak_threshold = 1_200;
                 config.asr.finish_pad_ms = 240;
@@ -1436,7 +1436,7 @@ mod tests {
         assert_eq!(config.speech.rms_threshold, 220.0);
         assert_eq!(config.speech.peak_threshold, 1_100);
         assert_eq!(config.speech.onset_min_silence_ms, 180);
-        assert_eq!(config.endpoint.final_settle_ms, 350);
+        assert_eq!(config.endpoint.final_settle_ms, 800);
         assert_eq!(config.asr.finish_pad_ms, 320);
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
