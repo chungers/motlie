@@ -50,7 +50,7 @@ Issue #480 supplied the model-layer confidence carrier. Issue #481 layers the sc
 
 ## Negotiation
 
-The gateway advertises supported text-stream extensions in callback payloads. An app opts in by returning the extension in `AcceptCallResponse.extensions`:
+The gateway advertises supported text-stream extensions in callback payloads. An app opts in by returning the extension in `AcceptCallResponse.extensions`; the bundled `bins/telnyx-agent` does this by default so local live calls exercise advisory partial delivery while still waiting for final `caller.turn` before speaking:
 
 ```json
 {

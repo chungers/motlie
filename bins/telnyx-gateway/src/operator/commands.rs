@@ -628,6 +628,9 @@ pub enum QualityEndpointCommand {
     MinTurnChars { n: usize },
     MergeWindowMs { ms: u64 },
     FinalSettleMs { ms: u64 },
+    ConversationIncompleteTailHoldMs { ms: u64 },
+    ConversationLowConfidenceThresholdPercent { percent: u64 },
+    ConversationPlaybackHoldPollMs { ms: u64 },
     MaxTurnWords { n: usize },
     MaxTurnDurationMs { ms: u64 },
 }
@@ -2451,12 +2454,15 @@ async fn quality_endpoint_command(
             let guard = context.state.read().await;
             let endpoint = &guard.quality.config.endpoint;
             Ok(CommandOutput::text(format!(
-                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nfinal_settle_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
+                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nfinal_settle_ms={}\nconversation_incomplete_tail_hold_ms={}\nconversation_low_confidence_threshold_percent={}\nconversation_playback_hold_poll_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
                 endpoint.trailing_silence_ms,
                 endpoint.min_turn_words,
                 endpoint.min_turn_chars,
                 endpoint.merge_window_ms,
                 endpoint.final_settle_ms,
+                endpoint.conversation_incomplete_tail_hold_ms,
+                endpoint.conversation_low_confidence_threshold_percent,
+                endpoint.conversation_playback_hold_poll_ms,
                 endpoint.max_turn_words,
                 endpoint.max_turn_duration_ms
             )))
@@ -2485,6 +2491,24 @@ async fn quality_endpoint_command(
                 context,
                 |config| Ok(config.set_endpoint_final_settle_ms(ms)),
             )
+            .await
+        }
+        QualityEndpointCommand::ConversationIncompleteTailHoldMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_conversation_incomplete_tail_hold_ms(ms))
+            })
+            .await
+        }
+        QualityEndpointCommand::ConversationLowConfidenceThresholdPercent { percent } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_conversation_low_confidence_threshold_percent(percent))
+            })
+            .await
+        }
+        QualityEndpointCommand::ConversationPlaybackHoldPollMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_conversation_playback_hold_poll_ms(ms))
+            })
             .await
         }
         QualityEndpointCommand::MaxTurnWords { n } => {
@@ -3245,6 +3269,9 @@ fn quality_help() -> String {
         "quality endpoint min-turn-chars <n>            range=0..200 default=6 report_only",
         "quality endpoint merge-window-ms <ms>          range=0..5000 default=350ms applies=new_turn",
         "quality endpoint final-settle-ms <ms>          range=0..5000 default=800ms applies=next_asr_session",
+        "quality endpoint conversation-incomplete-tail-hold-ms <ms> range=0..10000 default=2500ms applies=new_turn",
+        "quality endpoint conversation-low-confidence-threshold-percent <n> range=0..100 default=45 applies=new_turn",
+        "quality endpoint conversation-playback-hold-poll-ms <ms> range=10..1000 default=100ms applies=new_turn",
         "quality endpoint max-turn-words <n>            range=1..500 default=80 report_only",
         "quality endpoint max-turn-duration-ms <ms>     range=1000..120000 default=12000ms report_only",
         "quality speech status",
@@ -5135,6 +5162,25 @@ mod tests {
             state.read().await.quality.config.endpoint.final_settle_ms,
             5_000
         );
+
+        let conversation_hold_output = engine
+            .run_line("quality endpoint conversation-incomplete-tail-hold-ms 99999")
+            .await
+            .expect("set conversation incomplete tail hold");
+        assert!(conversation_hold_output.lines[0]
+            .contains("key=endpoint.conversation_incomplete_tail_hold_ms"));
+        assert!(conversation_hold_output.lines[0].contains("applies=new_turn"));
+        assert!(conversation_hold_output.lines[0].contains("clamped=true"));
+        assert_eq!(
+            state
+                .read()
+                .await
+                .quality
+                .config
+                .endpoint
+                .conversation_incomplete_tail_hold_ms,
+            10_000
+        );
     }
 
     #[tokio::test]
@@ -5336,6 +5382,9 @@ mod tests {
             config.set_endpoint_min_turn_chars(12);
             config.set_endpoint_merge_window_ms(444);
             config.set_endpoint_final_settle_ms(333);
+            config.set_endpoint_conversation_incomplete_tail_hold_ms(2_345);
+            config.set_endpoint_conversation_low_confidence_threshold_percent(39);
+            config.set_endpoint_conversation_playback_hold_poll_ms(77);
             config.set_endpoint_max_turn_words(123);
             config.set_endpoint_max_turn_duration_ms(7_654);
             config.set_asr_repeated_token_run_threshold(42);

@@ -13,7 +13,8 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
 use motlie_agent::voice::telnyx::text::{
-    AcceptCallResponse, CallConnectedPayload, CallOfferPayload, TEXT_CALL_PROTOCOL,
+    AcceptCallResponse, CallConnectedPayload, CallOfferPayload, TEXT_CALL_PARTIALS_EXTENSION,
+    TEXT_CALL_PROTOCOL,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -170,9 +171,13 @@ fn accept_response(state: &AgentState, call_id: &str) -> (StatusCode, Json<Accep
             .replace("https://", "wss://")
             .replace("http://", "ws://"),
         accept: true,
-        extensions: Vec::new(),
+        extensions: accepted_text_call_extensions(),
     };
     (StatusCode::OK, Json(response))
+}
+
+fn accepted_text_call_extensions() -> Vec<String> {
+    vec![TEXT_CALL_PARTIALS_EXTENSION.to_string()]
 }
 
 async fn text_call_ws(
@@ -398,6 +403,14 @@ mod tests {
     use motlie_agent::voice::telnyx::text::{TextCallDirection, TextCallInfo};
 
     const TEST_SECRET: &[u8] = b"callback-test-secret";
+
+    #[test]
+    fn accept_response_opts_into_advisory_partials() {
+        assert_eq!(
+            accepted_text_call_extensions(),
+            vec![TEXT_CALL_PARTIALS_EXTENSION.to_string()]
+        );
+    }
 
     #[tokio::test]
     async fn bridge_admission_allows_only_one_active_call() {

@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-12 PDT | @codex-366-impl | Resolved #488 generality review: final-settle fragment classifiers and conversation final-coalescing hold policy now live under `VoiceQualityConfig.endpoint` with default-preserving values, and `bins/telnyx-agent` opts into `motlie.telnyx.text.partials.v1` so advisory partials are exercised in live calls. |
 | 2026-06-12 PDT | @codex-366-impl | Added #481/David stability ruling notes: `caller.partial.stability` is gateway-estimated stream convergence/churn only, never confidence/truth/probability/response input, and successful advisory partials emit `text_call.caller_partial.sent` for live-test analysis. |
 | 2026-06-11 PDT | @codex-366-impl | Generalized conversation final debounce from smoke-harness wording: coalescing handlers use the 350 ms `endpoint.merge_window_ms`, M4 `caller.turn` stays unmerged, and `tts.first_chunk_max_chars` defaults to 40 for lower first-audio latency. |
 | 2026-06-11 PDT | @codex-366-impl | Calibrated generic `endpoint.final_settle_ms` to an 800 ms default for the media-path endpointing knobs: incomplete final fragments can be held/merged before live `caller.turn` or conversation dispatch, while `endpoint.merge_window_ms` drives handler-local committed-turn coalescing only. |
@@ -358,7 +359,7 @@ Early events often happen before a `turn_id` exists. M6 therefore requires a pre
 }
 ```
 
-When an opted-in advisory partial is successfully forwarded, emit the structured partial record. This is the live-test analysis hook for comparing `stability` against later partial survival and final text. `confidence` remains model-native when present. `stability` is gateway-estimated stream convergence/churn only: use it for preparation/routing/debounce analysis, never for truth, final response generation, model/ASR confidence, calibrated probability, or averaging/combining with `confidence`. Raw partial text follows `logging.include_transcript_text`.
+When an opted-in advisory partial is successfully forwarded, emit the structured partial record. `bins/telnyx-agent` opts into the extension in its accept response so local live calls exercise this path. This is the live-test analysis hook for comparing `stability` against later partial survival and final text. `confidence` remains model-native when present. `stability` is gateway-estimated stream convergence/churn only: use it for preparation/routing/debounce analysis, never for truth, final response generation, model/ASR confidence, calibrated probability, or averaging/combining with `confidence`. Raw partial text follows `logging.include_transcript_text`.
 
 ```json
 {
@@ -406,8 +407,8 @@ Boundary rules:
 - The end is the finalization decision, not the later transcript-to-turn handoff.
 - Hot-reloaded ASR/endpoint config applies only when the next `asr.session.started` event is created.
 - `asr.finish_pad_ms` is separate from endpoint trailing silence. It is a short ASR flush pad after the endpoint decision, not another full endpoint wait.
-- `endpoint.merge_window_ms` may label adjacent turns as likely merge candidates in reports and may be used by coalescing conversation handlers as a handler-local committed-turn debounce, but it must not merge live M4 `caller.turn` events on the app-agent protocol.
-- `endpoint.final_settle_ms` is the live media-path hold window for structurally incomplete final fragments. It runs before `caller.turn` / `ConversationHandler` dispatch, merges a pending fragment with a continuation final when one arrives, and otherwise flushes on timeout or stream end.
+- `endpoint.merge_window_ms` may label adjacent turns as likely merge candidates in reports and may be used by coalescing conversation handlers as a handler-local committed-turn debounce, but it must not merge live M4 `caller.turn` events on the app-agent protocol. Conversation-only continuation holds are governed by `endpoint.conversation_tail_words`, `endpoint.conversation_incomplete_tail_hold_ms`, `endpoint.conversation_low_confidence_threshold_percent`, and `endpoint.conversation_playback_hold_poll_ms`.
+- `endpoint.final_settle_ms` is the live media-path hold window for structurally incomplete final fragments. The holdable-fragment classifier is policy-backed by `endpoint.final_settle_trailing_punctuation`, `endpoint.final_settle_lead_words`, `endpoint.final_settle_tail_words`, and `endpoint.final_settle_dangling_suffixes`. It runs before `caller.turn` / `ConversationHandler` dispatch, merges a pending fragment with a continuation final when one arrives, and otherwise flushes on timeout or stream end.
 
 ## Text-Call and App-Agent Spans
 
@@ -708,6 +709,8 @@ Report-only/advisory analysis knobs:
 | `endpoint.min_turn_chars` | Label tiny text fragments. | None; must not suppress `caller.turn`. |
 | `endpoint.merge_window_ms` | Suggest adjacent-turn merge candidates in reports; handler-local committed-turn debounce for coalescing conversation handlers. | None for M4 app-agent `caller.turn`; coalescing conversation handlers may delay/merge only their local handler input. |
 | `endpoint.final_settle_ms` | Explain bounded live holds for dangling-tail final fragments. | Holds only structurally incomplete finals before `caller.turn`; merges with a continuation final or flushes on timeout/stream end. |
+| `endpoint.final_settle_trailing_punctuation` / `endpoint.final_settle_lead_words` / `endpoint.final_settle_tail_words` / `endpoint.final_settle_dangling_suffixes` | Explain why a final was considered structurally incomplete. | TOML/replay policy only; defaults preserve the live-tuned English fragment classifier. |
+| `endpoint.conversation_tail_words` / `endpoint.conversation_incomplete_tail_hold_ms` / `endpoint.conversation_low_confidence_threshold_percent` / `endpoint.conversation_playback_hold_poll_ms` | Explain handler-local final coalescing holds. | Applies only to coalescing conversation handlers; no M4 app-agent `caller.turn` merge. |
 | `endpoint.max_turn_words` | Flag likely overmerged turns. | None; must not split live turns. |
 | `endpoint.max_turn_duration_ms` | Flag long utterance or late endpointing. | None; must not force live endpointing. |
 
@@ -914,7 +917,7 @@ Prompt requirements:
 | Replay ASR | `--trailing-silence-pad-ms` | CLI implemented | `800` | finalization behavior |
 | ASR backend | `--backend`, `asr use` | CLI/REPL implemented | selected backend | backend comparison |
 | Codec eval | `--codec` in golden A/B | CLI implemented | selected matrix | Telnyx format comparison |
-| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` for normal conversation; smoke-test enablement sets `off`; coalescing handlers use `endpoint.merge_window_ms` plus active-playback hold | interruption realism vs deterministic echo validation |
+| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` for normal conversation; smoke-test enablement sets `off`; coalescing handlers use `endpoint.merge_window_ms` plus endpoint conversation hold policy | interruption realism vs deterministic echo validation |
 | Text-call | `quality text-call max-active-turns <n>` | REPL/socket/TUI implemented | `32` | runaway app-agent lag |
 | Text-call | `quality text-call media-ready-timeout-ms <ms>` | REPL/socket/TUI implemented | `20000 ms` | setup reliability |
 | Text-call | `quality text-call playback-wait-timeout-ms <ms>` | REPL/socket/TUI implemented | `180000 ms` | hung playback detection |
@@ -947,6 +950,14 @@ Prompt requirements:
 | `endpoint.min_turn_chars` | `ReportOnlyCount` | `0..200` | `6` | clamp to range | report only | Tiny-turn label threshold only. |
 | `endpoint.merge_window_ms` | `DurationMs` | `0..5000` | `350` | clamp to range | new conversation turn; no M4 `caller.turn` merge | Adjacent-turn recommendation and handler-local committed final debounce only. |
 | `endpoint.final_settle_ms` | `DurationMs` | `0..5000` | `800` | clamp to range | next ASR session | Bounded media-path hold/merge for structurally incomplete final fragments before live dispatch. |
+| `endpoint.final_settle_trailing_punctuation` | `StringList` | max 8 entries, 32 chars each | `[",", ":", ";"]` | reject oversize | next ASR session | Holdable trailing punctuation policy. |
+| `endpoint.final_settle_lead_words` | `StringList` | max 40 entries, 256 chars each | `although,because,...` | reject oversize | next ASR session | Holdable leading-fragment word policy. |
+| `endpoint.final_settle_tail_words` | `StringList` | max 64 entries, 256 chars each | `a,an,also,...` | reject oversize | next ASR session | Holdable dangling-tail word policy. |
+| `endpoint.final_settle_dangling_suffixes` | `StringList` | max 8 entries, 32 chars each | `["'", "-"]` | reject oversize | next ASR session | Holdable dangling suffix policy. |
+| `endpoint.conversation_tail_words` | `StringList` | max 64 entries, 256 chars each | `a,an,and,...` | reject oversize | new conversation turn | Handler-local incomplete-tail policy. |
+| `endpoint.conversation_incomplete_tail_hold_ms` | `DurationMs` | `0..10000` | `2500` | clamp to range | new conversation turn | Max handler-local hold for incomplete tails or low-confidence non-terminal finals. |
+| `endpoint.conversation_low_confidence_threshold_percent` | `Percent` | `0..100` | `45` | clamp to range | new conversation turn | Backend-native confidence threshold for handler-local non-terminal holds. |
+| `endpoint.conversation_playback_hold_poll_ms` | `DurationMs` | `10..1000` | `100` | clamp to range | new conversation turn | Recheck cadence while a coalescing handler waits for active playback to finish. |
 | `endpoint.max_turn_words` | `ReportOnlyCount` | `1..500` | `80` | clamp to range | report only | Overmerged-turn label threshold only. |
 | `endpoint.max_turn_duration_ms` | `ReportOnlyDurationMs` | `1000..120000` | `12000` | clamp to range | report only | Long-turn label threshold only. |
 | `asr.finish_pad_ms` | `DurationMs` | `0..2000` | `320` | clamp to range | next ASR session | Short final ASR flush pad after endpoint decision; separate from endpoint tail. |
@@ -1022,6 +1033,14 @@ min_turn_words = 2
 min_turn_chars = 6
 merge_window_ms = 350
 final_settle_ms = 800
+final_settle_trailing_punctuation = [",", ":", ";"]
+final_settle_lead_words = ["although", "because", "whereas", "while", "when", "if", "unless", "since", "before", "after", "though"]
+final_settle_tail_words = ["a", "an", "also", "the", "and", "or", "but", "if", "then", "than", "because", "so", "to", "of", "for", "with", "without", "in", "on", "at", "by", "from", "as", "is", "are", "was", "were", "be", "being", "been", "this", "that", "these", "those", "my", "your", "our", "their", "his", "her", "its"]
+final_settle_dangling_suffixes = ["'", "-"]
+conversation_tail_words = ["a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "did", "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might", "must", "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were", "where", "will", "with", "would"]
+conversation_incomplete_tail_hold_ms = 2500
+conversation_low_confidence_threshold_percent = 45
+conversation_playback_hold_poll_ms = 100
 max_turn_words = 80
 max_turn_duration_ms = 12000
 

@@ -17,21 +17,14 @@ use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
     CallStatus, ConversationMode, LogLevel, QualitySpanEmission, SharedState,
 };
-use crate::quality::{BargeInQualityConfig, RedactionMode, VoiceQualityConfig};
+use crate::quality::{
+    BargeInQualityConfig, EndpointQualityConfig, RedactionMode, VoiceQualityConfig,
+};
 use crate::speech;
 use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::SharedTtsRegistry;
 
 const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
-const CONVERSATION_PLAYBACK_HOLD_POLL_MS: u64 = 100;
-const CONVERSATION_INCOMPLETE_TAIL_HOLD_MS: u64 = 2_500;
-const CONVERSATION_LOW_CONFIDENCE_THRESHOLD: f32 = 0.45;
-const CONVERSATION_INCOMPLETE_TAIL_WORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "did",
-    "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might", "must",
-    "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were", "where",
-    "will", "with", "would",
-];
 
 pub type SharedConversationHandler = Arc<dyn ConversationHandler>;
 
@@ -128,7 +121,7 @@ impl ConversationRuntime {
 #[derive(Clone, Debug)]
 struct ConversationFinalInput {
     event: TranscriptEvent,
-    quality_config: Option<VoiceQualityConfig>,
+    quality_config: VoiceQualityConfig,
     final_transcript_at: Instant,
     debounce: Duration,
     turn_id: Option<String>,
@@ -137,7 +130,7 @@ struct ConversationFinalInput {
 #[derive(Clone, Debug)]
 struct PendingConversationFinal {
     event: TranscriptEvent,
-    quality_config: Option<VoiceQualityConfig>,
+    quality_config: VoiceQualityConfig,
     final_transcript_at: Instant,
     generation: u64,
     turn_id: Option<String>,
@@ -265,7 +258,7 @@ pub async fn handle_transcript_event_with_turn(
     }
 
     let event = event_with_trimmed_text(event, transcript_text);
-    let quality_config = quality_config.cloned();
+    let quality_config = snapshot.quality_config.clone();
     if snapshot.endpoint_merge_window_ms == 0 || !runtime.final_coalescing_enabled() {
         return dispatch_final_transcript_to_handler(
             state,
@@ -273,7 +266,7 @@ pub async fn handle_transcript_event_with_turn(
             runtime,
             gateway_call_id,
             event,
-            quality_config.as_ref(),
+            Some(&quality_config),
             ConversationTurnContext {
                 finalized_at: Some(final_transcript_at),
                 turn_id: turn_id.map(str::to_string),
@@ -333,9 +326,6 @@ async fn schedule_conversation_final(
         } else {
             entry.event = merge_conversation_final_events(&entry.event, input.event);
         }
-        if entry.quality_config.is_none() {
-            entry.quality_config = input.quality_config;
-        }
         if entry.turn_id.is_none() {
             entry.turn_id = input.turn_id;
         }
@@ -362,13 +352,13 @@ async fn schedule_conversation_final(
                 .await
                 .is_some()
             {
-                let Some(next_generation) =
+                let Some((next_generation, next_delay)) =
                     defer_ready_conversation_final(&runtime, &gateway_call_id, generation).await
                 else {
                     return;
                 };
                 generation = next_generation;
-                delay = Duration::from_millis(CONVERSATION_PLAYBACK_HOLD_POLL_MS);
+                delay = next_delay;
                 tracing::debug!(
                     gateway_call_id,
                     generation,
@@ -388,13 +378,13 @@ async fn schedule_conversation_final(
                 conversation_final_hold_reason(entry)
             };
             if let Some(reason) = hold_reason {
-                let Some(next_generation) =
+                let Some((next_generation, next_delay)) =
                     defer_ready_conversation_final(&runtime, &gateway_call_id, generation).await
                 else {
                     return;
                 };
                 generation = next_generation;
-                delay = Duration::from_millis(CONVERSATION_PLAYBACK_HOLD_POLL_MS);
+                delay = next_delay;
                 tracing::debug!(
                     gateway_call_id,
                     generation,
@@ -417,7 +407,7 @@ async fn schedule_conversation_final(
                 &runtime,
                 &gateway_call_id,
                 pending.event,
-                pending.quality_config.as_ref(),
+                Some(&pending.quality_config),
                 ConversationTurnContext {
                     finalized_at: Some(pending.final_transcript_at),
                     turn_id: pending.turn_id,
@@ -441,12 +431,18 @@ async fn defer_ready_conversation_final(
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
     generation: u64,
-) -> Option<u64> {
+) -> Option<(u64, Duration)> {
     let mut pending = runtime.pending_conversation_finals.lock().await;
     match pending.get_mut(gateway_call_id) {
         Some(entry) if entry.generation == generation => {
             entry.generation = entry.generation.saturating_add(1);
-            Some(entry.generation)
+            let delay = Duration::from_millis(
+                entry
+                    .quality_config
+                    .endpoint
+                    .conversation_playback_hold_poll_ms,
+            );
+            Some((entry.generation, delay))
         }
         _ => None,
     }
@@ -483,44 +479,27 @@ fn merge_conversation_finals(existing: &str, next: &str) -> String {
 }
 
 fn conversation_final_hold_reason(pending: &PendingConversationFinal) -> Option<&'static str> {
+    let endpoint = &pending.quality_config.endpoint;
     if pending.final_transcript_at.elapsed()
-        >= Duration::from_millis(CONVERSATION_INCOMPLETE_TAIL_HOLD_MS)
+        >= Duration::from_millis(endpoint.conversation_incomplete_tail_hold_ms)
     {
         return None;
     }
-    conversation_incomplete_tail_reason(pending.event.text())
-        .or_else(|| conversation_low_confidence_hold_reason(&pending.event))
+    endpoint
+        .conversation_incomplete_tail_reason(pending.event.text())
+        .or_else(|| conversation_low_confidence_hold_reason(&pending.event, endpoint))
 }
 
-fn conversation_incomplete_tail_reason(text: &str) -> Option<&'static str> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || ends_with_terminal_punctuation(trimmed) {
-        return None;
-    }
-    if trimmed.ends_with('\'') || trimmed.ends_with('-') {
-        return Some("dangling_tail");
-    }
-    let tail = trimmed
-        .split_whitespace()
-        .last()?
-        .trim_matches(|character: char| {
-            !character.is_alphanumeric() && character != '\'' && character != '-'
-        })
-        .to_ascii_lowercase();
-    if CONVERSATION_INCOMPLETE_TAIL_WORDS.contains(&tail.as_str()) {
-        Some("tail_word")
-    } else {
-        None
-    }
-}
-
-fn conversation_low_confidence_hold_reason(event: &TranscriptEvent) -> Option<&'static str> {
+fn conversation_low_confidence_hold_reason(
+    event: &TranscriptEvent,
+    endpoint: &EndpointQualityConfig,
+) -> Option<&'static str> {
     let text = event.text().trim();
-    if text.is_empty() || ends_with_terminal_punctuation(text) {
+    if !endpoint.conversation_low_confidence_hold_allowed(text) {
         return None;
     }
     let confidence = latest_transcript_confidence(event)?;
-    (confidence < CONVERSATION_LOW_CONFIDENCE_THRESHOLD).then_some("low_confidence_tail")
+    (confidence < endpoint.conversation_low_confidence_threshold()).then_some("low_confidence_tail")
 }
 
 fn latest_transcript_confidence(event: &TranscriptEvent) -> Option<f32> {
@@ -534,25 +513,14 @@ fn latest_transcript_confidence(event: &TranscriptEvent) -> Option<f32> {
     })
 }
 
-fn ends_with_terminal_punctuation(text: &str) -> bool {
-    text.ends_with('.') || text.ends_with('?') || text.ends_with('!')
-}
-
 async fn emit_conversation_final_debounce_span(
     state: &SharedState,
     gateway_call_id: &str,
     pending: &PendingConversationFinal,
     debounce: Duration,
 ) {
-    let (config_id, redaction_mode) = if let Some(config) = pending.quality_config.as_ref() {
-        (config.config_id(), config.logging.redaction_mode)
-    } else {
-        let guard = state.read().await;
-        (
-            guard.quality.config_id.clone(),
-            guard.quality.config.logging.redaction_mode,
-        )
-    };
+    let config_id = pending.quality_config.config_id();
+    let redaction_mode = pending.quality_config.logging.redaction_mode;
     let payload = serde_json::json!({
         "debounce_ms": debounce.as_millis() as u64,
         "text_chars": pending.event.text().chars().count(),
@@ -784,6 +752,7 @@ struct ConversationSnapshot {
     config_id: String,
     redaction_mode: RedactionMode,
     endpoint_merge_window_ms: u64,
+    quality_config: VoiceQualityConfig,
     context: CallContext,
 }
 
@@ -810,23 +779,13 @@ async fn conversation_snapshot(
     if let Some(text) = &call.conversation.last_assistant_text {
         custom_state.insert("last_assistant_text".to_string(), text.clone());
     }
-    let (barge_in, config_id, redaction_mode, endpoint_merge_window_ms) = quality_config
-        .map(|quality_config| {
-            (
-                quality_config.barge_in.clone(),
-                quality_config.config_id(),
-                quality_config.logging.redaction_mode,
-                quality_config.endpoint.merge_window_ms,
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                guard.quality.config.barge_in.clone(),
-                guard.quality.config_id.clone(),
-                guard.quality.config.logging.redaction_mode,
-                guard.quality.config.endpoint.merge_window_ms,
-            )
-        });
+    let effective_quality = quality_config
+        .cloned()
+        .unwrap_or_else(|| guard.quality.config.clone());
+    let barge_in = effective_quality.barge_in.clone();
+    let config_id = effective_quality.config_id();
+    let redaction_mode = effective_quality.logging.redaction_mode;
+    let endpoint_merge_window_ms = effective_quality.endpoint.merge_window_ms;
     Some(ConversationSnapshot {
         attached: call.conversation.attached,
         mode: call.conversation.mode,
@@ -835,6 +794,7 @@ async fn conversation_snapshot(
         config_id,
         redaction_mode,
         endpoint_merge_window_ms,
+        quality_config: effective_quality,
         context: CallContext {
             ids: Some(CallIds {
                 provider_call_id: call.ids.call_control_id.clone(),
@@ -1916,16 +1876,22 @@ mod tests {
     #[test]
     fn conversation_incomplete_tail_detector_is_conservative() {
         assert_eq!(
-            conversation_incomplete_tail_reason("Endpointing is still a problem, isn'"),
+            EndpointQualityConfig::default()
+                .conversation_incomplete_tail_reason("Endpointing is still a problem, isn'"),
             Some("dangling_tail")
         );
         assert_eq!(
-            conversation_incomplete_tail_reason("the endpoints are"),
+            EndpointQualityConfig::default()
+                .conversation_incomplete_tail_reason("the endpoints are"),
             Some("tail_word")
         );
-        assert_eq!(conversation_incomplete_tail_reason("Can you hear me"), None);
         assert_eq!(
-            conversation_incomplete_tail_reason("Can you hear me?"),
+            EndpointQualityConfig::default().conversation_incomplete_tail_reason("Can you hear me"),
+            None
+        );
+        assert_eq!(
+            EndpointQualityConfig::default()
+                .conversation_incomplete_tail_reason("Can you hear me?"),
             None
         );
     }
