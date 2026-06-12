@@ -1823,12 +1823,23 @@ unauthorized access to model cache"#,
         write_file(
             &root.join("models--koboldcpp--tts/snapshots/test/qwen3-tts-tokenizer-f16.gguf"),
         );
+        write_file(&root.join(
+            "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/onnx/model_quantized.onnx",
+        ));
+        write_file(
+            &root
+                .join("models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/tokenizer.json"),
+        );
+        write_file(&root.join(
+            "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/voices/af_bella.bin",
+        ));
 
         let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
             .expect("curated snapshot should parse");
         for cell_id in [
             "whisper_base_en__asr_short_transcription__smoke__ggml_default",
             "moonshine_streaming_en__asr_short_transcription__smoke__hf_default",
+            "kokoro_82m__tts_synthesis_smoke__smoke__onnx_default",
             "qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0",
         ] {
             let cell = snapshot
