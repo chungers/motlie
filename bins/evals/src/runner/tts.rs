@@ -169,6 +169,19 @@ async fn run_selected_tts(
         .await;
     }
 
+    #[cfg(feature = "model-kokoro-82m")]
+    if bundle_id == "kokoro_82m" {
+        return run_typed_tts::<_, _, _, i16, 24_000>(
+            context,
+            crate::runner::support::start_options(context, prepared),
+            request,
+            iterations,
+            warmup_iterations,
+            motlie_models::tts::kokoro_82m::start_typed,
+        )
+        .await;
+    }
+
     #[cfg(feature = "model-qwen3-tts-cpp")]
     if bundle_id == "qwen3_tts_cpp_0_6b" {
         return run_typed_tts::<_, _, _, f32, 24_000>(

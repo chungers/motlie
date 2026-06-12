@@ -1182,6 +1182,7 @@ pub struct ResolvedModelDescriptor {
 pub enum ModelSelector {
     #[cfg(any(
         feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-kokoro-82m",
         feature = "model-qwen3-tts-cpp",
     ))]
     Tts(TtsModels),
@@ -1234,6 +1235,7 @@ impl ModelSelector {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             Self::Tts(model) => format!("tts:{}", model.as_str()),
@@ -1267,6 +1269,7 @@ impl ModelSelector {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             Self::Tts(model) => model.bundle_id(),
@@ -1300,6 +1303,7 @@ impl ModelSelector {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             Self::Tts(model) => model.descriptor(),
@@ -1333,6 +1337,7 @@ impl ModelSelector {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             Self::Tts(model) => Ok(model.bundle()),
@@ -1413,11 +1418,13 @@ impl FromStr for ModelSelector {
             }
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             ))]
             return Ok(Self::Tts(raw.parse()?));
             #[cfg(not(any(
                 feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-kokoro-82m",
                 feature = "model-qwen3-tts-cpp",
             )))]
             return Err(ModelsError::UnknownModelSelector {
