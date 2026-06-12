@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono, SpeechStream, SpeechSynthesizer, SynthesisRequest};
 use motlie_model::{BundleHandle, ModelError, SpeechParams, StartOptions};
 
-use crate::metrics::{CapabilityPerformanceMetrics, PerformanceMetrics, TtsPerformanceMetrics};
+use crate::metrics::{
+    CapabilityPerformanceMetrics, MetricUnavailable, PerformanceMetrics, TtsPerformanceMetrics,
+};
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
@@ -48,6 +50,7 @@ impl ScenarioRunner for TtsRunner {
         let tts_metrics = TtsPerformanceMetrics {
             text_chars: Some(tts_scenario.input.text.chars().count() as u64),
             synthesis_latency_ms: Some(eval.synthesis_latency_ms),
+            ttfa_first_chunk_ms: eval.ttfa_first_chunk_ms,
             audio_duration_ms: Some(eval.audio_duration_ms),
             real_time_factor: (eval.audio_duration_ms > 0)
                 .then(|| eval.synthesis_latency_ms as f64 / eval.audio_duration_ms as f64),
@@ -55,9 +58,11 @@ impl ScenarioRunner for TtsRunner {
             sample_rate_hz: Some(eval.sample_rate_hz),
             chunk_count: Some(eval.chunk_count),
         };
+        let unavailable = required_tts_metric_gaps(&tts_metrics);
         let performance = PerformanceMetrics {
             startup_ms: Some(eval.startup_ms),
             request_latencies_ms: vec![eval.synthesis_latency_ms],
+            unavailable,
             capability_metrics: CapabilityPerformanceMetrics::Tts(tts_metrics),
             ..Default::default()
         };
@@ -90,6 +95,7 @@ impl ScenarioRunner for TtsRunner {
 struct TtsEvalOutput {
     startup_ms: u64,
     synthesis_latency_ms: u64,
+    ttfa_first_chunk_ms: Option<u64>,
     audio_duration_ms: u64,
     sample_count: u64,
     sample_rate_hz: u64,
@@ -157,6 +163,7 @@ where
         .context("failed to open typed speech stream")?;
     let mut sample_count = 0_u64;
     let mut chunk_count = 0_u64;
+    let mut ttfa_first_chunk_ms = None;
     while let Some(chunk) = stream
         .next_chunk()
         .await
@@ -164,6 +171,9 @@ where
     {
         sample_count = sample_count.saturating_add(chunk.samples().len() as u64);
         chunk_count = chunk_count.saturating_add(1);
+        if ttfa_first_chunk_ms.is_none() {
+            ttfa_first_chunk_ms = Some(elapsed_ms(synthesis_started_at.elapsed()));
+        }
         context.metrics_sampler.sample();
     }
     stream
@@ -177,11 +187,24 @@ where
     Ok(TtsEvalOutput {
         startup_ms,
         synthesis_latency_ms,
+        ttfa_first_chunk_ms,
         audio_duration_ms,
         sample_count,
         sample_rate_hz: u64::from(RATE_HZ),
         chunk_count,
     })
+}
+
+fn required_tts_metric_gaps(metrics: &TtsPerformanceMetrics) -> Vec<MetricUnavailable> {
+    if metrics.ttfa_first_chunk_ms.is_some() {
+        return Vec::new();
+    }
+
+    vec![MetricUnavailable::new(
+        "ttfa_first_chunk_ms",
+        "metric_not_reported_by_backend",
+        "tts_runner",
+    )]
 }
 
 fn evaluate_assertions(
@@ -239,5 +262,14 @@ mod tests {
 
         assert_eq!(outcomes[0].name, "min_audio_duration_ms");
         assert_eq!(outcomes[0].status, AcceptanceStatus::Fail);
+    }
+
+    #[test]
+    fn tts_metric_gap_records_null_ttfa() {
+        let gaps = required_tts_metric_gaps(&TtsPerformanceMetrics::default());
+
+        assert_eq!(gaps[0].metric, "ttfa_first_chunk_ms");
+        assert_eq!(gaps[0].reason, "metric_not_reported_by_backend");
+        assert_eq!(gaps[0].source.as_deref(), Some("tts_runner"));
     }
 }

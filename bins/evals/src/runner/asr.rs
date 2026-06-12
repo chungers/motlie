@@ -13,7 +13,9 @@ use motlie_model::{
 use motlie_voice::pipeline::convert::{decode_samples_to_f32, downmix_to_mono, f32_to_i16_clamped};
 use motlie_voice::pipeline::resample::{LinearInterpolator, Resampler};
 
-use crate::metrics::{AsrPerformanceMetrics, CapabilityPerformanceMetrics, PerformanceMetrics};
+use crate::metrics::{
+    AsrPerformanceMetrics, CapabilityPerformanceMetrics, MetricUnavailable, PerformanceMetrics,
+};
 use crate::result::{AcceptanceStatus, AssertionOutcome};
 use crate::runner::support::{
     assertion, build_record, bundle_filter_capability_kind, elapsed_ms,
@@ -75,15 +77,18 @@ impl ScenarioRunner for AsrRunner {
         let asr_metrics = AsrPerformanceMetrics {
             audio_duration_ms: Some(decoded.duration_ms),
             transcription_latency_ms: Some(eval.transcription_latency_ms),
+            ttfp_first_partial_ms: eval.ttfp_first_partial_ms,
             real_time_factor: (decoded.duration_ms > 0)
                 .then(|| eval.transcription_latency_ms as f64 / decoded.duration_ms as f64),
             transcript_chars: Some(transcript.chars().count() as u64),
             segment_count: Some(eval.segments.len() as u64),
             word_error_rate,
         };
+        let unavailable = required_asr_metric_gaps(&asr_metrics, eval.mode);
         let performance = PerformanceMetrics {
             startup_ms: Some(eval.startup_ms),
             request_latencies_ms: vec![eval.transcription_latency_ms],
+            unavailable,
             capability_metrics: CapabilityPerformanceMetrics::Asr(asr_metrics),
             ..Default::default()
         };
@@ -119,7 +124,15 @@ struct DecodedAsrAudio {
 struct AsrEvalOutput {
     startup_ms: u64,
     transcription_latency_ms: u64,
+    ttfp_first_partial_ms: Option<u64>,
+    mode: AsrMode,
     segments: Vec<TranscriptSegment>,
+}
+
+#[derive(Clone, Copy)]
+enum AsrMode {
+    Batch,
+    Streaming,
 }
 
 #[allow(unused_variables)]
@@ -151,7 +164,7 @@ async fn run_selected_asr(
             context,
             crate::runner::support::start_options(context, prepared),
             i16_audio,
-            params,
+            streaming_transcription_params(params),
             streaming_chunk_ms,
             motlie_models::asr::sherpa_onnx_streaming_en::start_typed,
         )
@@ -164,7 +177,7 @@ async fn run_selected_asr(
             context,
             crate::runner::support::start_options(context, prepared),
             i16_audio,
-            params,
+            streaming_transcription_params(params),
             streaming_chunk_ms,
             motlie_models::asr::moonshine_streaming_en::start_typed,
         )
@@ -172,6 +185,12 @@ async fn run_selected_asr(
     }
 
     bail!("ASR bundle `{bundle_id}` is not enabled or not supported by the eval runner")
+}
+
+#[allow(dead_code)]
+fn streaming_transcription_params(mut params: TranscriptionParams) -> TranscriptionParams {
+    params.emit_partials = true;
+    params
 }
 
 #[allow(dead_code)]
@@ -206,6 +225,8 @@ where
     Ok(AsrEvalOutput {
         startup_ms,
         transcription_latency_ms,
+        ttfp_first_partial_ms: None,
+        mode: AsrMode::Batch,
         segments: update.segments,
     })
 }
@@ -238,14 +259,23 @@ where
         .context("failed to open streaming ASR session")?;
     let chunk_samples = streaming_chunk_samples(chunk_ms);
     let mut segments = Vec::new();
+    let mut first_audio_submitted_at = None;
+    let mut ttfp_first_partial_ms = None;
     for chunk in audio.into_samples().chunks(chunk_samples) {
+        let audio_chunk = AudioBuf::<i16, ASR_SAMPLE_RATE_HZ, Mono>::new(chunk.to_vec());
+        if first_audio_submitted_at.is_none() {
+            first_audio_submitted_at = Some(std::time::Instant::now());
+        }
         if let Some(update) = session
-            .ingest(AudioBuf::<i16, ASR_SAMPLE_RATE_HZ, Mono>::new(
-                chunk.to_vec(),
-            ))
+            .ingest(audio_chunk)
             .await
             .context("streaming ASR ingest failed")?
         {
+            if ttfp_first_partial_ms.is_none() && has_partial_transcript(&update) {
+                if let Some(submitted_at) = first_audio_submitted_at.as_ref() {
+                    ttfp_first_partial_ms = Some(elapsed_ms(submitted_at.elapsed()));
+                }
+            }
             segments.extend(final_segments(update));
         }
     }
@@ -253,7 +283,7 @@ where
         .finish()
         .await
         .context("streaming ASR finish failed")?;
-    segments.extend(final_update.segments);
+    segments.extend(final_segments(final_update));
     let transcription_latency_ms = elapsed_ms(transcription_started_at.elapsed());
     context.metrics_sampler.sample();
     handle.shutdown().await.context("ASR shutdown failed")?;
@@ -261,8 +291,29 @@ where
     Ok(AsrEvalOutput {
         startup_ms,
         transcription_latency_ms,
+        ttfp_first_partial_ms,
+        mode: AsrMode::Streaming,
         segments,
     })
+}
+
+fn required_asr_metric_gaps(
+    metrics: &AsrPerformanceMetrics,
+    mode: AsrMode,
+) -> Vec<MetricUnavailable> {
+    if metrics.ttfp_first_partial_ms.is_some() {
+        return Vec::new();
+    }
+
+    let reason = match mode {
+        AsrMode::Batch => "metric_not_applicable_for_batch_engine",
+        AsrMode::Streaming => "metric_not_reported_by_backend",
+    };
+    vec![MetricUnavailable::new(
+        "ttfp_first_partial_ms",
+        reason,
+        "asr_runner",
+    )]
 }
 
 fn decode_wav_mono16k(path: &Path) -> Result<DecodedAsrAudio> {
@@ -359,6 +410,14 @@ fn final_segments(update: TranscriptionUpdate) -> Vec<TranscriptSegment> {
 }
 
 #[allow(dead_code)]
+fn has_partial_transcript(update: &TranscriptionUpdate) -> bool {
+    update
+        .segments
+        .iter()
+        .any(|segment| !segment.final_segment && !segment.text.trim().is_empty())
+}
+
+#[allow(dead_code)]
 fn streaming_chunk_samples(chunk_ms: u64) -> usize {
     let samples = u64::from(ASR_SAMPLE_RATE_HZ)
         .saturating_mul(chunk_ms)
@@ -443,5 +502,43 @@ mod tests {
     #[test]
     fn streaming_chunk_samples_clamps_to_one() {
         assert_eq!(streaming_chunk_samples(0), 1);
+    }
+
+    #[test]
+    fn final_segments_filters_partial_finish_updates() {
+        let update = TranscriptionUpdate {
+            segments: vec![
+                TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 100,
+                    text: "hel".to_owned(),
+                    final_segment: false,
+                },
+                TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 200,
+                    text: "hello".to_owned(),
+                    final_segment: true,
+                },
+            ],
+        };
+
+        let segments = final_segments(update);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "hello");
+    }
+
+    #[test]
+    fn asr_metric_gaps_distinguish_batch_and_streaming_null_ttfp() {
+        let metrics = AsrPerformanceMetrics::default();
+
+        let batch = required_asr_metric_gaps(&metrics, AsrMode::Batch);
+        let streaming = required_asr_metric_gaps(&metrics, AsrMode::Streaming);
+
+        assert_eq!(batch[0].metric, "ttfp_first_partial_ms");
+        assert_eq!(batch[0].reason, "metric_not_applicable_for_batch_engine");
+        assert_eq!(streaming[0].metric, "ttfp_first_partial_ms");
+        assert_eq!(streaming[0].reason, "metric_not_reported_by_backend");
     }
 }

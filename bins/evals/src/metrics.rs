@@ -81,6 +81,16 @@ pub struct ToolUsePerformanceMetrics {
 pub struct AsrPerformanceMetrics {
     pub audio_duration_ms: Option<u64>,
     pub transcription_latency_ms: Option<u64>,
+    /// Driver-measured wall time from submitting the first file-fed audio chunk
+    /// to receiving the first non-empty, non-final partial transcript segment.
+    /// The value is observed only at `ingest()` returns, so its resolution is
+    /// quantized by the scenario chunk size and cross-run comparisons require
+    /// constant chunking. Eval audio is pushed as fast as the backend accepts
+    /// chunks, so this is not comparable to realtime telephony first-partial
+    /// latency targets. Batch engines and streaming engines that emit no such
+    /// partial report `None` with a `MetricUnavailable` gap entry.
+    #[serde(default)]
+    pub ttfp_first_partial_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
     pub transcript_chars: Option<u64>,
     pub segment_count: Option<u64>,
@@ -91,6 +101,10 @@ pub struct AsrPerformanceMetrics {
 pub struct TtsPerformanceMetrics {
     pub text_chars: Option<u64>,
     pub synthesis_latency_ms: Option<u64>,
+    /// Driver-measured wall time from `synthesize(request)` to the first audio
+    /// chunk returned by `next_chunk()`.
+    #[serde(default)]
+    pub ttfa_first_chunk_ms: Option<u64>,
     pub audio_duration_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
     pub sample_count: Option<u64>,
@@ -370,6 +384,20 @@ fn max_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
         (Some(left), None) => Some(left),
         (None, Some(right)) => Some(right),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn audio_first_latency_fields_default_when_absent() {
+        let asr: AsrPerformanceMetrics = serde_json::from_str("{}").unwrap();
+        let tts: TtsPerformanceMetrics = serde_json::from_str("{}").unwrap();
+
+        assert_eq!(asr.ttfp_first_partial_ms, None);
+        assert_eq!(tts.ttfa_first_chunk_ms, None);
     }
 }
 

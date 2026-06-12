@@ -88,8 +88,9 @@ cargo run -p evals --features "model-qwen3-4b" -- run --bundle qwen3_4b --scenar
 
 The commands parse scenario TOML, start one compiled bundle from local
 artifacts, emit a sectioned JSONL result record, and apply capability-specific
-assertions. Result schema v3 adds chat/perf TTFT split into first generated token
-and first answer token, plus decode tokens/second. Use
+assertions. Result schema v4 adds ASR time-to-first-partial and TTS
+time-to-first-audio metrics; schema v3 added the chat/perf TTFT split into first
+generated token and first answer token, plus decode tokens/second. Use
 `--artifact-root ~/.cache/huggingface/hub` when the default repo-local artifact
 cache does not contain the bundle artifacts.
 
