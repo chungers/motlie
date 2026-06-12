@@ -398,6 +398,7 @@ fn evaluate_assertions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn min_duration_assertion_names_gate() {
@@ -456,5 +457,170 @@ mod tests {
         assert_eq!(output.p95_ttfa_first_chunk_ms, Some(30.0));
         assert_eq!(output.audio_duration_ms, 1000);
         assert_eq!(output.sample_rate_hz, 16_000);
+    }
+
+    #[tokio::test]
+    async fn tts_warmup_iterations_control_measured_call() {
+        let cold = run_counting_tts(0, 1).await;
+        let warm = run_counting_tts(2, 1).await;
+
+        assert_eq!(cold.calls, vec![1]);
+        assert_eq!(cold.output.sample_count, 1);
+        assert_eq!(cold.output.ttfa_first_chunk_samples_ms.len(), 1);
+        assert_eq!(warm.calls, vec![1, 2, 3]);
+        assert_eq!(warm.output.sample_count, 3);
+        assert_eq!(warm.output.ttfa_first_chunk_samples_ms.len(), 1);
+    }
+
+    struct CountingTtsRun {
+        output: TtsEvalOutput,
+        calls: Vec<u64>,
+    }
+
+    async fn run_counting_tts(warmup_iterations: u64, iterations: u64) -> CountingTtsRun {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let start_calls = Arc::clone(&calls);
+        let mut context = test_context();
+        let output = run_typed_tts::<_, _, _, i16, 22_050>(
+            &mut context,
+            StartOptions::default(),
+            SynthesisRequest {
+                text: "hello".to_owned(),
+                params: SpeechParams::default(),
+            },
+            iterations,
+            warmup_iterations,
+            move |_| async move { Ok(CountingTts { calls: start_calls }) },
+        )
+        .await
+        .unwrap();
+        let calls = calls.lock().unwrap().clone();
+
+        CountingTtsRun { output, calls }
+    }
+
+    struct CountingTts {
+        calls: Arc<Mutex<Vec<u64>>>,
+    }
+
+    #[async_trait]
+    impl BundleHandle for CountingTts {
+        type Chat = motlie_model::UnsupportedChat;
+        type Completion = motlie_model::UnsupportedCompletion;
+        type Embeddings = motlie_model::UnsupportedEmbeddings;
+
+        fn descriptor(&self) -> &motlie_model::LoadedBundleDescriptor {
+            unreachable!("test TTS handle descriptor is not used")
+        }
+
+        fn capabilities(&self) -> &motlie_model::Capabilities {
+            unreachable!("test TTS handle capabilities are not used")
+        }
+
+        fn chat(&self) -> std::result::Result<&Self::Chat, ModelError> {
+            Err(ModelError::UnsupportedCapability(
+                motlie_model::CapabilityKind::Chat,
+            ))
+        }
+
+        fn completion(&self) -> std::result::Result<&Self::Completion, ModelError> {
+            Err(ModelError::UnsupportedCapability(
+                motlie_model::CapabilityKind::Completion,
+            ))
+        }
+
+        fn embeddings(&self) -> std::result::Result<&Self::Embeddings, ModelError> {
+            Err(ModelError::UnsupportedCapability(
+                motlie_model::CapabilityKind::Embeddings,
+            ))
+        }
+
+        async fn shutdown(self) -> std::result::Result<(), ModelError> {
+            Ok(())
+        }
+    }
+
+    impl SpeechSynthesizer for CountingTts {
+        type Request = SynthesisRequest;
+        type Output = AudioBuf<i16, 22_050, Mono>;
+        type Stream = CountingSpeechStream;
+
+        async fn synthesize(
+            &self,
+            _request: Self::Request,
+        ) -> std::result::Result<Self::Stream, ModelError> {
+            let mut calls = self.calls.lock().unwrap();
+            let call = calls.len() as u64 + 1;
+            calls.push(call);
+            Ok(CountingSpeechStream {
+                chunk: Some(AudioBuf::new(vec![call as i16; call as usize])),
+            })
+        }
+    }
+
+    struct CountingSpeechStream {
+        chunk: Option<AudioBuf<i16, 22_050, Mono>>,
+    }
+
+    impl SpeechStream for CountingSpeechStream {
+        type Chunk = AudioBuf<i16, 22_050, Mono>;
+
+        async fn next_chunk(&mut self) -> std::result::Result<Option<Self::Chunk>, ModelError> {
+            Ok(self.chunk.take())
+        }
+
+        async fn finish(self) -> std::result::Result<(), ModelError> {
+            Ok(())
+        }
+    }
+
+    fn test_context() -> RunContext {
+        let scenario = toml::from_str(
+            r#"
+schema_version = 1
+id = "tts_test"
+capability = "tts"
+summary = "TTS test scenario."
+
+[bundle_filter]
+capability = "tts"
+
+[input]
+text = "hello"
+
+[assertions]
+min_sample_count = 1
+
+[metrics]
+capture_request_latency = true
+"#,
+        )
+        .unwrap();
+
+        RunContext {
+            scenario,
+            bundle_selection: crate::runner::BundleSelection {
+                bundle_id: "test_tts".to_owned(),
+                selector: None,
+            },
+            profile: crate::runner::ProfileSelection {
+                name: "local-cpu-x86_64".to_owned(),
+            },
+            artifact_root: std::path::PathBuf::from("/tmp/motlie-test-artifacts"),
+            runtime_flags: crate::runner::RuntimeFlags {
+                command_line: Vec::new(),
+                download_artifacts: false,
+                precision: None,
+                artifact_quantization: None,
+                quiet_backend_logs: false,
+                run_id: None,
+            },
+            coverage: None,
+            accelerator: None,
+            child_build: None,
+            platform_collector: crate::platform::PlatformCollector::new("local-cpu-x86_64"),
+            metrics_sampler: crate::metrics::MetricsSampler::new(),
+            output_sink: crate::report::OutputSink::Stdout,
+        }
     }
 }

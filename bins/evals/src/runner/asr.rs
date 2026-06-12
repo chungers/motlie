@@ -683,6 +683,7 @@ fn edit_distance(left: &[String], right: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn wer_normalizes_punctuation_and_case() {
@@ -757,5 +758,158 @@ mod tests {
         assert_eq!(output.ttfp_first_partial_samples_ms, vec![10, 20, 30]);
         assert_eq!(output.mean_ttfp_first_partial_ms, Some(20.0));
         assert_eq!(output.p95_ttfp_first_partial_ms, Some(30.0));
+    }
+
+    #[tokio::test]
+    async fn batch_asr_warmup_iterations_control_measured_call() {
+        let cold = run_counting_batch_asr(0, 1).await;
+        let warm = run_counting_batch_asr(2, 1).await;
+
+        assert_eq!(cold.calls, vec![1]);
+        assert_eq!(cold.output.segments[0].text, "call-1");
+        assert_eq!(cold.output.request_latencies_ms.len(), 1);
+        assert_eq!(warm.calls, vec![1, 2, 3]);
+        assert_eq!(warm.output.segments[0].text, "call-3");
+        assert_eq!(warm.output.request_latencies_ms.len(), 1);
+    }
+
+    struct CountingAsrRun {
+        output: AsrEvalOutput,
+        calls: Vec<u64>,
+    }
+
+    async fn run_counting_batch_asr(warmup_iterations: u64, iterations: u64) -> CountingAsrRun {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let start_calls = Arc::clone(&calls);
+        let mut context = test_context();
+        let output = run_batch_asr(
+            &mut context,
+            StartOptions::default(),
+            AudioBuf::<f32, ASR_SAMPLE_RATE_HZ, Mono>::new(vec![0.0]),
+            TranscriptionParams::default(),
+            IterationConfig {
+                iterations,
+                warmup_iterations,
+            },
+            move |_| async move { Ok(CountingBatchAsr { calls: start_calls }) },
+        )
+        .await
+        .unwrap();
+        let calls = calls.lock().unwrap().clone();
+
+        CountingAsrRun { output, calls }
+    }
+
+    struct CountingBatchAsr {
+        calls: Arc<Mutex<Vec<u64>>>,
+    }
+
+    #[async_trait]
+    impl BundleHandle for CountingBatchAsr {
+        type Chat = motlie_model::UnsupportedChat;
+        type Completion = motlie_model::UnsupportedCompletion;
+        type Embeddings = motlie_model::UnsupportedEmbeddings;
+
+        fn descriptor(&self) -> &motlie_model::LoadedBundleDescriptor {
+            unreachable!("test ASR handle descriptor is not used")
+        }
+
+        fn capabilities(&self) -> &motlie_model::Capabilities {
+            unreachable!("test ASR handle capabilities are not used")
+        }
+
+        fn chat(&self) -> std::result::Result<&Self::Chat, ModelError> {
+            Err(ModelError::UnsupportedCapability(
+                motlie_model::CapabilityKind::Chat,
+            ))
+        }
+
+        fn completion(&self) -> std::result::Result<&Self::Completion, ModelError> {
+            Err(ModelError::UnsupportedCapability(
+                motlie_model::CapabilityKind::Completion,
+            ))
+        }
+
+        fn embeddings(&self) -> std::result::Result<&Self::Embeddings, ModelError> {
+            Err(ModelError::UnsupportedCapability(
+                motlie_model::CapabilityKind::Embeddings,
+            ))
+        }
+
+        async fn shutdown(self) -> std::result::Result<(), ModelError> {
+            Ok(())
+        }
+    }
+
+    impl BatchTranscriber for CountingBatchAsr {
+        type Input = AudioBuf<f32, ASR_SAMPLE_RATE_HZ, Mono>;
+
+        async fn transcribe(
+            &self,
+            _audio: Self::Input,
+            _params: TranscriptionParams,
+        ) -> std::result::Result<TranscriptionUpdate, ModelError> {
+            let mut calls = self.calls.lock().unwrap();
+            let call = calls.len() as u64 + 1;
+            calls.push(call);
+            Ok(TranscriptionUpdate {
+                segments: vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: call,
+                    text: format!("call-{call}"),
+                    final_segment: true,
+                }],
+            })
+        }
+    }
+
+    fn test_context() -> RunContext {
+        let scenario = toml::from_str(
+            r#"
+schema_version = 1
+id = "asr_test"
+capability = "asr"
+summary = "ASR test scenario."
+
+[bundle_filter]
+capability = "asr"
+
+[input]
+audio = "evals/fixtures/audio/hello.wav"
+
+[assertions]
+min_transcript_chars = 1
+
+[metrics]
+capture_request_latency = true
+"#,
+        )
+        .unwrap();
+
+        RunContext {
+            scenario,
+            bundle_selection: crate::runner::BundleSelection {
+                bundle_id: "test_asr".to_owned(),
+                selector: None,
+            },
+            profile: crate::runner::ProfileSelection {
+                name: "local-cpu-x86_64".to_owned(),
+            },
+            artifact_root: std::path::PathBuf::from("/tmp/motlie-test-artifacts"),
+            runtime_flags: crate::runner::RuntimeFlags {
+                command_line: Vec::new(),
+                download_artifacts: false,
+                precision: None,
+                artifact_quantization: None,
+                quiet_backend_logs: false,
+                run_id: None,
+            },
+            coverage: None,
+            accelerator: None,
+            child_build: None,
+            platform_collector: crate::platform::PlatformCollector::new("local-cpu-x86_64"),
+            metrics_sampler: crate::metrics::MetricsSampler::new(),
+            output_sink: crate::report::OutputSink::Stdout,
+        }
     }
 }
