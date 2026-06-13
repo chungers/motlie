@@ -28,7 +28,6 @@ use crate::common::{
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
-const DEFAULT_MAX_TOKENS: u32 = 512;
 const DEFAULT_TEMPERATURE: f32 = 0.7;
 
 /// Architecture discriminant selecting the correct chat template and model behavior.
@@ -588,7 +587,12 @@ impl LlamaCppRuntime {
     ) -> Result<GeneratedText, ModelError> {
         let backend = Arc::clone(&self.backend);
         let model = Arc::clone(&self.model);
-        let max_tokens: u32 = params.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        // `None` means "no caller cap": generation runs to the model's natural
+        // EOS (#492). We deliberately do NOT substitute a guessed constant here
+        // — that would re-introduce the same class of a-priori cap the issue
+        // ruled out. The effective bound for the `None` case is resolved below
+        // from the model's own context window once the prompt is tokenized.
+        let requested_max_tokens: Option<u32> = params.max_tokens;
         let temperature: f32 = params.temperature.unwrap_or(DEFAULT_TEMPERATURE);
         let top_p: Option<f32> = params.top_p;
         let mut stop_sequences = params.stop_sequences;
@@ -628,6 +632,18 @@ impl LlamaCppRuntime {
             }
 
             let prompt_token_count = token_count_to_u32(tokens.len());
+
+            // Resolve the generation bound. A caller-supplied `max_tokens` is an
+            // explicit cap and is honored as-is. `None` (#492 uncapped path)
+            // runs to natural EOS, bounded only by the remaining context
+            // window — a hard physical limit, not a guessed a-priori cap. In
+            // normal operation the model emits EOS / a stop sequence well before
+            // this; the sole opt-in runaway guard is `--max-wall-time-secs`.
+            let max_tokens: u32 = effective_generation_bound(
+                requested_max_tokens,
+                context_length,
+                prompt_token_count,
+            );
 
             let mut batch = LlamaBatch::new(context_length as usize, 1);
             let last_idx = tokens.len() - 1;
@@ -802,6 +818,24 @@ struct GeneratedTokenTiming {
 
 fn token_count_to_u32(count: usize) -> u32 {
     count.min(u32::MAX as usize) as u32
+}
+
+/// Resolve the generation token bound.
+///
+/// A caller-supplied `max_tokens` is an explicit cap, honored as-is. `None`
+/// (the #492 uncapped path) runs to the model's natural EOS, bounded only by
+/// the remaining context window (`context_length - prompt_token_count`) — a
+/// hard physical limit, never a guessed a-priori constant. The result is at
+/// least 1 so there is always room to sample the EOS/first token.
+fn effective_generation_bound(
+    requested_max_tokens: Option<u32>,
+    context_length: u32,
+    prompt_token_count: u32,
+) -> u32 {
+    match requested_max_tokens {
+        Some(limit) => limit,
+        None => context_length.saturating_sub(prompt_token_count).max(1),
+    }
 }
 
 fn has_visible_answer_text_for_timing(generated_text: &str) -> bool {
@@ -1951,6 +1985,23 @@ mod tests {
         assert_eq!(timing.first_answer_token_at, Some(first_token_at));
         // Answer begins at the first token, so no reasoning tokens precede it.
         assert_eq!(timing.tokens_before_answer, Some(0));
+    }
+
+    #[test]
+    fn uncapped_generation_bound_uses_context_window_not_a_guessed_cap() {
+        // #492 F1: `None` must NOT collapse to a hidden 512 cap. With a 32768
+        // context it must allow generation far past 512 (run-to-EOS), bounded
+        // only by the remaining context window.
+        let bound = effective_generation_bound(None, 32_768, 40);
+        assert_eq!(bound, 32_768 - 40);
+        assert!(bound > 512, "uncapped path must exceed the old 512 default");
+
+        // An explicit caller cap is still honored verbatim.
+        assert_eq!(effective_generation_bound(Some(96), 32_768, 40), 96);
+
+        // Degenerate: prompt already fills the context -> still leave room for 1.
+        assert_eq!(effective_generation_bound(None, 100, 100), 1);
+        assert_eq!(effective_generation_bound(None, 100, 200), 1);
     }
 
     #[test]
