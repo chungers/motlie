@@ -737,11 +737,14 @@ fn is_audio_cell(cell: &SnapshotCell) -> bool {
     matches!(cell.capability, CapabilityName::Asr | CapabilityName::Tts)
 }
 
-fn evals_child_binary() -> PathBuf {
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+fn child_target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root().join("target"));
-    target_dir
+        .unwrap_or_else(|| repo_root().join("target"))
+}
+
+fn evals_child_binary() -> PathBuf {
+    child_target_dir()
         .join(CHILD_BUILD_PROFILE)
         .join(format!("evals{}", std::env::consts::EXE_SUFFIX))
 }
@@ -776,6 +779,95 @@ fn apply_child_env(
     if is_ort_backed_cell(cell) {
         apply_static_ort_child_env(command);
     }
+
+    if is_qwen3_tts_cpp_cell(cell) {
+        apply_qwen3_tts_cpp_runtime_env(command);
+    }
+}
+
+fn is_qwen3_tts_cpp_cell(cell: &SnapshotCell) -> bool {
+    cell.bundle_id == "qwen3_tts_cpp_0_6b"
+        || cell.backend.contains("qwen3_tts_cpp")
+        || cell
+            .features_for_profile("")
+            .iter()
+            .any(|feature| feature == "model-qwen3-tts-cpp")
+}
+
+/// qwen3-tts.cpp links `libqwen3tts.so` dynamically (a deliberate `-Bsymbolic`
+/// design that isolates its bundled ggml from co-linked backends). Cargo does
+/// not propagate an rpath from the dependency's build script to the child
+/// `evals` binary, so the runtime loader cannot find the library on its own.
+/// Prepend the built shared-library directory to the loader search path for
+/// qwen3-tts child runs so the cell can execute instead of failing at exec
+/// with `libqwen3tts.so.0: cannot open shared object file`.
+fn apply_qwen3_tts_cpp_runtime_env(command: &mut Command) {
+    let Some(lib_dir) = qwen3_tts_cpp_lib_dir() else {
+        return;
+    };
+    let lib_dir = lib_dir.display().to_string();
+    let var = if cfg!(target_os = "macos") {
+        "DYLD_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    let prepended = match std::env::var_os(var) {
+        Some(existing) if !existing.is_empty() => {
+            format!("{lib_dir}:{}", existing.to_string_lossy())
+        }
+        _ => lib_dir,
+    };
+    command.env(var, prepended);
+}
+
+/// Locate the directory holding the freshly built `libqwen3tts` shared library
+/// under the child build profile's cargo `OUT_DIR`. Mirrors the candidate
+/// layout that the qwen3-tts.cpp `build.rs` writes the library into.
+fn qwen3_tts_cpp_lib_dir() -> Option<PathBuf> {
+    let build_root = child_target_dir().join(CHILD_BUILD_PROFILE).join("build");
+    let lib_names: &[&str] = if cfg!(target_os = "macos") {
+        &["libqwen3tts.dylib", "libqwen3tts.0.dylib"]
+    } else if cfg!(target_os = "windows") {
+        &["qwen3tts.dll"]
+    } else {
+        &["libqwen3tts.so", "libqwen3tts.so.0"]
+    };
+
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    let entries = fs::read_dir(&build_root).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name
+            .to_string_lossy()
+            .starts_with("motlie-model-qwen3-tts-cpp-")
+        {
+            continue;
+        }
+        let out_dir = entry.path().join("out");
+        for candidate in [
+            out_dir.join("build/vendor-build"),
+            out_dir.join("build"),
+            out_dir.join("vendor-build"),
+            out_dir.join("lib"),
+        ] {
+            let Some(lib_path) = lib_names
+                .iter()
+                .map(|lib| candidate.join(lib))
+                .find(|path| path.is_file())
+            else {
+                continue;
+            };
+            let modified = lib_path
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(UNIX_EPOCH);
+            if newest.as_ref().is_none_or(|(best, _)| modified >= *best) {
+                newest = Some((modified, candidate));
+            }
+        }
+    }
+
+    newest.map(|(_, dir)| dir)
 }
 
 fn apply_static_ort_child_env(command: &mut Command) {
