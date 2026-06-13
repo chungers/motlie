@@ -476,6 +476,10 @@ fn generation_timing_from_usage(
         first_answer_token_at: Some(first_answer_token_at),
         last_token_at: Some(last_token_at),
         generated_tokens: usage_count_to_u32(usage.completion_tokens),
+        // mistral.rs reports aggregate prompt/completion durations, not
+        // per-token timings, so the reasoning token count at the think→answer
+        // boundary is not available here.
+        tokens_before_answer: None,
     }
 }
 

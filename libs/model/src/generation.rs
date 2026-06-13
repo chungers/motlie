@@ -95,6 +95,12 @@ pub struct GenerationTiming {
     pub first_answer_token_at: Option<Instant>,
     pub last_token_at: Option<Instant>,
     pub generated_tokens: u32,
+    /// Number of generated tokens emitted before the first answer token — i.e.
+    /// the reasoning/`<think>` token count up to the same think→answer boundary
+    /// that sets `first_answer_token_at`. A passthrough measurement (like the
+    /// TTFT timestamps), not a synthesized score. `None` when the backend does
+    /// not report per-token boundary data, or when no answer token was reached.
+    pub tokens_before_answer: Option<u32>,
 }
 
 impl GenerationTiming {
@@ -272,6 +278,7 @@ mod tests {
             first_answer_token_at: Some(first_answer_token_at),
             last_token_at: Some(last_token_at),
             generated_tokens: 4,
+            tokens_before_answer: Some(2),
         };
 
         assert_eq!(

@@ -377,9 +377,9 @@ fn render_platform_notes(out: &mut String, records: &[ResultRecord]) {
 }
 
 fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
-    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | mean_transcription_latency_ms | p95_transcription_latency_ms | mean_ttfp_first_partial_ms | p95_ttfp_first_partial_ms | mean_synthesis_latency_ms | p95_synthesis_latency_ms | mean_ttfa_first_chunk_ms | p95_ttfa_first_chunk_ms | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
+    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | thinking_tokens_to_answer | completion_tokens | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | mean_transcription_latency_ms | p95_transcription_latency_ms | mean_ttfp_first_partial_ms | p95_ttfp_first_partial_ms | mean_synthesis_latency_ms | p95_synthesis_latency_ms | mean_ttfa_first_chunk_ms | p95_ttfa_first_chunk_ms | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
     out.push_str(
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
 
     let mut row_count = 0_u64;
@@ -396,12 +396,14 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
             continue;
         }
         out.push_str(&format!(
-            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             record.coverage.cell_id,
             record.coverage.host_slug,
             record.coverage.capability,
             format_optional_u64(metrics.ttft_first_token_ms),
             format_optional_u64(metrics.ttft_first_answer_token_ms),
+            format_optional_u64(metrics.thinking_tokens_to_answer),
+            format_optional_u64(metrics.completion_tokens),
             format_optional_f64(metrics.mean_ttft_first_token_ms),
             format_optional_f64(metrics.p95_ttft_first_token_ms),
             format_optional_f64(metrics.mean_ttft_first_answer_token_ms),
@@ -421,7 +423,7 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
     }
 
     if row_count == 0 {
-        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |\n");
+        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |\n");
     }
 }
 
@@ -429,6 +431,8 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
 struct LatencyMetricCells {
     ttft_first_token_ms: Option<u64>,
     ttft_first_answer_token_ms: Option<u64>,
+    thinking_tokens_to_answer: Option<u64>,
+    completion_tokens: Option<u64>,
     mean_ttft_first_token_ms: Option<f64>,
     p95_ttft_first_token_ms: Option<f64>,
     mean_ttft_first_answer_token_ms: Option<f64>,
@@ -449,6 +453,8 @@ impl LatencyMetricCells {
     fn has_any_value(&self) -> bool {
         self.ttft_first_token_ms.is_some()
             || self.ttft_first_answer_token_ms.is_some()
+            || self.thinking_tokens_to_answer.is_some()
+            || self.completion_tokens.is_some()
             || self.mean_ttft_first_token_ms.is_some()
             || self.p95_ttft_first_token_ms.is_some()
             || self.mean_ttft_first_answer_token_ms.is_some()
@@ -471,6 +477,8 @@ fn latency_metric_cells(metrics: &CapabilityPerformanceMetrics) -> LatencyMetric
         CapabilityPerformanceMetrics::Chat(metrics) => LatencyMetricCells {
             ttft_first_token_ms: metrics.ttft_first_token_ms,
             ttft_first_answer_token_ms: metrics.ttft_first_answer_token_ms,
+            thinking_tokens_to_answer: metrics.thinking_tokens_to_answer,
+            completion_tokens: metrics.completion_tokens,
             ..Default::default()
         },
         CapabilityPerformanceMetrics::Perf(metrics) => LatencyMetricCells {
