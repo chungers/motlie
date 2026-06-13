@@ -52,6 +52,12 @@ pub struct ChatPerformanceMetrics {
     pub ttft_first_token_ms: Option<u64>,
     #[serde(default)]
     pub ttft_first_answer_token_ms: Option<u64>,
+    /// Reasoning/`<think>` token count emitted before the first answer token —
+    /// the token-count companion to `ttft_first_answer_token_ms`, for empirical
+    /// cross-model comparison of reasoning overhead (#492). Passthrough from the
+    /// backend; `None` when the backend does not report the boundary count.
+    #[serde(default)]
+    pub thinking_tokens_to_answer: Option<u64>,
     #[serde(default)]
     pub decode_ms: Option<u64>,
     pub tokens_per_second: Option<f64>,

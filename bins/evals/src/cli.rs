@@ -108,25 +108,46 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
         output_sink,
     };
 
-    match context.scenario.capability() {
-        CapabilityName::Embeddings => {
-            EmbeddingSimilarityRunner.run(context).await?;
+    let capability = context.scenario.capability();
+    let run_future = async move {
+        match capability {
+            CapabilityName::Embeddings => {
+                EmbeddingSimilarityRunner.run(context).await?;
+            }
+            CapabilityName::Chat => {
+                ChatRunner.run(context).await?;
+            }
+            CapabilityName::ToolUse => {
+                crate::runner::tool_use::ToolUseRunner.run(context).await?;
+            }
+            CapabilityName::Perf => {
+                PerfRunner.run(context).await?;
+            }
+            CapabilityName::Asr => {
+                AsrRunner.run(context).await?;
+            }
+            CapabilityName::Tts => {
+                TtsRunner.run(context).await?;
+            }
         }
-        CapabilityName::Chat => {
-            ChatRunner.run(context).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    // Opt-in wall-time backstop (#492): there is NO token cap and NO default
+    // time cap — generation runs to natural completion. This only arms when the
+    // operator explicitly passes `--max-wall-time-secs`, and exists solely to
+    // kill a genuinely non-terminating run rather than to bound normal output.
+    match options.max_wall_time_secs {
+        Some(secs) if secs > 0 => {
+            tokio::time::timeout(std::time::Duration::from_secs(secs), run_future)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "scenario exceeded --max-wall-time-secs={secs}s wall-time backstop (likely non-termination)"
+                    )
+                })??;
         }
-        CapabilityName::ToolUse => {
-            crate::runner::tool_use::ToolUseRunner.run(context).await?;
-        }
-        CapabilityName::Perf => {
-            PerfRunner.run(context).await?;
-        }
-        CapabilityName::Asr => {
-            AsrRunner.run(context).await?;
-        }
-        CapabilityName::Tts => {
-            TtsRunner.run(context).await?;
-        }
+        _ => run_future.await?,
     }
     Ok(())
 }
@@ -184,6 +205,7 @@ struct RunOptions {
     child_build_status: Option<i32>,
     child_build_duration_ms: Option<u64>,
     audio_iteration_overrides: AudioIterationOverrides,
+    max_wall_time_secs: Option<u64>,
 }
 
 impl RunOptions {
@@ -211,6 +233,7 @@ impl RunOptions {
         let mut child_build_status = None;
         let mut child_build_duration_ms = None;
         let mut audio_iteration_overrides = AudioIterationOverrides::default();
+        let mut max_wall_time_secs = None;
         let mut cold = false;
 
         let mut index = 0;
@@ -313,6 +336,9 @@ impl RunOptions {
                     cold = true;
                     audio_iteration_overrides = AudioIterationOverrides::cold();
                 }
+                "--max-wall-time-secs" => {
+                    max_wall_time_secs = Some(take_u64(args, &mut index, "--max-wall-time-secs")?);
+                }
                 other => bail!("unknown evals run option `{other}`"),
             }
             index += 1;
@@ -344,6 +370,7 @@ impl RunOptions {
             child_build_status,
             child_build_duration_ms,
             audio_iteration_overrides,
+            max_wall_time_secs,
         })
     }
 
@@ -484,7 +511,7 @@ fn print_usage() {
     println!("usage:");
     println!("  evals list scenarios [--root PATH]");
     println!("  evals list bundles");
-    println!("  evals run --bundle <bundle_id> --scenario <scenario_id> [--profile NAME] [--artifact-root PATH] [--jsonl PATH] [--warmup-iterations N | --cold]");
+    println!("  evals run --bundle <bundle_id> --scenario <scenario_id> [--profile NAME] [--artifact-root PATH] [--jsonl PATH] [--warmup-iterations N | --cold] [--max-wall-time-secs N]");
     println!("  evals matrix --snapshot <path> [--profile NAME] [--artifact-root PATH] [--warmup-iterations N | --cold]");
     println!("  evals provision --snapshot <path> [--artifact-root PATH]");
     println!("  evals report --input <jsonl> --format markdown");
@@ -548,6 +575,23 @@ mod tests {
         assert_eq!(options.bundle, "embeddinggemma_300m");
         assert_eq!(options.scenario, "embeddings_similarity");
         assert_eq!(options.profile, "local-cpu-x86_64");
+        // No wall-time backstop unless explicitly requested (#492): default off.
+        assert_eq!(options.max_wall_time_secs, None);
+    }
+
+    #[test]
+    fn parses_optional_wall_time_backstop() {
+        let options = RunOptions::parse(&[
+            "--bundle".to_owned(),
+            "qwen3_4b".to_owned(),
+            "--scenario".to_owned(),
+            "chat_smoke".to_owned(),
+            "--max-wall-time-secs".to_owned(),
+            "900".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.max_wall_time_secs, Some(900));
     }
 
     #[test]

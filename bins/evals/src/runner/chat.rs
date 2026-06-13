@@ -180,6 +180,7 @@ impl ScenarioRunner for ChatRunner {
             time_to_first_token_ms: timing.ttft_first_token_ms,
             ttft_first_token_ms: timing.ttft_first_token_ms,
             ttft_first_answer_token_ms: timing.ttft_first_answer_token_ms,
+            thinking_tokens_to_answer: timing.thinking_tokens_to_answer,
             decode_ms: timing.decode_ms,
             tokens_per_second,
             decode_tokens_per_second: timing.decode_tokens_per_second,
@@ -270,6 +271,7 @@ fn weather_tool_spec(tool_name: Option<&str>) -> Result<ToolSpec> {
 struct ResponseTimingMetrics {
     ttft_first_token_ms: Option<u64>,
     ttft_first_answer_token_ms: Option<u64>,
+    thinking_tokens_to_answer: Option<u64>,
     decode_ms: Option<u64>,
     tokens_per_second: Option<f64>,
     decode_tokens_per_second: Option<f64>,
@@ -283,6 +285,7 @@ fn response_timing_metrics(timing: Option<&GenerationTiming>) -> ResponseTimingM
     ResponseTimingMetrics {
         ttft_first_token_ms: timing.time_to_first_token().map(elapsed_ms),
         ttft_first_answer_token_ms: timing.time_to_first_answer_token().map(elapsed_ms),
+        thinking_tokens_to_answer: timing.tokens_before_answer.map(u64::from),
         decode_ms: timing.decode_duration().map(elapsed_ms),
         tokens_per_second: timing.total_tokens_per_second(),
         decode_tokens_per_second: timing.decode_tokens_per_second(),
@@ -313,6 +316,13 @@ fn required_chat_metric_gaps(
             "ttft_first_answer_token_ms",
             "metric_not_reported_by_backend",
             "chat_response.timing.first_answer_token_at",
+        ));
+    }
+    if metrics.thinking_tokens_to_answer.is_none() {
+        gaps.push(MetricUnavailable::new(
+            "thinking_tokens_to_answer",
+            "metric_not_reported_by_backend",
+            "chat_response.timing.tokens_before_answer",
         ));
     }
     if metrics.decode_ms.is_none() {
@@ -490,10 +500,12 @@ mod tests {
             first_answer_token_at: Some(first_answer_token_at),
             last_token_at: Some(last_token_at),
             generated_tokens: 5,
+            tokens_before_answer: Some(2),
         }));
 
         assert_eq!(metrics.ttft_first_token_ms, Some(10));
         assert_eq!(metrics.ttft_first_answer_token_ms, Some(25));
+        assert_eq!(metrics.thinking_tokens_to_answer, Some(2));
         assert_eq!(metrics.decode_ms, Some(100));
         assert!(metrics
             .decode_tokens_per_second

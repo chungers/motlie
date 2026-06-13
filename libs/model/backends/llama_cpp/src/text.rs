@@ -532,7 +532,8 @@ impl LlamaCppRuntime {
         let generated = self
             .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new())
             .await?;
-        let timing = timing_for_visible_content(generated.timing, &generated.text);
+        let timing =
+            timing_for_visible_content(generated.timing, &generated.text, &generated.token_timings);
         Ok(ChatResponse {
             content: generated.text,
             usage: Some(generated.usage),
@@ -763,6 +764,10 @@ impl LlamaCppRuntime {
                     first_answer_token_at,
                     last_token_at,
                     generated_tokens: generated_token_count,
+                    tokens_before_answer: tokens_before_boundary(
+                        first_answer_token_at,
+                        &token_timings,
+                    ),
                 },
                 token_timings,
             })
@@ -819,12 +824,36 @@ fn strip_leading_reasoning_for_timing(generated_text: &str) -> &str {
     strip_empty_gemma4_channel_prefix(generated_text)
 }
 
-fn timing_for_visible_content(mut timing: GenerationTiming, content: &str) -> GenerationTiming {
+/// Count generated tokens emitted strictly before the think→answer boundary.
+///
+/// The boundary token (the first answer token, at `boundary`) is excluded, so
+/// the result is the number of reasoning/`<think>` tokens that preceded it.
+/// `None` when no boundary was reached or there is no per-token timing to count
+/// against.
+fn tokens_before_boundary(
+    boundary: Option<Instant>,
+    token_timings: &[GeneratedTokenTiming],
+) -> Option<u32> {
+    let boundary = boundary?;
+    let count = token_timings
+        .iter()
+        .filter(|token| token.at < boundary)
+        .count();
+    Some(token_count_to_u32(count))
+}
+
+fn timing_for_visible_content(
+    mut timing: GenerationTiming,
+    content: &str,
+    token_timings: &[GeneratedTokenTiming],
+) -> GenerationTiming {
     if content.trim().is_empty() {
         timing.first_answer_token_at = None;
     } else if timing.first_answer_token_at.is_none() {
         timing.first_answer_token_at = timing.first_token_at;
     }
+    timing.tokens_before_answer =
+        tokens_before_boundary(timing.first_answer_token_at, token_timings);
     timing
 }
 
@@ -837,6 +866,7 @@ fn timing_for_openai_response(
 ) -> GenerationTiming {
     if final_content.trim().is_empty() {
         timing.first_answer_token_at = None;
+        timing.tokens_before_answer = None;
         return timing;
     }
 
@@ -844,6 +874,8 @@ fn timing_for_openai_response(
         first_parsed_content_token_at(template, generated_text, token_timings)
             .or(timing.last_token_at)
             .or(timing.first_token_at);
+    timing.tokens_before_answer =
+        tokens_before_boundary(timing.first_answer_token_at, token_timings);
     timing
 }
 
@@ -1903,14 +1935,58 @@ mod tests {
             first_answer_token_at: Some(first_token_at),
             last_token_at: Some(first_token_at),
             generated_tokens: 1,
+            tokens_before_answer: Some(0),
         };
+        let token_timings = [GeneratedTokenTiming {
+            end_byte: 1,
+            at: first_token_at,
+        }];
 
-        timing = timing_for_visible_content(timing, "   ");
+        timing = timing_for_visible_content(timing, "   ", &token_timings);
         assert_eq!(timing.first_answer_token_at, None);
+        assert_eq!(timing.tokens_before_answer, None);
 
         timing.first_answer_token_at = None;
-        timing = timing_for_visible_content(timing, "answer");
+        timing = timing_for_visible_content(timing, "answer", &token_timings);
         assert_eq!(timing.first_answer_token_at, Some(first_token_at));
+        // Answer begins at the first token, so no reasoning tokens precede it.
+        assert_eq!(timing.tokens_before_answer, Some(0));
+    }
+
+    #[test]
+    fn tokens_before_boundary_counts_reasoning_tokens() {
+        let request_at = Instant::now();
+        let at = |ms: u64| {
+            request_at
+                .checked_add(std::time::Duration::from_millis(ms))
+                .unwrap()
+        };
+        let token_timings = [
+            GeneratedTokenTiming {
+                end_byte: 1,
+                at: at(10),
+            },
+            GeneratedTokenTiming {
+                end_byte: 2,
+                at: at(20),
+            },
+            GeneratedTokenTiming {
+                end_byte: 3,
+                at: at(30),
+            },
+        ];
+        // Boundary at the 3rd token: 2 reasoning tokens precede it.
+        assert_eq!(
+            tokens_before_boundary(Some(at(30)), &token_timings),
+            Some(2)
+        );
+        // No boundary reached -> no count.
+        assert_eq!(tokens_before_boundary(None, &token_timings), None);
+        // Boundary at the first token -> zero reasoning tokens.
+        assert_eq!(
+            tokens_before_boundary(Some(at(10)), &token_timings),
+            Some(0)
+        );
     }
 
     #[tokio::test]
