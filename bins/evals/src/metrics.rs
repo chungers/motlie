@@ -79,8 +79,49 @@ pub struct ToolUsePerformanceMetrics {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AsrPerformanceMetrics {
+    #[serde(default)]
+    pub iterations: Option<u64>,
+    #[serde(default)]
+    pub successful_iterations: Option<u64>,
+    #[serde(default)]
+    pub failed_iterations: Option<u64>,
+    #[serde(default)]
+    pub last_iteration_error: Option<String>,
     pub audio_duration_ms: Option<u64>,
     pub transcription_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub mean_transcription_latency_ms: Option<f64>,
+    /// `support::percentile` p95 over measured iterations, using a nearest
+    /// sorted-sample rank rather than interpolation. With small iteration
+    /// counts such as the curated smoke n=3, this is the sample maximum;
+    /// interpret it together with `iterations` and
+    /// `PerformanceMetrics::request_latencies_ms`.
+    #[serde(default)]
+    pub p95_transcription_latency_ms: Option<f64>,
+    /// Driver-measured wall time from submitting the first file-fed audio chunk
+    /// to receiving the first non-empty-after-trim, non-final partial
+    /// transcript segment.
+    /// The value is observed only at `ingest()` returns, so its resolution is
+    /// quantized by the scenario chunk size and cross-run comparisons require
+    /// constant chunking. Eval audio is pushed as fast as the backend accepts
+    /// chunks, so this is not comparable to realtime telephony first-partial
+    /// latency targets. Batch engines and streaming engines that emit no such
+    /// partial report `None` with a `MetricUnavailable` gap entry.
+    /// Schema v5 runners leave this single-shot field null; schema v4 cold-start
+    /// baseline records may populate it.
+    #[serde(default)]
+    pub ttfp_first_partial_ms: Option<u64>,
+    #[serde(default)]
+    pub ttfp_first_partial_samples_ms: Vec<u64>,
+    #[serde(default)]
+    pub mean_ttfp_first_partial_ms: Option<f64>,
+    /// `support::percentile` p95 over measured first-partial samples, using a
+    /// nearest sorted-sample rank rather than interpolation. With small
+    /// iteration counts such as the curated smoke n=3, this is the sample
+    /// maximum; interpret it together with `iterations` and
+    /// `ttfp_first_partial_samples_ms`.
+    #[serde(default)]
+    pub p95_ttfp_first_partial_ms: Option<f64>,
     pub real_time_factor: Option<f64>,
     pub transcript_chars: Option<u64>,
     pub segment_count: Option<u64>,
@@ -89,8 +130,42 @@ pub struct AsrPerformanceMetrics {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TtsPerformanceMetrics {
+    #[serde(default)]
+    pub iterations: Option<u64>,
+    #[serde(default)]
+    pub successful_iterations: Option<u64>,
+    #[serde(default)]
+    pub failed_iterations: Option<u64>,
+    #[serde(default)]
+    pub last_iteration_error: Option<String>,
     pub text_chars: Option<u64>,
     pub synthesis_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub mean_synthesis_latency_ms: Option<f64>,
+    /// `support::percentile` p95 over measured iterations, using a nearest
+    /// sorted-sample rank rather than interpolation. With small iteration
+    /// counts such as the curated smoke n=3, this is the sample maximum;
+    /// interpret it together with `iterations` and
+    /// `PerformanceMetrics::request_latencies_ms`.
+    #[serde(default)]
+    pub p95_synthesis_latency_ms: Option<f64>,
+    /// Driver-measured wall time from `synthesize(request)` to the first audio
+    /// chunk returned by `next_chunk()`.
+    /// Schema v5 runners leave this single-shot field null; schema v4 cold-start
+    /// baseline records may populate it.
+    #[serde(default)]
+    pub ttfa_first_chunk_ms: Option<u64>,
+    #[serde(default)]
+    pub ttfa_first_chunk_samples_ms: Vec<u64>,
+    #[serde(default)]
+    pub mean_ttfa_first_chunk_ms: Option<f64>,
+    /// `support::percentile` p95 over measured first-audio samples, using a
+    /// nearest sorted-sample rank rather than interpolation. With small
+    /// iteration counts such as the curated smoke n=3, this is the sample
+    /// maximum; interpret it together with `iterations` and
+    /// `ttfa_first_chunk_samples_ms`.
+    #[serde(default)]
+    pub p95_ttfa_first_chunk_ms: Option<f64>,
     pub audio_duration_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
     pub sample_count: Option<u64>,
@@ -220,7 +295,11 @@ impl MetricsSampler {
             unavailable.push("process_swap_delta_peak_bytes".to_owned());
             unavailable_metrics.push(metric_unavailable(
                 "process_swap_delta_peak_bytes",
-                "metric_unavailable_on_platform",
+                if process_swap_metric_supported() {
+                    "metric_collection_failed"
+                } else {
+                    "metric_unavailable_on_platform"
+                },
                 process_swap_source(),
             ));
         }
@@ -313,6 +392,14 @@ fn current_resource_sample() -> ResourceSample {
     }
 }
 
+/// Whether the current platform implements per-process swap sampling.
+/// Only Linux does (procfs `VmSwap`); macOS is an acknowledged TODO
+/// (`mach_task_info_unimplemented`). Where this is false, a missing swap
+/// sample is a structural platform gap, not a collection failure.
+pub fn process_swap_metric_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
 fn current_process_swap_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -370,6 +457,28 @@ fn max_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
         (Some(left), None) => Some(left),
         (None, Some(right)) => Some(right),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn audio_first_latency_fields_default_when_absent() {
+        let asr: AsrPerformanceMetrics = serde_json::from_str("{}").unwrap();
+        let tts: TtsPerformanceMetrics = serde_json::from_str("{}").unwrap();
+
+        assert_eq!(asr.ttfp_first_partial_ms, None);
+        assert_eq!(asr.last_iteration_error, None);
+        assert!(asr.ttfp_first_partial_samples_ms.is_empty());
+        assert_eq!(asr.mean_ttfp_first_partial_ms, None);
+        assert_eq!(asr.p95_ttfp_first_partial_ms, None);
+        assert_eq!(tts.ttfa_first_chunk_ms, None);
+        assert_eq!(tts.last_iteration_error, None);
+        assert!(tts.ttfa_first_chunk_samples_ms.is_empty());
+        assert_eq!(tts.mean_ttfa_first_chunk_ms, None);
+        assert_eq!(tts.p95_ttfa_first_chunk_ms, None);
     }
 }
 

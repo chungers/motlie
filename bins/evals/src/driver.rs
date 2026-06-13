@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use motlie_models::{ArtifactSource, BundleId, Catalog};
 
 use crate::accelerator;
@@ -21,6 +21,7 @@ use crate::result::{
     ProfileSection, ResultRecord, RuntimeSection, SelectionSection, TerminalOutcome,
     RESULT_SCHEMA_VERSION,
 };
+use crate::scenario::{AudioIterationOverrides, CapabilityName};
 use crate::snapshot::{load_snapshot, EvalSnapshot, SnapshotCell};
 
 const CHILD_BUILD_PROFILE: &str = "release";
@@ -361,6 +362,7 @@ struct MatrixOptions {
     eval_root: PathBuf,
     artifact_root: PathBuf,
     results_root: PathBuf,
+    audio_iteration_overrides: AudioIterationOverrides,
     dry_run: bool,
 }
 
@@ -371,6 +373,8 @@ impl MatrixOptions {
         let mut eval_root = repo_root().join("evals");
         let mut artifact_root = motlie_models::default_artifact_root();
         let mut results_root = repo_root().join("evals/results");
+        let mut audio_iteration_overrides = AudioIterationOverrides::default();
+        let mut cold = false;
         let mut dry_run = false;
         let mut index = 0;
         while index < args.len() {
@@ -384,6 +388,19 @@ impl MatrixOptions {
                 "--results-root" => {
                     results_root = PathBuf::from(take_value(args, &mut index, "--results-root")?)
                 }
+                "--warmup-iterations" => {
+                    ensure!(!cold, "--warmup-iterations cannot be combined with --cold");
+                    audio_iteration_overrides.warmup_iterations =
+                        Some(take_u64(args, &mut index, "--warmup-iterations")?);
+                }
+                "--cold" => {
+                    ensure!(
+                        audio_iteration_overrides.is_empty(),
+                        "--cold cannot be combined with --warmup-iterations"
+                    );
+                    cold = true;
+                    audio_iteration_overrides = AudioIterationOverrides::cold();
+                }
                 "--dry-run" => dry_run = true,
                 other => bail!("unknown evals matrix option `{other}`"),
             }
@@ -395,6 +412,7 @@ impl MatrixOptions {
             eval_root,
             artifact_root,
             results_root,
+            audio_iteration_overrides,
             dry_run,
         })
     }
@@ -643,6 +661,10 @@ fn run_child_cell(
     run_command.args(["--model-family", &cell.model_family]);
     run_command.args(["--backend", &cell.backend]);
     run_command.args(["--requested-accelerator", requested.as_str()]);
+    run_command.args(audio_override_args_for_cell(
+        cell,
+        options.audio_iteration_overrides,
+    ));
     run_command.args(["--child-build-log", &log_path.display().to_string()]);
     if let Some(status) = child_build.status {
         run_command
@@ -689,6 +711,30 @@ fn run_child_cell(
         }
         thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn audio_override_args_for_cell(
+    cell: &SnapshotCell,
+    overrides: AudioIterationOverrides,
+) -> Vec<String> {
+    if !is_audio_cell(cell) || overrides.is_empty() {
+        return Vec::new();
+    }
+
+    let mut args = Vec::new();
+    if let Some(warmup_iterations) = overrides.warmup_iterations {
+        args.push("--warmup-iterations".to_owned());
+        args.push(warmup_iterations.to_string());
+    }
+    if let Some(iterations) = overrides.iterations {
+        args.push("--iterations".to_owned());
+        args.push(iterations.to_string());
+    }
+    args
+}
+
+fn is_audio_cell(cell: &SnapshotCell) -> bool {
+    matches!(cell.capability, CapabilityName::Asr | CapabilityName::Tts)
 }
 
 fn evals_child_binary() -> PathBuf {
@@ -1392,6 +1438,12 @@ fn take_value(args: &[String], index: &mut usize, flag: &str) -> Result<String> 
         .with_context(|| format!("{flag} requires a value"))
 }
 
+fn take_u64(args: &[String], index: &mut usize, flag: &str) -> Result<u64> {
+    take_value(args, index, flag)?
+        .parse::<u64>()
+        .with_context(|| format!("{flag} must be an unsigned integer"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1453,6 +1505,73 @@ mod tests {
         assert!(run_id.contains("curated-v2-smoke"));
         assert!(run_id.contains("dgx-spark"));
         assert!(run_id.ends_with("cuda"));
+    }
+
+    #[test]
+    fn matrix_options_parse_audio_iteration_overrides() {
+        let warm = MatrixOptions::parse(&[
+            "--snapshot".to_owned(),
+            "snapshot.toml".to_owned(),
+            "--warmup-iterations".to_owned(),
+            "2".to_owned(),
+        ])
+        .unwrap();
+        let cold = MatrixOptions::parse(&[
+            "--snapshot".to_owned(),
+            "snapshot.toml".to_owned(),
+            "--cold".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            warm.audio_iteration_overrides,
+            AudioIterationOverrides {
+                iterations: None,
+                warmup_iterations: Some(2)
+            }
+        );
+        assert_eq!(
+            cold.audio_iteration_overrides,
+            AudioIterationOverrides::cold()
+        );
+        assert!(MatrixOptions::parse(&[
+            "--snapshot".to_owned(),
+            "snapshot.toml".to_owned(),
+            "--cold".to_owned(),
+            "--warmup-iterations".to_owned(),
+            "1".to_owned(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn audio_iteration_overrides_forward_only_to_audio_cells() {
+        let mut asr = test_snapshot_cell();
+        asr.capability = CapabilityName::Asr;
+        let mut tts = test_snapshot_cell();
+        tts.capability = CapabilityName::Tts;
+        let chat = test_snapshot_cell();
+
+        assert_eq!(
+            audio_override_args_for_cell(
+                &asr,
+                AudioIterationOverrides {
+                    iterations: None,
+                    warmup_iterations: Some(3)
+                }
+            ),
+            vec!["--warmup-iterations".to_owned(), "3".to_owned()]
+        );
+        assert_eq!(
+            audio_override_args_for_cell(&tts, AudioIterationOverrides::cold()),
+            vec![
+                "--warmup-iterations".to_owned(),
+                "0".to_owned(),
+                "--iterations".to_owned(),
+                "1".to_owned(),
+            ]
+        );
+        assert!(audio_override_args_for_cell(&chat, AudioIterationOverrides::cold()).is_empty());
     }
 
     #[test]
@@ -1704,12 +1823,23 @@ unauthorized access to model cache"#,
         write_file(
             &root.join("models--koboldcpp--tts/snapshots/test/qwen3-tts-tokenizer-f16.gguf"),
         );
+        write_file(&root.join(
+            "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/onnx/model_quantized.onnx",
+        ));
+        write_file(
+            &root
+                .join("models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/tokenizer.json"),
+        );
+        write_file(&root.join(
+            "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/voices/af_bella.bin",
+        ));
 
         let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
             .expect("curated snapshot should parse");
         for cell_id in [
             "whisper_base_en__asr_short_transcription__smoke__ggml_default",
             "moonshine_streaming_en__asr_short_transcription__smoke__hf_default",
+            "kokoro_82m__tts_synthesis_smoke__smoke__onnx_default",
             "qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0",
         ] {
             let cell = snapshot

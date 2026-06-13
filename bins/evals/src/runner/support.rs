@@ -257,6 +257,18 @@ pub fn evaluate_resource_status(
     resources: &ResourceMetrics,
     context: &RunContext,
 ) -> SectionEvaluation {
+    evaluate_resource_status_with_swap_support(
+        resources,
+        context,
+        crate::metrics::process_swap_metric_supported(),
+    )
+}
+
+fn evaluate_resource_status_with_swap_support(
+    resources: &ResourceMetrics,
+    context: &RunContext,
+    process_swap_supported: bool,
+) -> SectionEvaluation {
     if let Some(gates) = context.scenario.gates_for_profile(&context.profile.name) {
         if let Some(max_process_swap_delta_bytes) = gates.max_process_swap_delta_bytes {
             match resources.process_swap_delta_peak_bytes {
@@ -272,7 +284,9 @@ pub fn evaluate_resource_status(
                         )),
                     };
                 }
-                None => {
+                // Where the platform implements the metric (Linux), a missing
+                // sample is a collection failure: stay fail-closed.
+                None if process_swap_supported => {
                     return SectionEvaluation {
                         status: AcceptanceStatus::Blocked,
                         failure_reason: Some(
@@ -281,6 +295,11 @@ pub fn evaluate_resource_status(
                         ),
                     };
                 }
+                // Platforms without process-swap sampling (e.g. darwin) cannot
+                // satisfy this gate by construction; the gate is not applicable
+                // there. The gap stays recorded in unavailable_metrics as
+                // metric_unavailable_on_platform (#494).
+                None => {}
             }
         }
     }
@@ -954,6 +973,45 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("max_process_swap_delta_bytes=4294967296 exceeded"));
+    }
+
+    #[test]
+    fn swap_gate_unavailable_metric_blocks_where_swap_is_implemented() {
+        // Linux semantics: the platform implements process swap, so a missing
+        // sample is a collection failure and the gate stays fail-closed.
+        let context = test_context_with_swap_limit("local-cpu-x86_64", 4 * 1024 * 1024 * 1024);
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            process_swap_delta_peak_bytes: None,
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status_with_swap_support(&resources, &context, true);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Blocked);
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("process swap delta unavailable"));
+    }
+
+    #[test]
+    fn swap_gate_not_applicable_where_swap_is_unimplemented() {
+        // darwin semantics (#494): process swap is structurally unavailable,
+        // so the gate is not applicable and the cell can run; the gap is
+        // recorded in unavailable_metrics, not as a gate failure.
+        let context = test_context_with_swap_limit("local-cpu-x86_64", 4 * 1024 * 1024 * 1024);
+        let resources = ResourceMetrics {
+            rss_peak_bytes: Some(1),
+            process_swap_delta_peak_bytes: None,
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_resource_status_with_swap_support(&resources, &context, false);
+
+        assert_eq!(evaluation.status, AcceptanceStatus::Pass);
+        assert_eq!(evaluation.failure_reason, None);
     }
 
     #[test]

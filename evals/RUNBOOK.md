@@ -58,6 +58,54 @@ token value.
 3. **Close the tracking issue (#399-class) only after the full merge into main**, with the cycle closeout.
 4. **The `evals/<cycle>` branch is LEFT in place as the historical snapshot** — do not delete it.
 5. **Naming:** run-data dirs are chrono/ID-named by design (immutable records; the name is the identity: ts-pid-SHA-host-arch-accel). Files that represent CURRENT state in main (the coverage report, RUNBOOK) use STABLE names with dates inside the document; history is git + the run dirs.
+6. **ASR/TTS latency runs use the Cold/Warm Two-Phase Run protocol below.** Both phases are required for coverage whenever audio latency is reported.
+
+## Cold/Warm Two-Phase Run
+
+ASR/TTS latency coverage is a two-phase protocol at a single git pin. The CLI
+override takes precedence over per-scenario `warmup_iterations`; when no CLI
+override is present, each scenario's default applies. The override flags apply
+only to ASR/TTS cells; direct `evals run` invocations reject them for non-audio
+scenarios.
+
+1. Check out the exact `evals/<cycle>` SHA that will identify both datasets.
+2. Run the matrix COLD with `--cold`, which sets audio `warmup_iterations = 0`
+   and `iterations = 1` for a single first-call measurement:
+
+```sh
+cargo run -p evals -- matrix \
+  --snapshot evals/snapshots/curated-v2-smoke.toml \
+  --profile <host-profile> \
+  --results-root evals/results/cold \
+  --cold
+```
+
+3. Stop the harness process after the cold run finishes. Do not continue into
+   the warm phase from the same long-lived process.
+4. Start a fresh shell/process at the same git pin.
+5. Run the matrix WARM using the scenario defaults, or an explicit warm override
+   when the cycle calls for a specific value:
+
+```sh
+cargo run -p evals -- matrix \
+  --snapshot evals/snapshots/curated-v2-smoke.toml \
+  --profile <host-profile> \
+  --results-root evals/results/warm
+```
+
+6. Commit both cold and warm result directories from the same pin. Label the run
+   dirs and results PR/summary text as cold vs warm.
+
+Why both: the stop/start between phases guarantees there is no harness-process
+or backend cache carryover from cold into warm. Matrix children are per-cell
+processes, so each cold audio cell measures a process-cold first call that pays
+ORT session/graph initialization, allocation, and first-kernel costs. It is not
+disk-cold: model weights are usually already in the OS page cache after
+prefetch/build, so cold I/O is outside this protocol. Warm reports steady-state
+latency after the configured discarded warmup passes. Cold is one first-call draw
+per matrix run; if cold variance is needed, repeat the whole cold phase and keep
+those cold runs separate rather than averaging them into warm statistics. Both
+datasets are retained rather than replacing one with the other.
 
 ## CYCLE COMPLETE (2026-06-11 ~02:5x PDT) — final summary
 - **Final coverage:** `evals/results/final-coverage-2026-06-11.md` — 143 records over 8 final-pin + supplement runs: **95 passed / 43 blocked / 4 failed / 1 skipped**. Every blocked/failed row carries a structured reason + committed failure doc; the dominant blocked class is the documented `apple-metal` mistralrs platform gap (honest CPU-fallback) and the dgx `-lcudnn` host issue.
@@ -99,6 +147,7 @@ Curated bundles are LOCAL models meant for CPU inference — failures and budget
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **debug child builds inflate wall time (mac1 data for the orchestrator gotcha above):** every mistralrs chat/perf/tool cell on this host burned the full 1200s budget (7 cells ≈ 2h20m for zero successful generations). The #435 harness batch switches matrix children to release before the next round.
 
 ## Open issues
+- `@495-impl 2026-06-12 PDT` — **#495/#496/#497 ORT CUDA on aarch64: no CUDA execution provider exists for the dgx under the static-ORT policy (platform gap, mistralrs-metal-class).** Evidence chain: (a) the pinned static archive `sherpa-onnx-v1.13.2-linux-aarch64-static-lib` contains the CUDA C-API entry points but ZERO references to `cuda*`/`cudnn*` runtime symbols — the CUDA EP implementation is not compiled in (`GetAvailableProviders` reports CPU only); (b) pyke (the workspace `ort` binary source) publishes `cu12`/`cu13` builds for x86_64 ONLY — `aarch64-unknown-linux-gnu+cu{12,13}` 404 on the CDN; (c) Microsoft's official ORT releases through v1.26.0 ship `linux-aarch64` CPU-only (GPU = x64 only); (d) k2-fsa's aarch64 GPU builds are Jetson-era shared libs against ORT 1.11.0–1.18.1 (pre-Blackwell CUDA — cannot run on GB10 sm_121, and shared linkage is not an accepted runbook path); (e) the GB10 host has CUDA 13.0 but no cuDNN installed (ORT CUDA EP hard-requires cuDNN 9). Fix landed for honesty instead: `motlie-model-ort` now resolves CUDA only when the linked ORT actually compiles the EP in (`ep::CUDA::is_available()`), registers it `error_on_failure`, and piper/moonshine records carry `cuda_execution_provider=unavailable;ort_build=cpu_only`. NOTE this applies to **cuda-workstation x86_64 too**: matrix children pin `MOTLIE_ORT_SOURCE=sherpa-onnx` (CPU static) on every target, so piper/kokoro/moonshine cells cannot resolve CUDA anywhere until the cycle either ships a CUDA-capable static ORT or sanctions `MOTLIE_ORT_SOURCE=pyke` for cuda profiles (x86_64 has pyke cu12/cu13). sherpa cells additionally need an upstream GPU static archive (none published). kokoro: same gap, plus `KokoroHandle` has no `accelerator_observation()` at all — its dgx/cuda-workstation cells will record `backend_offload_unverified` even where CUDA were possible; follow-up needed.
 - `@codex-399-impl 2026-06-10 PDT` -- **#444/#449/#451 ORT follow-up:** eval child builds for ONNX/ORT-backed Piper and Sherpa cells now use static ORT from the workspace `third_party/ort-sys` patch, scrub host dynamic ORT env, and classify `_OrtGetApiBase`/undefined-symbol linker failures as `native_link_failed`. Local aarch64 one-cell repros for Piper and Sherpa both passed with poisoned parent ORT env; see issue comments for raw commands and metrics.
 - Umbrella tracker: #435 (sub-issues filed as runs land)
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **snapshot quant label vs runtime default mismatch:** `qwen3_6_27b_gguf` cells are labeled `q4_k_m` but the runtime default (no `--precision` from the driver) resolves the bundle's recommended quant **Q5_K_M** → `GGUF artifact Qwen3.6-27B-Q5_K_M.gguf not found`. Any green record under this condition would mislabel the quant axis. Fix: driver passes `--precision` derived from the cell's quantization label, or snapshot validation against `QuantizationSupport.recommended`.

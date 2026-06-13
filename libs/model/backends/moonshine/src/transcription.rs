@@ -12,6 +12,10 @@ use motlie_model::{
     StartOptions, TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
     UnsupportedCompletion, UnsupportedEmbeddings,
 };
+use motlie_model_ort::{
+    apply_execution_target, resolved_execution_target, OrtExecutionTarget,
+    OrtResolvedExecutionTarget,
+};
 use ndarray::{ArrayD, ArrayViewD, IxDyn};
 use ort::inputs;
 use ort::session::Session;
@@ -252,11 +256,18 @@ impl BundleHandle for MoonshineHandle {
     }
 
     fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
-        Some(RuntimeAcceleratorObservation {
-            backend_mode: "moonshine:cpu".to_owned(),
-            offload: Some("accelerator_feature=none".to_owned()),
-            selected_device: None,
-        })
+        match self.runtime.execution_target {
+            OrtResolvedExecutionTarget::Cuda => Some(RuntimeAcceleratorObservation {
+                backend_mode: "moonshine:cuda".to_owned(),
+                offload: Some("cuda_execution_provider=on;target=auto".to_owned()),
+                selected_device: Some("0".to_owned()),
+            }),
+            OrtResolvedExecutionTarget::Cpu => Some(RuntimeAcceleratorObservation {
+                backend_mode: "moonshine:cpu".to_owned(),
+                offload: Some(moonshine_cpu_offload_reason()),
+                selected_device: None,
+            }),
+        }
     }
 
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
@@ -277,6 +288,21 @@ impl BundleHandle for MoonshineHandle {
 
     async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
+    }
+}
+
+fn moonshine_cpu_offload_reason() -> String {
+    if motlie_model::metrics_runtime::should_force_cpu() {
+        "cuda_execution_provider=off;force_cpu=true".to_owned()
+    } else if !cfg!(feature = "cuda") {
+        "accelerator_feature=none".to_owned()
+    } else if !motlie_model_ort::cuda_ep_available() {
+        // The `cuda` Cargo feature is on, but the ONNX Runtime this binary
+        // linked against has no CUDA execution provider compiled in (e.g. the
+        // static linux-aarch64 archives are CPU-only; see issue #495).
+        "cuda_execution_provider=unavailable;ort_build=cpu_only".to_owned()
+    } else {
+        "cuda_execution_provider=off".to_owned()
     }
 }
 
@@ -558,6 +584,7 @@ struct MoonshineRuntime {
     decoder_kv: Mutex<Session>,
     tokenizer: BinTokenizer,
     config: StreamingConfig,
+    execution_target: OrtResolvedExecutionTarget,
     _staged_root: StagedModelDir,
 }
 
@@ -931,20 +958,47 @@ impl MoonshineRuntime {
 fn load_runtime(artifacts: &MoonshineArtifactPaths) -> Result<MoonshineRuntime, ModelError> {
     let staged_root = StagedModelDir::prepare(artifacts)?;
     let config = StreamingConfig::load(staged_root.path())?;
+    let target = OrtExecutionTarget::Auto;
+    let execution_target = resolved_execution_target(target);
 
     Ok(MoonshineRuntime {
-        frontend: Mutex::new(load_component_session(staged_root.path(), "frontend")?),
-        encoder: Mutex::new(load_component_session(staged_root.path(), "encoder")?),
-        adapter: Mutex::new(load_component_session(staged_root.path(), "adapter")?),
-        cross_kv: Mutex::new(load_component_session(staged_root.path(), "cross_kv")?),
-        decoder_kv: Mutex::new(load_component_session(staged_root.path(), "decoder_kv")?),
+        frontend: Mutex::new(load_component_session(
+            staged_root.path(),
+            "frontend",
+            target,
+        )?),
+        encoder: Mutex::new(load_component_session(
+            staged_root.path(),
+            "encoder",
+            target,
+        )?),
+        adapter: Mutex::new(load_component_session(
+            staged_root.path(),
+            "adapter",
+            target,
+        )?),
+        cross_kv: Mutex::new(load_component_session(
+            staged_root.path(),
+            "cross_kv",
+            target,
+        )?),
+        decoder_kv: Mutex::new(load_component_session(
+            staged_root.path(),
+            "decoder_kv",
+            target,
+        )?),
         tokenizer: BinTokenizer::load(staged_root.path())?,
         config,
+        execution_target,
         _staged_root: staged_root,
     })
 }
 
-fn load_component_session(model_dir: &Path, name: &str) -> Result<Session, ModelError> {
+fn load_component_session(
+    model_dir: &Path,
+    name: &str,
+    target: OrtExecutionTarget,
+) -> Result<Session, ModelError> {
     for extension in ["ort", "onnx"] {
         let path = model_dir.join(format!("{name}.{extension}"));
         if !path.exists() {
@@ -955,12 +1009,13 @@ fn load_component_session(model_dir: &Path, name: &str) -> Result<Session, Model
             backend: "moonshine",
             message: format!("failed to create ORT session builder for `{name}`: {err}"),
         })?;
-        let mut builder = builder.with_intra_threads(NUM_THREADS).map_err(|err| {
+        let builder = builder.with_intra_threads(NUM_THREADS).map_err(|err| {
             ModelError::BackendInitialization {
                 backend: "moonshine",
                 message: format!("failed to configure ORT threads for `{name}`: {err}"),
             }
         })?;
+        let mut builder = apply_execution_target("moonshine", builder, target)?;
 
         return builder
             .commit_from_file(&path)

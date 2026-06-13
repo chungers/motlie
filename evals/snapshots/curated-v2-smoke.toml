@@ -680,6 +680,9 @@ quantization = "default"
 backend = "ort"
 features = ["model-moonshine-streaming"]
 profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "moonshine-cuda"]
+"cuda-workstation" = ["cuda", "moonshine-cuda"]
 [cells.artifact]
 requires_hf_token = false
 patterns = [
@@ -735,6 +738,28 @@ profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark",
 [cells.artifact]
 requires_hf_token = false
 patterns = ["*.onnx", "*.json"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "kokoro_82m__tts_synthesis_smoke__smoke__onnx_default"
+bundle_id = "kokoro_82m"
+scenario = "tts_synthesis_smoke"
+capability = "tts"
+depth = "smoke"
+model_family = "kokoro"
+checkpoint_format = "onnx"
+quantization = "default"
+backend = "ort"
+features = ["model-kokoro-82m"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "kokoro-cuda"]
+"cuda-workstation" = ["cuda", "kokoro-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["model_quantized.onnx", "tokenizer.json", "af_bella.bin"]
 [cells.budgets]
 max_wall_time_secs = 900
 cpu_depth_allowed = ["smoke"]

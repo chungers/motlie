@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 
 use crate::accelerator;
 use crate::metrics::MetricsSampler;
@@ -16,7 +16,7 @@ use crate::runner::embeddings::EmbeddingSimilarityRunner;
 use crate::runner::perf::PerfRunner;
 use crate::runner::tts::TtsRunner;
 use crate::runner::{BundleSelection, ProfileSelection, RunContext, RuntimeFlags, ScenarioRunner};
-use crate::scenario::{self, CapabilityName};
+use crate::scenario::{self, AudioIterationOverrides, CapabilityName};
 
 pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     let command_line = args.into_iter().collect::<Vec<_>>();
@@ -57,8 +57,13 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
 
 async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> {
     let options = RunOptions::parse(args)?;
-    let scenario = scenario::load_scenario(&options.eval_root, &options.scenario)
+    let mut scenario = scenario::load_scenario(&options.eval_root, &options.scenario)
         .with_context(|| format!("failed to load scenario `{}`", options.scenario))?;
+    if !options.audio_iteration_overrides.is_empty()
+        && !scenario.apply_audio_iteration_overrides(options.audio_iteration_overrides)
+    {
+        bail!("audio iteration overrides (--cold/--warmup-iterations/--iterations) apply only to ASR/TTS scenarios");
+    }
     let output_sink = options
         .jsonl
         .clone()
@@ -178,6 +183,7 @@ struct RunOptions {
     child_build_log: Option<String>,
     child_build_status: Option<i32>,
     child_build_duration_ms: Option<u64>,
+    audio_iteration_overrides: AudioIterationOverrides,
 }
 
 impl RunOptions {
@@ -204,6 +210,8 @@ impl RunOptions {
         let mut child_build_log = None;
         let mut child_build_status = None;
         let mut child_build_duration_ms = None;
+        let mut audio_iteration_overrides = AudioIterationOverrides::default();
+        let mut cold = false;
 
         let mut index = 0;
         while index < args.len() {
@@ -287,6 +295,24 @@ impl RunOptions {
                             .context("--child-build-duration-ms must be an integer")?,
                     );
                 }
+                "--warmup-iterations" => {
+                    ensure!(!cold, "--warmup-iterations cannot be combined with --cold");
+                    audio_iteration_overrides.warmup_iterations =
+                        Some(take_u64(args, &mut index, "--warmup-iterations")?);
+                }
+                "--iterations" => {
+                    ensure!(!cold, "--iterations cannot be combined with --cold");
+                    audio_iteration_overrides.iterations =
+                        Some(take_u64(args, &mut index, "--iterations")?);
+                }
+                "--cold" => {
+                    ensure!(
+                        audio_iteration_overrides.is_empty(),
+                        "--cold cannot be combined with --iterations or --warmup-iterations"
+                    );
+                    cold = true;
+                    audio_iteration_overrides = AudioIterationOverrides::cold();
+                }
                 other => bail!("unknown evals run option `{other}`"),
             }
             index += 1;
@@ -317,6 +343,7 @@ impl RunOptions {
             child_build_log,
             child_build_status,
             child_build_duration_ms,
+            audio_iteration_overrides,
         })
     }
 
@@ -414,6 +441,12 @@ fn take_value(args: &[String], index: &mut usize, flag: &str) -> Result<String> 
         .with_context(|| format!("{flag} requires a value"))
 }
 
+fn take_u64(args: &[String], index: &mut usize, flag: &str) -> Result<u64> {
+    take_value(args, index, flag)?
+        .parse::<u64>()
+        .with_context(|| format!("{flag} must be an unsigned integer"))
+}
+
 fn default_eval_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -451,8 +484,8 @@ fn print_usage() {
     println!("usage:");
     println!("  evals list scenarios [--root PATH]");
     println!("  evals list bundles");
-    println!("  evals run --bundle <bundle_id> --scenario <scenario_id> [--profile NAME] [--artifact-root PATH] [--jsonl PATH]");
-    println!("  evals matrix --snapshot <path> [--profile NAME] [--artifact-root PATH]");
+    println!("  evals run --bundle <bundle_id> --scenario <scenario_id> [--profile NAME] [--artifact-root PATH] [--jsonl PATH] [--warmup-iterations N | --cold]");
+    println!("  evals matrix --snapshot <path> [--profile NAME] [--artifact-root PATH] [--warmup-iterations N | --cold]");
     println!("  evals provision --snapshot <path> [--artifact-root PATH]");
     println!("  evals report --input <jsonl> --format markdown");
     println!("  evals report --aggregate <glob-or-path> --output <path> [--snapshot <path>] [--allow-invalid-records]");
@@ -483,6 +516,23 @@ mod tests {
         assert!(error.to_string().contains("unknown evals command"));
     }
 
+    #[tokio::test]
+    async fn audio_run_overrides_reject_non_audio_scenarios() {
+        let error = run([
+            "evals".to_owned(),
+            "run".to_owned(),
+            "--bundle".to_owned(),
+            "qwen3_4b".to_owned(),
+            "--scenario".to_owned(),
+            "chat_smoke".to_owned(),
+            "--cold".to_owned(),
+        ])
+        .await
+        .expect_err("audio overrides should reject non-audio scenarios");
+
+        assert!(error.to_string().contains("apply only to ASR/TTS"));
+    }
+
     #[test]
     fn parses_run_options() {
         let options = RunOptions::parse(&[
@@ -498,5 +548,48 @@ mod tests {
         assert_eq!(options.bundle, "embeddinggemma_300m");
         assert_eq!(options.scenario, "embeddings_similarity");
         assert_eq!(options.profile, "local-cpu-x86_64");
+    }
+
+    #[test]
+    fn parses_audio_run_iteration_overrides() {
+        let warm = RunOptions::parse(&[
+            "--bundle".to_owned(),
+            "piper_en_us_ljspeech_medium".to_owned(),
+            "--scenario".to_owned(),
+            "tts_synthesis_smoke".to_owned(),
+            "--warmup-iterations".to_owned(),
+            "2".to_owned(),
+        ])
+        .unwrap();
+        let cold = RunOptions::parse(&[
+            "--bundle".to_owned(),
+            "piper_en_us_ljspeech_medium".to_owned(),
+            "--scenario".to_owned(),
+            "tts_synthesis_smoke".to_owned(),
+            "--cold".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            warm.audio_iteration_overrides,
+            AudioIterationOverrides {
+                iterations: None,
+                warmup_iterations: Some(2)
+            }
+        );
+        assert_eq!(
+            cold.audio_iteration_overrides,
+            AudioIterationOverrides::cold()
+        );
+        assert!(RunOptions::parse(&[
+            "--bundle".to_owned(),
+            "piper_en_us_ljspeech_medium".to_owned(),
+            "--scenario".to_owned(),
+            "tts_synthesis_smoke".to_owned(),
+            "--cold".to_owned(),
+            "--warmup-iterations".to_owned(),
+            "1".to_owned(),
+        ])
+        .is_err());
     }
 }

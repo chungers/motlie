@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::metrics::{PerformanceMetrics, ResourceMetrics};
 use crate::platform::PlatformSnapshot;
 
-pub const RESULT_SCHEMA_VERSION: u32 = 3;
+pub const RESULT_SCHEMA_VERSION: u32 = 5;
+pub const MIN_AGGREGATE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResultRecord {
