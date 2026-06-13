@@ -28,7 +28,6 @@ use crate::common::{
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
-const DEFAULT_MAX_TOKENS: u32 = 512;
 const DEFAULT_TEMPERATURE: f32 = 0.7;
 
 /// Architecture discriminant selecting the correct chat template and model behavior.
@@ -532,7 +531,8 @@ impl LlamaCppRuntime {
         let generated = self
             .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new())
             .await?;
-        let timing = timing_for_visible_content(generated.timing, &generated.text);
+        let timing =
+            timing_for_visible_content(generated.timing, &generated.text, &generated.token_timings);
         Ok(ChatResponse {
             content: generated.text,
             usage: Some(generated.usage),
@@ -587,7 +587,12 @@ impl LlamaCppRuntime {
     ) -> Result<GeneratedText, ModelError> {
         let backend = Arc::clone(&self.backend);
         let model = Arc::clone(&self.model);
-        let max_tokens: u32 = params.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        // `None` means "no caller cap": generation runs to the model's natural
+        // EOS (#492). We deliberately do NOT substitute a guessed constant here
+        // — that would re-introduce the same class of a-priori cap the issue
+        // ruled out. The effective bound for the `None` case is resolved below
+        // from the model's own context window once the prompt is tokenized.
+        let requested_max_tokens: Option<u32> = params.max_tokens;
         let temperature: f32 = params.temperature.unwrap_or(DEFAULT_TEMPERATURE);
         let top_p: Option<f32> = params.top_p;
         let mut stop_sequences = params.stop_sequences;
@@ -627,6 +632,18 @@ impl LlamaCppRuntime {
             }
 
             let prompt_token_count = token_count_to_u32(tokens.len());
+
+            // Resolve the generation bound. A caller-supplied `max_tokens` is an
+            // explicit cap and is honored as-is. `None` (#492 uncapped path)
+            // runs to natural EOS, bounded only by the remaining context
+            // window — a hard physical limit, not a guessed a-priori cap. In
+            // normal operation the model emits EOS / a stop sequence well before
+            // this; the sole opt-in runaway guard is `--max-wall-time-secs`.
+            let max_tokens: u32 = effective_generation_bound(
+                requested_max_tokens,
+                context_length,
+                prompt_token_count,
+            );
 
             let mut batch = LlamaBatch::new(context_length as usize, 1);
             let last_idx = tokens.len() - 1;
@@ -763,6 +780,10 @@ impl LlamaCppRuntime {
                     first_answer_token_at,
                     last_token_at,
                     generated_tokens: generated_token_count,
+                    tokens_before_answer: tokens_before_boundary(
+                        first_answer_token_at,
+                        &token_timings,
+                    ),
                 },
                 token_timings,
             })
@@ -799,6 +820,24 @@ fn token_count_to_u32(count: usize) -> u32 {
     count.min(u32::MAX as usize) as u32
 }
 
+/// Resolve the generation token bound.
+///
+/// A caller-supplied `max_tokens` is an explicit cap, honored as-is. `None`
+/// (the #492 uncapped path) runs to the model's natural EOS, bounded only by
+/// the remaining context window (`context_length - prompt_token_count`) — a
+/// hard physical limit, never a guessed a-priori constant. The result is at
+/// least 1 so there is always room to sample the EOS/first token.
+fn effective_generation_bound(
+    requested_max_tokens: Option<u32>,
+    context_length: u32,
+    prompt_token_count: u32,
+) -> u32 {
+    match requested_max_tokens {
+        Some(limit) => limit,
+        None => context_length.saturating_sub(prompt_token_count).max(1),
+    }
+}
+
 fn has_visible_answer_text_for_timing(generated_text: &str) -> bool {
     !strip_leading_reasoning_for_timing(generated_text)
         .trim()
@@ -819,12 +858,36 @@ fn strip_leading_reasoning_for_timing(generated_text: &str) -> &str {
     strip_empty_gemma4_channel_prefix(generated_text)
 }
 
-fn timing_for_visible_content(mut timing: GenerationTiming, content: &str) -> GenerationTiming {
+/// Count generated tokens emitted strictly before the think→answer boundary.
+///
+/// The boundary token (the first answer token, at `boundary`) is excluded, so
+/// the result is the number of reasoning/`<think>` tokens that preceded it.
+/// `None` when no boundary was reached or there is no per-token timing to count
+/// against.
+fn tokens_before_boundary(
+    boundary: Option<Instant>,
+    token_timings: &[GeneratedTokenTiming],
+) -> Option<u32> {
+    let boundary = boundary?;
+    let count = token_timings
+        .iter()
+        .filter(|token| token.at < boundary)
+        .count();
+    Some(token_count_to_u32(count))
+}
+
+fn timing_for_visible_content(
+    mut timing: GenerationTiming,
+    content: &str,
+    token_timings: &[GeneratedTokenTiming],
+) -> GenerationTiming {
     if content.trim().is_empty() {
         timing.first_answer_token_at = None;
     } else if timing.first_answer_token_at.is_none() {
         timing.first_answer_token_at = timing.first_token_at;
     }
+    timing.tokens_before_answer =
+        tokens_before_boundary(timing.first_answer_token_at, token_timings);
     timing
 }
 
@@ -837,6 +900,7 @@ fn timing_for_openai_response(
 ) -> GenerationTiming {
     if final_content.trim().is_empty() {
         timing.first_answer_token_at = None;
+        timing.tokens_before_answer = None;
         return timing;
     }
 
@@ -844,6 +908,8 @@ fn timing_for_openai_response(
         first_parsed_content_token_at(template, generated_text, token_timings)
             .or(timing.last_token_at)
             .or(timing.first_token_at);
+    timing.tokens_before_answer =
+        tokens_before_boundary(timing.first_answer_token_at, token_timings);
     timing
 }
 
@@ -1903,14 +1969,75 @@ mod tests {
             first_answer_token_at: Some(first_token_at),
             last_token_at: Some(first_token_at),
             generated_tokens: 1,
+            tokens_before_answer: Some(0),
         };
+        let token_timings = [GeneratedTokenTiming {
+            end_byte: 1,
+            at: first_token_at,
+        }];
 
-        timing = timing_for_visible_content(timing, "   ");
+        timing = timing_for_visible_content(timing, "   ", &token_timings);
         assert_eq!(timing.first_answer_token_at, None);
+        assert_eq!(timing.tokens_before_answer, None);
 
         timing.first_answer_token_at = None;
-        timing = timing_for_visible_content(timing, "answer");
+        timing = timing_for_visible_content(timing, "answer", &token_timings);
         assert_eq!(timing.first_answer_token_at, Some(first_token_at));
+        // Answer begins at the first token, so no reasoning tokens precede it.
+        assert_eq!(timing.tokens_before_answer, Some(0));
+    }
+
+    #[test]
+    fn uncapped_generation_bound_uses_context_window_not_a_guessed_cap() {
+        // #492 F1: `None` must NOT collapse to a hidden 512 cap. With a 32768
+        // context it must allow generation far past 512 (run-to-EOS), bounded
+        // only by the remaining context window.
+        let bound = effective_generation_bound(None, 32_768, 40);
+        assert_eq!(bound, 32_768 - 40);
+        assert!(bound > 512, "uncapped path must exceed the old 512 default");
+
+        // An explicit caller cap is still honored verbatim.
+        assert_eq!(effective_generation_bound(Some(96), 32_768, 40), 96);
+
+        // Degenerate: prompt already fills the context -> still leave room for 1.
+        assert_eq!(effective_generation_bound(None, 100, 100), 1);
+        assert_eq!(effective_generation_bound(None, 100, 200), 1);
+    }
+
+    #[test]
+    fn tokens_before_boundary_counts_reasoning_tokens() {
+        let request_at = Instant::now();
+        let at = |ms: u64| {
+            request_at
+                .checked_add(std::time::Duration::from_millis(ms))
+                .unwrap()
+        };
+        let token_timings = [
+            GeneratedTokenTiming {
+                end_byte: 1,
+                at: at(10),
+            },
+            GeneratedTokenTiming {
+                end_byte: 2,
+                at: at(20),
+            },
+            GeneratedTokenTiming {
+                end_byte: 3,
+                at: at(30),
+            },
+        ];
+        // Boundary at the 3rd token: 2 reasoning tokens precede it.
+        assert_eq!(
+            tokens_before_boundary(Some(at(30)), &token_timings),
+            Some(2)
+        );
+        // No boundary reached -> no count.
+        assert_eq!(tokens_before_boundary(None, &token_timings), None);
+        // Boundary at the first token -> zero reasoning tokens.
+        assert_eq!(
+            tokens_before_boundary(Some(at(10)), &token_timings),
+            Some(0)
+        );
     }
 
     #[tokio::test]

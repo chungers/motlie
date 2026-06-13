@@ -440,6 +440,7 @@ mod tests {
             first_answer_token_at: Some(first_answer_token_at),
             last_token_at: Some(last_token_at),
             generated_tokens: 5,
+            tokens_before_answer: None,
         }));
 
         assert_eq!(metrics.ttft_first_token_ms, Some(10));
