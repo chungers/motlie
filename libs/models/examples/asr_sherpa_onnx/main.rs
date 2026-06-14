@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use motlie_models::asr::{sherpa_onnx_streaming_en, sherpa_onnx_streaming_en_kroko_2025};
+use motlie_models::asr::{sherpa_onnx_streaming_zipformer_en, sherpa_onnx_streaming_zipformer_en_kroko_2025};
 
 #[path = "../support/asr.rs"]
 mod asr_support;
@@ -130,7 +130,7 @@ async fn run(args: Args) -> Result<()> {
                 "failed to start typed sherpa-onnx bundle",
                 "failed to open typed sherpa-onnx session",
                 "typed sherpa ingest failed",
-                sherpa_onnx_streaming_en::start_typed,
+                sherpa_onnx_streaming_zipformer_en::start_typed,
             )
             .await
         }
@@ -141,7 +141,7 @@ async fn run(args: Args) -> Result<()> {
                 "failed to start typed sherpa-onnx Kroko 2025 bundle",
                 "failed to open typed sherpa-onnx Kroko 2025 session",
                 "typed sherpa Kroko 2025 ingest failed",
-                sherpa_onnx_streaming_en_kroko_2025::start_typed,
+                sherpa_onnx_streaming_zipformer_en_kroko_2025::start_typed,
             )
             .await
         }

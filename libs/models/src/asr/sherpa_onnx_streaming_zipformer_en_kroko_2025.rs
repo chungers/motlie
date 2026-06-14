@@ -195,7 +195,7 @@ mod tests {
             SELECTOR
                 .parse::<AsrModels>()
                 .expect("Kroko selector should parse"),
-            AsrModels::SherpaOnnxStreamingEnKroko2025
+            AsrModels::SherpaOnnxStreamingZipformerEnKroko2025
         );
         assert_eq!(
             catalog.model(&bundle_id).map(|model| model.id.clone()),
@@ -206,7 +206,7 @@ mod tests {
             .any(|bundle| bundle.id == bundle_id));
         assert_eq!(
             catalog.instantiate(&bundle_id),
-            Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)
+            Some(CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025)
         );
 
         let resolved = catalog
@@ -214,7 +214,7 @@ mod tests {
             .expect("Kroko should resolve from the default curated catalog");
         assert_eq!(
             catalog.instantiate_resolved(&resolved),
-            Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)
+            Some(CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025)
         );
     }
 

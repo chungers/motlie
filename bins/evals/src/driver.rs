@@ -1948,6 +1948,96 @@ unauthorized access to model cache"#,
         let _ = std::fs::remove_dir_all(root);
     }
 
+    // --- Issue #518 structural rules: snapshot/data bundle_id must be a
+    // CuratedBundle canonical string, and every variant must have a cell. ---
+
+    #[test]
+    fn snapshot_bundle_ids_are_canonical() {
+        let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
+            .expect("curated snapshot should parse");
+        for cell in &snapshot.cells {
+            assert!(
+                motlie_models::CuratedBundle::CANONICAL_IDS.contains(&cell.bundle_id.as_str()),
+                "snapshot cell `{}` bundle_id `{}` is not a CuratedBundle canonical id",
+                cell.id,
+                cell.bundle_id
+            );
+        }
+    }
+
+    #[test]
+    fn every_curated_bundle_has_a_snapshot_cell() {
+        let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
+            .expect("curated snapshot should parse");
+        let covered: std::collections::BTreeSet<&str> =
+            snapshot.cells.iter().map(|cell| cell.bundle_id.as_str()).collect();
+        let missing: Vec<&str> = motlie_models::CuratedBundle::CANONICAL_IDS
+            .iter()
+            .copied()
+            .filter(|id| !covered.contains(id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "CuratedBundle variants without a curated cell (completeness gap): {missing:?}"
+        );
+    }
+
+    #[test]
+    fn committed_result_bundle_ids_are_canonical() {
+        // Data guard: proves committed records already use canonical bundle_ids
+        // without editing any data. Walks evals/results/**/results.jsonl.
+        let canonical: std::collections::BTreeSet<&str> =
+            motlie_models::CuratedBundle::CANONICAL_IDS.iter().copied().collect();
+        let results_root = repo_root().join("evals/results");
+        let mut stack = vec![results_root];
+        let mut checked = 0_u64;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.file_name().and_then(|n| n.to_str()) != Some("results.jsonl") {
+                    continue;
+                }
+                let contents = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|err| panic!("failed to read `{}`: {err}", path.display()));
+                for (line_no, line) in contents.lines().enumerate() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let value: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|err| {
+                        panic!("invalid jsonl in `{}` line {}: {err}", path.display(), line_no + 1)
+                    });
+                    let bundle_id = value
+                        .get("coverage")
+                        .and_then(|c| c.get("bundle_id"))
+                        .and_then(|b| b.as_str())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "missing coverage.bundle_id in `{}` line {}",
+                                path.display(),
+                                line_no + 1
+                            )
+                        });
+                    assert!(
+                        canonical.contains(bundle_id),
+                        "committed record `{}` line {} has non-canonical bundle_id `{}`",
+                        path.display(),
+                        line_no + 1,
+                        bundle_id
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "data guard found no committed result records to check");
+    }
+
     #[test]
     fn profile_filter_emits_not_applicable() {
         let snapshot = EvalSnapshot {

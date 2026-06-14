@@ -190,7 +190,7 @@ async fn run_selected_tts(
             request,
             iterations,
             warmup_iterations,
-            motlie_models::tts::qwen3_tts_cpp::start_typed,
+            motlie_models::tts::qwen3_tts_cpp_0_6b::start_typed,
         )
         .await;
     }
