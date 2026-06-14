@@ -20,7 +20,7 @@ mod gemma4_multimodal_example {
     use anyhow::{bail, ensure, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart,
-        QuantizationBits, StartOptions,
+        QuantizationScheme, StartOptions,
     };
     use motlie_model_mistral::MistralMultimodalSpec;
     use motlie_models::{
@@ -301,7 +301,7 @@ mod gemma4_multimodal_example {
         descriptor: BundleDescriptor,
         bundle: CuratedBundle,
         generation_defaults: motlie_model::GenerationParams,
-        recommended_quantization: Option<QuantizationBits>,
+        recommended_quantization: Option<QuantizationScheme>,
     }
 
     fn select_model(model_name: Option<&str>) -> Result<SelectedGemmaModel> {
@@ -361,11 +361,11 @@ mod gemma4_multimodal_example {
 
     fn resolve_quantization(
         precision: Option<&str>,
-        recommended: Option<QuantizationBits>,
-    ) -> Result<Option<QuantizationBits>> {
+        recommended: Option<QuantizationScheme>,
+    ) -> Result<Option<QuantizationScheme>> {
         match precision {
-            Some("q4") => Ok(Some(QuantizationBits::Four)),
-            Some("q8") => Ok(Some(QuantizationBits::Eight)),
+            Some("q4") => Ok(Some(QuantizationScheme::GgufQ4_K_M)),
+            Some("q8") => Ok(Some(QuantizationScheme::GgufQ8_0)),
             Some("f32") | Some("full") | Some("none") => Ok(None),
             None => Ok(recommended),
             Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),

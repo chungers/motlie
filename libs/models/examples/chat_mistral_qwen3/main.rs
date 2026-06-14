@@ -1,7 +1,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
-    QuantizationBits, StartOptions,
+    QuantizationScheme, StartOptions,
 };
 use motlie_model_mistral::MistralTextSpec;
 use motlie_models::{
@@ -61,8 +61,8 @@ async fn main() -> Result<()> {
     }
 
     let quantization = match precision.as_deref() {
-        Some("q4") | None => Some(QuantizationBits::Four),
-        Some("q8") => Some(QuantizationBits::Eight),
+        Some("q4") | None => Some(QuantizationScheme::GgufQ4_K_M),
+        Some("q8") => Some(QuantizationScheme::GgufQ8_0),
         Some("f32") => None,
         Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
     };

@@ -13,8 +13,8 @@ use motlie_model::typed::{
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint,
-    RuntimeAcceleratorObservation, SpeechParams, StartOptions, UnsupportedChat,
+    ModelIdentity, ModelMetricSnapshot, QuantizationScheme, QuantizationSupport,
+    ResolvedCheckpoint, RuntimeAcceleratorObservation, SpeechParams, StartOptions, UnsupportedChat,
     UnsupportedCompletion, UnsupportedEmbeddings,
 };
 
@@ -46,7 +46,17 @@ impl Qwen3TtsCppSpeechSpec {
             display_name: "Qwen3-TTS CPP 0.6B",
             hf_repo: "koboldcpp/tts",
             capabilities: Capabilities::speech_buffered_with_voice_clone(),
-            quantization: QuantizationSupport::without_recommended([QuantizationBits::Eight]),
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationScheme::GgufQ8_0, QuantizationScheme::Fp16],
+                QuantizationScheme::GgufQ8_0,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("curated quantization construction failed (this is a bug): {e}");
+                QuantizationSupport::without_recommended([
+                    QuantizationScheme::GgufQ8_0,
+                    QuantizationScheme::Fp16,
+                ])
+            }),
         }
     }
 }
@@ -92,7 +102,7 @@ impl BackendAdapter for Qwen3TtsCppSpeechAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_gguf_artifacts(checkpoint)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -155,7 +165,7 @@ impl Qwen3TtsCppSpeechBundle {
     ) -> Result<Qwen3TtsCppHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.hf_repo, policy)?

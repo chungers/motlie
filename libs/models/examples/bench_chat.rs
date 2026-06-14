@@ -9,7 +9,7 @@
 ///   --iterations=N         Number of measured iterations (default: 5)
 ///   --precision=q4|q8|f32|f16
 ///                          Quantization (default: q4; GGUF uses f16 for no quantization)
-///   --model=qwen|gemma|gemma4-12b-gguf|gemma4-12b-qat-q4-0-gguf
+///   --model=qwen|gemma|gemma4-12b-gguf|gemma4-12b-qat-gguf
 ///                          Model selection (default: qwen; `gemma` is Gemma 4 E2B)
 ///   --input=FILE           Read prompt from file instead of args
 ///
@@ -24,12 +24,12 @@ fn main() -> anyhow::Result<()> {
     feature = "model-qwen3-4b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 )))]
 mod bench_chat_example {
     pub fn run() -> anyhow::Result<()> {
         anyhow::bail!(
-            "enable at least one bench_chat feature: model-qwen3-4b, model-gemma4-e2b, model-gemma4-12b-gguf, or model-gemma4-12b-qat-q4-0-gguf"
+            "enable at least one bench_chat feature: model-qwen3-4b, model-gemma4-e2b, model-gemma4-12b-gguf, or model-gemma4-12b-qat-gguf"
         )
     }
 }
@@ -38,13 +38,13 @@ mod bench_chat_example {
     feature = "model-qwen3-4b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 ))]
 mod bench_chat_example {
     use anyhow::{bail, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole,
-        QuantizationBits, StartOptions,
+        QuantizationScheme, StartOptions,
     };
     use motlie_models::{
         default_artifact_root, quantization_label_gguf, quantization_label_isq, CuratedBundle,
@@ -83,8 +83,8 @@ mod bench_chat_example {
         };
 
         let quantization = match precision.as_deref() {
-            Some("q4") | None => Some(QuantizationBits::Four),
-            Some("q8") => Some(QuantizationBits::Eight),
+            Some("q4") | None => Some(QuantizationScheme::GgufQ4_K_M),
+            Some("q8") => Some(QuantizationScheme::GgufQ8_0),
             Some("f32") | Some("f16") => None,
             Some(other) => bail!("unknown precision `{other}`"),
         };
@@ -98,8 +98,8 @@ mod bench_chat_example {
         let est_tokens = prompt_words * 13 / 10;
 
         let quantization_label = match model_name.as_str() {
-            "gemma4-12b-qat-q4-0-gguf" | "gemma4_12b_qat_q4_0_gguf" => match quantization {
-                Some(QuantizationBits::Four) => "GGUF Q4_0",
+            "gemma4-12b-qat-gguf" | "gemma4_12b_qat_gguf" => match quantization {
+                Some(QuantizationScheme::GgufQ4_K_M) => "GGUF Q4_0",
                 _ => "unsupported QAT GGUF precision",
             },
             "gemma4-12b-gguf" | "gemma4_12b_gguf" => quantization_label_gguf(quantization),
@@ -144,16 +144,16 @@ mod bench_chat_example {
                 #[cfg(not(feature = "model-gemma4-12b-gguf"))]
                 bail!("model-gemma4-12b-gguf feature not enabled")
             }
-            "gemma4-12b-qat-q4-0-gguf" | "gemma4_12b_qat_q4_0_gguf" => {
-                #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            "gemma4-12b-qat-gguf" | "gemma4_12b_qat_gguf" => {
+                #[cfg(feature = "model-gemma4-12b-qat-gguf")]
                 {
-                    motlie_models::chat::gemma4_12b_qat_q4_0_gguf::bundle()
+                    motlie_models::chat::gemma4_12b_qat_gguf::bundle()
                 }
-                #[cfg(not(feature = "model-gemma4-12b-qat-q4-0-gguf"))]
-                bail!("model-gemma4-12b-qat-q4-0-gguf feature not enabled")
+                #[cfg(not(feature = "model-gemma4-12b-qat-gguf"))]
+                bail!("model-gemma4-12b-qat-gguf feature not enabled")
             }
             other => bail!(
-                "unknown model `{other}` — use qwen, gemma, gemma4-12b-gguf, or gemma4-12b-qat-q4-0-gguf"
+                "unknown model `{other}` — use qwen, gemma, gemma4-12b-gguf, or gemma4-12b-qat-gguf"
             ),
         };
 

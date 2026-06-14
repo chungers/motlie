@@ -54,7 +54,9 @@ impl AsrModels {
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingZipformerEn => sherpa_onnx_streaming_zipformer_en::SELECTOR,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingZipformerEnKroko2025 => sherpa_onnx_streaming_zipformer_en_kroko_2025::SELECTOR,
+            Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
+                sherpa_onnx_streaming_zipformer_en_kroko_2025::SELECTOR
+            }
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => whisper_base_en::SELECTOR,
         }
@@ -65,7 +67,9 @@ impl AsrModels {
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => moonshine_streaming_en::descriptor().id,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingZipformerEn => sherpa_onnx_streaming_zipformer_en::descriptor().id,
+            Self::SherpaOnnxStreamingZipformerEn => {
+                sherpa_onnx_streaming_zipformer_en::descriptor().id
+            }
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
                 sherpa_onnx_streaming_zipformer_en_kroko_2025::descriptor().id
@@ -80,7 +84,9 @@ impl AsrModels {
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => moonshine_streaming_en::descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingZipformerEn => sherpa_onnx_streaming_zipformer_en::descriptor(),
+            Self::SherpaOnnxStreamingZipformerEn => {
+                sherpa_onnx_streaming_zipformer_en::descriptor()
+            }
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
                 sherpa_onnx_streaming_zipformer_en_kroko_2025::descriptor()
@@ -95,7 +101,9 @@ impl AsrModels {
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => crate::CuratedBundle::MoonshineStreamingEn,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingZipformerEn => crate::CuratedBundle::SherpaOnnxStreamingZipformerEn,
+            Self::SherpaOnnxStreamingZipformerEn => {
+                crate::CuratedBundle::SherpaOnnxStreamingZipformerEn
+            }
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
                 crate::CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025
@@ -129,7 +137,9 @@ impl FromStr for AsrModels {
                 selector: value.to_owned(),
             }),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            sherpa_onnx_streaming_zipformer_en::SELECTOR => Ok(Self::SherpaOnnxStreamingZipformerEn),
+            sherpa_onnx_streaming_zipformer_en::SELECTOR => {
+                Ok(Self::SherpaOnnxStreamingZipformerEn)
+            }
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             sherpa_onnx_streaming_zipformer_en_kroko_2025::SELECTOR => {
                 Ok(Self::SherpaOnnxStreamingZipformerEnKroko2025)

@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use motlie_model::{
-    ArtifactPolicy, BundleHandle, BundleId, EmbeddingModel, EmbeddingRequest, QuantizationBits,
+    ArtifactPolicy, BundleHandle, BundleId, EmbeddingModel, EmbeddingRequest, QuantizationScheme,
     StartOptions,
 };
 use motlie_models::{
@@ -255,10 +255,10 @@ fn set_selection(current: Option<Selection>, next: Selection) -> Result<Option<S
     Ok(Some(next))
 }
 
-fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationBits>> {
+fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationScheme>> {
     match precision {
-        Some("q4") => Ok(Some(QuantizationBits::Four)),
-        Some("q8") => Ok(Some(QuantizationBits::Eight)),
+        Some("q4") => Ok(Some(QuantizationScheme::GgufQ4_K_M)),
+        Some("q8") => Ok(Some(QuantizationScheme::GgufQ8_0)),
         Some("f32") | None => Ok(None),
         Some(other) => bail!("unknown precision `{other}` - use q4, q8, or f32"),
     }

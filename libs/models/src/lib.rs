@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-kokoro-82m",
@@ -43,7 +43,7 @@ use motlie_model_kokoro::KokoroHandle;
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 ))]
 use motlie_model_llama_cpp::LlamaCppTextHandle;
 #[cfg(any(
@@ -73,7 +73,7 @@ pub use motlie_model::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleFamily, BundleId,
     BundleRequirements, Capabilities, CapabilityDescriptor, CapabilityKind, CheckpointFormat,
     ContentKind, EvalTrack, InteractionStyle, ModelBundle, ModelCheckpoint, ModelIdentity,
-    PlatformConstraint, QuantizationBits, QuantizationSupport,
+    PlatformConstraint, QuantizationScheme, QuantizationSupport,
 };
 use motlie_model::{
     BundleHandle, ChatModel, CompletionModel, EmbeddingModel, LoadedBundleDescriptor, ModelError,
@@ -121,29 +121,31 @@ pub enum ModelsError {
     NoEmbeddingModelsEnabled,
     #[error("expected exactly one curated embedding model in this build, found {count}")]
     AmbiguousEmbeddingModelSelection { count: usize },
+    #[error("invalid checkpoint quantization: {message}")]
+    InvalidCheckpointQuantization { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
 
 pub const LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX: &str = "artifact policy `LocalOnly`";
 
-pub fn quantization_label_isq(quantization: Option<QuantizationBits>) -> &'static str {
+pub fn quantization_label_isq(quantization: Option<QuantizationScheme>) -> &'static str {
     match quantization {
-        Some(QuantizationBits::Four) => "ISQ Q4",
-        Some(QuantizationBits::Eight) => "ISQ Q8",
-        Some(QuantizationBits::Five) | Some(QuantizationBits::FloatEight) => {
-            "unsupported ISQ precision"
-        }
+        Some(QuantizationScheme::IsqQ4) => "ISQ Q4",
+        Some(QuantizationScheme::IsqQ8) => "ISQ Q8",
+        Some(_) => "unsupported ISQ precision",
         None => "F32 (none)",
     }
 }
 
-pub fn quantization_label_gguf(quantization: Option<QuantizationBits>) -> &'static str {
+pub fn quantization_label_gguf(quantization: Option<QuantizationScheme>) -> &'static str {
     match quantization {
-        Some(QuantizationBits::Four) => "GGUF Q4_K_M",
-        Some(QuantizationBits::Five) => "GGUF Q5_K_M",
-        Some(QuantizationBits::Eight) => "GGUF Q8_0",
-        Some(QuantizationBits::FloatEight) => "GGUF FP8",
+        Some(QuantizationScheme::GgufQ4_K_M) => "GGUF Q4_K_M",
+        Some(QuantizationScheme::GgufQ4_0) => "GGUF Q4_0",
+        Some(QuantizationScheme::GgufQ5_K_M) => "GGUF Q5_K_M",
+        Some(QuantizationScheme::GgufQ8_0) => "GGUF Q8_0",
+        Some(QuantizationScheme::Fp16) => "GGUF F16",
+        Some(_) => "unsupported GGUF precision",
         None => "GGUF F16 (no quantization)",
     }
 }
@@ -279,7 +281,7 @@ pub fn resolve_hf_gguf_snapshot(
 /// root-level GGUF filename for the selected curated variant.
 #[cfg(any(
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 ))]
 pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
     model_id: &str,
@@ -311,7 +313,7 @@ pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
@@ -328,7 +330,7 @@ pub(crate) fn resolve_typed_artifact_policy(
 ) -> std::result::Result<StartOptions, motlie_model::ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization,
+        quantization_scheme,
         unpack_root,
         max_concurrency,
     } = options;
@@ -344,7 +346,7 @@ pub(crate) fn resolve_typed_artifact_policy(
 
     Ok(StartOptions {
         artifact_policy,
-        quantization,
+        quantization_scheme,
         unpack_root,
         max_concurrency,
     })
@@ -370,8 +372,8 @@ pub enum CuratedBundle {
     Gemma4E4B_Gguf,
     #[cfg(feature = "model-gemma4-12b-gguf")]
     Gemma4_12B_Gguf,
-    #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-    Gemma4_12B_QatQ4_0_Gguf,
+    #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+    Gemma4_12B_Qat_Gguf,
     #[cfg(feature = "model-google-gemma-300m")]
     EmbeddingGemma300m,
     #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -408,7 +410,7 @@ impl CuratedBundle {
         "gemma4_e2b_gguf",
         "gemma4_e4b_gguf",
         "gemma4_12b_gguf",
-        "gemma4_12b_qat_q4_0_gguf",
+        "gemma4_12b_qat_gguf",
         "embeddinggemma_300m",
         "qwen3_embedding_06b",
         "whisper_base_en",
@@ -446,8 +448,8 @@ impl CuratedBundle {
             Self::Gemma4E4B_Gguf => "gemma4_e4b_gguf",
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf => "gemma4_12b_gguf",
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf => "gemma4_12b_qat_q4_0_gguf",
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf => "gemma4_12b_qat_gguf",
             #[cfg(feature = "model-google-gemma-300m")]
             Self::EmbeddingGemma300m => "embeddinggemma_300m",
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -457,7 +459,9 @@ impl CuratedBundle {
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingZipformerEn => "sherpa_onnx_streaming_zipformer_en",
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingZipformerEnKroko2025 => "sherpa_onnx_streaming_zipformer_en_kroko_2025",
+            Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
+                "sherpa_onnx_streaming_zipformer_en_kroko_2025"
+            }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => "moonshine_streaming_en",
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -489,8 +493,8 @@ impl CuratedBundle {
             Self::Gemma4E4B_Gguf => chat::gemma4_e4b_gguf::descriptor(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf => chat::gemma4_12b_gguf::descriptor(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf => chat::gemma4_12b_qat_q4_0_gguf::descriptor(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf => chat::gemma4_12b_qat_gguf::descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::EmbeddingGemma300m => embeddings::embeddinggemma_300m::descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -498,7 +502,9 @@ impl CuratedBundle {
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => asr::whisper_base_en::descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingZipformerEn => asr::sherpa_onnx_streaming_zipformer_en::descriptor(),
+            Self::SherpaOnnxStreamingZipformerEn => {
+                asr::sherpa_onnx_streaming_zipformer_en::descriptor()
+            }
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
                 asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::descriptor()
@@ -555,10 +561,10 @@ impl CuratedBundle {
             Self::Gemma4_12B_Gguf => chat::gemma4_12b_gguf::start(options)
                 .await
                 .map(CuratedHandle::Gemma4_12B_Gguf),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf => chat::gemma4_12b_qat_q4_0_gguf::start(options)
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf => chat::gemma4_12b_qat_gguf::start(options)
                 .await
-                .map(CuratedHandle::Gemma4_12B_QatQ4_0_Gguf),
+                .map(CuratedHandle::Gemma4_12B_Qat_Gguf),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::EmbeddingGemma300m => embeddings::embeddinggemma_300m::start(options)
                 .await
@@ -572,9 +578,11 @@ impl CuratedBundle {
                 .await
                 .map(CuratedHandle::WhisperBaseEn),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingZipformerEn => asr::sherpa_onnx_streaming_zipformer_en::start_typed(options)
-                .await
-                .map(CuratedHandle::SherpaOnnxStreamingZipformerEn),
+            Self::SherpaOnnxStreamingZipformerEn => {
+                asr::sherpa_onnx_streaming_zipformer_en::start_typed(options)
+                    .await
+                    .map(CuratedHandle::SherpaOnnxStreamingZipformerEn)
+            }
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
                 asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::start_typed(options)
@@ -622,8 +630,8 @@ pub enum CuratedHandle {
     Gemma4E4B_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-gemma4-12b-gguf")]
     Gemma4_12B_Gguf(LlamaCppTextHandle),
-    #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-    Gemma4_12B_QatQ4_0_Gguf(LlamaCppTextHandle),
+    #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+    Gemma4_12B_Qat_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-google-gemma-300m")]
     EmbeddingGemma300m(MistralEmbeddingHandle),
     #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -669,8 +677,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.descriptor(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.descriptor(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::EmbeddingGemma300m(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -712,8 +720,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.capabilities(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.capabilities(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::EmbeddingGemma300m(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -755,8 +763,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.metric_snapshot(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::EmbeddingGemma300m(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -798,8 +806,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.accelerator_observation(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::EmbeddingGemma300m(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -809,7 +817,9 @@ impl BundleHandle for CuratedHandle {
             #[cfg(feature = "model-sherpa-onnx-streaming")]
             Self::SherpaOnnxStreamingZipformerEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.accelerator_observation(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => {
+                handle.accelerator_observation()
+            }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -841,8 +851,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(_) => Ok(self),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(_) => Ok(self),
             _ => Err(ModelError::UnsupportedCapability(CapabilityKind::Chat)),
         }
     }
@@ -862,8 +872,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(_) => Ok(self),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(_) => Ok(self),
             _ => Err(ModelError::UnsupportedCapability(
                 CapabilityKind::Completion,
             )),
@@ -901,8 +911,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.shutdown().await,
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-google-gemma-300m")]
             Self::EmbeddingGemma300m(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -949,8 +959,8 @@ impl ChatModel for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.generate(request).await,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.generate(request).await,
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.generate(request).await,
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.generate(request).await,
             _ => UnsupportedChat.generate(request).await,
         }
     }
@@ -976,8 +986,8 @@ impl CompletionModel for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.complete(request).await,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.complete(request).await,
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.complete(request).await,
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.complete(request).await,
             _ => UnsupportedCompletion.complete(request).await,
         }
     }
@@ -1006,6 +1016,7 @@ pub struct BundleArtifacts {
     pub format: CheckpointFormat,
     pub source: ArtifactSource,
     pub include: Vec<ArtifactRule>,
+    pub quantization: Option<QuantizationScheme>,
 }
 
 impl BundleArtifacts {
@@ -1015,7 +1026,7 @@ impl BundleArtifacts {
 
     pub fn include_for_quantization(
         &self,
-        quantization: Option<QuantizationBits>,
+        quantization: Option<QuantizationScheme>,
     ) -> Vec<ArtifactRule> {
         artifact_rules_for_quantization(self.format, &self.include, quantization)
     }
@@ -1030,7 +1041,7 @@ pub struct ArtifactDownloadSummary {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArtifactDownloadOptions {
     pub hf_token: Option<String>,
-    pub quantization: Option<QuantizationBits>,
+    pub quantization_scheme: Option<QuantizationScheme>,
 }
 
 pub fn default_artifact_root() -> PathBuf {
@@ -1072,8 +1083,8 @@ pub fn download_bundle_artifacts_with_options(
         &ModelCheckpoint {
             format: artifacts.format,
             source: artifacts.source.clone(),
-            include: artifacts.include_for_quantization(options.quantization),
-            quantization: None,
+            include: artifacts.include_for_quantization(options.quantization_scheme),
+            quantization: options.quantization_scheme.or(artifacts.quantization),
         },
         artifact_root,
         options,
@@ -1090,6 +1101,12 @@ fn download_checkpoint_artifacts_with_options(
     artifact_root: &Path,
     options: &ArtifactDownloadOptions,
 ) -> Result<Vec<PathBuf>> {
+    checkpoint.validate_quantization().map_err(|source| {
+        ModelsError::InvalidCheckpointQuantization {
+            message: source.to_string(),
+        }
+    })?;
+
     match &checkpoint.source {
         ArtifactSource::HuggingFace { repo } => {
             std::fs::create_dir_all(artifact_root).map_err(|source| {
@@ -1138,7 +1155,7 @@ fn download_checkpoint_artifacts_with_options(
 pub fn artifact_rules_for_quantization(
     format: CheckpointFormat,
     include: &[ArtifactRule],
-    quantization: Option<QuantizationBits>,
+    quantization: Option<QuantizationScheme>,
 ) -> Vec<ArtifactRule> {
     if format != CheckpointFormat::Gguf {
         return include.to_vec();
@@ -1154,22 +1171,27 @@ pub fn artifact_rules_for_quantization(
         .collect()
 }
 
-fn artifact_rule_matches_gguf_quant(rule: &ArtifactRule, quantization: QuantizationBits) -> bool {
+fn artifact_rule_matches_gguf_quant(rule: &ArtifactRule, quantization: QuantizationScheme) -> bool {
     let raw = match rule {
         ArtifactRule::Exact(value) | ArtifactRule::Suffix(value) => value,
     };
     let normalized = raw.to_ascii_lowercase();
+    if normalized.contains("tokenizer") {
+        return true;
+    }
     gguf_quant_markers(quantization)
         .iter()
         .any(|marker| normalized.contains(marker))
 }
 
-fn gguf_quant_markers(quantization: QuantizationBits) -> &'static [&'static str] {
+fn gguf_quant_markers(quantization: QuantizationScheme) -> &'static [&'static str] {
     match quantization {
-        QuantizationBits::Four => &["q4_k_m", "q4_0"],
-        QuantizationBits::Five => &["q5_k_m"],
-        QuantizationBits::Eight => &["q8_0"],
-        QuantizationBits::FloatEight => &["fp8"],
+        QuantizationScheme::GgufQ4_K_M => &["q4_k_m"],
+        QuantizationScheme::GgufQ4_0 => &["q4_0"],
+        QuantizationScheme::GgufQ5_K_M => &["q5_k_m"],
+        QuantizationScheme::GgufQ8_0 => &["q8_0"],
+        QuantizationScheme::Fp16 => &["f16"],
+        _ => &[],
     }
 }
 
@@ -1212,7 +1234,7 @@ impl BundleDescriptor {
             format: artifacts.format,
             source: artifacts.source.clone(),
             include: artifacts.include.clone(),
-            quantization: None,
+            quantization: artifacts.quantization,
         })
     }
 }
@@ -1222,11 +1244,15 @@ pub(crate) fn bundle_artifacts_from_checkpoint(
     control_name: &'static str,
     checkpoint: &ModelCheckpoint,
 ) -> BundleArtifacts {
+    checkpoint
+        .validate_quantization()
+        .expect("curated checkpoint quantization must use a checkpoint-legal scheme");
     BundleArtifacts {
         control_name,
         format: checkpoint.format,
         source: checkpoint.source.clone(),
         include: checkpoint.include.clone(),
+        quantization: checkpoint.quantization,
     }
 }
 
@@ -1273,7 +1299,7 @@ pub enum ModelSelector {
         feature = "model-gemma4-e2b-gguf",
         feature = "model-gemma4-e4b",
         feature = "model-gemma4-12b-gguf",
-        feature = "model-gemma4-12b-qat-q4-0-gguf",
+        feature = "model-gemma4-12b-qat-gguf",
         feature = "model-gemma4-e4b-gguf",
     ))]
     Chat(ChatModels),
@@ -1294,7 +1320,7 @@ pub enum ModelSelector {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-kokoro-82m",
@@ -1326,7 +1352,7 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => format!("chat:{}", model.as_str()),
@@ -1360,7 +1386,7 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => model.bundle_id(),
@@ -1394,7 +1420,7 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => model.descriptor(),
@@ -1428,7 +1454,7 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => Ok(model.bundle()),
@@ -1451,7 +1477,7 @@ impl ModelSelector {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-kokoro-82m",
@@ -1536,8 +1562,8 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(not(feature = "model-gemma4-12b-qat-q4-0-gguf"))]
-            if raw == chat::GEMMA4_12B_QAT_Q4_0_GGUF_SELECTOR {
+            #[cfg(not(feature = "model-gemma4-12b-qat-gguf"))]
+            if raw == chat::GEMMA4_12B_QAT_GGUF_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
@@ -1568,7 +1594,7 @@ impl FromStr for ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             return Ok(Self::Chat(raw.parse()?));
@@ -1580,7 +1606,7 @@ impl FromStr for ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             )))]
             return Err(ModelsError::UnknownModelSelector {
@@ -1680,8 +1706,8 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "gemma4_e4b_gguf" => Some(CuratedBundle::Gemma4E4B_Gguf),
         #[cfg(feature = "model-gemma4-12b-gguf")]
         "gemma4_12b_gguf" => Some(CuratedBundle::Gemma4_12B_Gguf),
-        #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-        "gemma4_12b_qat_q4_0_gguf" => Some(CuratedBundle::Gemma4_12B_QatQ4_0_Gguf),
+        #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+        "gemma4_12b_qat_gguf" => Some(CuratedBundle::Gemma4_12B_Qat_Gguf),
         #[cfg(feature = "model-google-gemma-300m")]
         "embeddinggemma_300m" => Some(CuratedBundle::EmbeddingGemma300m),
         #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -1824,8 +1850,8 @@ impl Catalog {
         chat::gemma4_e4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-12b-gguf")]
         chat::gemma4_12b_gguf::register(&mut catalog);
-        #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-        chat::gemma4_12b_qat_q4_0_gguf::register(&mut catalog);
+        #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+        chat::gemma4_12b_qat_gguf::register(&mut catalog);
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
         #[cfg(feature = "model-kokoro-82m")]
@@ -1965,7 +1991,10 @@ mod tests {
     fn canonical_ids_are_unique_and_complete() {
         let mut seen = std::collections::BTreeSet::new();
         for id in CuratedBundle::CANONICAL_IDS {
-            assert!(seen.insert(*id), "duplicate canonical id `{id}` in CANONICAL_IDS");
+            assert!(
+                seen.insert(*id),
+                "duplicate canonical id `{id}` in CANONICAL_IDS"
+            );
         }
         assert_eq!(
             CuratedBundle::CANONICAL_IDS.len(),
@@ -1997,8 +2026,8 @@ mod tests {
             CuratedBundle::Gemma4E4B_Gguf,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             CuratedBundle::Gemma4_12B_Gguf,
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            CuratedBundle::Gemma4_12B_QatQ4_0_Gguf,
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            CuratedBundle::Gemma4_12B_Qat_Gguf,
             #[cfg(feature = "model-google-gemma-300m")]
             CuratedBundle::EmbeddingGemma300m,
             #[cfg(feature = "model-qwen3-embedding-06b")]
@@ -2065,7 +2094,7 @@ mod tests {
             artifact_policy: Some(motlie_model::ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/cache"),
             }),
-            quantization: Some(motlie_model::QuantizationBits::Four),
+            quantization_scheme: Some(motlie_model::QuantizationScheme::GgufQ4_K_M),
             unpack_root: Some(PathBuf::from("/tmp/unpack")),
             max_concurrency: Some(2),
         };
@@ -2081,8 +2110,8 @@ mod tests {
             })
         );
         assert_eq!(
-            resolved.quantization,
-            Some(motlie_model::QuantizationBits::Four)
+            resolved.quantization_scheme,
+            Some(motlie_model::QuantizationScheme::GgufQ4_K_M)
         );
         assert_eq!(resolved.unpack_root, Some(PathBuf::from("/tmp/unpack")));
         assert_eq!(resolved.max_concurrency, Some(2));
@@ -2147,6 +2176,7 @@ mod tests {
                     repo: "Qwen/Qwen3-4B",
                 },
                 include: vec![ArtifactRule::Exact("config.json")],
+                quantization: None,
             }),
             model_id: BundleId::new("qwen3_4b"),
             display_name: "Qwen3 4B".into(),
@@ -2168,6 +2198,7 @@ mod tests {
                     repo: "Qwen/Qwen3-4B-GGUF",
                 },
                 include: vec![ArtifactRule::Suffix(".gguf")],
+                quantization: None,
             }),
             ..mistral.clone()
         };
@@ -2204,8 +2235,8 @@ mod tests {
                 backend: BackendKind::LlamaCpp,
                 capabilities: Capabilities::chat_and_completion(),
                 quantization: QuantizationSupport::with_recommended(
-                    [motlie_model::QuantizationBits::Four],
-                    motlie_model::QuantizationBits::Four,
+                    [motlie_model::QuantizationScheme::GgufQ4_K_M],
+                    motlie_model::QuantizationScheme::GgufQ4_K_M,
                 )
                 .expect("test quantization support should be valid"),
                 checkpoint: llama
@@ -2694,6 +2725,7 @@ mod tests {
                 ArtifactRule::Exact("config.json"),
                 ArtifactRule::Suffix(".safetensors"),
             ],
+            quantization: None,
         };
 
         assert!(artifacts.includes("config.json"));
@@ -2714,14 +2746,15 @@ mod tests {
                 ArtifactRule::Exact("Qwen3.6-27B-Q5_K_M.gguf"),
                 ArtifactRule::Exact("Qwen3.6-27B-Q8_0.gguf"),
             ],
+            quantization: None,
         };
 
         assert_eq!(
-            artifacts.include_for_quantization(Some(QuantizationBits::Four)),
+            artifacts.include_for_quantization(Some(QuantizationScheme::GgufQ4_K_M)),
             vec![ArtifactRule::Exact("Qwen3.6-27B-Q4_K_M.gguf")]
         );
         assert_eq!(
-            artifacts.include_for_quantization(Some(QuantizationBits::Five)),
+            artifacts.include_for_quantization(Some(QuantizationScheme::GgufQ5_K_M)),
             vec![ArtifactRule::Exact("Qwen3.6-27B-Q5_K_M.gguf")]
         );
         assert_eq!(artifacts.include_for_quantization(None), artifacts.include);

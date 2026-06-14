@@ -16,16 +16,16 @@ use motlie_model::{
 };
 use motlie_model_espeak_ng::text_to_phonemes;
 use motlie_model_ort::{
-    OrtExecutionTarget, OrtResolvedExecutionTarget, build_session_with_target,
-    resolved_execution_target,
+    build_session_with_target, resolved_execution_target, OrtExecutionTarget,
+    OrtResolvedExecutionTarget,
 };
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    PiperArtifactPaths, PiperConfig, RuntimeMetricState, configure_artifact_policy, lock_metrics,
-    observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, PiperArtifactPaths, PiperConfig, RuntimeMetricState,
 };
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -96,7 +96,7 @@ impl BackendAdapter for PiperSpeechAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.model_filename)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -156,7 +156,7 @@ impl PiperSpeechBundle {
     pub async fn start_typed(&self, options: StartOptions) -> Result<PiperHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.spec.model_filename, policy)?
@@ -579,8 +579,8 @@ fn ort_tensor_error(err: ort::Error) -> ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::SpeechParams;
     use motlie_model::typed::SpeechStream as _;
+    use motlie_model::SpeechParams;
 
     #[tokio::test]
     async fn stream_emits_chunks_and_finishes_once() {
@@ -593,13 +593,11 @@ mod tests {
         }
 
         assert_eq!(total, 10_000);
-        assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("stream should stay exhausted")
-                .is_none()
-        );
+        assert!(stream
+            .next_chunk()
+            .await
+            .expect("stream should stay exhausted")
+            .is_none());
     }
 
     #[test]

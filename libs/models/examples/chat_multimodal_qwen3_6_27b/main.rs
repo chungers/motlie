@@ -1,7 +1,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, CapabilityKind, ChatMessage, ChatModel, ChatRequest, ChatRole,
-    CompletionModel, ContentPart, QuantizationBits, StartOptions,
+    CompletionModel, ContentPart, QuantizationScheme, StartOptions,
 };
 use motlie_models::{chat::ChatModels, default_artifact_root, quantization_label_gguf};
 use std::path::Path;
@@ -237,11 +237,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_precision(value: Option<&str>) -> Result<Option<QuantizationBits>> {
+fn parse_precision(value: Option<&str>) -> Result<Option<QuantizationScheme>> {
     match value {
-        Some("q4") => Ok(Some(QuantizationBits::Four)),
-        Some("q5") => Ok(Some(QuantizationBits::Five)),
-        Some("q8") => Ok(Some(QuantizationBits::Eight)),
+        Some("q4") => Ok(Some(QuantizationScheme::GgufQ4_K_M)),
+        Some("q5") => Ok(Some(QuantizationScheme::GgufQ5_K_M)),
+        Some("q8") => Ok(Some(QuantizationScheme::GgufQ8_0)),
         None => Ok(None),
         Some("fp8") => bail!(
             "--precision=fp8 is reserved for CUDA builds once a curated FP8 GGUF artifact exists; current Qwen3.6 GGUF artifacts support q4, q5, and q8"
@@ -250,12 +250,12 @@ fn parse_precision(value: Option<&str>) -> Result<Option<QuantizationBits>> {
     }
 }
 
-fn requested_precision_label(quantization: Option<QuantizationBits>) -> &'static str {
+fn requested_precision_label(quantization: Option<QuantizationScheme>) -> &'static str {
     match quantization {
-        Some(QuantizationBits::Four) => "q4",
-        Some(QuantizationBits::Five) => "q5",
-        Some(QuantizationBits::Eight) => "q8",
-        Some(QuantizationBits::FloatEight) => "fp8",
+        Some(QuantizationScheme::GgufQ4_K_M) => "q4",
+        Some(QuantizationScheme::GgufQ5_K_M) => "q5",
+        Some(QuantizationScheme::GgufQ8_0) => "q8",
+        Some(QuantizationScheme::Fp16) => "fp8",
         None => "bundle recommended",
     }
 }

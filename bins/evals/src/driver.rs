@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Context, Result};
-use motlie_models::{ArtifactSource, BundleId, Catalog};
+use motlie_models::{ArtifactSource, BundleId, Catalog, QuantizationScheme};
 
 use crate::accelerator;
 use crate::metrics::{PerformanceMetrics, ResourceMetrics};
@@ -76,7 +76,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
             ApplicabilityDecision::Applicable,
             TerminalOutcome::Blocked,
             None,
-        );
+        )?;
 
         if !cell.applies_to_profile(&profile) {
             sink.emit(&pre_run_record(
@@ -246,7 +246,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
                 ApplicabilityDecision::BlockedPreRun,
                 TerminalOutcome::Blocked,
                 child.reason.clone(),
-            );
+            )?;
             let mut record = pre_run_record(
                 &snapshot,
                 cell,
@@ -291,7 +291,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
                 ApplicabilityDecision::BlockedPreRun,
                 TerminalOutcome::Blocked,
                 Some(reason.clone()),
-            );
+            )?;
             let mut record = pre_run_record(
                 &snapshot,
                 cell,
@@ -653,10 +653,11 @@ fn run_child_cell(
     run_command.args(["--snapshot-id", &snapshot.id]);
     run_command.args(["--cell-id", &cell.id]);
     run_command.args(["--depth", cell.depth.as_str()]);
+    let child_quantization = cell_quantization_scheme(cell)?.as_str().to_owned();
     run_command.args(["--checkpoint-format", &cell.checkpoint_format]);
-    run_command.args(["--artifact-quantization", &cell.quantization]);
+    run_command.args(["--artifact-quantization", &child_quantization]);
     if let Some(precision) = cell_runtime_precision(cell)? {
-        run_command.args(["--precision", precision]);
+        run_command.arg("--precision").arg(precision);
     }
     run_command.args(["--model-family", &cell.model_family]);
     run_command.args(["--backend", &cell.backend]);
@@ -929,6 +930,8 @@ fn pre_run_record(
         Some(std::env::var_os("HF_TOKEN").is_some().to_string()),
     );
 
+    let coverage_quantization = coverage.quantization.clone();
+
     ResultRecord {
         schema_version: RESULT_SCHEMA_VERSION,
         identity: IdentitySection {
@@ -945,7 +948,7 @@ fn pre_run_record(
             selector: cell.selector.clone(),
             backend: Some(cell.backend.clone()),
             checkpoint_format: Some(cell.checkpoint_format.clone()),
-            artifact_quantization: Some(cell.quantization.clone()),
+            artifact_quantization: Some(coverage_quantization.clone()),
             artifact_snapshot: snapshot.git_sha.clone(),
             artifact_patterns: cell.artifact.patterns.clone(),
             artifact_files: Vec::new(),
@@ -960,8 +963,8 @@ fn pre_run_record(
         runtime: RuntimeSection {
             cargo_features: cell.features_for_profile(profile),
             build_profile: None,
-            quantization: Some(cell.quantization.clone()),
-            runtime_precision: cell_runtime_precision_label(cell),
+            quantization: Some(coverage_quantization.clone()),
+            runtime_precision: Some(coverage_quantization),
             artifact_root: String::new(),
             download_artifacts: false,
             context_length: None,
@@ -995,7 +998,7 @@ fn coverage_for_cell(
     applicability: ApplicabilityDecision,
     terminal_outcome: TerminalOutcome,
     reason: Option<OutcomeReason>,
-) -> CoverageSection {
+) -> Result<CoverageSection> {
     let host_id = platform
         .host_id
         .clone()
@@ -1005,6 +1008,7 @@ fn coverage_for_cell(
         .host_slug
         .clone()
         .unwrap_or_else(|| sanitize_slug(&host_id));
+    let quantization = cell_quantization_scheme(cell)?.as_str().to_owned();
     let mut grouping_keys = BTreeMap::new();
     grouping_keys.insert("bundle".to_owned(), cell.bundle_id.clone());
     grouping_keys.insert("capability".to_owned(), cell.capability.as_str().to_owned());
@@ -1014,10 +1018,10 @@ fn coverage_for_cell(
         "checkpoint_format".to_owned(),
         cell.checkpoint_format.clone(),
     );
-    grouping_keys.insert("quantization".to_owned(), cell.quantization.clone());
+    grouping_keys.insert("quantization".to_owned(), quantization.clone());
     grouping_keys.insert("profile".to_owned(), profile.to_owned());
 
-    CoverageSection {
+    Ok(CoverageSection {
         snapshot_id: snapshot.id.clone(),
         cell_id: cell.id.clone(),
         depth: cell.depth,
@@ -1026,7 +1030,7 @@ fn coverage_for_cell(
         bundle_id: cell.bundle_id.clone(),
         model_family: cell.model_family.clone(),
         checkpoint_format: cell.checkpoint_format.clone(),
-        quantization: cell.quantization.clone(),
+        quantization: quantization.clone(),
         backend: cell.backend.clone(),
         profile: profile.to_owned(),
         host_id,
@@ -1038,7 +1042,7 @@ fn coverage_for_cell(
         terminal_outcome,
         reason,
         grouping_keys,
-    }
+    })
 }
 
 fn write_run_manifest(
@@ -1307,26 +1311,48 @@ fn merge_bindgen_args(
     args.join(" ")
 }
 
-fn cell_runtime_precision(cell: &SnapshotCell) -> Result<Option<&'static str>> {
-    quantization_precision(&cell.quantization)
+fn cell_runtime_precision(cell: &SnapshotCell) -> Result<Option<String>> {
+    let scheme = cell_quantization_scheme(cell)?;
+    if cell.quantization == "default" {
+        return Ok(None);
+    }
+    Ok(Some(scheme.as_str().to_owned()))
 }
 
-fn cell_runtime_precision_label(cell: &SnapshotCell) -> Option<String> {
-    quantization_precision(&cell.quantization)
-        .ok()
-        .flatten()
-        .map(ToOwned::to_owned)
-}
-
-fn quantization_precision(quantization: &str) -> Result<Option<&'static str>> {
-    match quantization {
-        "default" => Ok(None),
-        "q4_k_m" | "q4_0" => Ok(Some("q4")),
-        "q5_k_m" => Ok(Some("q5")),
-        "q8_0" => Ok(Some("q8")),
-        "fp8" => Ok(Some("fp8")),
-        "f16" | "f32" => Ok(None),
+fn cell_quantization_scheme(cell: &SnapshotCell) -> Result<QuantizationScheme> {
+    match cell.quantization.as_str() {
+        "q4_k_m" | "gguf_q4_k_m" => Ok(QuantizationScheme::GgufQ4_K_M),
+        "q4_0" | "gguf_q4_0" => Ok(QuantizationScheme::GgufQ4_0),
+        "q5_k_m" | "gguf_q5_k_m" => Ok(QuantizationScheme::GgufQ5_K_M),
+        "q8_0" | "gguf_q8_0" => Ok(QuantizationScheme::GgufQ8_0),
+        "onnx_int8" => Ok(QuantizationScheme::OnnxInt8),
+        "isq_q4" => Ok(QuantizationScheme::IsqQ4),
+        "isq_q8" => Ok(QuantizationScheme::IsqQ8),
+        "fp32" | "f32" => Ok(QuantizationScheme::Fp32),
+        "fp16" | "f16" => Ok(QuantizationScheme::Fp16),
+        "bf16" => Ok(QuantizationScheme::Bf16),
+        "default" => default_quantization_scheme(cell),
         other => bail!("unknown snapshot quantization `{other}`"),
+    }
+}
+
+fn default_quantization_scheme(cell: &SnapshotCell) -> Result<QuantizationScheme> {
+    match cell.bundle_id.as_str() {
+        "qwen3_4b" | "gemma4_e2b" | "gemma4_e4b" | "qwen3_embedding_06b" => {
+            Ok(QuantizationScheme::Bf16)
+        }
+        "embeddinggemma_300m" => Ok(QuantizationScheme::Fp32),
+        "whisper_base_en" => Ok(QuantizationScheme::Fp16),
+        "sherpa_onnx_streaming_zipformer_en" | "kokoro_82m" => {
+            Ok(QuantizationScheme::OnnxInt8)
+        }
+        "sherpa_onnx_streaming_zipformer_en_kroko_2025"
+        | "moonshine_streaming_en"
+        | "piper_en_us_ljspeech_medium" => Ok(QuantizationScheme::Fp32),
+        other => bail!(
+            "snapshot cell `{}` uses default quantization for bundle `{other}` without a bundle-aware QuantizationScheme mapping",
+            cell.id
+        ),
     }
 }
 
@@ -1394,7 +1420,7 @@ fn curated_hf_repo_for_bundle(bundle_id: &str) -> Option<&'static str> {
         "gemma4_e2b_gguf" => Some("unsloth/gemma-4-E2B-it-GGUF"),
         "gemma4_e4b_gguf" => Some("unsloth/gemma-4-E4B-it-GGUF"),
         "gemma4_12b_gguf" => Some("unsloth/gemma-4-12b-it-GGUF"),
-        "gemma4_12b_qat_q4_0_gguf" => Some("google/gemma-4-12B-it-qat-q4_0-gguf"),
+        "gemma4_12b_qat_gguf" => Some("google/gemma-4-12B-it-qat-q4_0-gguf"),
         "whisper_base_en" => Some("ggerganov/whisper.cpp"),
         "moonshine_streaming_en" => Some("UsefulSensors/moonshine-streaming"),
         "sherpa_onnx_streaming_zipformer_en" => {
@@ -1758,13 +1784,57 @@ unauthorized access to model cache"#,
     }
 
     #[test]
-    fn snapshot_quantization_maps_to_child_precision() {
-        assert_eq!(quantization_precision("default").unwrap(), None);
-        assert_eq!(quantization_precision("q4_k_m").unwrap(), Some("q4"));
-        assert_eq!(quantization_precision("q4_0").unwrap(), Some("q4"));
-        assert_eq!(quantization_precision("q5_k_m").unwrap(), Some("q5"));
-        assert_eq!(quantization_precision("q8_0").unwrap(), Some("q8"));
-        assert!(quantization_precision("q6_k").is_err());
+    fn snapshot_quantization_maps_to_scheme_ids_without_bits_collapse() {
+        let mut cell = test_snapshot_cell();
+
+        cell.bundle_id = "qwen3_4b".to_owned();
+        cell.quantization = "default".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::Bf16
+        );
+        assert_eq!(cell_runtime_precision(&cell).unwrap(), None);
+
+        cell.bundle_id = "embeddinggemma_300m".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::Fp32
+        );
+
+        cell.quantization = "q4_k_m".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::GgufQ4_K_M
+        );
+        assert_eq!(
+            cell_runtime_precision(&cell).unwrap(),
+            Some("gguf_q4_k_m".to_owned())
+        );
+
+        cell.quantization = "q4_0".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::GgufQ4_0
+        );
+        assert_eq!(
+            cell_runtime_precision(&cell).unwrap(),
+            Some("gguf_q4_0".to_owned())
+        );
+
+        cell.quantization = "q5_k_m".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::GgufQ5_K_M
+        );
+
+        cell.quantization = "q8_0".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::GgufQ8_0
+        );
+
+        cell.quantization = "q6_k".to_owned();
+        assert!(cell_quantization_scheme(&cell).is_err());
     }
 
     #[test]
@@ -1969,8 +2039,11 @@ unauthorized access to model cache"#,
     fn every_curated_bundle_has_a_snapshot_cell() {
         let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
             .expect("curated snapshot should parse");
-        let covered: std::collections::BTreeSet<&str> =
-            snapshot.cells.iter().map(|cell| cell.bundle_id.as_str()).collect();
+        let covered: std::collections::BTreeSet<&str> = snapshot
+            .cells
+            .iter()
+            .map(|cell| cell.bundle_id.as_str())
+            .collect();
         let missing: Vec<&str> = motlie_models::CuratedBundle::CANONICAL_IDS
             .iter()
             .copied()
@@ -1987,7 +2060,10 @@ unauthorized access to model cache"#,
         // Data guard: proves committed records already use canonical bundle_ids
         // without editing any data. Walks evals/results/**/results.jsonl.
         let canonical: std::collections::BTreeSet<&str> =
-            motlie_models::CuratedBundle::CANONICAL_IDS.iter().copied().collect();
+            motlie_models::CuratedBundle::CANONICAL_IDS
+                .iter()
+                .copied()
+                .collect();
         let results_root = repo_root().join("evals/results");
         let mut stack = vec![results_root];
         let mut checked = 0_u64;
@@ -2010,9 +2086,14 @@ unauthorized access to model cache"#,
                     if line.trim().is_empty() {
                         continue;
                     }
-                    let value: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|err| {
-                        panic!("invalid jsonl in `{}` line {}: {err}", path.display(), line_no + 1)
-                    });
+                    let value: serde_json::Value =
+                        serde_json::from_str(line).unwrap_or_else(|err| {
+                            panic!(
+                                "invalid jsonl in `{}` line {}: {err}",
+                                path.display(),
+                                line_no + 1
+                            )
+                        });
                     let bundle_id = value
                         .get("coverage")
                         .and_then(|c| c.get("bundle_id"))
@@ -2035,7 +2116,10 @@ unauthorized access to model cache"#,
                 }
             }
         }
-        assert!(checked > 0, "data guard found no committed result records to check");
+        assert!(
+            checked > 0,
+            "data guard found no committed result records to check"
+        );
     }
 
     #[test]

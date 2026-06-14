@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -527,11 +528,107 @@ pub enum CheckpointFormat {
     Onnx,
 }
 
-/// Checkpoint-native quantization metadata.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CheckpointQuantization {
-    Gguf { label: String },
-    Onnx { bits: u8 },
+/// Canonical quantization and dtype scheme used across checkpoints, runtime
+/// resolution, and eval coverage.
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum QuantizationScheme {
+    GgufQ4_K_M,
+    GgufQ4_0,
+    GgufQ5_K_M,
+    GgufQ8_0,
+    OnnxInt8,
+    /// mistral.rs in-situ quantization; effective/runtime-only.
+    IsqQ4,
+    /// mistral.rs in-situ quantization; effective/runtime-only.
+    IsqQ8,
+    Fp32,
+    Fp16,
+    Bf16,
+}
+
+impl QuantizationScheme {
+    pub const ALL: &'static [QuantizationScheme] = &[
+        Self::GgufQ4_K_M,
+        Self::GgufQ4_0,
+        Self::GgufQ5_K_M,
+        Self::GgufQ8_0,
+        Self::OnnxInt8,
+        Self::IsqQ4,
+        Self::IsqQ8,
+        Self::Fp32,
+        Self::Fp16,
+        Self::Bf16,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GgufQ4_K_M => "gguf_q4_k_m",
+            Self::GgufQ4_0 => "gguf_q4_0",
+            Self::GgufQ5_K_M => "gguf_q5_k_m",
+            Self::GgufQ8_0 => "gguf_q8_0",
+            Self::OnnxInt8 => "onnx_int8",
+            Self::IsqQ4 => "isq_q4",
+            Self::IsqQ8 => "isq_q8",
+            Self::Fp32 => "fp32",
+            Self::Fp16 => "fp16",
+            Self::Bf16 => "bf16",
+        }
+    }
+
+    pub fn approx_bits(self) -> u8 {
+        match self {
+            Self::GgufQ4_K_M | Self::GgufQ4_0 | Self::IsqQ4 => 4,
+            Self::GgufQ5_K_M => 5,
+            Self::GgufQ8_0 | Self::OnnxInt8 | Self::IsqQ8 => 8,
+            Self::Fp16 | Self::Bf16 => 16,
+            Self::Fp32 => 32,
+        }
+    }
+
+    pub fn is_runtime_only(self) -> bool {
+        matches!(self, Self::IsqQ4 | Self::IsqQ8)
+    }
+
+    pub fn is_checkpoint_legal(self) -> bool {
+        !self.is_runtime_only()
+    }
+
+    pub fn is_gguf(self) -> bool {
+        matches!(
+            self,
+            Self::GgufQ4_K_M | Self::GgufQ4_0 | Self::GgufQ5_K_M | Self::GgufQ8_0
+        )
+    }
+}
+
+impl fmt::Display for QuantizationScheme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl FromStr for QuantizationScheme {
+    type Err = ModelError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "gguf_q4_k_m" | "q4_k_m" | "q4-k-m" | "q4_k" => Ok(Self::GgufQ4_K_M),
+            "gguf_q4_0" | "q4_0" | "q4-0" => Ok(Self::GgufQ4_0),
+            "gguf_q5_k_m" | "q5_k_m" | "q5-k-m" | "q5_k" => Ok(Self::GgufQ5_K_M),
+            "gguf_q8_0" | "q8_0" | "q8-0" => Ok(Self::GgufQ8_0),
+            "onnx_int8" | "onnx-i8" | "int8" => Ok(Self::OnnxInt8),
+            "isq_q4" | "isq-q4" => Ok(Self::IsqQ4),
+            "isq_q8" | "isq-q8" => Ok(Self::IsqQ8),
+            "fp32" | "f32" => Ok(Self::Fp32),
+            "fp16" | "f16" => Ok(Self::Fp16),
+            "bf16" => Ok(Self::Bf16),
+            other => Err(ModelError::InvalidConfiguration(format!(
+                "unknown quantization scheme `{other}`"
+            ))),
+        }
+    }
 }
 
 /// Artifact declaration for a concrete checkpoint variant of a model.
@@ -540,12 +637,51 @@ pub struct ModelCheckpoint {
     pub format: CheckpointFormat,
     pub source: ArtifactSource,
     pub include: Vec<ArtifactRule>,
-    pub quantization: Option<CheckpointQuantization>,
+    pub quantization: Option<QuantizationScheme>,
 }
 
 impl ModelCheckpoint {
     pub fn includes(&self, filename: &str) -> bool {
         self.include.iter().any(|rule| rule.matches(filename))
+    }
+
+    pub fn validate_quantization(&self) -> Result<(), ModelError> {
+        let Some(scheme) = self.quantization else {
+            return Ok(());
+        };
+        if !scheme.is_checkpoint_legal() {
+            return Err(ModelError::InvalidConfiguration(format!(
+                "`{scheme}` is an effective runtime quantization scheme and cannot be used as checkpoint metadata"
+            )));
+        }
+        match (self.format, scheme) {
+            (
+                CheckpointFormat::Gguf,
+                QuantizationScheme::GgufQ4_K_M
+                | QuantizationScheme::GgufQ4_0
+                | QuantizationScheme::GgufQ5_K_M
+                | QuantizationScheme::GgufQ8_0
+                | QuantizationScheme::Fp16
+                | QuantizationScheme::Fp32,
+            )
+            | (
+                CheckpointFormat::Onnx,
+                QuantizationScheme::OnnxInt8
+                | QuantizationScheme::Fp32
+                | QuantizationScheme::Fp16
+                | QuantizationScheme::Bf16,
+            )
+            | (
+                CheckpointFormat::Safetensors,
+                QuantizationScheme::Fp32 | QuantizationScheme::Fp16 | QuantizationScheme::Bf16,
+            )
+            | (CheckpointFormat::Ggml, QuantizationScheme::Fp32 | QuantizationScheme::Fp16) => {
+                Ok(())
+            }
+            (format, scheme) => Err(ModelError::InvalidConfiguration(format!(
+                "checkpoint format {format:?} cannot use quantization scheme `{scheme}`"
+            ))),
+        }
     }
 }
 
@@ -563,33 +699,20 @@ pub enum ArtifactPolicy {
     LocalOnly { root: PathBuf },
 }
 
-/// Backend-agnostic quantization precision for model weights.
-///
-/// Backends map this to their native quantization mechanism — ISQ for
-/// mistral.rs, GGUF bit width for llama.cpp, etc. `None` (the default)
-/// means the backend chooses its own default precision.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum QuantizationBits {
-    Four,
-    Five,
-    Eight,
-    FloatEight,
-}
-
-/// Bundle-level declaration of which quantization precisions are supported
-/// and which precision is recommended for default deployments.
+/// Bundle-level declaration of which quantization/dtype schemes are supported
+/// and which scheme is recommended for default deployments.
 ///
 /// Invariant: `recommended` is either `None` or present in `supported`.
 /// Use the constructors (`none`, `with_recommended`, `without_recommended`)
 /// to enforce this.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct QuantizationSupport {
-    supported: BTreeSet<QuantizationBits>,
-    recommended: Option<QuantizationBits>,
+    supported: BTreeSet<QuantizationScheme>,
+    recommended: Option<QuantizationScheme>,
 }
 
 impl QuantizationSupport {
-    /// Bundle does not support any quantization.
+    /// Bundle does not support a selectable quantization scheme.
     pub fn none() -> Self {
         Self {
             supported: BTreeSet::new(),
@@ -597,12 +720,12 @@ impl QuantizationSupport {
         }
     }
 
-    /// Bundle supports the given precisions with a curated default.
+    /// Bundle supports the given schemes with a curated default.
     ///
     /// Returns `InvalidConfiguration` if `recommended` is not in `supported`.
     pub fn with_recommended(
-        supported: impl IntoIterator<Item = QuantizationBits>,
-        recommended: QuantizationBits,
+        supported: impl IntoIterator<Item = QuantizationScheme>,
+        recommended: QuantizationScheme,
     ) -> Result<Self, ModelError> {
         let supported: BTreeSet<_> = supported.into_iter().collect();
         if !supported.contains(&recommended) {
@@ -616,42 +739,44 @@ impl QuantizationSupport {
         })
     }
 
-    /// Bundle supports the given precisions with no curated default (F32 by default).
-    pub fn without_recommended(supported: impl IntoIterator<Item = QuantizationBits>) -> Self {
+    /// Bundle supports the given schemes with no curated default.
+    pub fn without_recommended(supported: impl IntoIterator<Item = QuantizationScheme>) -> Self {
         Self {
             supported: supported.into_iter().collect(),
             recommended: None,
         }
     }
 
-    pub fn supported(&self) -> &BTreeSet<QuantizationBits> {
+    pub fn supported(&self) -> &BTreeSet<QuantizationScheme> {
         &self.supported
     }
 
-    pub fn recommended(&self) -> Option<QuantizationBits> {
+    pub fn recommended(&self) -> Option<QuantizationScheme> {
         self.recommended
     }
 
-    pub fn supports(&self, bits: QuantizationBits) -> bool {
-        self.supported.contains(&bits)
+    pub fn supports(&self, scheme: QuantizationScheme) -> bool {
+        self.supported.contains(&scheme)
     }
 
     /// Resolve the caller's quantization request against this bundle's support.
     ///
-    /// - `Some(bits)` where bits is supported → `Ok(Some(bits))`
-    /// - `Some(bits)` where bits is NOT supported → `Err(InvalidConfiguration)`
-    /// - `None` → `Ok(self.recommended)` (curated default or None for F32)
+    /// - `Some(scheme)` where scheme is supported → `Ok(Some(scheme))`
+    /// - `Some(scheme)` where scheme is NOT supported → `Err(InvalidConfiguration)`
+    /// - `None` → `Ok(self.recommended)`.
     pub fn resolve(
         &self,
-        requested: Option<QuantizationBits>,
+        requested: Option<QuantizationScheme>,
         bundle_id: &BundleId,
-    ) -> Result<Option<QuantizationBits>, ModelError> {
+    ) -> Result<Option<QuantizationScheme>, ModelError> {
         match requested {
-            Some(bits) if !self.supports(bits) => Err(ModelError::InvalidConfiguration(format!(
-                "bundle `{bundle_id}` does not support {bits:?} quantization; supported: {:?}",
-                self.supported
-            ))),
-            Some(bits) => Ok(Some(bits)),
+            Some(scheme) if !self.supports(scheme) => {
+                Err(ModelError::InvalidConfiguration(format!(
+                    "bundle `{bundle_id}` does not support `{scheme}` quantization; supported: {:?}",
+                    self.supported
+                )))
+            }
+            Some(scheme) => Ok(Some(scheme)),
             None => Ok(self.recommended),
         }
     }
@@ -661,7 +786,7 @@ impl QuantizationSupport {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StartOptions {
     pub artifact_policy: Option<ArtifactPolicy>,
-    pub quantization: Option<QuantizationBits>,
+    pub quantization_scheme: Option<QuantizationScheme>,
     pub unpack_root: Option<PathBuf>,
     pub max_concurrency: Option<usize>,
 }
@@ -677,8 +802,8 @@ pub struct LoadedBundleDescriptor {
     pub display_name: String,
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
-    /// The quantization precision actually applied at startup, or `None` for F32.
-    pub resolved_quantization: Option<QuantizationBits>,
+    /// The quantization/dtype scheme actually applied at startup.
+    pub resolved_quantization: Option<QuantizationScheme>,
 }
 
 /// Structured error surface for core bundle operations.
@@ -1002,6 +1127,49 @@ mod tests {
     }
 
     #[test]
+    fn quantization_scheme_has_stable_ids_and_bits() {
+        let expected = [
+            (QuantizationScheme::GgufQ4_K_M, "gguf_q4_k_m", 4),
+            (QuantizationScheme::GgufQ4_0, "gguf_q4_0", 4),
+            (QuantizationScheme::GgufQ5_K_M, "gguf_q5_k_m", 5),
+            (QuantizationScheme::GgufQ8_0, "gguf_q8_0", 8),
+            (QuantizationScheme::OnnxInt8, "onnx_int8", 8),
+            (QuantizationScheme::IsqQ4, "isq_q4", 4),
+            (QuantizationScheme::IsqQ8, "isq_q8", 8),
+            (QuantizationScheme::Fp32, "fp32", 32),
+            (QuantizationScheme::Fp16, "fp16", 16),
+            (QuantizationScheme::Bf16, "bf16", 16),
+        ];
+
+        assert_eq!(QuantizationScheme::ALL.len(), expected.len());
+        for (scheme, id, bits) in expected {
+            assert_eq!(scheme.as_str(), id);
+            assert_eq!(scheme.to_string(), id);
+            assert_eq!(scheme.approx_bits(), bits);
+            assert_eq!(id.parse::<QuantizationScheme>().unwrap(), scheme);
+        }
+    }
+
+    #[test]
+    fn checkpoint_quantization_rejects_runtime_only_schemes() {
+        let checkpoint = ModelCheckpoint {
+            format: CheckpointFormat::Safetensors,
+            source: ArtifactSource::HuggingFace {
+                repo: "example/model",
+            },
+            include: vec![ArtifactRule::Suffix(".safetensors")],
+            quantization: Some(QuantizationScheme::IsqQ4),
+        };
+
+        let err = checkpoint
+            .validate_quantization()
+            .expect_err("ISQ is runtime-only and cannot describe a checkpoint");
+        assert!(
+            matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("runtime quantization"))
+        );
+    }
+
+    #[test]
     fn artifact_rule_and_checkpoint_match_expected_filenames() {
         let checkpoint = ModelCheckpoint {
             format: CheckpointFormat::Gguf,
@@ -1012,9 +1180,7 @@ mod tests {
                 ArtifactRule::Suffix("-Q4_K_M.gguf"),
                 ArtifactRule::Suffix("-Q8_0.gguf"),
             ],
-            quantization: Some(CheckpointQuantization::Gguf {
-                label: "Q4_K_M".into(),
-            }),
+            quantization: Some(QuantizationScheme::GgufQ4_K_M),
         };
 
         assert!(checkpoint.includes("Qwen3-4B-Q4_K_M.gguf"));
@@ -1047,7 +1213,7 @@ mod tests {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/models"),
             }),
-            quantization: None,
+            quantization_scheme: None,
             unpack_root: None,
             max_concurrency: Some(4),
         };
@@ -1063,18 +1229,18 @@ mod tests {
     #[test]
     fn start_options_carry_quantization_policy() {
         let q4 = StartOptions {
-            quantization: Some(QuantizationBits::Four),
+            quantization_scheme: Some(QuantizationScheme::IsqQ4),
             ..Default::default()
         };
         let q8 = StartOptions {
-            quantization: Some(QuantizationBits::Eight),
+            quantization_scheme: Some(QuantizationScheme::IsqQ8),
             ..Default::default()
         };
         let none = StartOptions::default();
 
-        assert_eq!(q4.quantization, Some(QuantizationBits::Four));
-        assert_eq!(q8.quantization, Some(QuantizationBits::Eight));
-        assert_eq!(none.quantization, None);
+        assert_eq!(q4.quantization_scheme, Some(QuantizationScheme::IsqQ4));
+        assert_eq!(q8.quantization_scheme, Some(QuantizationScheme::IsqQ8));
+        assert_eq!(none.quantization_scheme, None);
     }
 
     #[test]
@@ -1083,48 +1249,48 @@ mod tests {
 
         let no_support = QuantizationSupport::none();
         assert!(no_support
-            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .resolve(Some(QuantizationScheme::IsqQ4), &bundle_id)
             .is_err());
         assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
 
         let q4_q8 = QuantizationSupport::with_recommended(
-            [QuantizationBits::Four, QuantizationBits::Eight],
-            QuantizationBits::Four,
+            [QuantizationScheme::IsqQ4, QuantizationScheme::IsqQ8],
+            QuantizationScheme::IsqQ4,
         )
         .expect("test support is valid");
         assert_eq!(
             q4_q8
-                .resolve(Some(QuantizationBits::Four), &bundle_id)
+                .resolve(Some(QuantizationScheme::IsqQ4), &bundle_id)
                 .unwrap(),
-            Some(QuantizationBits::Four)
+            Some(QuantizationScheme::IsqQ4)
         );
         assert_eq!(
             q4_q8
-                .resolve(Some(QuantizationBits::Eight), &bundle_id)
+                .resolve(Some(QuantizationScheme::IsqQ8), &bundle_id)
                 .unwrap(),
-            Some(QuantizationBits::Eight)
+            Some(QuantizationScheme::IsqQ8)
         );
         assert_eq!(
             q4_q8.resolve(None, &bundle_id).unwrap(),
-            Some(QuantizationBits::Four)
+            Some(QuantizationScheme::IsqQ4)
         );
 
-        let q8_only = QuantizationSupport::without_recommended([QuantizationBits::Eight]);
+        let q8_only = QuantizationSupport::without_recommended([QuantizationScheme::IsqQ8]);
         assert!(q8_only
-            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .resolve(Some(QuantizationScheme::IsqQ4), &bundle_id)
             .is_err());
         assert_eq!(
             q8_only
-                .resolve(Some(QuantizationBits::Eight), &bundle_id)
+                .resolve(Some(QuantizationScheme::IsqQ8), &bundle_id)
                 .unwrap(),
-            Some(QuantizationBits::Eight)
+            Some(QuantizationScheme::IsqQ8)
         );
         assert_eq!(q8_only.resolve(None, &bundle_id).unwrap(), None);
     }
 
     #[test]
     fn quantization_support_rejects_contradictory_recommended() {
-        let err = QuantizationSupport::with_recommended([], QuantizationBits::Four)
+        let err = QuantizationSupport::with_recommended([], QuantizationScheme::IsqQ4)
             .expect_err("contradictory recommended should fail");
 
         assert!(

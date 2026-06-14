@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, Capabilities, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity,
-    QuantizationSupport, StartOptions,
+    QuantizationScheme, QuantizationSupport, StartOptions,
 };
 use motlie_model_sherpa_onnx::{
     SherpaOnnxHandle, SherpaOnnxStreamingBundle, SherpaOnnxStreamingSpec,
@@ -52,7 +52,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(JOINER_FILE),
             ArtifactRule::Exact(TOKENS_FILE),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Fp32),
     }
 }
 

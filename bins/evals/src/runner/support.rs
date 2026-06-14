@@ -2,22 +2,22 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
-    ArtifactPolicy, BundleHandle, BundleId, CapabilityKind, QuantizationBits, StartOptions,
+    ArtifactPolicy, BundleHandle, BundleId, CapabilityKind, QuantizationScheme, StartOptions,
 };
 use motlie_models::{
-    ArtifactDownloadOptions, BackendKind, BundleDescriptor, Catalog, CheckpointFormat,
-    CuratedBundle, download_bundle_artifacts_with_options,
+    download_bundle_artifacts_with_options, ArtifactDownloadOptions, BackendKind, BundleDescriptor,
+    Catalog, CheckpointFormat, CuratedBundle,
 };
 
 use crate::accelerator;
 use crate::metrics::{MemoryPeakKind, PerformanceMetrics, ResourceMetrics};
 use crate::result::{
-    AcceleratorClass, AcceptanceSection, AcceptanceStatus, AssertionOutcome, CoverageSection,
-    GateOutcome, IdentitySection, OutcomeReason, ProfileSection, RESULT_SCHEMA_VERSION,
-    ResultRecord, RuntimeSection, SelectionSection, overall_status_with_accelerator,
-    reason_for_status, terminal_outcome,
+    overall_status_with_accelerator, reason_for_status, terminal_outcome, AcceleratorClass,
+    AcceptanceSection, AcceptanceStatus, AssertionOutcome, CoverageSection, GateOutcome,
+    IdentitySection, OutcomeReason, ProfileSection, ResultRecord, RuntimeSection, SelectionSection,
+    RESULT_SCHEMA_VERSION,
 };
 use crate::runner::RunContext;
 use crate::scenario::{CapabilityName, ModelCapabilityName};
@@ -27,7 +27,7 @@ pub struct PreparedBundle {
     pub descriptor: BundleDescriptor,
     pub bundle: CuratedBundle,
     pub downloaded_artifacts: Vec<String>,
-    pub quantization: Option<QuantizationBits>,
+    pub quantization: Option<QuantizationScheme>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,7 +78,7 @@ pub fn prepare_bundle(
     let downloaded_artifacts = if context.runtime_flags.download_artifacts {
         let download_options = ArtifactDownloadOptions {
             hf_token: hf_token_from_env(),
-            quantization: artifact_download_quantization(&descriptor, quantization),
+            quantization_scheme: artifact_download_quantization(&descriptor, quantization),
         };
         download_bundle_artifacts_with_options(
             &catalog,
@@ -110,8 +110,8 @@ pub fn prepare_bundle(
 
 fn artifact_download_quantization(
     descriptor: &BundleDescriptor,
-    quantization: Option<QuantizationBits>,
-) -> Option<QuantizationBits> {
+    quantization: Option<QuantizationScheme>,
+) -> Option<QuantizationScheme> {
     let artifacts = descriptor.artifacts.as_ref()?;
     if descriptor.backend == BackendKind::LlamaCpp && artifacts.format == CheckpointFormat::Gguf {
         quantization
@@ -122,7 +122,7 @@ fn artifact_download_quantization(
 
 fn artifact_patterns_for_record(
     descriptor: &BundleDescriptor,
-    quantization: Option<QuantizationBits>,
+    quantization: Option<QuantizationScheme>,
 ) -> Vec<String> {
     descriptor
         .artifacts
@@ -181,7 +181,7 @@ pub fn start_options(context: &RunContext, prepared: &PreparedBundle) -> StartOp
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
             root: context.artifact_root.clone(),
         }),
-        quantization: prepared.quantization,
+        quantization_scheme: prepared.quantization,
         ..Default::default()
     }
 }
@@ -786,14 +786,20 @@ fn ensure_capability(descriptor: &BundleDescriptor, capability: CapabilityKind) 
     Ok(())
 }
 
-fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationBits>> {
+fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationScheme>> {
     match precision {
-        Some("q4") => Ok(Some(QuantizationBits::Four)),
-        Some("q5") => Ok(Some(QuantizationBits::Five)),
-        Some("q8") => Ok(Some(QuantizationBits::Eight)),
-        Some("fp8") => Ok(Some(QuantizationBits::FloatEight)),
-        Some("f16") | Some("f32") | None => Ok(None),
-        Some(other) => bail!("unknown precision `{other}` - use q4, q5, q8, fp8, f16, or f32"),
+        Some("q4") | Some("q4_k_m") | Some("gguf_q4_k_m") => Ok(Some(QuantizationScheme::GgufQ4_K_M)),
+        Some("q4_0") | Some("gguf_q4_0") => Ok(Some(QuantizationScheme::GgufQ4_0)),
+        Some("q5") | Some("q5_k_m") | Some("gguf_q5_k_m") => Ok(Some(QuantizationScheme::GgufQ5_K_M)),
+        Some("q8") | Some("q8_0") | Some("gguf_q8_0") => Ok(Some(QuantizationScheme::GgufQ8_0)),
+        Some("onnx_int8") | Some("int8") => Ok(Some(QuantizationScheme::OnnxInt8)),
+        Some("isq_q4") => Ok(Some(QuantizationScheme::IsqQ4)),
+        Some("isq_q8") => Ok(Some(QuantizationScheme::IsqQ8)),
+        Some("f16") | Some("fp16") => Ok(Some(QuantizationScheme::Fp16)),
+        Some("f32") | Some("fp32") => Ok(Some(QuantizationScheme::Fp32)),
+        Some("bf16") => Ok(Some(QuantizationScheme::Bf16)),
+        None => Ok(None),
+        Some(other) => bail!("unknown precision `{other}` - use a QuantizationScheme id such as gguf_q4_k_m, gguf_q4_0, gguf_q5_k_m, gguf_q8_0, onnx_int8, isq_q4, isq_q8, fp32, fp16, or bf16"),
     }
 }
 
@@ -845,8 +851,8 @@ fn active_features() -> Vec<String> {
             cfg!(feature = "model-gemma4-12b-gguf"),
         ),
         (
-            "model-gemma4-12b-qat-q4-0-gguf",
-            cfg!(feature = "model-gemma4-12b-qat-q4-0-gguf"),
+            "model-gemma4-12b-qat-gguf",
+            cfg!(feature = "model-gemma4-12b-qat-gguf"),
         ),
         ("model-qwen3-4b-gguf", cfg!(feature = "model-qwen3-4b-gguf")),
         (
@@ -933,20 +939,16 @@ mod tests {
         let evaluation = evaluate_resource_status(&resources, &context);
 
         assert_eq!(evaluation.status, AcceptanceStatus::Fail);
-        assert!(
-            evaluation
-                .failure_reason
-                .as_deref()
-                .unwrap()
-                .contains("max_process_swap_delta_bytes=0 exceeded")
-        );
-        assert!(
-            evaluation
-                .failure_reason
-                .as_deref()
-                .unwrap()
-                .contains("process_swap_delta_peak=1.56GiB")
-        );
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("max_process_swap_delta_bytes=0 exceeded"));
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("process_swap_delta_peak=1.56GiB"));
     }
 
     #[test]
@@ -975,13 +977,11 @@ mod tests {
         let evaluation = evaluate_resource_status(&resources, &context);
 
         assert_eq!(evaluation.status, AcceptanceStatus::Fail);
-        assert!(
-            evaluation
-                .failure_reason
-                .as_deref()
-                .unwrap()
-                .contains("max_process_swap_delta_bytes=4294967296 exceeded")
-        );
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("max_process_swap_delta_bytes=4294967296 exceeded"));
     }
 
     #[test]
@@ -998,13 +998,11 @@ mod tests {
         let evaluation = evaluate_resource_status_with_swap_support(&resources, &context, true);
 
         assert_eq!(evaluation.status, AcceptanceStatus::Blocked);
-        assert!(
-            evaluation
-                .failure_reason
-                .as_deref()
-                .unwrap()
-                .contains("process swap delta unavailable")
-        );
+        assert!(evaluation
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("process swap delta unavailable"));
     }
 
     #[test]

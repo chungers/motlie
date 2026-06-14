@@ -8,7 +8,9 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use motlie_models::asr::{sherpa_onnx_streaming_zipformer_en, sherpa_onnx_streaming_zipformer_en_kroko_2025};
+use motlie_models::asr::{
+    sherpa_onnx_streaming_zipformer_en, sherpa_onnx_streaming_zipformer_en_kroko_2025,
+};
 
 #[path = "../support/asr.rs"]
 mod asr_support;

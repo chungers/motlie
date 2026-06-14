@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, CheckpointQuantization, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, QuantizationScheme,
     StartOptions,
 };
 use motlie_model_kokoro::{KokoroHandle, KokoroSpeechBundle, KokoroSpeechSpec};
@@ -48,7 +48,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(TOKENIZER_FILE),
             ArtifactRule::Exact(VOICE_FILE),
         ],
-        quantization: Some(CheckpointQuantization::Onnx { bits: 8 }),
+        quantization: Some(QuantizationScheme::OnnxInt8),
     }
 }
 
