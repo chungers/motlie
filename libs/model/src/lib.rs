@@ -105,6 +105,135 @@ pub enum BackendKind {
     WhisperCpp,
 }
 
+/// Hardware accelerator class a backend execution provider can target.
+///
+/// Only the three physical classes live here. The eval runtime carries extra
+/// resolution-only states (`Any`/`Unavailable`); those are an eval concern, not
+/// a model-capability one, so they are deliberately absent.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Accelerator {
+    Cpu,
+    Cuda,
+    Metal,
+}
+
+impl Accelerator {
+    /// Every accelerator class, for exhaustive coverage walks.
+    pub const ALL: [Accelerator; 3] = [Self::Cpu, Self::Cuda, Self::Metal];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Metal => "metal",
+        }
+    }
+}
+
+/// Why a backend has no execution path for an accelerator — a *permanent*,
+/// compile-time truth (independent of whether any given build compiled a path).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Reason {
+    /// The backend's execution provider does not exist for this accelerator at
+    /// all (e.g. ONNX Runtime has no Metal execution provider).
+    NoExecutionProviderForAccelerator,
+    /// The backend runs on the accelerator's host but does not forward
+    /// generation to the accelerator upstream (e.g. mistralrs → CUDA/Metal for
+    /// the non-forwarding bundles).
+    UpstreamNoGpuForwarding,
+    /// Only a CPU static archive is shipped/linkable for this backend today, so
+    /// the accelerated path cannot be built (e.g. the sherpa/ORT static archive,
+    /// #495/#513).
+    CpuOnlyStaticArchive,
+    /// Reaching the accelerated path requires a gated artifact that is not
+    /// freely provisionable.
+    RequiresArtifactGate,
+}
+
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoExecutionProviderForAccelerator => "no_execution_provider_for_accelerator",
+            Self::UpstreamNoGpuForwarding => "upstream_no_gpu_forwarding",
+            Self::CpuOnlyStaticArchive => "cpu_only_static_archive",
+            Self::RequiresArtifactGate => "requires_artifact_gate",
+        }
+    }
+}
+
+/// Declared accelerator support for a backend (the compile-time / model layer of
+/// the coverage ontology, #521). This is the *intrinsic* capability of the
+/// backend's execution provider, declared at curation — never discovered from
+/// eval runs. The eval runtime reconciles this declaration against recorded
+/// results to classify each coverage cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccelSupport {
+    /// The backend can target this accelerator. The native path is compiled only
+    /// when `feature` is active in a build (`None` = always present, e.g. CPU).
+    ///
+    /// `feature` is an advisory hint that corroborates a build's
+    /// `runtime.cargo_features`; the runtime `BuildGap` classification keys on
+    /// recorded native-provider evidence (EP probe / static-archive presence /
+    /// `resolved_accelerator`), not on this string alone.
+    Targetable { feature: Option<&'static str> },
+    /// The backend fundamentally cannot target this accelerator. Permanent.
+    Unsupported(Reason),
+}
+
+impl BackendKind {
+    /// Backend-intrinsic accelerator support, **declared** (not discovered from
+    /// runs). Bundles inherit this through their backend; genuine per-bundle
+    /// deviations are layered on at the registry (motlie-models) level.
+    ///
+    /// Totality: returns a declared `AccelSupport` for every `(backend,
+    /// accelerator)` — there is no undeclared combination.
+    pub fn accel_support(self, accel: Accelerator) -> AccelSupport {
+        use AccelSupport::{Targetable, Unsupported};
+        use Accelerator::{Cpu, Cuda, Metal};
+
+        match (self, accel) {
+            // CPU is always targetable for every local backend; the HTTP backend
+            // is remote and has no local accelerator, so CPU stands in as its
+            // only (host-side) class and GPU classes are not applicable.
+            (_, Cpu) => Targetable { feature: None },
+            (BackendKind::Http, Cuda | Metal) => {
+                Unsupported(Reason::NoExecutionProviderForAccelerator)
+            }
+            // ONNX Runtime (audio): CUDA only when a CUDA-EP archive is linked;
+            // no Metal execution provider exists at all (permanent).
+            (BackendKind::Ort | BackendKind::SherpaOnnx, Cuda) => Targetable {
+                feature: Some("cuda"),
+            },
+            (BackendKind::Ort | BackendKind::SherpaOnnx, Metal) => {
+                Unsupported(Reason::NoExecutionProviderForAccelerator)
+            }
+            // llama.cpp (ggml) forwards to both CUDA and Metal.
+            (BackendKind::LlamaCpp, Cuda) => Targetable {
+                feature: Some("llama-cpp-cuda"),
+            },
+            (BackendKind::LlamaCpp, Metal) => Targetable {
+                feature: Some("metal"),
+            },
+            // mistralrs (candle): CUDA-capable; no Metal forwarding upstream.
+            (BackendKind::MistralRs, Cuda) => Targetable {
+                feature: Some("cuda"),
+            },
+            (BackendKind::MistralRs, Metal) => Unsupported(Reason::UpstreamNoGpuForwarding),
+            // whisper.cpp / qwen3-tts.cpp (ggml): CUDA + Metal.
+            (BackendKind::WhisperCpp, Cuda) => Targetable {
+                feature: Some("whisper-cpp-cuda"),
+            },
+            (BackendKind::Qwen3TtsCpp, Cuda) => Targetable {
+                feature: Some("qwen3-tts-cpp-cuda"),
+            },
+            (BackendKind::WhisperCpp | BackendKind::Qwen3TtsCpp, Metal) => Targetable {
+                feature: Some("metal"),
+            },
+        }
+    }
+}
+
 /// Platform scoping visible to operators and release tooling.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlatformConstraint {
@@ -954,6 +1083,71 @@ impl EmbeddingModel for UnsupportedEmbeddings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accel_support_is_total_over_backend_x_accelerator() {
+        // Every (backend, accelerator) resolves to a declared AccelSupport — no
+        // undeclared combination. This is the compile-time half of the #521
+        // tuple-completeness guarantee.
+        let backends = [
+            BackendKind::Http,
+            BackendKind::LlamaCpp,
+            BackendKind::MistralRs,
+            BackendKind::Ort,
+            BackendKind::Qwen3TtsCpp,
+            BackendKind::SherpaOnnx,
+            BackendKind::WhisperCpp,
+        ];
+        for backend in backends {
+            for accel in Accelerator::ALL {
+                // Declared (the match is exhaustive); CPU is always targetable.
+                let support = backend.accel_support(accel);
+                if accel == Accelerator::Cpu {
+                    assert!(
+                        matches!(support, AccelSupport::Targetable { .. }),
+                        "{backend:?} cpu must be targetable",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ort_has_no_metal_path_permanently() {
+        // The defining permanent-NotApplicable case: ONNX Runtime has no Metal EP.
+        assert_eq!(
+            BackendKind::Ort.accel_support(Accelerator::Metal),
+            AccelSupport::Unsupported(Reason::NoExecutionProviderForAccelerator),
+        );
+        assert_eq!(
+            BackendKind::SherpaOnnx.accel_support(Accelerator::Metal),
+            AccelSupport::Unsupported(Reason::NoExecutionProviderForAccelerator),
+        );
+    }
+
+    #[test]
+    fn llama_cpp_targets_all_three_accelerators() {
+        assert!(matches!(
+            BackendKind::LlamaCpp.accel_support(Accelerator::Cuda),
+            AccelSupport::Targetable { .. }
+        ));
+        assert!(matches!(
+            BackendKind::LlamaCpp.accel_support(Accelerator::Metal),
+            AccelSupport::Targetable { .. }
+        ));
+    }
+
+    #[test]
+    fn mistralrs_targets_cuda_but_not_metal() {
+        assert!(matches!(
+            BackendKind::MistralRs.accel_support(Accelerator::Cuda),
+            AccelSupport::Targetable { .. }
+        ));
+        assert_eq!(
+            BackendKind::MistralRs.accel_support(Accelerator::Metal),
+            AccelSupport::Unsupported(Reason::UpstreamNoGpuForwarding),
+        );
+    }
 
     struct FakeHandle {
         descriptor: LoadedBundleDescriptor,
