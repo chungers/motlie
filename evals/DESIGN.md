@@ -2,125 +2,113 @@
 
 ## Changelog
 - 2026-06-14 @ops48-orchestrator — initial cut. Captures the (bundle, capability, accelerator) coverage tuple + full-accounting rule. Outgrowth of #399/#486/#513/#514/#518: silent coverage gaps (kokoro, qwen3-tts, kroko-2025 missed) and the "ASR-on-GPU" surprise class.
-- 2026-06-14 @onto-impl — finalize for #521. Renamed the third dimension **accelerator → Profile** throughout (Profile encodes arch+accelerator; one axis, not two). Grounded the schema in the real motlie-models type system (`CuratedBundle`, `Capabilities`/`CapabilityKind`, new `Profile`/`Capability`/`Reason` enums). Added the concrete applicability API, the runtime↔declared reconciliation rule, the enforcement-test plan, and a **Dataset Reorg proposal** (§9, derived index over immutable run dirs). Marked open questions for @onto-rv review. **No code/data edited yet — this doc is the review gate.**
+- 2026-06-14 @onto-impl — finalize for #521 (v1): accelerator→Profile rename + enum-grounded schema.
+- 2026-06-14 @onto-impl — **v2, David-approved two-layer design.** Restructured to the compile-time/runtime split: compile-time accelerator capability is declared on **`BackendKind`** (the EP truth lives at the backend; bundles inherit), **not** a Profile enum in motlie-models. Profile stays the **runtime** eval instantiation in `bins/evals`; the existing `accelerator.rs` `Profile→AcceleratorClass` bridge is the join. Added the **4-state taxonomy** (Validated / NotApplicable / **BuildGap** / Gap) that resolves the compile-vs-runtime mismatch. Added §9 **Data Migration** layout (David: data migrated into the (bundle,capability,Profile) organization before merge — sign-off required before moving). Dropped v1's per-bundle applicability table and the motlie-models `Profile`/`Capability` enums. **No code/data edited — review gate.**
 
 ## Problem
-Curated-eval coverage is a flat, hand-curated cell list. "Does bundle X support capability Y on profile Z?" is answerable only by *absence* — a missing cell is indistinguishable from "not applicable" vs "we forgot." This causes (a) silent test gaps (models defined but never evaluated) and (b) deployment disappointments (e.g. picking an ASR model for GPU when it has no GPU backend). No single artifact accounts for the full space.
+Curated-eval coverage is a flat, hand-curated cell list. "Does bundle X support capability Y on profile Z?" is answerable only by *absence* — a missing cell is indistinguishable from "not applicable" vs "build didn't provision it" vs "we forgot." This causes (a) silent test gaps, (b) deployment disappointments (ASR-on-GPU surprise), and (c) **the compile-vs-runtime confusion**: a `blocked` aarch64-CUDA-ORT cell pre-#513 looked identical to a permanently-impossible ORT-on-Metal cell, though one is fixable (compile the path) and one never is.
 
-## Key insight: coverage is a product space
-Coverage is the set of tuples **(CuratedBundle, Capability, Profile)**. Completeness = **every tuple in the (sparse) space is explicitly classified** — none undeclared.
+## Key insight: coverage is a product space with a two-layer truth
+Coverage is the set of tuples **(CuratedBundle, Capability, Profile)**. Completeness = every tuple in the (sparse) space is explicitly classified. But *what* classifies a tuple has **two layers** that must not be conflated:
 
-### Dimensions & cardinality (all keyed to motlie-models enums — no freetext)
-- **bundle**: `CuratedBundle` enum — **18** variants (the registry; canonical `bundle_id` strings, #518). `libs/models/src/lib.rs`.
-- **capability**: `Capability` enum — the 6 eval-matrix categories `Chat | ToolUse | Asr | Tts | Embeddings | Perf`. *New canonical enum* (see §8.2). A bundle's **advertised** capability set is **derived** from its existing `descriptor().capabilities` (`CapabilityKind`), not hand-listed. `perf`/`tool_use` cross-cut text-generation bundles.
-- **Profile**: `Profile` enum — the eval profile = (arch, accelerator), **one axis, not two**. *New enum* (see §8.1). 5 variants: `local-cpu-x86_64`, `local-cpu-aarch64`, `apple-metal` (arm64+metal), `dgx-spark` (aarch64+cuda, GB10), `cuda-workstation` (x86_64+cuda). `aarch64`==`arm64`. Today these are bare strings in `bins/evals` (`accelerator.rs`, `snapshot.rs`); the ontology promotes them to a typed enum.
+- **Compile-time / model truth (motlie-models / motlie-model):** what a model's backend's execution provider can *ever* target. Permanent. ORT has no Metal EP — period. This is declared on **`BackendKind`** and inherited by every bundle using that backend.
+- **Runtime / build truth (bins/evals):** what *this build* (its active cargo features + git SHA), running on *this Profile*, actually instantiated and resolved. A correct CUDA-capable backend still yields nothing if this build didn't compile the CUDA feature.
 
-The space is **sparse**: pruned by each bundle's *advertised* capabilities (a chat model has no `asr` row). Real cardinality ≈ `Σ_bundle (advertised-caps × 5 profiles)`, far below `18 × 6 × 5`.
+The 4-state taxonomy (below) is exactly the reconciliation of these two layers.
 
-### Cell state (each tuple is exactly one)
-- **`Validated`** — produced a `passed` eval cell (carries the metric).
-- **`NotApplicable(Reason)`** — declared can't/won't run, with a typed reason. *Full accounting, not a silent miss.*
-- **`Gap`** — known-missing, must be filled. Transient, CI-visible.
+### Dimensions (keyed to existing enums — no freetext)
+- **bundle**: `CuratedBundle` enum — 18 variants, canonical `bundle_id` (#518). `libs/models/src/lib.rs`.
+- **capability**: the eval-matrix axis `chat | tool_use | asr | tts | embeddings | perf` (evals `CapabilityName`, `bins/evals/src/scenario.rs`). Each bundle's **advertised** set is **derived** from its existing `descriptor().capabilities` (`CapabilityKind`, `libs/model/src/lib.rs:156`): `asr←Transcription`, `tts←Speech`, `embeddings←Embeddings`, `chat←Chat`, `tool_use←ToolUse`, `perf←(any bundle advertising Chat)`. No new capability enum; no hand-listing.
+- **Profile**: the **runtime** eval instantiation — `(arch, accelerator)`, one axis. 5 values: `local-cpu-x86_64`, `local-cpu-aarch64`, `apple-metal`, `dgx-spark` (aarch64+cuda GB10), `cuda-workstation` (x86_64+cuda). Stays string-keyed in `bins/evals` (`snapshot.rs`, `accelerator.rs`); **no Profile enum in motlie-models** — Profile is an eval concern, the model layer only knows `AcceleratorClass`.
 
-### Reason taxonomy (typed, queryable — not freetext)
-A new `Reason` enum in motlie-models. Initial variants (extensible `#[non_exhaustive]`):
-`NoBackendForProfile` (no backend compiled/exists for this profile), `UpstreamNoGpuForwarding` (mistralrs→CUDA/Metal for the bundles that don't forward), `CpuOnlyStaticArchive` (ORT audio: static archive has no GPU EP, #495/#513), `NoGpuPath` (embeddings: no accelerated path advertised), `RequiresArtifactGate` (gated artifact / token), … . Distinct from the *runtime* `OutcomeReason` (§8.4).
+The space is **sparse**: pruned by each bundle's advertised capabilities.
 
-## Enforcement
-A CI test asserts: for every **(bundle × advertised-capability × Profile)** tuple, the declared applicability is `Supported` **or** `NotApplicable(Reason)` — the applicability function is **total** (no undeclared tuple). A second, results-side test asserts the *reconciliation* (§8.4): every `passed` record sits on a `Supported` tuple, and every `blocked` record's runtime `OutcomeReason` maps to the tuple's declared `NotApplicable(Reason)` — an unexplained `blocked`, or a `blocked` whose reason contradicts the declaration, **fails CI**. Extends the #518 `CANONICAL_IDS` completeness test from the bundle axis to the full tuple. → No silent fails or deployment surprises.
+## §A Compile-time layer — accelerator capability on `BackendKind`
+`BackendKind` (`libs/model/src/lib.rs:97`: `Http, LlamaCpp, MistralRs, Ort, Qwen3TtsCpp, SherpaOnnx, WhisperCpp`) is where the execution-provider truth lives. Add one declaration; bundles inherit it through `descriptor().backend`.
 
-## High-level data flow
-```
-CuratedBundle.descriptor().capabilities   ──derive──>  advertised Capability set   ┐
-Profile::ALL (5)                                                                    ├─> applicability(bundle, cap, profile) -> Supported | NotApplicable(Reason)
-per-bundle applicability overrides (declared)                                       ┘            │
-                                                                                                 ▼
-results.jsonl records (coverage.{bundle_id,capability,profile}, terminal_outcome, reason) ──reconcile──> CoverageState{Validated|NotApplicable|Gap}
-                                                                                                 │
-                                                                                                 ▼
-                                                                          evals report --aggregate  →  ## Accounting Matrix (§8.5)
-```
-
-## §8 Schema design (concrete, enum-grounded)
-
-### 8.1 `Profile` enum — `libs/models/src/profile.rs` (new)
 ```rust
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum Profile { LocalCpuX86_64, LocalCpuAarch64, AppleMetal, DgxSpark, CudaWorkstation }
+// motlie-model — minimal model-side accelerator enum (resolution states Any/Unavailable are runtime-only, excluded).
+pub enum Accelerator { Cpu, Cuda, Metal }
 
-pub enum Arch { X86_64, Aarch64 }
-pub enum Accel { Cpu, Cuda, Metal }
+pub enum AccelSupport {
+    /// Backend's EP can target this accelerator. Compiled only when `feature` is
+    /// active in the build (None = always present, e.g. Cpu). The feature gate is
+    /// what distinguishes Validated from BuildGap at reconciliation time.
+    Targetable { feature: Option<&'static str> },
+    /// Backend fundamentally has no path here — permanent, independent of build.
+    Unsupported(Reason),
+}
 
-impl Profile {
-    pub const ALL: [Profile; 5] = [ /* … */ ];
-    pub const CANONICAL_IDS: [&'static str; 5] = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"];
-    pub fn canonical_id(self) -> &'static str;        // matches existing profile strings exactly
-    pub fn from_id(id: &str) -> Option<Profile>;      // string -> enum at the snapshot/result boundary
-    pub fn arch(self) -> Arch;
-    pub fn accel(self) -> Accel;
+impl BackendKind {
+    pub fn accel_support(self, accel: Accelerator) -> AccelSupport;
 }
 ```
-*Home = motlie-models* so the applicability table (model layer) can key on it. Mirrors the `CuratedBundle::canonical_id`/`CANONICAL_IDS` pattern, incl. a completeness test. `bins/evals` (`accelerator.rs`, `snapshot.rs`, `driver.rs`) parse strings into `Profile` at the edges and stay enum-keyed internally; existing profile strings are unchanged on disk.
 
-### 8.2 `Capability` enum (the matrix axis) — motlie-models (new)
-The 6 eval-matrix categories: `Chat | ToolUse | Asr | Tts | Embeddings | Perf`. The **advertised** set per bundle is **derived** from existing metadata — no new hand-authored list:
-| Capability | derived from `descriptor().capabilities.supports(..)` |
-|---|---|
-| Chat | `CapabilityKind::Chat` |
-| ToolUse | `CapabilityKind::ToolUse` |
-| Asr | `CapabilityKind::Transcription` |
-| Tts | `CapabilityKind::Speech` |
-| Embeddings | `CapabilityKind::Embeddings` |
-| Perf | derived: any bundle advertising `Chat` (perf-bench cross-cuts text generation) |
+Declared truth (feature-gated), e.g.:
+| BackendKind | Cpu | Cuda | Metal |
+|---|---|---|---|
+| `Ort` / `SherpaOnnx` (audio EP) | `Targetable{None}` | `Targetable{feature:"…-cuda"}` *(static archive is CPU-only today, #495/#513 → BuildGap until shipped)* | `Unsupported(NoExecutionProviderForAccelerator)` **(permanent)** |
+| `LlamaCpp` | `Targetable{None}` | `Targetable{feature:"llama-cpp-cuda"}` | `Targetable{feature:"metal"}` |
+| `MistralRs` | `Targetable{None}` | `Targetable{feature:"cuda"}` | `Unsupported(UpstreamNoGpuForwarding)` |
+| `WhisperCpp` / `Qwen3TtsCpp` (ggml) | `Targetable{None}` | `Targetable{feature:"…-cuda"}` | `Targetable{feature:"metal"}` |
 
-`bins/evals` currently has its own `CapabilityName` (chat/tool_use/asr/tts/embeddings/perf) — **identical set**. Proposal: make `Capability` the single source of truth in motlie-models and have evals re-export it as `CapabilityName` (or replace). This is the main refactor surface — flagged for review (§10).
+`Reason` (new typed enum, `#[non_exhaustive]`, motlie-model): `NoExecutionProviderForAccelerator`, `UpstreamNoGpuForwarding`, `CpuOnlyStaticArchive`, `RequiresArtifactGate`, … . These are the *permanent* NotApplicable reasons; they are a function of `(BackendKind, Accelerator)`, not hand-authored per bundle. (Per-bundle runtime divergence — e.g. gemma-mistralrs failing on CUDA where qwen3-mistralrs passes — is a runtime outcome, reconciled in §C, not a compile-time NotApplicable.)
 
-### 8.3 Applicability table — `libs/models/src/applicability.rs` (new)
-```rust
-pub enum Applicability { Supported, NotApplicable(Reason) }
+## §B Runtime layer — Profile is the eval instantiation
+`bins/evals` keeps Profile (string) and the existing bridge `requested_for_profile(profile) -> AcceleratorClass` / `resolve_for_profile(profile, platform) -> AcceleratorSection` (`accelerator.rs`). This bridge is **the join**: it turns a runtime Profile into the `AcceleratorClass`/`Accelerator` that §A is keyed on. Records already carry the runtime evidence needed for reconciliation:
+- `coverage.{bundle_id, capability, profile, resolved_accelerator}`, `coverage.terminal_outcome` + `OutcomeReason`
+- `runtime.cargo_features` (the build's active feature set) and `identity.git_sha`.
 
-/// Total over (advertised cap × Profile). Per-BUNDLE, not per-backend:
-/// e.g. qwen3_4b (mistralrs) Chat@cuda = Supported (forwards, #515) while
-/// gemma4_e2b (mistralrs) Chat@cuda = NotApplicable(UpstreamNoGpuForwarding).
-pub fn applicability(bundle: CuratedBundle, cap: Capability, profile: Profile) -> Applicability;
+## §C The 4-state cell taxonomy (the compile↔runtime reconciliation)
+For each tuple `(bundle, capability, Profile)`, let `accel = bridge(Profile)`, `support = bundle.backend().accel_support(accel)`:
+
+1. **`Validated`** — a `passed` record exists for the tuple with `resolved_accelerator == accel`. (Implies `support == Targetable`.) Carries the metric.
+2. **`NotApplicable(Reason)`** — `support == Unsupported(Reason)`. The model fundamentally can't; **compile-permanent** (ORT-on-Metal). A runtime `blocked` here must reconcile to this Reason; anything else is a CI failure.
+3. **`BuildGap`** — `support == Targetable{feature}` but **this build didn't provide the path**: either no record exists for the tuple, or the record is `blocked` and its `runtime.cargo_features` lacks `feature` (e.g. aarch64-CUDA-ORT pre-#513 — capable in principle, not compiled in that build/SHA). Distinct from NotApplicable: **fixable by building/provisioning the path**; reconciled via recorded feature flags + SHA.
+4. **`Gap`** — `support == Targetable` and `feature` *was* compiled (or none required) but the cell was never scheduled / no passing record (e.g. kroko-2025 + qwen3-tts on CUDA). Should run; CI-visible, transient.
+
+Reconciliation rule (results-side test, `bins/evals`):
+- every `passed` record ⇒ tuple state `Validated` and `support == Targetable`.
+- every `blocked`/`skipped` record ⇒ tuple is `NotApplicable(r)` with `OutcomeReason → r`, **or** `BuildGap` (Targetable but feature absent in the record's build). An undeclared tuple, or a `blocked` whose runtime reason contradicts §A, fails CI.
+- This extends the #518 `CANONICAL_IDS` completeness test from the bundle axis to the full tuple.
+
+## §D Coverage-report **Accounting Matrix**
+New section in `evals report --aggregate` (`bins/evals/src/report.rs`): rows = `bundle × capability` (advertised only), cols = the 5 Profiles, cell = `✅ Validated (+metric)` / `⛔ NotApplicable (reason)` / `🔧 BuildGap (feature/SHA)` / `⏳ Gap`. Generated by joining §A's declaration (via the §B bridge) with the records. The model-selection + no-surprise + "what must we still build/run" view.
+
+## §9 Data Migration — PROPOSAL (sign-off required before moving; David)
+David: *"the data needs to be migrated so it's in this organization before merge to main."* So this is a real reorg of committed `evals/results/`, not just a derived index. The #518 discipline still holds: **propose + sign-off before moving**, and **preserve provenance** (no record content rewritten; identity fields stay intact inside each record).
+
+**Proposed canonical layout — enum-keyed, one record per file:**
 ```
-Implemented as: **sensible defaults** (CPU profiles → `Supported` for every advertised cap; embeddings on any GPU → `NotApplicable(NoGpuPath)`; ORT-audio on metal/cuda → `NotApplicable(CpuOnlyStaticArchive)`) **+ per-bundle overrides** for the backend-forwarding nuances. Each override carries the `Reason`. The function is total → the enforcement test (§Enforcement) just asserts it returns for every tuple, which the type system already guarantees; the test's real job is asserting it agrees with the *records* (§8.4).
+evals/results/coverage/<bundle_id>/<capability>/<profile>/<git_sha8>-<host_slug>-<run_ts>.json
+                         │            │            │          └─ disambiguates multiple runs of the same tuple
+                         │            │            └─ one of the 5 Profile strings (validated against the registry)
+                         │            └─ one of {chat,tool_use,asr,tts,embeddings,perf} (CapabilityName)
+                         └─ ∈ CuratedBundle::CANONICAL_IDS  (#518)
+```
+- Each leaf file is exactly one `ResultRecord` (the cell), **byte-identical** to its source row — migration only *relocates+splits*, never edits content. Provenance (`run_id`, `git_sha`, `command_line`, host) stays inside the record; the original run grouping is recoverable by `run_id`.
+- **Path components are validated against the enums** at migration time and by the enforcement test — a path that doesn't parse to `(CuratedBundle, CapabilityName, Profile)` fails. This *is* the enforced results↔enums mapping.
+- **Migration is mechanical + reproducible:** a `evals migrate-results` step reads each existing `results.jsonl`, emits leaf files by tuple. Re-runnable; deterministic given the same inputs.
 
-### 8.4 Runtime ↔ declared reconciliation
-`bins/evals` records already carry a runtime `OutcomeReason` (28 variants, `result.rs`). We add a mapping `OutcomeReason -> Option<Reason>` (a record's runtime block reason → the declared family). Reconciliation rule, enforced by a results-side test in `bins/evals`:
-- `passed` record  ⇒ its tuple's `applicability == Supported`.
-- `blocked`/`skipped` record ⇒ tuple is `NotApplicable(r)` **and** the record's `OutcomeReason` maps to `r` (or to a compatible family).
-- any record whose tuple is **undeclared**, or whose runtime reason contradicts the declaration ⇒ test failure.
+**Open migration questions for review/sign-off:**
+1. **Keep or retire the original run dirs?** Lean: **keep** `evals/results/curated-v2-smoke/<run-dir>/` as the immutable raw archive (provenance/audit) and add `coverage/` as the canonical enum-keyed view populated from them — belt-and-suspenders, no data loss. (Alt: move-and-delete to avoid duplication — riskier, loses run-grouping on disk.)
+2. **One-record-per-file vs per-tuple `records.jsonl`** (all runs of a tuple appended in one file). Lean: per-tuple `records.jsonl` (fewer inodes; natural "history of this tuple"); the Accounting Matrix picks the current-SHA record.
+3. Scope: migrate the full committed `evals/results/` history, or only the canonical/final-pin sets the coverage report consumes? Lean: the sets the report consumes (avoids dragging stale 33/33-blocked incident runs into the clean tree).
 
-### 8.5 Coverage-report **Accounting Matrix**
-New section in `evals report --aggregate` (`bins/evals/src/report.rs`): rows = `bundle × capability` (advertised only), cols = the 5 `Profile`s, cell = `✅ validated (+metric)` / `⛔ N/A (reason)` / `⏳ gap`. The model-selection + no-surprise view; generated from the applicability table joined with records (not hand-authored).
+**Recommendation:** layout above, **keep raw run dirs + add enum-keyed `coverage/` tree**, per-tuple `records.jsonl`, migrate the report-consumed sets. Hold for David's sign-off before any move.
 
-## §9 Dataset Reorg — PROPOSAL (review before any data move; #518 discipline)
-**Constraint (RUNBOOK + #518):** run-data dirs are chrono/ID-named *by design* — immutable records whose name **is** their identity (`ts-pid-SHA-host-arch-accel`). We must **not** silently move/rewrite committed records.
+## Alternatives considered
+- **Flat hand-curated cell list (status quo)** — rejected: silent gaps, no accounting, compile/runtime confusion.
+- **Profile enum in motlie-models + per-bundle applicability table (v1)** — superseded: leaked the eval-runtime Profile into the model layer and hand-authored per-bundle what the backend already determines. The BackendKind declaration is the single source of EP truth; bundles inherit.
+- **3-state taxonomy (Validated/NotApplicable/Gap)** — rejected: cannot distinguish "can't ever" from "this build didn't compile it." `BuildGap` is the state that makes the #513 ASR-on-aarch64-CUDA class legible and actionable.
+- **Auto-run every bundle on every profile** — rejected: wastes runs on impossible combos; no declared rationale.
 
-**Option A (RECOMMENDED) — derived enum-keyed index over immutable run dirs.**
-Keep every `results.jsonl` exactly where it is. Add a generated, committed **coverage index** `evals/results/coverage-index.json` (and the Accounting Matrix view) keyed by `(CuratedBundle, Capability, Profile)` → `{ state, reason?, metric?, source_run_dir, git_sha }`. The index is *derived* (regenerated by `evals report`), so it is reproducible and never the source of truth; raw records stay immutable and provenance-preserving. "Reorg" = introduce the **enum-keyed selection/index layer**, not physically relocating data.
-- Pros: zero rewrite of committed data; aligns with #518/RUNBOOK; the (bundle,cap,profile) lookup the issue asks for; trivially regenerated.
-- Cons: the on-disk run dirs remain chrono-named (you still need the index to navigate by tuple) — acceptable, since the index *is* the navigation layer.
+## §10 Open questions for @onto-rv
+1. `Accelerator`/`AccelSupport`/`Reason` home: `motlie-model` (next to `BackendKind`) — agreed?
+2. `accel_support` shape: single `(accel)->AccelSupport` fn (above) vs a const table per BackendKind. Lean: fn (feature-gated arms read naturally).
+3. Feature-name strings in `AccelSupport::Targetable{feature}` are the one stringly bit — they must match the cargo feature recorded in `runtime.cargo_features`. Acceptable, or wrap in a typed feature id?
+4. Data migration: §9 layout + the 3 sub-questions (keep run dirs / per-tuple file / scope).
+5. Snapshot cells: validate the hand-listed TOML against the ontology this PR vs generate from `advertised-caps × profiles`. Lean: validate-now, generate-later.
 
-**Option B — physical tree `results/<bundle>/<capability>/<profile>/…`.**
-Relocate/duplicate records into an enum-named tree.
-- Pros: filesystem browsing by tuple.
-- Cons: rewrites immutable identity-named records (breaks #518/RUNBOOK provenance); a tuple can have *many* runs over time (which one lives at the path?); merge/aggregation churn. **Rejected unless the reviewer wants it.**
-
-**Recommendation:** Option A. Decision requested from @onto-rv / @ops48 before I touch any committed `results/`.
-
-## Alternatives considered (ontology shape)
-- **Flat hand-curated cell list (status quo)** — rejected: silent gaps, no accounting, the surprise class.
-- **Auto-run every bundle on every profile** — rejected: wastes runs on impossible combos + still no *declared* rationale (a blocked cell stays ambiguous).
-- **Profile as two axes (arch × accelerator)** — rejected per David: arch and accelerator are coupled (profile is the deployable unit); one `Profile` axis keeps the matrix legible and matches the existing profile registry.
-
-## §10 Open questions for @onto-rv (settle before implementation)
-1. **Capability home/refactor:** OK to promote a single `Capability` enum into motlie-models and have `bins/evals` re-export it (replacing the standalone `CapabilityName`)? Or keep `CapabilityName` in evals and add a `From<Capability>` bridge (less churn, two near-identical enums)?
-2. **`Profile` home:** motlie-models (so applicability can key on it) — agreed? Or a smaller shared crate?
-3. **Applicability authoring:** defaults + per-bundle overrides (§8.3) vs a fully explicit per-bundle table. Defaults reduce boilerplate but hide intent; explicit is verbose but auditable. Lean: defaults + overrides, with the enforcement test pinning every override against the records.
-4. **Dataset reorg:** Option A (derived index) vs B (physical tree) — §9. Lean A.
-5. **Snapshot generation:** derive the cell list from `advertised-caps × profiles × applicability` (closes silent-miss structurally) now, or keep the hand-listed TOML and only *validate* it against the ontology this PR (smaller blast radius)? Lean: validate-now, generate-later.
-
-## In-flight gaps to fill (data-driven, not assumed; separate from this schema PR)
-- **kroko-2025 + qwen3-tts on CUDA** — currently `Gap`; run on the dgx (kroko via static-CUDA-ORT #513; qwen3-tts via ggml-CUDA) so the GPU-vs-CPU tradeoff is decided by data. (Standing finding so far: small ORT audio sees ~no CUDA speedup; LLMs do.)
+## In-flight gaps to fill (data-driven; separate from this schema PR)
+- **kroko-2025 + qwen3-tts on CUDA** — currently `Gap`; run on the dgx (kroko via static-CUDA-ORT #513; qwen3-tts via ggml-CUDA) so the GPU-vs-CPU tradeoff is decided by data. (Standing finding: small ORT audio sees ~no CUDA speedup; LLMs do.)
