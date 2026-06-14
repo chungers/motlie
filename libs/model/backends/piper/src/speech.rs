@@ -16,16 +16,16 @@ use motlie_model::{
 };
 use motlie_model_espeak_ng::text_to_phonemes;
 use motlie_model_ort::{
-    build_session_with_target, resolved_execution_target, OrtExecutionTarget,
-    OrtResolvedExecutionTarget,
+    OrtExecutionTarget, OrtResolvedExecutionTarget, build_session_with_target,
+    resolved_execution_target,
 };
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_onnx_artifacts, PiperArtifactPaths, PiperConfig, RuntimeMetricState,
+    PiperArtifactPaths, PiperConfig, RuntimeMetricState, configure_artifact_policy, lock_metrics,
+    observe_latency, observe_memory, resolve_onnx_artifacts,
 };
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -410,9 +410,14 @@ struct PiperSynthesisScales {
 }
 
 fn piper_ort_target() -> OrtExecutionTarget {
-    match std::env::var("MOTLIE_PIPER_ALLOW_CUDA") {
-        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => OrtExecutionTarget::Auto,
-        _ => OrtExecutionTarget::CpuOnly,
+    #[cfg(feature = "cuda")]
+    {
+        OrtExecutionTarget::Auto
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        OrtExecutionTarget::CpuOnly
     }
 }
 
@@ -445,10 +450,8 @@ fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelErr
     let target = piper_ort_target();
     let execution_target = resolved_execution_target(target);
     Ok(PiperRuntime {
-        // @codex-tts 2026-04-27 -- Piper exits with glibc heap corruption on this host when
-        // the ONNX Runtime CUDA execution provider is enabled during teardown. Default to CPU
-        // for Piper as a stability workaround, but allow explicit opt-in probing with
-        // MOTLIE_PIPER_ALLOW_CUDA=1 on hosts that may not reproduce the crash. See issue #230.
+        // Target selection is feature-driven and resolved once so runtime telemetry
+        // exactly matches the ORT execution provider used by the session.
         session: Mutex::new(build_session_with_target(
             "piper",
             &artifacts.model,
@@ -576,8 +579,8 @@ fn ort_tensor_error(err: ort::Error) -> ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::typed::SpeechStream as _;
     use motlie_model::SpeechParams;
+    use motlie_model::typed::SpeechStream as _;
 
     #[tokio::test]
     async fn stream_emits_chunks_and_finishes_once() {
@@ -590,11 +593,13 @@ mod tests {
         }
 
         assert_eq!(total, 10_000);
-        assert!(stream
-            .next_chunk()
-            .await
-            .expect("stream should stay exhausted")
-            .is_none());
+        assert!(
+            stream
+                .next_chunk()
+                .await
+                .expect("stream should stay exhausted")
+                .is_none()
+        );
     }
 
     #[test]

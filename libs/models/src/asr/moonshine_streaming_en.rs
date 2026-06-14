@@ -38,7 +38,7 @@ pub(crate) fn identity() -> ModelIdentity {
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
-            build: vec![BuildConstraint::CpuOnly],
+            build: Vec::new(),
         },
     }
 }
@@ -73,10 +73,7 @@ pub fn descriptor() -> BundleDescriptor {
         backend: BackendKind::Ort,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
-            build: vec![
-                BuildConstraint::CpuOnly,
-                BuildConstraint::Feature("backend-moonshine".into()),
-            ],
+            build: vec![BuildConstraint::Feature("backend-moonshine".into())],
         },
         eval_tracks: identity.eval_tracks,
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
@@ -187,13 +184,17 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "moonshine_streaming_en");
         assert_eq!(descriptor.display_name, "Moonshine Streaming EN");
         assert_eq!(descriptor.backend, BackendKind::Ort);
-        assert!(descriptor
-            .requirements
-            .build
-            .contains(&BuildConstraint::CpuOnly));
-        assert!(descriptor
-            .capabilities
-            .supports(CapabilityKind::Transcription));
+        assert!(
+            !descriptor
+                .requirements
+                .build
+                .contains(&BuildConstraint::CpuOnly)
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .supports(CapabilityKind::Transcription)
+        );
     }
 
     #[test]
@@ -204,9 +205,11 @@ mod tests {
         #[cfg(feature = "model-moonshine-streaming")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Transcription)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Transcription)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
         }
     }
 

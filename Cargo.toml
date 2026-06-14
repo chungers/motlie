@@ -226,6 +226,6 @@ path = "bins/motlie/tests/db_cli.rs"
 tempfile = "3.25.0"
 
 [patch.crates-io]
-ort-sys = { path = "third_party/ort-sys" }
+ort-sys = { path = "libs/model/backends/ort/ort-sys" }
 sherpa-onnx-sys = { path = "libs/model/vendor/sherpa-onnx-sys" }
 sherpa-onnx = { path = "libs/model/vendor/sherpa-onnx" }

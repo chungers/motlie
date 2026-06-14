@@ -1,0 +1,14 @@
+snapshot_id = "issue513-audio-smoke"
+run_id = "issue513-warm-cpu-cb2ec5f1"
+profile = "local-cpu-aarch64"
+host = "spark-2f6e"
+arch = "aarch64"
+git_sha = "cb2ec5f15db85bc57f9e124da7ff06d6e8db9578"
+child_build_profile = "release"
+phase = "warm"
+requested_accelerator = "cpu"
+ort_source = "sherpa-onnx"
+ort_link_policy = "static"
+onnxruntime_source = "prebuilt sherpa-onnx static CPU archive"
+cell_count = 4
+

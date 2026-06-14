@@ -1,0 +1,407 @@
+diff --git a/cmake/CMakeLists.txt b/cmake/CMakeLists.txt
+index 6d0d395..c135add 100644
+--- a/cmake/CMakeLists.txt
++++ b/cmake/CMakeLists.txt
+@@ -83,6 +83,7 @@ option(onnxruntime_USE_COREML "Build with CoreML support" OFF)
+ option(onnxruntime_USE_NNAPI_BUILTIN "Build with builtin NNAPI lib for Android NNAPI support" OFF)
+ option(onnxruntime_USE_QNN "Build with QNN support" OFF)
+ option(onnxruntime_BUILD_QNN_EP_STATIC_LIB "Build with QNN EP as a static library" OFF)
++option(onnxruntime_BUILD_CUDA_EP_STATIC_LIB "Build with CUDA EP as a static library" OFF)
+ option(onnxruntime_USE_SNPE "Build with SNPE support" OFF)
+ option(onnxruntime_USE_RKNPU "Build with RKNPU support" OFF)
+ option(onnxruntime_USE_DNNL "Build with DNNL support" OFF)
+diff --git a/cmake/onnxruntime_providers_cuda.cmake b/cmake/onnxruntime_providers_cuda.cmake
+index cd7324d..55a1501 100644
+--- a/cmake/onnxruntime_providers_cuda.cmake
++++ b/cmake/onnxruntime_providers_cuda.cmake
+@@ -2,6 +2,10 @@
+ # Licensed under the MIT License.
+ 
+ 
++  if(onnxruntime_BUILD_CUDA_EP_STATIC_LIB)
++    add_compile_definitions(BUILD_CUDA_EP_STATIC_LIB=1)
++  endif()
++
+   if (onnxruntime_CUDA_MINIMAL)
+     file(GLOB onnxruntime_providers_cuda_cc_srcs CONFIGURE_DEPENDS
+         "${ONNXRUNTIME_ROOT}/core/providers/cuda/*.h"
+@@ -45,6 +49,16 @@
+   endif()
+   source_group(TREE ${ONNXRUNTIME_ROOT}/core FILES ${onnxruntime_providers_cuda_cc_srcs} ${onnxruntime_providers_cuda_shared_srcs} ${onnxruntime_providers_cuda_cu_srcs})
+   set(onnxruntime_providers_cuda_src ${onnxruntime_providers_cuda_cc_srcs} ${onnxruntime_providers_cuda_shared_srcs} ${onnxruntime_providers_cuda_cu_srcs})
++  if(onnxruntime_BUILD_CUDA_EP_STATIC_LIB)
++    list(APPEND onnxruntime_providers_cuda_src
++      "${ONNXRUNTIME_ROOT}/core/providers/shared/common.cc"
++      "${ONNXRUNTIME_ROOT}/core/providers/shared/common.h"
++    )
++    list(REMOVE_ITEM onnxruntime_providers_cuda_src
++      "${ONNXRUNTIME_ROOT}/core/providers/cuda/math/einsum.cc"
++      "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/sparse/sparse_attention.cc"
++    )
++  endif()
+ 
+   # disable contrib ops conditionally
+   if(NOT onnxruntime_DISABLE_CONTRIB_OPS AND NOT onnxruntime_CUDA_MINIMAL)
+@@ -69,6 +83,11 @@
+         "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/collective/distributed_squeeze.cc"
+       )
+     endif()
++    if(onnxruntime_BUILD_CUDA_EP_STATIC_LIB)
++      list(REMOVE_ITEM onnxruntime_cuda_contrib_ops_cc_srcs
++        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/sparse/sparse_attention.cc"
++      )
++    endif()
+     # add using ONNXRUNTIME_ROOT so they show up under the 'contrib_ops' folder in Visual Studio
+     source_group(TREE ${ONNXRUNTIME_ROOT} FILES ${onnxruntime_cuda_contrib_ops_cc_srcs} ${onnxruntime_cuda_contrib_ops_cu_srcs})
+     list(APPEND onnxruntime_providers_cuda_src ${onnxruntime_cuda_contrib_ops_cc_srcs} ${onnxruntime_cuda_contrib_ops_cu_srcs})
+@@ -146,7 +165,11 @@
+       list(APPEND onnxruntime_providers_cuda_all_srcs "${ONNXRUNTIME_ROOT}/core/providers/cuda/onnxruntime_providers_cuda.rc")
+     endif()
+ 
+-    onnxruntime_add_shared_library_module(onnxruntime_providers_cuda ${onnxruntime_providers_cuda_all_srcs})
++    if(onnxruntime_BUILD_CUDA_EP_STATIC_LIB)
++      onnxruntime_add_static_library(onnxruntime_providers_cuda ${onnxruntime_providers_cuda_all_srcs})
++    else()
++      onnxruntime_add_shared_library_module(onnxruntime_providers_cuda ${onnxruntime_providers_cuda_all_srcs})
++    endif()
+   endif()
+ 
+   if(WIN32)
+@@ -236,10 +259,16 @@
+       endif()
+     endif()
+ 
+-    add_dependencies(${target} onnxruntime_providers_shared ${onnxruntime_EXTERNAL_DEPENDENCIES})
++    if(onnxruntime_BUILD_CUDA_EP_STATIC_LIB)
++      add_dependencies(${target} ${onnxruntime_EXTERNAL_DEPENDENCIES})
++      set(onnxruntime_cuda_provider_shared_target_deps ${ABSEIL_LIBS} Boost::mp11 safeint_interface)
++    else()
++      add_dependencies(${target} onnxruntime_providers_shared ${onnxruntime_EXTERNAL_DEPENDENCIES})
++      set(onnxruntime_cuda_provider_shared_target_deps ${ABSEIL_LIBS} ${ONNXRUNTIME_PROVIDERS_SHARED} Boost::mp11 safeint_interface)
++    endif()
+     if(onnxruntime_CUDA_MINIMAL)
+       target_compile_definitions(${target} PRIVATE USE_CUDA_MINIMAL)
+-      target_link_libraries(${target} PRIVATE ${ABSEIL_LIBS} ${ONNXRUNTIME_PROVIDERS_SHARED} Boost::mp11 safeint_interface CUDA::cudart)
++      target_link_libraries(${target} PRIVATE ${onnxruntime_cuda_provider_shared_target_deps} CUDA::cudart)
+     else()
+       include(cudnn_frontend) # also defines CUDNN::*
+       if (onnxruntime_USE_CUDA_NHWC_OPS)
+@@ -250,7 +279,7 @@
+         endif()
+       endif()
+       target_link_libraries(${target} PRIVATE CUDA::cublasLt CUDA::cublas CUDNN::cudnn_all cudnn_frontend CUDA::curand CUDA::cufft CUDA::cudart
+-              ${ABSEIL_LIBS} ${ONNXRUNTIME_PROVIDERS_SHARED} Boost::mp11 safeint_interface)
++              ${onnxruntime_cuda_provider_shared_target_deps})
+     endif()
+ 
+     include(cutlass)
+@@ -321,14 +350,16 @@
+           STATIC_LIBRARY_FLAGS "${onnxruntime_providers_cuda_static_library_flags}")
+     endif()
+ 
+-    if(APPLE)
+-      set_property(TARGET ${target} APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${ONNXRUNTIME_ROOT}/core/providers/cuda/exported_symbols.lst")
+-    elseif(UNIX)
+-      set_property(TARGET ${target} APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker --version-script=${ONNXRUNTIME_ROOT}/core/providers/cuda/version_script.lds -Xlinker --gc-sections")
+-    elseif(WIN32)
+-      set_property(TARGET ${target} APPEND_STRING PROPERTY LINK_FLAGS "-DEF:${ONNXRUNTIME_ROOT}/core/providers/cuda/symbols.def")
+-    else()
+-      message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
++    if(NOT onnxruntime_BUILD_CUDA_EP_STATIC_LIB)
++      if(APPLE)
++        set_property(TARGET ${target} APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${ONNXRUNTIME_ROOT}/core/providers/cuda/exported_symbols.lst")
++      elseif(UNIX)
++        set_property(TARGET ${target} APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker --version-script=${ONNXRUNTIME_ROOT}/core/providers/cuda/version_script.lds -Xlinker --gc-sections")
++      elseif(WIN32)
++        set_property(TARGET ${target} APPEND_STRING PROPERTY LINK_FLAGS "-DEF:${ONNXRUNTIME_ROOT}/core/providers/cuda/symbols.def")
++      else()
++        message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
++      endif()
+     endif()
+ 
+     if (onnxruntime_ENABLE_ATEN)
+diff --git a/onnxruntime/core/providers/cuda/cuda_provider_factory.cc b/onnxruntime/core/providers/cuda/cuda_provider_factory.cc
+index dbed995..b201387 100644
+--- a/onnxruntime/core/providers/cuda/cuda_provider_factory.cc
++++ b/onnxruntime/core/providers/cuda/cuda_provider_factory.cc
+@@ -53,6 +53,57 @@ std::unique_ptr<IExecutionProvider> CUDAProviderFactory::CreateProvider() {
+   return std::make_unique<CUDAExecutionProvider>(info_);
+ }
+ 
++static CUDAExecutionProviderInfo CUDAExecutionProviderInfoFromProviderOptionsV2(const OrtCUDAProviderOptionsV2& params) {
++  CUDAExecutionProviderInfo info{};
++  info.device_id = gsl::narrow<OrtDevice::DeviceId>(params.device_id);
++  info.gpu_mem_limit = params.gpu_mem_limit;
++  info.arena_extend_strategy = params.arena_extend_strategy;
++  info.cudnn_conv_algo_search = params.cudnn_conv_algo_search;
++  info.do_copy_in_default_stream = params.do_copy_in_default_stream != 0;
++  info.has_user_compute_stream = params.has_user_compute_stream != 0;
++  info.user_compute_stream = params.user_compute_stream;
++  info.default_memory_arena_cfg = params.default_memory_arena_cfg;
++  info.cudnn_conv_use_max_workspace = params.cudnn_conv_use_max_workspace != 0;
++  info.enable_cuda_graph = params.enable_cuda_graph != 0;
++  info.prefer_nhwc = params.prefer_nhwc;
++  info.fuse_conv_bias = params.fuse_conv_bias;
++  info.cudnn_conv1d_pad_to_nc1d = params.cudnn_conv1d_pad_to_nc1d != 0;
++  info.tunable_op.enable = params.tunable_op_enable;
++  info.tunable_op.tuning_enable = params.tunable_op_tuning_enable;
++  info.tunable_op.max_tuning_duration_ms = params.tunable_op_max_tuning_duration_ms;
++  info.enable_skip_layer_norm_strict_mode = params.enable_skip_layer_norm_strict_mode != 0;
++  info.use_ep_level_unified_stream = params.use_ep_level_unified_stream != 0;
++  info.use_tf32 = params.use_tf32 != 0;
++  info.sdpa_kernel = params.sdpa_kernel;
++  return info;
++}
++
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++static OrtCUDAProviderOptionsV2 StaticOrtCUDAProviderOptionsToOrtCUDAProviderOptionsV2(const OrtCUDAProviderOptions* legacy_cuda_options) {
++  OrtCUDAProviderOptionsV2 cuda_options_converted{};
++
++  cuda_options_converted.device_id = legacy_cuda_options->device_id;
++  cuda_options_converted.cudnn_conv_algo_search = legacy_cuda_options->cudnn_conv_algo_search;
++  cuda_options_converted.gpu_mem_limit = legacy_cuda_options->gpu_mem_limit;
++  cuda_options_converted.arena_extend_strategy = static_cast<onnxruntime::ArenaExtendStrategy>(legacy_cuda_options->arena_extend_strategy);
++  cuda_options_converted.do_copy_in_default_stream = legacy_cuda_options->do_copy_in_default_stream;
++  cuda_options_converted.has_user_compute_stream = legacy_cuda_options->has_user_compute_stream;
++  cuda_options_converted.user_compute_stream = legacy_cuda_options->user_compute_stream;
++  cuda_options_converted.default_memory_arena_cfg = legacy_cuda_options->default_memory_arena_cfg;
++  cuda_options_converted.cudnn_conv_use_max_workspace = 1;
++  cuda_options_converted.enable_cuda_graph = 0;
++  cuda_options_converted.prefer_nhwc = 0;
++  cuda_options_converted.fuse_conv_bias = 0;
++  cuda_options_converted.cudnn_conv1d_pad_to_nc1d = 0;
++  cuda_options_converted.enable_skip_layer_norm_strict_mode = 0;
++  cuda_options_converted.use_ep_level_unified_stream = 0;
++  cuda_options_converted.use_tf32 = 1;
++
++  return cuda_options_converted;
++}
++#endif
++
++
+ struct ProviderInfo_CUDA_Impl final : ProviderInfo_CUDA {
+   OrtStatus* SetCurrentGpuDeviceId(_In_ int device_id) override {
+     int num_devices;
+@@ -224,28 +275,7 @@ struct CUDA_Provider : Provider {
+     }
+ 
+     auto params = reinterpret_cast<const OrtCUDAProviderOptionsV2*>(void_params);
+-
+-    CUDAExecutionProviderInfo info{};
+-    info.device_id = gsl::narrow<OrtDevice::DeviceId>(params->device_id);
+-    info.gpu_mem_limit = params->gpu_mem_limit;
+-    info.arena_extend_strategy = params->arena_extend_strategy;
+-    info.cudnn_conv_algo_search = params->cudnn_conv_algo_search;
+-    info.do_copy_in_default_stream = params->do_copy_in_default_stream != 0;
+-    info.has_user_compute_stream = params->has_user_compute_stream != 0;
+-    info.user_compute_stream = params->user_compute_stream;
+-    info.default_memory_arena_cfg = params->default_memory_arena_cfg;
+-    info.cudnn_conv_use_max_workspace = params->cudnn_conv_use_max_workspace != 0;
+-    info.enable_cuda_graph = params->enable_cuda_graph != 0;
+-    info.prefer_nhwc = params->prefer_nhwc;
+-    info.fuse_conv_bias = params->fuse_conv_bias;
+-    info.cudnn_conv1d_pad_to_nc1d = params->cudnn_conv1d_pad_to_nc1d != 0;
+-    info.tunable_op.enable = params->tunable_op_enable;
+-    info.tunable_op.tuning_enable = params->tunable_op_tuning_enable;
+-    info.tunable_op.max_tuning_duration_ms = params->tunable_op_max_tuning_duration_ms;
+-    info.enable_skip_layer_norm_strict_mode = params->enable_skip_layer_norm_strict_mode != 0;
+-    info.use_ep_level_unified_stream = params->use_ep_level_unified_stream != 0;
+-    info.use_tf32 = params->use_tf32 != 0;
+-    info.sdpa_kernel = params->sdpa_kernel;
++    auto info = CUDAExecutionProviderInfoFromProviderOptionsV2(*params);
+ 
+     return std::make_shared<CUDAProviderFactory>(info);
+   }
+@@ -322,6 +352,62 @@ CUDA_Provider* GetProvider() {
+   return &g_provider;
+ }
+ 
++
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++void StaticUpdateProviderInfo_Cuda(OrtCUDAProviderOptionsV2* provider_options, const ProviderOptions& options) {
++  auto internal_options = CUDAExecutionProviderInfo::FromProviderOptions(options);
++  auto& cuda_options = *provider_options;
++
++  cuda_options.device_id = internal_options.device_id;
++  cuda_options.cudnn_conv_algo_search = internal_options.cudnn_conv_algo_search;
++  cuda_options.gpu_mem_limit = internal_options.gpu_mem_limit;
++  cuda_options.arena_extend_strategy = internal_options.arena_extend_strategy;
++  cuda_options.do_copy_in_default_stream = internal_options.do_copy_in_default_stream;
++  cuda_options.has_user_compute_stream = internal_options.has_user_compute_stream;
++  if (options.find("has_user_compute_stream") != options.end()) {
++    cuda_options.user_compute_stream = internal_options.user_compute_stream;
++  }
++  cuda_options.default_memory_arena_cfg = internal_options.default_memory_arena_cfg;
++  cuda_options.cudnn_conv_use_max_workspace = internal_options.cudnn_conv_use_max_workspace;
++  cuda_options.enable_cuda_graph = internal_options.enable_cuda_graph;
++  cuda_options.cudnn_conv1d_pad_to_nc1d = internal_options.cudnn_conv1d_pad_to_nc1d;
++  cuda_options.enable_skip_layer_norm_strict_mode = internal_options.enable_skip_layer_norm_strict_mode;
++  cuda_options.prefer_nhwc = internal_options.prefer_nhwc;
++  cuda_options.use_ep_level_unified_stream = internal_options.use_ep_level_unified_stream;
++  cuda_options.use_tf32 = internal_options.use_tf32;
++  cuda_options.sdpa_kernel = internal_options.sdpa_kernel;
++  cuda_options.fuse_conv_bias = internal_options.fuse_conv_bias;
++}
++
++ProviderOptions StaticGetProviderInfo_Cuda(const OrtCUDAProviderOptionsV2* provider_options) {
++  return CUDAExecutionProviderInfo::ToProviderOptions(*provider_options);
++}
++
++ProviderInfo_CUDA* GetStaticCudaProviderInfo() {
++  return &g_info;
++}
++
++std::shared_ptr<IExecutionProviderFactory> CudaProviderFactoryCreator::Create(
++    const OrtCUDAProviderOptions* provider_options) try {
++  OrtCUDAProviderOptionsV2 cuda_options_converted = StaticOrtCUDAProviderOptionsToOrtCUDAProviderOptionsV2(provider_options);
++  auto info = CUDAExecutionProviderInfoFromProviderOptionsV2(cuda_options_converted);
++  return std::make_shared<CUDAProviderFactory>(info);
++} catch (const std::exception& exception) {
++  LOGS_DEFAULT(ERROR) << exception.what();
++  return nullptr;
++}
++
++std::shared_ptr<IExecutionProviderFactory> CudaProviderFactoryCreator::Create(
++    const OrtCUDAProviderOptionsV2* provider_options) try {
++  auto info = CUDAExecutionProviderInfoFromProviderOptionsV2(*provider_options);
++  return std::make_shared<CUDAProviderFactory>(info);
++} catch (const std::exception& exception) {
++  LOGS_DEFAULT(ERROR) << exception.what();
++  return nullptr;
++}
++#endif
++
++
+ }  // namespace onnxruntime
+ 
+ //
+diff --git a/onnxruntime/core/providers/shared_library/provider_bridge_provider.cc b/onnxruntime/core/providers/shared_library/provider_bridge_provider.cc
+index ee00a06..265d935 100644
+--- a/onnxruntime/core/providers/shared_library/provider_bridge_provider.cc
++++ b/onnxruntime/core/providers/shared_library/provider_bridge_provider.cc
+@@ -115,6 +115,13 @@ struct OnUnload {
+ 
+ } g_on_unload;
+ 
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++std::string GetEnvironmentVar(const std::string& var_name) {
++  return g_host->GetEnvironmentVar(var_name);
++}
++#endif
++
++#if !defined(BUILD_CUDA_EP_STATIC_LIB)
+ void* CPUAllocator::Alloc(size_t size) { return g_host->CPUAllocator__Alloc(this, size); }
+ void CPUAllocator::Free(void* p) { g_host->CPUAllocator__Free(this, p); }
+ 
+@@ -816,4 +823,5 @@ std::wstring ToWideString(std::string_view s) {
+   return g_host->ToWideString(std::string{s});
+ }
+ #endif  // _WIN32
++#endif
+ }  // namespace onnxruntime
+diff --git a/onnxruntime/core/session/provider_bridge_ort.cc b/onnxruntime/core/session/provider_bridge_ort.cc
+index 3dc2df6..57a448c 100644
+--- a/onnxruntime/core/session/provider_bridge_ort.cc
++++ b/onnxruntime/core/session/provider_bridge_ort.cc
+@@ -47,6 +47,9 @@
+ #include "core/session/provider_bridge_library.h"
+ #include "core/session/provider_bridge_ort.h"
+ #include "core/util/math.h"
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++#include "core/providers/shared/common.h"
++#endif
+ #include "onnx/shape_inference/implementation.h"
+ #include "core/optimizer/initializer.h"
+ 
+@@ -1850,7 +1853,24 @@ struct ProviderHostImpl : ProviderHost {
+ #if !defined(ORT_MINIMAL_BUILD) || defined(ORT_MINIMAL_BUILD_CUSTOM_OPS)
+   Status LoadDynamicLibrary(onnxruntime::PathString library_name) override { return LoadDynamicLibraryFromProvider(library_name); };
+ #endif
+-} g_provider_host;
++} g_provider_host
++#if defined(BUILD_CUDA_EP_STATIC_LIB) && defined(__GNUC__) && !defined(__APPLE__)
++    __attribute__((init_priority(101)))
++#endif
++    ;
++
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++struct StaticProviderHostInitializer {
++  StaticProviderHostInitializer() {
++    Provider_SetHost(&g_provider_host);
++  }
++};
++static StaticProviderHostInitializer g_static_provider_host_initializer
++#if defined(__GNUC__) && !defined(__APPLE__)
++    __attribute__((init_priority(102)))
++#endif
++    ;
++#endif
+ 
+ #if defined(_MSC_VER) && !defined(__clang__)
+ #pragma warning(pop)
+@@ -2092,6 +2112,7 @@ OrtCUDAProviderOptionsV2 OrtCUDAProviderOptionsToOrtCUDAProviderOptionsV2(const
+   return cuda_options_converted;
+ }
+ 
++#if !defined(BUILD_CUDA_EP_STATIC_LIB)
+ std::shared_ptr<IExecutionProviderFactory> CudaProviderFactoryCreator::Create(
+     const OrtCUDAProviderOptions* provider_options) try {
+   OrtCUDAProviderOptionsV2 cuda_options_converted = onnxruntime::OrtCUDAProviderOptionsToOrtCUDAProviderOptionsV2(provider_options);
+@@ -2111,6 +2132,8 @@ std::shared_ptr<IExecutionProviderFactory> CudaProviderFactoryCreator::Create(
+   return nullptr;
+ }
+ 
++#endif  // !defined(BUILD_CUDA_EP_STATIC_LIB)
++
+ std::shared_ptr<IExecutionProviderFactory>
+ CannProviderFactoryCreator::Create(const OrtCANNProviderOptions* provider_options) {
+   return s_library_cann.Get().CreateExecutionProviderFactory(provider_options);
+@@ -2353,12 +2376,22 @@ ProviderInfo_Nv& GetProviderInfo_Nv() {
+   ORT_THROW("NV Provider not available, can't get interface for it");
+ }
+ 
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++ProviderInfo_CUDA* GetStaticCudaProviderInfo();
++ProviderInfo_CUDA* TryGetProviderInfo_CUDA() try {
++  return GetStaticCudaProviderInfo();
++} catch (const std::exception& exception) {
++  LOGS_DEFAULT(ERROR) << exception.what();
++  return nullptr;
++}
++#else
+ ProviderInfo_CUDA* TryGetProviderInfo_CUDA() try {
+   return reinterpret_cast<ProviderInfo_CUDA*>(s_library_cuda.Get().GetInfo());
+ } catch (const std::exception& exception) {
+   LOGS_DEFAULT(ERROR) << exception.what();
+   return nullptr;
+ }
++#endif
+ 
+ ProviderInfo_CUDA& GetProviderInfo_CUDA() {
+   if (auto* info = TryGetProviderInfo_CUDA())
+@@ -2468,12 +2501,25 @@ ProviderOptions GetProviderInfo_Tensorrt(const OrtTensorRTProviderOptionsV2* pro
+   return s_library_tensorrt.Get().GetProviderOptions(reinterpret_cast<const void*>(provider_options));
+ }
+ 
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++void StaticUpdateProviderInfo_Cuda(OrtCUDAProviderOptionsV2* provider_options, const ProviderOptions& options);
++ProviderOptions StaticGetProviderInfo_Cuda(const OrtCUDAProviderOptionsV2* provider_options);
++#endif
++
+ void UpdateProviderInfo_Cuda(OrtCUDAProviderOptionsV2* provider_options, const ProviderOptions& options) {
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++  return StaticUpdateProviderInfo_Cuda(provider_options, options);
++#else
+   return s_library_cuda.Get().UpdateProviderOptions(reinterpret_cast<void*>(provider_options), options);
++#endif
+ }
+ 
+ ProviderOptions GetProviderInfo_Cuda(const OrtCUDAProviderOptionsV2* provider_options) {
++#if defined(BUILD_CUDA_EP_STATIC_LIB)
++  return StaticGetProviderInfo_Cuda(provider_options);
++#else
+   return s_library_cuda.Get().GetProviderOptions(reinterpret_cast<const void*>(provider_options));
++#endif
+ }
+ 
+ }  // namespace onnxruntime
