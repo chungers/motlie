@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-14 UTC | @527-design: Added #527 design for an opt-in, insertable early-response stream stage over ASR partials, explicit provisional-turn lifecycle events, cancellable TTS reconciliation, runtime policy knobs, protocol extension shape, observability, and test-scope inventory. | Application Text Call Protocol and Gateway Control API, Alternatives Considered, Testing Scope for PLAN |
 | 2026-06-12 PDT | @codex-366-impl: Resolved #488 generality review by moving final-settle fragment classifiers and conversation final-coalescing hold knobs behind `VoiceQualityConfig.endpoint` while preserving live-tuned defaults; `bins/telnyx-agent` now opts into `motlie.telnyx.text.partials.v1` so advisory partials are reachable in live calls. | Milestone 5: Conversational Realism Latency Improvements, Conversation Handler Contract, Application Text Call Protocol and Gateway Control API |
 | 2026-06-12 PDT | @codex-366-impl: Addressed #481 and David's stability ruling by keeping opt-in `caller.partial.stability` as a gateway-estimated stream-convergence/churn signal only, documenting that it is for preparation/routing/debounce decisions and must never be treated as truth, model confidence, calibrated probability, final response input, or combined with `confidence`. | Application Text Call Protocol and Gateway Control API, Telnyx Interaction Quality Design |
 | 2026-06-11 PDT | @codex-366-impl: Generalized handler-local final coalescing for conversation handlers: `endpoint.merge_window_ms` now drives a 350 ms committed-turn debounce, while `tts.first_chunk_max_chars` defaults to 40 for lower first-audio latency. | Milestone 5: Conversational Realism Latency Improvements, Conversation Handler Contract, Telnyx Interaction Quality Design |
@@ -81,7 +82,7 @@
 | 2026-04-15 | @codex-macmini-telnyx: Added the recommended v1 ASR/TTS stack, concrete telephony pipeline, and latency budget based on current Motlie benchmark results and backend readiness. | Recommended ASR/TTS Stack, Gap Analysis, Open Concerns |
 | 2026-04-15 | @codex-macmini-telnyx: Initial Telnyx real-time voice integration design for Motlie. Documents Telnyx API research, recommends a WebSocket media gateway over the existing ASR/TTS contracts, and outlines brownfield gaps around codecs, resampling, duplex orchestration, and deployment. | All |
 
-This document defines a brownfield design for integrating Telnyx programmable voice with Motlie's existing speech stack. The current session-specific product classification has not yet been confirmed by the user, but this proposal assumes brownfield work because Motlie already has established `libs/model` speech and transcription contracts plus curated backends in `libs/models`. The Telnyx integration should extend those seams instead of introducing a parallel speech subsystem.
+This document defines a brownfield design for integrating Telnyx programmable voice with Motlie's existing speech stack. The overall Telnyx integration remains brownfield because Motlie already has established `libs/model` speech and transcription contracts plus curated backends in `libs/models`. The #527 early-response provisional-turn stage is separately confirmed greenfield in the product sense because it is a new opt-in extension and stream stage with no migration plan. The Telnyx integration should extend existing seams instead of introducing a parallel speech subsystem.
 
 ## Table of Contents
 
@@ -1387,6 +1388,352 @@ Recommended error frame:
 This contract deliberately stays turn-based by default. It does not expose ASR partials unless the application opts into `motlie.telnyx.text.partials.v1`, and it does not require the application to stream token-by-token responses. Advisory partials are planning context; final `caller.turn` remains authoritative for committed responses. See `docs/INTERACTION_QUALITY.md` for the four endpointing levels; #481/#488 covers acoustic endpointing, ASR finalization, and transcript structural/stability endpointing, not semantic intent endpointing. The gateway emits `caller.partial.speech_state` as `speaking` during active ASR speech frames, `endpoint_candidate` during the low-energy endpoint window, and `finalizing` for partials produced by ASR finish-pad/finalization. After PR #484, `motlie_model::TranscriptSegment` carries optional backend-native confidence; #481 exposes that value as optional `caller.partial.confidence` only when the backend supplied a normalized finite `0.0..=1.0` value. #481 also exposes optional `caller.partial.stability` as a gateway-estimated stream-convergence/churn signal based on prior/current partial continuity for the same call. Stability is for preparation, routing, or debounce decisions only; it must never be used as truth, final response generation input, model/ASR confidence, calibrated probability, or a value to average/combine with `confidence`. It is omitted until the gateway has survival evidence. `bins/telnyx-agent` opts into `motlie.telnyx.text.partials.v1` in its accept response, consumes these advisory scores into a compact per-utterance summary, and still waits for final `caller.turn` before producing speech while `reply_allowed=false`.
 
 See `docs/INTERACTION_QUALITY.md` for the conversational-quality rationale and non-goals.
+
+### Early Response Provisional Turns (#527)
+
+#### Problem and Product Scope
+
+The current text-call path can forward advisory `caller.partial` frames before endpointing, but the response path still starts from the final `caller.turn`. That keeps simple turn-based agents correct, but it prevents low-risk early work such as the smoke handler saying `I heard: ...` from beginning when a partial is already stable enough to use.
+
+For #527, the product scope is greenfield: this is a new opt-in stream stage and protocol extension. There is no migration plan and no default behavior change. Existing ASR partial emission, `caller.partial.reply_allowed=false`, and final `caller.turn` emission stay unchanged. The new stage runs only when `motlie.telnyx.text.early_turns.v1` is negotiated and `VoiceQualityConfig.early_response.enabled` is true; early reply permission appears on provisional-turn frames, not on `caller.partial`.
+
+This design coordinates with #525 by using the existing cancellable speech primitives for stale provisional audio. It coordinates with #524 by treating true incremental TTS as a separate backend/model contract: buffered or appendable TTS can exercise this protocol, but #524 owns lower first-audio latency inside the TTS backend. It coordinates with #523 by adding provisional-turn profiling records only; final-turn aggregate denominator and selected/coalesced-turn reporting remain #523 scope.
+
+#### Goals
+
+- Add an insertable stream transformer after normalized ASR partial handling and before processors.
+- Let an early-response processor start cancellable work before final endpointing when policy allows.
+- Preserve final `caller.turn` as the only committed caller-turn boundary.
+- Use explicit `provisional_turn_id` values until a final `turn_id` exists.
+- Make cancellation, update, and final commit semantics explicit enough for TTS and agents to avoid stale speech.
+- Keep the smoke path expressible as a trivial processor after aggregation, not as a special ASR branch.
+
+#### Non-Goals
+
+- Do not make ASR partials truth, final response input, model confidence, or calibrated probability.
+- Do not globally change handlers to respond to partials.
+- Do not replace final endpointing or final `caller.turn`.
+- Do not solve conversational fillers or semantic intent endpointing.
+- Do not implement #524 incremental TTS backend streaming in this issue.
+- Do not close #523 final-turn reporting gaps with provisional metrics.
+
+#### Functional Requirements
+
+| Requirement | Design requirement |
+|---|---|
+| Insertable stage | `aggregate_early_resp_partials(partial_stream, policy)` is a pure stream transformer over normalized ASR-derived inputs. It does not own Telnyx media, model sessions, WebSocket sessions, or TTS playback. |
+| Existing behavior | The gateway still emits opt-in `caller.partial` exactly as today and still creates final `caller.turn` through the existing final transcript path. |
+| Provisional identity | The first accepted partial for an utterance mints one `provisional_turn_id`; updates increment `generation`; final reconciliation maps that id to the existing final `turn_id` only on commit. |
+| Policy gate | No `Started` event is emitted until enablement, minimum length or token count, boundary requirement, optional confidence, optional stability, speech-state allowlist, debounce, max-update, and start-timing policy all pass. |
+| Updates | Later accepted partials emit `Updated` with `AppendOrReplace`. Use `Append` only for strict extensions that are safe to append to already generated text; use `Replace` when the usable prefix changed. |
+| Commit | When final `caller.turn` is created for the utterance, the stage emits `Committed` if the final transcript is compatible with the active provisional text. The commit event carries both `provisional_turn_id` and final `turn_id`. |
+| Cancel | The stage emits `Canceled` on ASR correction, final mismatch, session end, hangup, policy disablement, superseding generation, or explicit downstream rejection. Cancellation is keyed by `provisional_turn_id` and must reach TTS before stale audio continues. |
+| Concurrency | State is isolated by `call_id`, `utterance_id`, and `provisional_turn_id`; overlapping calls or utterances must not cross-cancel. |
+| Protocol opt-in | External agents see provisional-turn frames only after negotiating `motlie.telnyx.text.early_turns.v1`; existing `motlie.telnyx.text.partials.v1` semantics are not changed. |
+
+#### Non-Functional Requirements
+
+- Realtime safety: aggregation must not block ASR or media tasks on WebSocket send, agent generation, TTS, logging I/O, or disk/network writes.
+- Bounded memory: state is per active utterance and capped by call/session teardown plus `max_updates_per_utterance`.
+- Determinism: identical input event order and policy should produce identical provisional lifecycle events.
+- Operability: all active policy values appear in `call.config.snapshot` and runtime `quality status`.
+- Privacy: provisional profiling follows existing transcript redaction modes and must not log raw phone numbers or routing values.
+- Testability: the aggregator is unit-testable without Telnyx media transport, WebSocket sessions, or a TTS backend.
+
+#### High-Level System Design and Data Flow
+
+The selected design adds one optional stage beside the current partial forwarding path:
+
+```text
+ASR transcript events
+  -> normalized partial/final candidates
+  -> existing caller.partial emission, unchanged
+  -> aggregate_early_resp_partials(partial_stream, policy)
+  -> early processor, for example smoke_i_heard_processor or streaming agent adapter
+  -> existing cancellable / appendable speech queue from #525
+  -> Telnyx media playback
+
+final ASR transcript
+  -> existing caller.turn creation, unchanged
+  -> early-response reconciliation: Committed or Canceled
+```
+
+The aggregator owns only lightweight per-utterance state: last accepted text, generation, update count, last emission time, `provisional_turn_id`, and the source sequence/timestamp of accepted inputs. It never speaks. Downstream processors convert `EarlyResponseEvent` values into app frames or gateway-local smoke responses. The TTS adapter remains responsible for queuing, appending, canceling, and mapping playback terminal status.
+
+Final commit is observational, not generative. The existing final transcript path creates and emits `caller.turn` with `turn_id`; the aggregator receives that mapping and decides whether active provisional work survives. A surviving provisional response can be attributed to the final `turn_id`; a mismatched or stale provisional response is canceled.
+
+#### Rust API Design
+
+The helper shape is intentionally stream-transformer-like:
+
+```rust
+pub fn aggregate_early_resp_partials<S>(
+    partial_stream: S,
+    policy: EarlyResponsePolicy,
+) -> impl Stream<Item = EarlyResponseEvent>
+where
+    S: Stream<Item = EarlyResponseInput>;
+```
+
+The input stream is ASR-derived, not Telnyx-specific. `Partial` inputs come from the same normalized data used for current `caller.partial`; `Finalized` inputs come from the existing final `caller.turn` creation path so the helper can reconcile without creating the turn itself.
+
+```rust
+pub enum EarlyResponseInput {
+    Partial(EarlyResponsePartial),
+    Finalized(EarlyResponseFinal),
+    Cancel {
+        call_id: String,
+        utterance_id: String,
+        reason: EarlyResponseCancelReason,
+    },
+}
+
+pub struct EarlyResponsePartial {
+    pub call_id: String,
+    pub utterance_id: String,
+    pub sequence: u64,
+    pub received_at_ms: u64,
+    pub text: String,
+    pub confidence: Option<f32>,
+    pub stability: Option<f32>,
+    pub speech_state: CallerSpeechState,
+}
+
+pub struct EarlyResponseFinal {
+    pub call_id: String,
+    pub utterance_id: String,
+    pub sequence: u64,
+    pub turn_id: String,
+    pub final_text: String,
+}
+```
+
+Policy belongs under `VoiceQualityConfig` as an `early_response` group because it crosses ASR, text-call protocol, and TTS runtime behavior:
+
+```rust
+pub struct EarlyResponsePolicy {
+    pub enabled: bool,
+    pub min_text_chars: usize,
+    pub min_text_tokens: usize,
+    pub boundary: BoundaryRequirement,
+    pub min_confidence: Option<f32>,
+    pub min_stability: Option<f32>,
+    pub allowed_speech_states: Vec<CallerSpeechState>,
+    pub debounce_ms: u64,
+    pub max_updates_per_utterance: usize,
+    pub start_timing: EarlyResponseStartTiming,
+}
+
+pub enum BoundaryRequirement {
+    None,
+    Clause,
+    Sentence,
+}
+
+pub enum EarlyResponseStartTiming {
+    EndpointCandidateOnly,
+    WhileSpeaking,
+}
+```
+
+`EarlyResponseStartTiming::WhileSpeaking` only permits starts while the caller is speaking if `CallerSpeechState::Speaking` is also in `allowed_speech_states`. `min_confidence` and `min_stability` apply only when the corresponding score is present; the aggregator must not synthesize confidence or stability when a backend or prior partial did not provide it. The safer default should be `EndpointCandidateOnly`.
+
+The output stream is the contract consumed by processors and protocol adapters:
+
+```rust
+pub enum EarlyResponseEvent {
+    Started {
+        provisional_turn_id: String,
+        call_id: String,
+        utterance_id: String,
+        generation: u64,
+        text: String,
+        confidence: Option<f32>,
+        stability: Option<f32>,
+        speech_state: CallerSpeechState,
+    },
+    Updated {
+        provisional_turn_id: String,
+        call_id: String,
+        utterance_id: String,
+        generation: u64,
+        text: String,
+        append_or_replace: AppendOrReplace,
+    },
+    Committed {
+        provisional_turn_id: String,
+        call_id: String,
+        utterance_id: String,
+        turn_id: String,
+        final_text: String,
+    },
+    Canceled {
+        provisional_turn_id: String,
+        call_id: String,
+        utterance_id: String,
+        reason: EarlyResponseCancelReason,
+    },
+}
+
+pub enum AppendOrReplace {
+    Append,
+    Replace,
+}
+
+pub enum EarlyResponseCancelReason {
+    AsrCorrection,
+    FinalTranscriptMismatch,
+    SupersededByNewGeneration,
+    PolicyDisabled,
+    PolicyNoLongerSatisfied,
+    MaxUpdatesExceeded,
+    CallerBargeIn,
+    ProcessorRejected,
+    TtsCanceled,
+    SessionEnded,
+    Hangup,
+}
+```
+
+A smoke processor should remain trivial:
+
+```rust
+let early_events = aggregate_early_resp_partials(partial_stream, policy);
+let smoke_responses = smoke_i_heard_processor(early_events);
+
+// Started -> speak "I heard: <text>" for provisional_turn_id.
+// Updated(Append) -> append only the new safe suffix.
+// Updated(Replace) or Canceled -> cancel stale provisional playback.
+// Committed -> attach surviving playback attribution to turn_id.
+```
+
+#### Policy Configuration and Runtime Status
+
+Recommended resolved config shape:
+
+```toml
+[voice_quality.early_response]
+enabled = false
+min_text_chars = 12
+min_text_tokens = 3
+boundary = "clause"
+min_confidence = 0.70
+min_stability = 0.80
+allowed_speech_states = ["endpoint_candidate", "finalizing"]
+debounce_ms = 120
+max_updates_per_utterance = 3
+start_timing = "endpoint_candidate_only"
+```
+
+Runtime status and config snapshots must expose the same active values, for example:
+
+```text
+early_response.enabled=false
+early_response.min_text_chars=12
+early_response.min_text_tokens=3
+early_response.boundary=clause
+early_response.min_confidence=0.70
+early_response.min_stability=0.80
+early_response.allowed_speech_states=endpoint_candidate,finalizing
+early_response.debounce_ms=120
+early_response.max_updates_per_utterance=3
+early_response.start_timing=endpoint_candidate_only
+```
+
+`stability` remains an aggregation signal only. It can gate whether a partial has converged enough to start or update provisional work, but it must never be interpreted as truth, model confidence, calibrated probability, final response input, or a value to average with `confidence`.
+
+#### Protocol Extension
+
+Add a separate opt-in extension:
+
+```text
+motlie.telnyx.text.early_turns.v1
+```
+
+The gateway may advertise it beside `motlie.telnyx.text.partials.v1`, but accepting early turns does not change `caller.partial` semantics. An app may accept early turns without requesting raw advisory partial frames.
+
+```json
+{
+  "protocol": "motlie.telnyx.text.v1",
+  "call_url": "wss://agent.example.com/motlie/text-calls/call_01HZ...",
+  "accept": true,
+  "extensions": ["motlie.telnyx.text.early_turns.v1"]
+}
+```
+
+Gateway-to-application provisional frames:
+
+```json
+{"type":"caller.turn.provisional","provisional_turn_id":"pt_01HZ...","utterance_id":"utt_01HZ...","sequence":42,"generation":1,"text":"I need a tow truck","confidence":0.91,"stability":0.84,"speech_state":"endpoint_candidate","reply_allowed":true}
+{"type":"caller.turn.provisional.update","provisional_turn_id":"pt_01HZ...","utterance_id":"utt_01HZ...","sequence":43,"generation":2,"text":"I need a tow truck in Oakland","append_or_replace":"append","confidence":0.92,"stability":0.88,"speech_state":"speaking"}
+{"type":"caller.turn.provisional.cancel","provisional_turn_id":"pt_01HZ...","utterance_id":"utt_01HZ...","sequence":44,"reason":"asr_correction"}
+{"type":"caller.turn.provisional.commit","provisional_turn_id":"pt_01HZ...","turn_id":"turn_01HZ...","utterance_id":"utt_01HZ...","sequence":45,"final_text":"I need a tow truck in Oakland."}
+```
+
+Application-to-gateway early output frames:
+
+```json
+{"type":"agent.turn.provisional.partial","provisional_turn_id":"pt_01HZ...","text":"I heard: I need a tow truck","append":true}
+{"type":"agent.turn.provisional","provisional_turn_id":"pt_01HZ...","text":"I heard: I need a tow truck in Oakland."}
+```
+
+Do not overload existing committed playback frames. Provisional playback should use extension-owned status frames until commit:
+
+```json
+{"type":"playback.provisional.started","provisional_turn_id":"pt_01HZ...","sequence":46}
+{"type":"playback.provisional.finished","provisional_turn_id":"pt_01HZ...","sequence":47,"status":"canceled","reason":"asr_correction"}
+```
+
+On `caller.turn.provisional.commit`, the gateway maps any surviving provisional playback to the final `turn_id` internally for profiling and call history. New app output after commit should use normal `agent.turn` keyed by the final `turn_id`; new app output after cancel must be rejected with an `invalid_provisional_turn` error frame and ignored.
+
+#### Cancellation and Reconciliation
+
+Cancellation is keyed by `provisional_turn_id`, not by raw `utterance_id` text. The protocol adapter and gateway-local processors must maintain a map from `provisional_turn_id` to the active generation, processor task, append speech handle, playback id, and eventual `turn_id` if committed.
+
+Rules:
+
+- `Updated(Append)` may append only a suffix that was not already spoken or queued.
+- `Updated(Replace)` must cancel or supersede active provisional TTS before new text is queued.
+- `Canceled` must cancel processor work and active provisional TTS immediately.
+- Barge-in during provisional playback uses the same clear/cancel path as #525 and records the cancellation as provisional.
+- Hangup or text-stream teardown cancels all provisional tasks for that call.
+- A final transcript that is compatible with the accepted provisional text emits `Committed`; an incompatible final emits `Canceled { reason: FinalTranscriptMismatch }`.
+- A later generation must not allow old audio to continue after the newer generation has been accepted.
+
+The compatibility check should be conservative and explainable in PLAN. A normalized final that preserves the provisional text as a prefix or safe clause can commit; a corrected intent, changed named entity, changed negation, or materially different normalized prefix must cancel.
+
+#### Observability
+
+Implementation should add normalized records for provisional lifecycle and TTS attribution. These are additive to #523:
+
+- `text_call.early_turn.started`
+- `text_call.early_turn.updated`
+- `text_call.early_turn.committed`
+- `text_call.early_turn.canceled`
+- `early_response.processor.started`
+- `early_response.processor.finished`
+- `tts.provisional.requested`
+- `tts.provisional.first_audio`
+- `tts.provisional.canceled`
+- `tts.provisional.committed`
+
+Required join keys are `gateway_call_id`, `asr_session_id` when available, `utterance_id`, `provisional_turn_id`, `turn_id` after commit, `playback_id`, `config_id`, run id, host id, and git sha. Metrics should include partial-to-provisional latency, provisional-to-first-agent-token latency, provisional-to-first-audio latency, final endpoint lead time, survival rate, cancel/supersede rate, and stale-audio leakage after cancellation.
+
+#### Components and Subsystems To Test
+
+Detailed test cases belong in a future PLAN, but the DESIGN requires coverage of these components:
+
+- `aggregate_early_resp_partials` as a pure stream transformer.
+- Policy validation, clamping, config snapshot, replay restore, and `quality status` rendering.
+- Protocol negotiation and serde for `motlie.telnyx.text.early_turns.v1`.
+- Text-call session state for active provisional turns, invalid ids, commit, cancel, and teardown cleanup.
+- Gateway-local smoke processor behavior from `Started`, `Updated`, `Committed`, and `Canceled`.
+- TTS append/cancel integration through the #525 speech queue and playback terminal status.
+- Final `caller.turn` reconciliation without changing existing final-turn emission.
+- Concurrent-call and overlapping-utterance isolation.
+- Profiling records and redaction behavior.
+
+Appendix alternatives for #527 are listed under [Alternatives Considered](#alternatives-considered).
 
 ### Optional Read APIs
 
@@ -3675,6 +4022,66 @@ Cons:
 - not necessary to validate Telnyx integration
 - conflicts with the goal of a surgical brownfield slice
 
+### Alternative 5: Reuse `caller.partial` With `reply_allowed=true`
+
+Decision: reject for #527.
+
+Pros:
+
+- Robustness: smallest wire change and uses the existing partial emission path.
+- Correctness: keeps one ASR hypothesis stream instead of adding a second lifecycle stream.
+- UX: gives capable agents early text quickly.
+- Operability: few new config or status fields.
+
+Cons:
+
+- Robustness: couples early response to raw partial forwarding and makes every partial consumer reason about speculative speech.
+- Correctness: no explicit provisional identity, update generation, commit mapping, or cancellation reason.
+- UX: high risk of stale spoken output when ASR corrects names, negation, or intent.
+- Operability: weak profiling joins because there is no durable provisional-turn id to connect ASR, agent, TTS, and final reconciliation.
+
+This conflicts with the #527 constraint that early response must be a modular stream transformer, not a deep rewrite or semantic change to current partial handling.
+
+### Alternative 6: Put Provisional Work in the Existing `turn_id` Namespace
+
+Decision: reject as the default design. Consider only if implementation can encode provisional versus committed state as an unambiguous type-level invariant.
+
+Pros:
+
+- Robustness: downstream text-call and TTS maps already understand turn-like ids.
+- Correctness: fewer protocol frame variants if the same id field can be reused safely.
+- UX: application code might be simpler for agents that already key all state by turn id.
+- Operability: existing playback started and finished frames could be reused with fewer schema additions.
+
+Cons:
+
+- Robustness: provisional and committed lifecycles have different failure modes; one namespace hides that distinction.
+- Correctness: a speculative id can be mistaken for a final `turn_id`, especially around stale replies, commit, and invalid-turn rejection.
+- UX: agents may treat provisional text as final and continue stale output after final mismatch.
+- Operability: logs and support tooling become harder to read because `turn_id` no longer means committed caller turn.
+
+Explicit `provisional_turn_id -> turn_id` commit semantics are clearer and safer.
+
+### Alternative 7: Endpoint-Candidate-Only Early Response
+
+Decision: keep as the recommended default policy mode, but reject as the whole design.
+
+Pros:
+
+- Robustness: avoids speaking while the caller is actively producing more audio.
+- Correctness: partial text is usually less volatile once the gateway reaches `endpoint_candidate`.
+- UX: fewer audible corrections and fewer barge-in-like self interruptions.
+- Operability: simpler first live validation because fewer starts need cancellation.
+
+Cons:
+
+- Robustness: still needs provisional ids, commit, and cancel semantics once early audio starts.
+- Correctness: endpoint-candidate text can still be corrected by final ASR.
+- UX: leaves latency wins on the table for stable mid-speech clauses that are safe to start preparing or speaking.
+- Operability: cannot validate the full policy surface needed by richer streaming agents.
+
+The chosen design makes `endpoint_candidate_only` the conservative default while still allowing `while_speaking` experiments behind explicit policy, speech-state allowlists, and cancellation instrumentation.
+
 ## Testing Scope for PLAN
 
 - webhook parsing and signature verification tests
@@ -3689,9 +4096,21 @@ Cons:
 - loopback tests that synthesize TTS and verify outbound `media` frames
 - env-gated integration tests against a real Telnyx test number after local simulation passes
 
+Issue #527 early-response PLAN should also cover:
+
+- pure unit tests for `aggregate_early_resp_partials` start, update, commit, cancel, debounce, and max-update behavior
+- policy config validation, replay restore, `call.config.snapshot`, and `quality status` output
+- protocol serde and negotiation for `motlie.telnyx.text.early_turns.v1`
+- text-call session tests for active provisional ids, invalid provisional ids, commit mapping, cancel cleanup, and teardown cleanup
+- smoke processor tests proving `I heard: ...` starts from `Started`, updates safely, and cancels on mismatch
+- speech queue integration tests proving `Updated(Replace)`, `Canceled`, barge-in, and hangup stop stale provisional TTS
+- final `caller.turn` reconciliation tests proving existing final emission remains unchanged
+- concurrent-call and overlapping-utterance isolation tests
+- provisional profiling and transcript redaction tests
+
 ## Open Concerns
 
-- The user still needs to confirm whether this work should be treated as greenfield or brownfield in the product sense. This document currently assumes brownfield.
+- The overall Telnyx gateway integration remains brownfield; the #527 early-response provisional-turn stage is separately greenfield in the product sense and preserves existing default behavior through opt-in negotiation.
 - Telnyx documents codec options broadly, but actual inbound codec selection may depend on carrier, destination, and account configuration. Phase 1 should log observed `media_format` values in real calls before broadening codec support.
 - `stream_bidirectional_target_legs=self` is the best current inference for single-leg AI-agent calls, but this should be validated on the first live call because Telnyx defaults to `opposite`.
 - Piper currently defaults to CPU-only ONNX Runtime because of issue #230. Live latency numbers should record whether `MOTLIE_PIPER_ALLOW_CUDA=1` was enabled.
