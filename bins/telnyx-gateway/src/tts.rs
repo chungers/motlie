@@ -23,6 +23,7 @@ use tokio::task;
 
 pub const KOKORO_SAMPLE_RATE_HZ: u32 = 24_000;
 pub const PIPER_SAMPLE_RATE_HZ: u32 = 22_050;
+const TTS_WARMUP_TEXT: &str = "Ready.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TtsAudio {
@@ -244,7 +245,9 @@ impl KokoroTtsFactory {
 #[async_trait]
 impl OutboundTtsFactory for KokoroTtsFactory {
     async fn warm(&self) -> anyhow::Result<()> {
-        self.handle().await.map(|_| ())
+        self.synthesize_chunks(TTS_WARMUP_TEXT.to_string())
+            .await
+            .map(|_| ())
     }
 
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {
@@ -288,7 +291,9 @@ impl PiperTtsFactory {
     }
 
     pub(crate) async fn warm(&self) -> anyhow::Result<()> {
-        self.handle().await.map(|_| ())
+        self.synthesize_chunks(TTS_WARMUP_TEXT.to_string())
+            .await
+            .map(|_| ())
     }
 
     async fn handle(&self) -> anyhow::Result<Arc<motlie_model_piper::PiperHandle>> {
@@ -307,7 +312,9 @@ impl PiperTtsFactory {
 #[async_trait]
 impl OutboundTtsFactory for PiperTtsFactory {
     async fn warm(&self) -> anyhow::Result<()> {
-        self.handle().await.map(|_| ())
+        self.synthesize_chunks(TTS_WARMUP_TEXT.to_string())
+            .await
+            .map(|_| ())
     }
 
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>> {

@@ -3224,7 +3224,7 @@ fn gateway_root_help() -> String {
         "  tts list",
         "  tts status",
         "  tts use kokoro-82m|piper       Select TTS backend for speak and conversation replies",
-        "  warm [all|asr|tts]             Load selected ASR/TTS models before serving calls",
+        "  warm [all|asr|tts]             Load selected ASR/TTS models before serving calls; TTS warm runs a tiny probe synthesis",
         "",
         "Calls:",
         "  calls                          List calls in operator roster order",
@@ -3292,7 +3292,7 @@ fn quality_help() -> String {
         "quality tts chunking on|off                    bool default=true applies=new_playback_request",
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
-        "quality tts prebuffer-chunks <n>               range=1..64 default=2 applies=new_playback_request",
+        "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
@@ -3390,7 +3390,7 @@ fn warm_help() -> String {
         "warm tts",
         "",
         "Load the source-local next ASR and/or TTS model handles before serving a call.",
-        "Warm status is runtime-only and appears in the TUI Runtime pane.",
+        "Warm status is runtime-only and appears in the TUI Runtime pane; TTS warm includes a tiny discarded probe synthesis.",
     ]
     .join("\n")
 }

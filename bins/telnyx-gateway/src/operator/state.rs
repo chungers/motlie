@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
 use crate::quality::{
-    ActiveAsrQualitySession, QualityEvent, QualityEventContext, QualityEventSink, RedactionMode,
-    VoiceQualityConfig,
+    ActiveAsrQualitySession, CallerTurnEventMetadata, QualityEvent, QualityEventContext,
+    QualityEventSink, RedactionMode, VoiceQualityConfig,
 };
 use crate::tts::LiveTtsBackend;
 
@@ -697,11 +697,26 @@ impl GatewayState {
         turn_id: &str,
         text: &str,
         session: Option<&ActiveAsrQualitySession>,
+        mut metadata: CallerTurnEventMetadata,
     ) {
         if !self.quality.event_sink.is_enabled() {
             return;
         }
         let (context, include_transcript_text) = if let Some(session) = session {
+            if metadata.asr_session_id.is_none() {
+                metadata.asr_session_id = Some(session.asr_session_id.clone());
+            }
+            if metadata.asr_session_ids.is_empty() {
+                metadata
+                    .asr_session_ids
+                    .push(session.asr_session_id.clone());
+            }
+            if metadata.utterance_id.is_none() {
+                metadata.utterance_id = Some(session.utterance_id.clone());
+            }
+            if metadata.utterance_ids.is_empty() {
+                metadata.utterance_ids.push(session.utterance_id.clone());
+            }
             (
                 self.quality_event_context_with_config_and_redaction(
                     Some(gateway_call_id.to_string()),
@@ -721,6 +736,7 @@ impl GatewayState {
             turn_id.to_string(),
             text,
             include_transcript_text,
+            metadata,
         );
         self.quality.event_sink.emit(event);
     }

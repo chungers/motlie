@@ -31,7 +31,8 @@ use crate::operator::state::{
     SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
 };
 use crate::quality::{
-    ActiveAsrQualitySession, EchoSuppressionQualityConfig, OnsetDuringPlaybackPolicy,
+    insert_transcript_text_fields, transcript_plaintext_included, ActiveAsrQualitySession,
+    CallerTurnEventMetadata, EchoSuppressionQualityConfig, OnsetDuringPlaybackPolicy,
     RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
 };
 use crate::speech;
@@ -120,7 +121,9 @@ pub struct OutboundFrameQualityContext {
     pub redaction_mode: RedactionMode,
     pub request_started_at: Instant,
     pub turn_finalized_at: Option<Instant>,
+    pub latest_turn_finalized_at: Option<Instant>,
     pub turn_id: Option<String>,
+    pub coalesced_turn_ids: Vec<String>,
     pub queued_at: Instant,
     pub first_for_playback: bool,
 }
@@ -1076,7 +1079,7 @@ async fn maybe_emit_first_frame_span(
         );
     }
     if let Some(finalized_at) = quality.turn_finalized_at {
-        let payload = map_from_value(json!({
+        let mut payload = map_from_value(json!({
             "playback_id": frame.playback_id.as_str(),
             "turn_id": quality.turn_id.as_deref(),
             "queue_depth": queue_depth,
@@ -1084,7 +1087,26 @@ async fn maybe_emit_first_frame_span(
                 .request_started_at
                 .saturating_duration_since(finalized_at)
                 .as_millis() as u64,
+            "coalesced_turn_count": quality.coalesced_turn_ids.len(),
+            "coalesced_turn_ids": quality.coalesced_turn_ids.as_slice(),
         }));
+        if let Some(latest_finalized_at) = quality.latest_turn_finalized_at {
+            payload.insert(
+                "latest_turn_handler_to_request_ms".to_string(),
+                Value::Number(serde_json::Number::from(
+                    quality
+                        .request_started_at
+                        .saturating_duration_since(latest_finalized_at)
+                        .as_millis() as u64,
+                )),
+            );
+            payload.insert(
+                "latest_turn_finalize_to_first_audio_ms".to_string(),
+                Value::Number(serde_json::Number::from(
+                    latest_finalized_at.elapsed().as_millis() as u64,
+                )),
+            );
+        }
         state.write().await.emit_quality_span_finished(
             call_id,
             QualitySpanEmission {
@@ -3021,6 +3043,11 @@ async fn emit_asr_final_reconciliation(
     include_transcript_text: bool,
     reconciliation: &FinalTextReconciliation,
 ) {
+    let include_plaintext = quality_session
+        .map(|session| {
+            transcript_plaintext_included(session.redaction_mode, include_transcript_text)
+        })
+        .unwrap_or(false);
     tracing::info!(
         gateway_call_id,
         stream_id,
@@ -3034,11 +3061,11 @@ async fn emit_asr_final_reconciliation(
         common_prefix_chars = reconciliation.common_prefix_chars,
         partial_is_strict_extension = reconciliation.partial_is_strict_extension,
         final_tail_word_chars = reconciliation.final_tail_word_chars,
-        asr_final_text = include_transcript_text.then_some(reconciliation.final_text.as_str()),
-        latest_partial_text = include_transcript_text
+        asr_final_text = include_plaintext.then_some(reconciliation.final_text.as_str()),
+        latest_partial_text = include_plaintext
             .then_some(reconciliation.latest_partial_text.as_deref())
             .flatten(),
-        selected_text = include_transcript_text.then_some(reconciliation.selected_text.as_str()),
+        selected_text = include_plaintext.then_some(reconciliation.selected_text.as_str()),
         "asr.final_text_reconciled"
     );
     let Some(session) = quality_session else {
@@ -3059,22 +3086,29 @@ async fn emit_asr_final_reconciliation(
         "partial_is_strict_extension": reconciliation.partial_is_strict_extension,
         "final_tail_word_chars": reconciliation.final_tail_word_chars,
     }));
-    if include_transcript_text {
-        payload.insert(
-            "asr_final_text".to_string(),
-            Value::String(reconciliation.final_text.clone()),
-        );
-        if let Some(partial) = &reconciliation.latest_partial_text {
-            payload.insert(
-                "latest_partial_text".to_string(),
-                Value::String(partial.clone()),
-            );
-        }
-        payload.insert(
-            "selected_text".to_string(),
-            Value::String(reconciliation.selected_text.clone()),
+    insert_transcript_text_fields(
+        &mut payload,
+        session.redaction_mode,
+        include_transcript_text,
+        "asr_final_text",
+        &reconciliation.final_text,
+    );
+    if let Some(partial) = &reconciliation.latest_partial_text {
+        insert_transcript_text_fields(
+            &mut payload,
+            session.redaction_mode,
+            include_transcript_text,
+            "latest_partial_text",
+            partial,
         );
     }
+    insert_transcript_text_fields(
+        &mut payload,
+        session.redaction_mode,
+        include_transcript_text,
+        "selected_text",
+        &reconciliation.selected_text,
+    );
     state.write().await.emit_quality_span_finished(
         gateway_call_id,
         QualitySpanEmission {
@@ -3152,7 +3186,10 @@ struct FinalTurnCandidate {
     text: String,
     finalized_at: Instant,
     transcript_event_ids: Vec<String>,
-    utterance_id: Option<String>,
+    asr_session_ids: Vec<String>,
+    utterance_ids: Vec<String>,
+    confidence: Option<f32>,
+    coalesced_turn_ids: Vec<String>,
 }
 
 struct PartialTurnCandidate {
@@ -3232,14 +3269,28 @@ fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCa
     let mut text = String::new();
     let mut finalized_at = None;
     let mut transcript_event_ids = Vec::new();
-    let mut utterance_id = None;
+    let mut asr_session_ids = Vec::new();
+    let mut utterance_ids = Vec::new();
+    let mut confidence = None;
+    let mut coalesced_turn_ids = Vec::new();
     for turn in final_turns {
         if turn_id.is_none() {
             turn_id = Some(turn.turn_id);
         }
-        if utterance_id.is_none() {
-            utterance_id = turn.utterance_id.clone();
+        for asr_session_id in turn.asr_session_ids {
+            if !asr_session_ids.contains(&asr_session_id) {
+                asr_session_ids.push(asr_session_id);
+            }
         }
+        for utterance_id in turn.utterance_ids {
+            if !utterance_ids.contains(&utterance_id) {
+                utterance_ids.push(utterance_id);
+            }
+        }
+        if turn.confidence.is_some() {
+            confidence = turn.confidence;
+        }
+        coalesced_turn_ids.extend(turn.coalesced_turn_ids);
         let trimmed = turn.text.trim();
         if !trimmed.is_empty() {
             if !text.is_empty() {
@@ -3258,7 +3309,10 @@ fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCa
             text,
             finalized_at: finalized_at.unwrap_or_else(Instant::now),
             transcript_event_ids,
-            utterance_id,
+            asr_session_ids,
+            utterance_ids,
+            confidence,
+            coalesced_turn_ids,
         }]
     }
 }
@@ -3485,14 +3539,22 @@ async fn record_transcript_events(
                 .event_sink
                 .is_enabled()
                 .then(|| format!("trn_{}", uuid::Uuid::new_v4().simple()));
+            let turn_id = turn_id.clone().unwrap_or_else(new_local_turn_id);
             final_turns.push(FinalTurnCandidate {
-                turn_id: turn_id.clone().unwrap_or_else(new_local_turn_id),
+                turn_id: turn_id.clone(),
                 text: text.clone(),
                 finalized_at: Instant::now(),
                 transcript_event_ids: transcript_event_id.into_iter().collect(),
-                utterance_id: context
+                asr_session_ids: context
                     .quality_session
-                    .map(|session| session.utterance_id.clone()),
+                    .map(|session| vec![session.asr_session_id.clone()])
+                    .unwrap_or_default(),
+                utterance_ids: context
+                    .quality_session
+                    .map(|session| vec![session.utterance_id.clone()])
+                    .unwrap_or_default(),
+                confidence: transcript_confidence,
+                coalesced_turn_ids: vec![turn_id],
             });
         } else if let Some(session) = context.quality_session {
             partial_turns.push(PartialTurnCandidate {
@@ -3572,7 +3634,7 @@ async fn record_transcript_events(
                     gateway_call_id,
                     final_turn.text.clone(),
                     final_turn.finalized_at,
-                    final_turn.utterance_id.clone(),
+                    final_turn.utterance_ids.first().cloned(),
                 )
                 .await
             {
@@ -3634,6 +3696,19 @@ fn emit_quality_turn_join(
         turn_id,
         &final_turn.text,
         quality_session,
+        CallerTurnEventMetadata {
+            asr_session_id: final_turn
+                .asr_session_ids
+                .first()
+                .cloned()
+                .or_else(|| quality_session.map(|session| session.asr_session_id.clone())),
+            asr_session_ids: final_turn.asr_session_ids.clone(),
+            utterance_id: final_turn.utterance_ids.first().cloned(),
+            utterance_ids: final_turn.utterance_ids.clone(),
+            confidence: final_turn.confidence,
+            transcript_event_count: final_turn.transcript_event_ids.len(),
+            coalesced_turn_ids: final_turn.coalesced_turn_ids.clone(),
+        },
     );
     if let Some(session) = quality_session {
         for transcript_event_id in &final_turn.transcript_event_ids {
