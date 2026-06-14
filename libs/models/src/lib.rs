@@ -393,8 +393,81 @@ pub enum CuratedBundle {
 }
 
 impl CuratedBundle {
+    /// The single canonical id string for every curated bundle, used identically
+    /// across the eval snapshot, the driver artifact map, and result records.
+    /// This list is always present (not feature-gated) so snapshot/data lints can
+    /// enumerate the full set without compiling every model backend. The
+    /// `canonical_ids_match_bundle_ids` test (run with all model features) keeps
+    /// this list exactly in sync with the enum's `bundle_id()`/`canonical_id()`.
+    pub const CANONICAL_IDS: &'static [&'static str] = &[
+        "qwen3_4b",
+        "gemma4_e2b",
+        "gemma4_e4b",
+        "qwen3_4b_gguf",
+        "qwen3_6_27b_gguf",
+        "gemma4_e2b_gguf",
+        "gemma4_e4b_gguf",
+        "gemma4_12b_gguf",
+        "gemma4_12b_qat_q4_0_gguf",
+        "embeddinggemma_300m",
+        "qwen3_embedding_06b",
+        "whisper_base_en",
+        "sherpa_onnx_streaming_zipformer_en",
+        "sherpa_onnx_streaming_zipformer_en_kroko_2025",
+        "moonshine_streaming_en",
+        "piper_en_us_ljspeech_medium",
+        "kokoro_82m",
+        "qwen3_tts_cpp_0_6b",
+    ];
+
     pub fn bundle_id(&self) -> BundleId {
         self.descriptor().id
+    }
+
+    /// The canonical id string for this variant. Equals `bundle_id().as_str()`
+    /// (enforced by the `canonical_ids_match_bundle_ids` test) and is always a
+    /// member of [`CuratedBundle::CANONICAL_IDS`].
+    pub fn canonical_id(&self) -> &'static str {
+        #[allow(unreachable_patterns)]
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B => "qwen3_4b",
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B => "gemma4_e2b",
+            #[cfg(feature = "model-gemma4-e4b")]
+            Self::Gemma4E4B => "gemma4_e4b",
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf => "qwen3_4b_gguf",
+            #[cfg(feature = "model-qwen3-6-27b-gguf")]
+            Self::Qwen3_6_27B_Gguf => "qwen3_6_27b_gguf",
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf => "gemma4_e2b_gguf",
+            #[cfg(feature = "model-gemma4-e4b-gguf")]
+            Self::Gemma4E4B_Gguf => "gemma4_e4b_gguf",
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf => "gemma4_12b_gguf",
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            Self::Gemma4_12B_QatQ4_0_Gguf => "gemma4_12b_qat_q4_0_gguf",
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m => "embeddinggemma_300m",
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B => "qwen3_embedding_06b",
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn => "whisper_base_en",
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn => "sherpa_onnx_streaming_zipformer_en",
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEnKroko2025 => "sherpa_onnx_streaming_zipformer_en_kroko_2025",
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn => "moonshine_streaming_en",
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium => "piper_en_us_ljspeech_medium",
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m => "kokoro_82m",
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B => "qwen3_tts_cpp_0_6b",
+            _ => unreachable!("no curated bundle variants are enabled"),
+        }
     }
 
     pub fn descriptor(&self) -> BundleDescriptor {
@@ -1887,6 +1960,83 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_ids_are_unique_and_complete() {
+        let mut seen = std::collections::BTreeSet::new();
+        for id in CuratedBundle::CANONICAL_IDS {
+            assert!(seen.insert(*id), "duplicate canonical id `{id}` in CANONICAL_IDS");
+        }
+        assert_eq!(
+            CuratedBundle::CANONICAL_IDS.len(),
+            18,
+            "expected 18 curated bundles; update CANONICAL_IDS and the enum together"
+        );
+    }
+
+    #[test]
+    fn canonical_ids_match_bundle_ids() {
+        // Each compiled variant's canonical_id() must equal its descriptor
+        // bundle_id() and be a member of CANONICAL_IDS, and must round-trip
+        // through bundle_from_id(). Run with all model features (CI) to cover
+        // all 18 variants; with fewer features this covers the compiled subset.
+        let variants: Vec<CuratedBundle> = vec![
+            #[cfg(feature = "model-qwen3-4b")]
+            CuratedBundle::Qwen3_4B,
+            #[cfg(feature = "model-gemma4-e2b")]
+            CuratedBundle::Gemma4E2B,
+            #[cfg(feature = "model-gemma4-e4b")]
+            CuratedBundle::Gemma4E4B,
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            CuratedBundle::Qwen3_4B_Gguf,
+            #[cfg(feature = "model-qwen3-6-27b-gguf")]
+            CuratedBundle::Qwen3_6_27B_Gguf,
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            CuratedBundle::Gemma4E2B_Gguf,
+            #[cfg(feature = "model-gemma4-e4b-gguf")]
+            CuratedBundle::Gemma4E4B_Gguf,
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            CuratedBundle::Gemma4_12B_Gguf,
+            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
+            CuratedBundle::Gemma4_12B_QatQ4_0_Gguf,
+            #[cfg(feature = "model-google-gemma-300m")]
+            CuratedBundle::GoogleGemma300m,
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            CuratedBundle::Qwen3Embedding06B,
+            #[cfg(feature = "model-whisper-base-en")]
+            CuratedBundle::WhisperBaseEn,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            CuratedBundle::SherpaOnnxStreamingEn,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            CuratedBundle::SherpaOnnxStreamingEnKroko2025,
+            #[cfg(feature = "model-moonshine-streaming")]
+            CuratedBundle::MoonshineStreamingEn,
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            CuratedBundle::PiperEnUsLjspeechMedium,
+            #[cfg(feature = "model-kokoro-82m")]
+            CuratedBundle::Kokoro82m,
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            CuratedBundle::Qwen3TtsCpp0_6B,
+        ];
+
+        for variant in variants {
+            let canonical = variant.canonical_id();
+            assert_eq!(
+                canonical,
+                variant.bundle_id().as_str(),
+                "canonical_id() must equal bundle_id() for {variant:?}"
+            );
+            assert!(
+                CuratedBundle::CANONICAL_IDS.contains(&canonical),
+                "canonical id `{canonical}` is missing from CANONICAL_IDS"
+            );
+            assert_eq!(
+                bundle_from_id(&BundleId::new(canonical)),
+                Some(variant),
+                "canonical id `{canonical}` must round-trip through bundle_from_id()"
+            );
+        }
+    }
 
     fn stub_descriptor(id: &str) -> BundleDescriptor {
         BundleDescriptor {
