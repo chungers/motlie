@@ -479,9 +479,14 @@ fn load_tokenizer_without_post_processor(
 }
 
 fn kokoro_ort_target() -> OrtExecutionTarget {
-    match std::env::var("MOTLIE_KOKORO_ALLOW_CUDA") {
-        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => OrtExecutionTarget::Auto,
-        _ => OrtExecutionTarget::CpuOnly,
+    #[cfg(feature = "cuda")]
+    {
+        OrtExecutionTarget::Auto
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        OrtExecutionTarget::CpuOnly
     }
 }
 

@@ -2,22 +2,22 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, BundleId, CapabilityKind, QuantizationBits, StartOptions,
 };
 use motlie_models::{
-    download_bundle_artifacts_with_options, ArtifactDownloadOptions, BackendKind, BundleDescriptor,
-    Catalog, CheckpointFormat, CuratedBundle,
+    ArtifactDownloadOptions, BackendKind, BundleDescriptor, Catalog, CheckpointFormat,
+    CuratedBundle, download_bundle_artifacts_with_options,
 };
 
 use crate::accelerator;
 use crate::metrics::{MemoryPeakKind, PerformanceMetrics, ResourceMetrics};
 use crate::result::{
-    overall_status_with_accelerator, reason_for_status, terminal_outcome, AcceleratorClass,
-    AcceptanceSection, AcceptanceStatus, AssertionOutcome, CoverageSection, GateOutcome,
-    IdentitySection, OutcomeReason, ProfileSection, ResultRecord, RuntimeSection, SelectionSection,
-    RESULT_SCHEMA_VERSION,
+    AcceleratorClass, AcceptanceSection, AcceptanceStatus, AssertionOutcome, CoverageSection,
+    GateOutcome, IdentitySection, OutcomeReason, ProfileSection, RESULT_SCHEMA_VERSION,
+    ResultRecord, RuntimeSection, SelectionSection, overall_status_with_accelerator,
+    reason_for_status, terminal_outcome,
 };
 use crate::runner::RunContext;
 use crate::scenario::{CapabilityName, ModelCapabilityName};
@@ -865,6 +865,7 @@ fn active_features() -> Vec<String> {
             "model-piper-en-us-ljspeech-medium",
             cfg!(feature = "model-piper-en-us-ljspeech-medium"),
         ),
+        ("model-kokoro-82m", cfg!(feature = "model-kokoro-82m")),
         ("model-qwen3-tts-cpp", cfg!(feature = "model-qwen3-tts-cpp")),
         (
             "model-moonshine-streaming",
@@ -880,6 +881,8 @@ fn active_features() -> Vec<String> {
         ),
         ("llama-cpp-cuda", cfg!(feature = "llama-cpp-cuda")),
         ("piper-cuda", cfg!(feature = "piper-cuda")),
+        ("kokoro-cuda", cfg!(feature = "kokoro-cuda")),
+        ("moonshine-cuda", cfg!(feature = "moonshine-cuda")),
         ("qwen3-tts-cpp-cuda", cfg!(feature = "qwen3-tts-cpp-cuda")),
         ("sherpa-onnx-cuda", cfg!(feature = "sherpa-onnx-cuda")),
         ("whisper-cpp-cuda", cfg!(feature = "whisper-cpp-cuda")),
@@ -930,16 +933,20 @@ mod tests {
         let evaluation = evaluate_resource_status(&resources, &context);
 
         assert_eq!(evaluation.status, AcceptanceStatus::Fail);
-        assert!(evaluation
-            .failure_reason
-            .as_deref()
-            .unwrap()
-            .contains("max_process_swap_delta_bytes=0 exceeded"));
-        assert!(evaluation
-            .failure_reason
-            .as_deref()
-            .unwrap()
-            .contains("process_swap_delta_peak=1.56GiB"));
+        assert!(
+            evaluation
+                .failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("max_process_swap_delta_bytes=0 exceeded")
+        );
+        assert!(
+            evaluation
+                .failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("process_swap_delta_peak=1.56GiB")
+        );
     }
 
     #[test]
@@ -968,11 +975,13 @@ mod tests {
         let evaluation = evaluate_resource_status(&resources, &context);
 
         assert_eq!(evaluation.status, AcceptanceStatus::Fail);
-        assert!(evaluation
-            .failure_reason
-            .as_deref()
-            .unwrap()
-            .contains("max_process_swap_delta_bytes=4294967296 exceeded"));
+        assert!(
+            evaluation
+                .failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("max_process_swap_delta_bytes=4294967296 exceeded")
+        );
     }
 
     #[test]
@@ -989,11 +998,13 @@ mod tests {
         let evaluation = evaluate_resource_status_with_swap_support(&resources, &context, true);
 
         assert_eq!(evaluation.status, AcceptanceStatus::Blocked);
-        assert!(evaluation
-            .failure_reason
-            .as_deref()
-            .unwrap()
-            .contains("process swap delta unavailable"));
+        assert!(
+            evaluation
+                .failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("process swap delta unavailable")
+        );
     }
 
     #[test]
