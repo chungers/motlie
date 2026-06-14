@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(descriptor.display_name, "Moonshine Streaming EN");
         assert_eq!(descriptor.backend, BackendKind::Ort);
         assert!(
-            descriptor
+            !descriptor
                 .requirements
                 .build
                 .contains(&BuildConstraint::CpuOnly)
