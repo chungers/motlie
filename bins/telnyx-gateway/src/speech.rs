@@ -36,7 +36,9 @@ pub struct SpeechQueueRequest {
     pub source_label: String,
     pub conflict_policy: SpeechConflictPolicy,
     pub turn_finalized_at: Option<Instant>,
+    pub latest_turn_finalized_at: Option<Instant>,
     pub turn_id: Option<String>,
+    pub coalesced_turn_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,7 +104,9 @@ pub async fn queue_speech(
             source_label: source_label.to_string(),
             conflict_policy: SpeechConflictPolicy::Reject,
             turn_finalized_at: None,
+            latest_turn_finalized_at: None,
             turn_id: None,
+            coalesced_turn_ids: Vec::new(),
         },
     )
     .await
@@ -121,7 +125,9 @@ pub async fn queue_speech_with_request(
         source_label,
         conflict_policy,
         turn_finalized_at,
+        latest_turn_finalized_at,
         turn_id,
+        coalesced_turn_ids,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
@@ -210,7 +216,9 @@ pub async fn queue_speech_with_request(
         tts_prebuffer_chunks,
         request_started_at,
         turn_finalized_at,
+        latest_turn_finalized_at,
         turn_id,
+        coalesced_turn_ids,
         cancel,
     };
     tokio::spawn(async move {
@@ -240,7 +248,9 @@ pub async fn queue_append_speech_with_request(
         source_label,
         conflict_policy,
         turn_finalized_at,
+        latest_turn_finalized_at,
         turn_id,
+        coalesced_turn_ids,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
@@ -333,7 +343,9 @@ pub async fn queue_append_speech_with_request(
             tts_prebuffer_chunks,
             request_started_at,
             turn_finalized_at,
+            latest_turn_finalized_at,
             turn_id,
+            coalesced_turn_ids,
             cancel,
         },
         rx,
@@ -407,7 +419,9 @@ struct SpeechJob {
     tts_prebuffer_chunks: usize,
     request_started_at: Instant,
     turn_finalized_at: Option<Instant>,
+    latest_turn_finalized_at: Option<Instant>,
     turn_id: Option<String>,
+    coalesced_turn_ids: Vec<String>,
     cancel: SpeechCancelToken,
 }
 
@@ -1233,7 +1247,9 @@ async fn enqueue_prepared_chunks(
                 redaction_mode: job.quality_redaction_mode,
                 request_started_at: job.request_started_at,
                 turn_finalized_at: job.turn_finalized_at,
+                latest_turn_finalized_at: job.latest_turn_finalized_at,
                 turn_id: job.turn_id.clone(),
+                coalesced_turn_ids: job.coalesced_turn_ids.clone(),
                 queued_at: Instant::now(),
                 first_for_playback: *first_packet_for_playback,
             };
@@ -1526,7 +1542,12 @@ mod tests {
         }
 
         async fn wait_for_second_call(&self) {
-            self.second_started.notified().await;
+            loop {
+                if self.calls.load(Ordering::SeqCst) >= 2 {
+                    return;
+                }
+                self.second_started.notified().await;
+            }
         }
 
         fn release_second_call(&self) {
@@ -1539,7 +1560,7 @@ mod tests {
         async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if call == 2 {
-                self.second_started.notify_waiters();
+                self.second_started.notify_one();
                 self.release_second.notified().await;
             }
             Ok(vec![TtsAudio::new(
@@ -1702,7 +1723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_prebuffer_waits_for_second_chunk_when_speech_is_chunked() {
+    async fn default_prebuffer_starts_after_first_chunk_when_speech_is_chunked() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = {
             let mut guard = state.write().await;
@@ -1721,7 +1742,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.quality.config.set_tts_max_text_chunk_chars(40);
-            assert_eq!(guard.quality.config.tts.prebuffer_chunks, 2);
+            assert_eq!(guard.quality.config.tts.prebuffer_chunks, 1);
             let config_id = guard.quality.config.config_id();
             guard.quality.config_id = config_id;
         }
@@ -1752,18 +1773,37 @@ mod tests {
         .await
         .expect("speech should be queued");
 
-        timeout(Duration::from_secs(1), kokoro.wait_for_second_call())
+        let first_command = timeout(Duration::from_secs(1), rx.recv())
             .await
-            .expect("second text chunk synthesis should start");
-        assert!(
-            timeout(Duration::from_millis(200), rx.recv())
-                .await
-                .is_err(),
-            "default prebuffer should wait for the second prepared chunk"
-        );
+            .expect("default prebuffer should queue first audio promptly")
+            .expect("media command should be present");
+        let mut frame_count = match first_command {
+            OutboundMediaCommand::Frame(frame) => {
+                assert_eq!(frame.playback_id, queued.playback_id);
+                1
+            }
+            other => panic!("expected first queued audio frame, got {other:?}"),
+        };
 
+        timeout(Duration::from_secs(1), async {
+            loop {
+                tokio::select! {
+                    _ = kokoro.wait_for_second_call() => break,
+                    command = rx.recv() => {
+                        match command.expect("media command before second chunk") {
+                            OutboundMediaCommand::Frame(frame) => {
+                                assert_eq!(frame.playback_id, queued.playback_id);
+                                frame_count += 1;
+                            }
+                            other => panic!("expected frame before second chunk, got {other:?}"),
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("second text chunk synthesis should start after first chunk frames drain");
         kokoro.release_second_call();
-        let mut frame_count = 0usize;
         for _ in 0..16 {
             let Some(command) = timeout(Duration::from_secs(1), rx.recv())
                 .await
@@ -1822,7 +1862,9 @@ mod tests {
                 source_label: "test end".to_string(),
                 conflict_policy: SpeechConflictPolicy::Reject,
                 turn_finalized_at: None,
+                latest_turn_finalized_at: None,
                 turn_id: None,
+                coalesced_turn_ids: Vec::new(),
             },
         )
         .await
@@ -1927,7 +1969,9 @@ mod tests {
                 source_label: "test replace".to_string(),
                 conflict_policy: SpeechConflictPolicy::CancelAndReplace,
                 turn_finalized_at: None,
+                latest_turn_finalized_at: None,
                 turn_id: None,
+                coalesced_turn_ids: Vec::new(),
             },
         )
         .await

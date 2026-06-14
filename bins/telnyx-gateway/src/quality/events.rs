@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -153,16 +154,51 @@ impl QualityEvent {
         turn_id: impl Into<String>,
         text: &str,
         include_transcript_text: bool,
+        metadata: CallerTurnEventMetadata,
     ) -> Self {
+        let redaction_mode = context.redaction_mode;
+        let turn_id = turn_id.into();
+        let coalesced_turn_ids = if metadata.coalesced_turn_ids.is_empty() {
+            vec![turn_id.clone()]
+        } else {
+            metadata.coalesced_turn_ids
+        };
+        let asr_session_id = metadata.asr_session_id;
+        let asr_session_ids = if metadata.asr_session_ids.is_empty() {
+            asr_session_id.iter().cloned().collect()
+        } else {
+            metadata.asr_session_ids
+        };
+        let utterance_id = metadata.utterance_id;
+        let utterance_ids = if metadata.utterance_ids.is_empty() {
+            utterance_id.iter().cloned().collect()
+        } else {
+            metadata.utterance_ids
+        };
         let mut payload = map_from_value(json!({
-            "turn_id": turn_id.into(),
+            "turn_id": turn_id,
+            "asr_session_id": asr_session_id,
+            "asr_session_ids": asr_session_ids,
+            "utterance_id": utterance_id,
+            "utterance_ids": utterance_ids,
+            "confidence": metadata.confidence,
+            "transcript_event_count": metadata.transcript_event_count,
+            "coalesced_turn_count": coalesced_turn_ids.len(),
+            "coalesced_turn_ids": coalesced_turn_ids,
             "text_words": text.split_whitespace().count(),
             "text_chars": text.chars().count(),
-            "transcript_text_included": include_transcript_text,
+            "transcript_text_included": transcript_plaintext_included(
+                redaction_mode,
+                include_transcript_text
+            ),
         }));
-        if include_transcript_text {
-            payload.insert("text".to_string(), Value::String(text.to_string()));
-        }
+        insert_transcript_text_fields(
+            &mut payload,
+            redaction_mode,
+            include_transcript_text,
+            "text",
+            text,
+        );
         Self::new(context, "text_call.caller_turn.sent", payload)
     }
 
@@ -175,6 +211,7 @@ impl QualityEvent {
         speech_state: impl Into<String>,
         include_transcript_text: bool,
     ) -> Self {
+        let redaction_mode = context.redaction_mode;
         let mut payload = map_from_value(json!({
             "asr_session_id": session.asr_session_id,
             "utterance_id": session.utterance_id,
@@ -183,11 +220,18 @@ impl QualityEvent {
             "stability": stability,
             "text_words": text.split_whitespace().count(),
             "text_chars": text.chars().count(),
-            "transcript_text_included": include_transcript_text,
+            "transcript_text_included": transcript_plaintext_included(
+                redaction_mode,
+                include_transcript_text
+            ),
         }));
-        if include_transcript_text {
-            payload.insert("text".to_string(), Value::String(text.to_string()));
-        }
+        insert_transcript_text_fields(
+            &mut payload,
+            redaction_mode,
+            include_transcript_text,
+            "text",
+            text,
+        );
         Self::new(context, "text_call.caller_partial.sent", payload)
     }
 
@@ -249,6 +293,52 @@ pub struct ActiveAsrQualitySession {
     pub redaction_mode: RedactionMode,
     pub include_transcript_text: bool,
     pub opened_at: Instant,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CallerTurnEventMetadata {
+    pub asr_session_id: Option<String>,
+    pub asr_session_ids: Vec<String>,
+    pub utterance_id: Option<String>,
+    pub utterance_ids: Vec<String>,
+    pub confidence: Option<f32>,
+    pub transcript_event_count: usize,
+    pub coalesced_turn_ids: Vec<String>,
+}
+
+pub fn transcript_plaintext_included(
+    redaction_mode: RedactionMode,
+    include_transcript_text: bool,
+) -> bool {
+    include_transcript_text && matches!(redaction_mode, RedactionMode::SensitivePlaintext)
+}
+
+pub fn insert_transcript_text_fields(
+    payload: &mut Map<String, Value>,
+    redaction_mode: RedactionMode,
+    include_transcript_text: bool,
+    field_name: &str,
+    text: &str,
+) {
+    match redaction_mode {
+        RedactionMode::SensitivePlaintext if include_transcript_text => {
+            payload.insert(field_name.to_string(), Value::String(text.to_string()));
+        }
+        RedactionMode::HashedText => {
+            payload.insert(
+                format!("{field_name}_hash_algorithm"),
+                Value::String("sha256".to_string()),
+            );
+            payload.insert(
+                format!("{field_name}_sha256"),
+                Value::String(format!("{:x}", Sha256::digest(text.as_bytes()))),
+            );
+        }
+        RedactionMode::RedactedText => {
+            payload.insert(format!("{field_name}_redacted"), Value::Bool(true));
+        }
+        RedactionMode::MetricsOnly | RedactionMode::SensitivePlaintext => {}
+    }
 }
 
 impl ActiveAsrQualitySession {
@@ -422,9 +512,55 @@ mod tests {
             "turn_test",
             "reset account access",
             false,
+            CallerTurnEventMetadata::default(),
         );
         assert_eq!(event.payload["text_words"], 3);
+        assert_eq!(event.payload["coalesced_turn_count"], 1);
+        assert_eq!(event.payload["coalesced_turn_ids"][0], "turn_test");
         assert_eq!(event.payload["transcript_text_included"], false);
+        assert!(!event.payload.contains_key("text"));
+    }
+
+    #[test]
+    fn caller_turn_event_hashes_text_when_hash_redaction_is_selected() {
+        let event = QualityEvent::caller_turn_sent(
+            QualityEventContext::new(
+                1,
+                "run_test",
+                Some("gwc_test".to_string()),
+                "cfg_test",
+                RedactionMode::HashedText,
+            ),
+            "turn_test",
+            "reset account access",
+            true,
+            CallerTurnEventMetadata {
+                asr_session_id: Some("asr_test".to_string()),
+                asr_session_ids: vec!["asr_test".to_string(), "asr_next".to_string()],
+                utterance_id: Some("utt_test".to_string()),
+                utterance_ids: vec!["utt_test".to_string(), "utt_next".to_string()],
+                confidence: Some(0.81),
+                transcript_event_count: 2,
+                coalesced_turn_ids: vec!["turn_test".to_string(), "turn_next".to_string()],
+            },
+        );
+        assert_eq!(event.payload["asr_session_id"], "asr_test");
+        assert_eq!(event.payload["asr_session_ids"][0], "asr_test");
+        assert_eq!(event.payload["asr_session_ids"][1], "asr_next");
+        assert_eq!(event.payload["utterance_id"], "utt_test");
+        assert_eq!(event.payload["utterance_ids"][0], "utt_test");
+        assert_eq!(event.payload["utterance_ids"][1], "utt_next");
+        assert_eq!(event.payload["transcript_event_count"], 2);
+        assert_eq!(event.payload["coalesced_turn_count"], 2);
+        assert_eq!(event.payload["transcript_text_included"], false);
+        assert_eq!(event.payload["text_hash_algorithm"], "sha256");
+        assert_eq!(
+            event.payload["text_sha256"]
+                .as_str()
+                .expect("hash should be string")
+                .len(),
+            64
+        );
         assert!(!event.payload.contains_key("text"));
     }
 
