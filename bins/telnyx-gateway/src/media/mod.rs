@@ -3418,6 +3418,7 @@ async fn record_transcript_events(
 ) -> TranscriptRecordOutcome {
     let mut guard = state.write().await;
     let include_transcript_text = guard.quality.config.logging.include_transcript_text;
+    let redaction_mode = guard.quality.config.logging.redaction_mode;
     let live_echo_config = guard.quality.config.echo_suppression.clone();
     let echo_config = context.echo_config.unwrap_or(&live_echo_config);
     let mut reset_requested = false;
@@ -3570,7 +3571,9 @@ async fn record_transcript_events(
             event: event.event.clone(),
             turn_id,
         });
-        let transcript_text = include_transcript_text.then_some(text.as_str());
+        let transcript_text =
+            transcript_plaintext_included(redaction_mode, include_transcript_text)
+                .then_some(text.as_str());
         tracing::info!(
             gateway_call_id,
             call_control_id = call_control_id.as_deref(),
