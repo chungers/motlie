@@ -220,6 +220,20 @@ async fn run_selected_asr(
         .await;
     }
 
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    if bundle_id == "sherpa_onnx_streaming_zipformer_en_kroko_2025" {
+        return run_streaming_asr(
+            context,
+            crate::runner::support::start_options(context, prepared),
+            i16_audio,
+            streaming_transcription_params(params),
+            streaming_chunk_ms,
+            iteration_config,
+            motlie_models::asr::sherpa_onnx_streaming_en_kroko_2025::start_typed,
+        )
+        .await;
+    }
+
     #[cfg(feature = "model-moonshine-streaming")]
     if bundle_id == "moonshine_streaming_en" {
         return run_streaming_asr(

@@ -721,6 +721,28 @@ max_wall_time_secs = 900
 cpu_depth_allowed = ["smoke"]
 
 [[cells]]
+id = "sherpa_onnx_streaming_zipformer_en_kroko_2025__asr_short_transcription__smoke__hf_default"
+bundle_id = "sherpa_onnx_streaming_zipformer_en_kroko_2025"
+scenario = "asr_short_transcription"
+capability = "asr"
+depth = "smoke"
+model_family = "sherpa_onnx"
+checkpoint_format = "onnx"
+quantization = "default"
+backend = "sherpa_onnx"
+features = ["model-sherpa-onnx-streaming"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "sherpa-onnx-cuda"]
+"cuda-workstation" = ["cuda", "sherpa-onnx-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.onnx"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
 id = "piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default"
 bundle_id = "piper_en_us_ljspeech_medium"
 scenario = "tts_synthesis_smoke"
