@@ -432,6 +432,63 @@ fn render_llm_accelerator_comparison(out: &mut String, records: &[ResultRecord])
     render_llm_throughput(out, &llm_records);
     out.push_str("\n### Backend-family viability\n\n");
     render_llm_viability(out, &llm_records);
+    out.push_str("\n### Build provenance\n\n");
+    render_llm_provenance(out, &llm_records);
+}
+
+/// Build-SHA provenance per accelerator, from `identity.git_sha` of the records
+/// whose numbers feed the tables above (on-target passing cells). Surfaces pin
+/// mismatch honestly: an accelerator whose SHA set differs from the others is
+/// prior-pin data. Fully data-driven — no pin is hardcoded.
+fn render_llm_provenance(out: &mut String, llm_records: &[&ResultRecord]) {
+    out.push_str(
+        "Distinct build SHAs (`identity.git_sha`) of the on-target passing records backing the \
+         numbers above, per accelerator. An accelerator whose SHA set differs from the others is \
+         **prior-pin** data (pin mismatch — confirmatory only, not a fresh re-run).\n\n",
+    );
+    out.push_str("| accelerator | build SHAs |\n|---|---|\n");
+
+    let mut by_accel: BTreeMap<&'static str, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for record in llm_records {
+        if record.coverage.terminal_outcome != TerminalOutcome::Passed
+            || record.coverage.resolved_accelerator != record.coverage.requested_accelerator
+        {
+            continue;
+        }
+        let accelerator = record.coverage.requested_accelerator.as_str();
+        if !COMPARISON_ACCELERATORS.contains(&accelerator) {
+            continue;
+        }
+        let sha = record
+            .identity
+            .git_sha
+            .as_deref()
+            .map(short_sha)
+            .unwrap_or_else(|| "unknown".to_owned());
+        by_accel.entry(accelerator).or_default().insert(sha);
+    }
+
+    if by_accel.is_empty() {
+        out.push_str("| `none` | — |\n");
+        return;
+    }
+    for accelerator in COMPARISON_ACCELERATORS {
+        let shas = by_accel.get(accelerator);
+        let rendered = shas
+            .filter(|set| !set.is_empty())
+            .map(|set| {
+                set.iter()
+                    .map(|sha| format!("`{sha}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "—".to_owned());
+        out.push_str(&format!("| `{accelerator}` | {rendered} |\n"));
+    }
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(8).collect()
 }
 
 /// Decode throughput (tok/s) and TTFT (ms), one row per LLM bundle, pivoted by
@@ -1234,6 +1291,37 @@ mod tests {
         assert!(markdown.contains("Backend-family viability"));
         assert!(markdown.contains("| mistralrs/HF | `cuda` | 1 | 0 | 0 | 1 | 0 | — |"));
         assert!(markdown.contains("| llama.cpp/GGUF | `cuda` | 1 | 1 | 1 | 0 | 0 | 95.2 |"));
+    }
+
+    #[test]
+    fn llm_accelerator_comparison_marks_prior_pin_provenance() {
+        let mut cpu = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Cpu,
+            Some(14.3),
+            Some(16000.0),
+        );
+        cpu.identity.git_sha = Some("e8f27b6e12c325f257aefa0e1f4714cce630330f".to_owned());
+
+        // Metal data from a prior #399-cycle pin — different sha.
+        let mut metal = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Metal,
+            Some(64.5),
+            Some(774.0),
+        );
+        metal.identity.git_sha = Some("874c9f69abcdef0123456789".to_owned());
+
+        let mut markdown = String::new();
+        render_llm_accelerator_comparison(&mut markdown, &[cpu, metal]);
+
+        assert!(markdown.contains("Build provenance"));
+        assert!(markdown.contains("| `cpu` | `e8f27b6e` |"));
+        assert!(markdown.contains("| `metal` | `874c9f69` |"));
+        // cuda had no records -> dash.
+        assert!(markdown.contains("| `cuda` | — |"));
     }
 
     #[test]
