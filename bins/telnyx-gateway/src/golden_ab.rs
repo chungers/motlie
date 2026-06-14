@@ -1134,7 +1134,7 @@ async fn start_qwen3_tts(
     artifact_root: &Path,
     allow_download: bool,
 ) -> anyhow::Result<motlie_model_qwen3_tts_cpp::Qwen3TtsCppHandle> {
-    match motlie_models::tts::qwen3_tts_cpp::start_typed(local_only_options(artifact_root)).await {
+    match motlie_models::tts::qwen3_tts_cpp_0_6b::start_typed(local_only_options(artifact_root)).await {
         Ok(handle) => Ok(handle),
         Err(err) if allow_download && missing_local_artifacts(&err) => {
             tracing::info!(
@@ -1143,7 +1143,7 @@ async fn start_qwen3_tts(
                 "downloading Qwen3-TTS artifacts"
             );
             download_qwen3_tts_artifacts(artifact_root)?;
-            motlie_models::tts::qwen3_tts_cpp::start_typed(local_only_options(artifact_root))
+            motlie_models::tts::qwen3_tts_cpp_0_6b::start_typed(local_only_options(artifact_root))
                 .await
                 .map_err(anyhow::Error::from)
                 .context("start Qwen3-TTS after downloading artifacts")
@@ -1192,7 +1192,7 @@ fn download_kokoro_artifacts(artifact_root: &Path) -> anyhow::Result<()> {
 #[cfg(feature = "qwen3-tts-cpp")]
 fn download_qwen3_tts_artifacts(artifact_root: &Path) -> anyhow::Result<()> {
     let catalog = motlie_models::Catalog::with_defaults();
-    let bundle_id = motlie_models::tts::qwen3_tts_cpp::descriptor().id;
+    let bundle_id = motlie_models::tts::qwen3_tts_cpp_0_6b::descriptor().id;
     motlie_models::download_bundle_artifacts(&catalog, &bundle_id, artifact_root)
         .map(|_| ())
         .map_err(anyhow::Error::from)

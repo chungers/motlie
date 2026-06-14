@@ -230,9 +230,9 @@ impl SherpaAsrArtifact {
     #[cfg(feature = "sherpa")]
     fn asr_model(self) -> motlie_models::AsrModels {
         match self {
-            Self::ZipformerEn20230626 => motlie_models::AsrModels::SherpaOnnxStreamingEn,
+            Self::ZipformerEn20230626 => motlie_models::AsrModels::SherpaOnnxStreamingZipformerEn,
             Self::ZipformerEnKroko20250806 => {
-                motlie_models::AsrModels::SherpaOnnxStreamingEnKroko2025
+                motlie_models::AsrModels::SherpaOnnxStreamingZipformerEnKroko2025
             }
         }
     }
@@ -607,10 +607,10 @@ async fn start_sherpa_artifact(
 ) -> Result<motlie_model_sherpa_onnx::SherpaOnnxHandle, ModelError> {
     match artifact {
         SherpaAsrArtifact::ZipformerEn20230626 => {
-            motlie_models::asr::sherpa_onnx_streaming_en::start_typed(options).await
+            motlie_models::asr::sherpa_onnx_streaming_zipformer_en::start_typed(options).await
         }
         SherpaAsrArtifact::ZipformerEnKroko20250806 => {
-            motlie_models::asr::sherpa_onnx_streaming_en_kroko_2025::start_typed(options).await
+            motlie_models::asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::start_typed(options).await
         }
     }
 }

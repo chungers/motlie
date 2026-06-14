@@ -111,7 +111,7 @@ pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
 }
 
 pub fn bundle() -> crate::CuratedBundle {
-    crate::CuratedBundle::GoogleGemma300m
+    crate::CuratedBundle::EmbeddingGemma300m
 }
 
 pub async fn start(options: StartOptions) -> Result<MistralEmbeddingHandle, ModelError> {

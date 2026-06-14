@@ -373,15 +373,15 @@ pub enum CuratedBundle {
     #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
     Gemma4_12B_QatQ4_0_Gguf,
     #[cfg(feature = "model-google-gemma-300m")]
-    GoogleGemma300m,
+    EmbeddingGemma300m,
     #[cfg(feature = "model-qwen3-embedding-06b")]
     Qwen3Embedding06B,
     #[cfg(feature = "model-whisper-base-en")]
     WhisperBaseEn,
     #[cfg(feature = "model-sherpa-onnx-streaming")]
-    SherpaOnnxStreamingEn,
+    SherpaOnnxStreamingZipformerEn,
     #[cfg(feature = "model-sherpa-onnx-streaming")]
-    SherpaOnnxStreamingEnKroko2025,
+    SherpaOnnxStreamingZipformerEnKroko2025,
     #[cfg(feature = "model-moonshine-streaming")]
     MoonshineStreamingEn,
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -449,15 +449,15 @@ impl CuratedBundle {
             #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
             Self::Gemma4_12B_QatQ4_0_Gguf => "gemma4_12b_qat_q4_0_gguf",
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => "embeddinggemma_300m",
+            Self::EmbeddingGemma300m => "embeddinggemma_300m",
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => "qwen3_embedding_06b",
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => "whisper_base_en",
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn => "sherpa_onnx_streaming_zipformer_en",
+            Self::SherpaOnnxStreamingZipformerEn => "sherpa_onnx_streaming_zipformer_en",
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025 => "sherpa_onnx_streaming_zipformer_en_kroko_2025",
+            Self::SherpaOnnxStreamingZipformerEnKroko2025 => "sherpa_onnx_streaming_zipformer_en_kroko_2025",
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => "moonshine_streaming_en",
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -492,16 +492,16 @@ impl CuratedBundle {
             #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
             Self::Gemma4_12B_QatQ4_0_Gguf => chat::gemma4_12b_qat_q4_0_gguf::descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => embeddings::google_gemma_300m::descriptor(),
+            Self::EmbeddingGemma300m => embeddings::embeddinggemma_300m::descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => embeddings::qwen3_embedding_06b::descriptor(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => asr::whisper_base_en::descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::descriptor(),
+            Self::SherpaOnnxStreamingZipformerEn => asr::sherpa_onnx_streaming_zipformer_en::descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025 => {
-                asr::sherpa_onnx_streaming_en_kroko_2025::descriptor()
+            Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
+                asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::descriptor()
             }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::descriptor(),
@@ -510,7 +510,7 @@ impl CuratedBundle {
             #[cfg(feature = "model-kokoro-82m")]
             Self::Kokoro82m => tts::kokoro_82m::descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::descriptor(),
+            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp_0_6b::descriptor(),
             _ => unreachable!("no curated bundle variants are enabled"),
         }
     }
@@ -560,9 +560,9 @@ impl CuratedBundle {
                 .await
                 .map(CuratedHandle::Gemma4_12B_QatQ4_0_Gguf),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => embeddings::google_gemma_300m::start(options)
+            Self::EmbeddingGemma300m => embeddings::embeddinggemma_300m::start(options)
                 .await
-                .map(CuratedHandle::GoogleGemma300m),
+                .map(CuratedHandle::EmbeddingGemma300m),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => embeddings::qwen3_embedding_06b::start(options)
                 .await
@@ -572,14 +572,14 @@ impl CuratedBundle {
                 .await
                 .map(CuratedHandle::WhisperBaseEn),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::start_typed(options)
+            Self::SherpaOnnxStreamingZipformerEn => asr::sherpa_onnx_streaming_zipformer_en::start_typed(options)
                 .await
-                .map(CuratedHandle::SherpaOnnxStreamingEn),
+                .map(CuratedHandle::SherpaOnnxStreamingZipformerEn),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025 => {
-                asr::sherpa_onnx_streaming_en_kroko_2025::start_typed(options)
+            Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
+                asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::start_typed(options)
                     .await
-                    .map(CuratedHandle::SherpaOnnxStreamingEnKroko2025)
+                    .map(CuratedHandle::SherpaOnnxStreamingZipformerEnKroko2025)
             }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::start_typed(options)
@@ -594,7 +594,7 @@ impl CuratedBundle {
                 .await
                 .map(CuratedHandle::Kokoro82m),
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::start_typed(options)
+            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp_0_6b::start_typed(options)
                 .await
                 .map(CuratedHandle::Qwen3TtsCpp0_6B),
             _ => Err(ModelError::InvalidConfiguration(
@@ -625,15 +625,15 @@ pub enum CuratedHandle {
     #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
     Gemma4_12B_QatQ4_0_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-google-gemma-300m")]
-    GoogleGemma300m(MistralEmbeddingHandle),
+    EmbeddingGemma300m(MistralEmbeddingHandle),
     #[cfg(feature = "model-qwen3-embedding-06b")]
     Qwen3Embedding06B(MistralEmbeddingHandle),
     #[cfg(feature = "model-whisper-base-en")]
     WhisperBaseEn(WhisperCppHandle),
     #[cfg(feature = "model-sherpa-onnx-streaming")]
-    SherpaOnnxStreamingEn(SherpaOnnxHandle),
+    SherpaOnnxStreamingZipformerEn(SherpaOnnxHandle),
     #[cfg(feature = "model-sherpa-onnx-streaming")]
-    SherpaOnnxStreamingEnKroko2025(SherpaOnnxHandle),
+    SherpaOnnxStreamingZipformerEnKroko2025(SherpaOnnxHandle),
     #[cfg(feature = "model-moonshine-streaming")]
     MoonshineStreamingEn(MoonshineHandle),
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -672,15 +672,15 @@ impl BundleHandle for CuratedHandle {
             #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
             Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.descriptor(),
+            Self::EmbeddingGemma300m(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.descriptor(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.descriptor(),
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.descriptor(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.descriptor(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -715,15 +715,15 @@ impl BundleHandle for CuratedHandle {
             #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
             Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.capabilities(),
+            Self::EmbeddingGemma300m(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.capabilities(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.capabilities(),
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.capabilities(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.capabilities(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -758,15 +758,15 @@ impl BundleHandle for CuratedHandle {
             #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
             Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.metric_snapshot(),
+            Self::EmbeddingGemma300m(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.metric_snapshot(),
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.metric_snapshot(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -801,15 +801,15 @@ impl BundleHandle for CuratedHandle {
             #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
             Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.accelerator_observation(),
+            Self::EmbeddingGemma300m(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.accelerator_observation(),
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.accelerator_observation(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -874,7 +874,7 @@ impl BundleHandle for CuratedHandle {
         #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(_) => Ok(self),
+            Self::EmbeddingGemma300m(_) => Ok(self),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(_) => Ok(self),
             _ => Err(ModelError::UnsupportedCapability(
@@ -904,15 +904,15 @@ impl BundleHandle for CuratedHandle {
             #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
             Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.shutdown().await,
+            Self::EmbeddingGemma300m(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.shutdown().await,
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.shutdown().await,
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.shutdown().await,
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.shutdown().await,
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -992,7 +992,7 @@ impl EmbeddingModel for CuratedHandle {
         #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.embed(request).await,
+            Self::EmbeddingGemma300m(handle) => handle.embed(request).await,
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.embed(request).await,
             _ => UnsupportedEmbeddings.embed(request).await,
@@ -1683,16 +1683,16 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
         "gemma4_12b_qat_q4_0_gguf" => Some(CuratedBundle::Gemma4_12B_QatQ4_0_Gguf),
         #[cfg(feature = "model-google-gemma-300m")]
-        "embeddinggemma_300m" => Some(CuratedBundle::GoogleGemma300m),
+        "embeddinggemma_300m" => Some(CuratedBundle::EmbeddingGemma300m),
         #[cfg(feature = "model-qwen3-embedding-06b")]
         "qwen3_embedding_06b" => Some(CuratedBundle::Qwen3Embedding06B),
         #[cfg(feature = "model-whisper-base-en")]
         "whisper_base_en" => Some(CuratedBundle::WhisperBaseEn),
         #[cfg(feature = "model-sherpa-onnx-streaming")]
-        "sherpa_onnx_streaming_zipformer_en" => Some(CuratedBundle::SherpaOnnxStreamingEn),
+        "sherpa_onnx_streaming_zipformer_en" => Some(CuratedBundle::SherpaOnnxStreamingZipformerEn),
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         "sherpa_onnx_streaming_zipformer_en_kroko_2025" => {
-            Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)
+            Some(CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025)
         }
         #[cfg(feature = "model-moonshine-streaming")]
         "moonshine_streaming_en" => Some(CuratedBundle::MoonshineStreamingEn),
@@ -1746,7 +1746,7 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         }
         #[cfg(feature = "model-google-gemma-300m")]
         ("embeddinggemma_300m", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
-            Some(CuratedBundle::GoogleGemma300m)
+            Some(CuratedBundle::EmbeddingGemma300m)
         }
         #[cfg(feature = "model-qwen3-embedding-06b")]
         ("qwen3_embedding_06b", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
@@ -1758,14 +1758,14 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         }
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         ("sherpa_onnx_streaming_zipformer_en", BackendKind::SherpaOnnx, CheckpointFormat::Onnx) => {
-            Some(CuratedBundle::SherpaOnnxStreamingEn)
+            Some(CuratedBundle::SherpaOnnxStreamingZipformerEn)
         }
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         (
             "sherpa_onnx_streaming_zipformer_en_kroko_2025",
             BackendKind::SherpaOnnx,
             CheckpointFormat::Onnx,
-        ) => Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025),
+        ) => Some(CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025),
         #[cfg(feature = "model-moonshine-streaming")]
         ("moonshine_streaming_en", BackendKind::Ort, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::MoonshineStreamingEn)
@@ -1805,7 +1805,7 @@ impl Catalog {
         #[allow(unused_mut)]
         let mut catalog = Self::new();
         #[cfg(feature = "model-google-gemma-300m")]
-        embeddings::google_gemma_300m::register(&mut catalog);
+        embeddings::embeddinggemma_300m::register(&mut catalog);
         #[cfg(feature = "model-qwen3-embedding-06b")]
         embeddings::qwen3_embedding_06b::register(&mut catalog);
         #[cfg(feature = "model-qwen3-4b")]
@@ -1831,13 +1831,13 @@ impl Catalog {
         #[cfg(feature = "model-kokoro-82m")]
         tts::kokoro_82m::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-cpp")]
-        tts::qwen3_tts_cpp::register(&mut catalog);
+        tts::qwen3_tts_cpp_0_6b::register(&mut catalog);
         #[cfg(feature = "model-moonshine-streaming")]
         asr::moonshine_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
-        asr::sherpa_onnx_streaming_en::register(&mut catalog);
+        asr::sherpa_onnx_streaming_zipformer_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
-        asr::sherpa_onnx_streaming_en_kroko_2025::register(&mut catalog);
+        asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::register(&mut catalog);
         #[cfg(feature = "model-whisper-base-en")]
         asr::whisper_base_en::register(&mut catalog);
         catalog
@@ -2000,15 +2000,15 @@ mod tests {
             #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
             CuratedBundle::Gemma4_12B_QatQ4_0_Gguf,
             #[cfg(feature = "model-google-gemma-300m")]
-            CuratedBundle::GoogleGemma300m,
+            CuratedBundle::EmbeddingGemma300m,
             #[cfg(feature = "model-qwen3-embedding-06b")]
             CuratedBundle::Qwen3Embedding06B,
             #[cfg(feature = "model-whisper-base-en")]
             CuratedBundle::WhisperBaseEn,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            CuratedBundle::SherpaOnnxStreamingEn,
+            CuratedBundle::SherpaOnnxStreamingZipformerEn,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            CuratedBundle::SherpaOnnxStreamingEnKroko2025,
+            CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025,
             #[cfg(feature = "model-moonshine-streaming")]
             CuratedBundle::MoonshineStreamingEn,
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -2305,7 +2305,7 @@ mod tests {
                 .parse()
                 .expect("known embedding selector should parse");
 
-            assert_eq!(model, EmbeddingModels::GoogleGemma300m);
+            assert_eq!(model, EmbeddingModels::EmbeddingGemma300m);
             assert_eq!(model.to_string(), "google/embeddinggemma_300m");
         }
 
@@ -2330,7 +2330,7 @@ mod tests {
 
             assert_eq!(
                 selector,
-                ModelSelector::Embedding(EmbeddingModels::GoogleGemma300m)
+                ModelSelector::Embedding(EmbeddingModels::EmbeddingGemma300m)
             );
             assert_eq!(selector.to_string(), "embedding:google/embeddinggemma_300m");
         }
@@ -2387,7 +2387,7 @@ mod tests {
         {
             assert_eq!(
                 EmbeddingModels::only_enabled().expect("single gemma build should succeed"),
-                EmbeddingModels::GoogleGemma300m
+                EmbeddingModels::EmbeddingGemma300m
             );
         }
 
@@ -2644,7 +2644,7 @@ mod tests {
 
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         {
-            let descriptor = crate::asr::sherpa_onnx_streaming_en::descriptor();
+            let descriptor = crate::asr::sherpa_onnx_streaming_zipformer_en::descriptor();
             assert_eq!(
                 descriptor.capabilities.descriptors(),
                 &[CapabilityDescriptor::transcription_stream_partial()]
@@ -2671,7 +2671,7 @@ mod tests {
 
         #[cfg(feature = "model-qwen3-tts-cpp")]
         {
-            let descriptor = crate::tts::qwen3_tts_cpp::descriptor();
+            let descriptor = crate::tts::qwen3_tts_cpp_0_6b::descriptor();
             assert_eq!(
                 descriptor.capabilities.descriptors(),
                 &[
