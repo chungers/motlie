@@ -200,6 +200,9 @@ fn render_records_markdown(
     out.push_str("\n## Platform Notes\n\n");
     render_platform_notes(&mut out, records);
 
+    out.push_str("\n## LLM Accelerator Comparison\n\n");
+    render_llm_accelerator_comparison(&mut out, records);
+
     out.push_str("\n## Per-Cell Coverage\n\n");
     out.push_str("| cell | host | arch | run | bundle | capability | depth | profile | requested | resolved | outcome | reason |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for record in records {
@@ -374,6 +377,273 @@ fn render_platform_notes(out: &mut String, records: &[ResultRecord]) {
     } else {
         out.push_str("- No platform-specific caveats detected in the input records.\n");
     }
+}
+
+/// LLM bundles run through `llama.cpp`/GGUF or `mistralrs`/HF; everything else
+/// (ASR/TTS/embeddings) is excluded from the accelerator comparison.
+fn is_llm_record(record: &ResultRecord) -> bool {
+    matches!(record.coverage.backend.as_str(), "llama_cpp" | "mistralrs")
+        && matches!(
+            record.coverage.capability.as_str(),
+            "chat" | "perf" | "tool_use"
+        )
+}
+
+fn backend_family_label(backend: &str) -> &'static str {
+    match backend {
+        "llama_cpp" => "llama.cpp/GGUF",
+        "mistralrs" => "mistralrs/HF",
+        other => other_backend_family(other),
+    }
+}
+
+fn other_backend_family(_backend: &str) -> &'static str {
+    "other"
+}
+
+/// Accelerator axis for the comparison: the *target* the cell asked for
+/// (derived from the profile), so a backend that refuses to forward to
+/// CUDA/Metal still shows up under that column as blocked rather than vanishing.
+const COMPARISON_ACCELERATORS: [&str; 3] = ["cpu", "cuda", "metal"];
+
+#[derive(Default)]
+struct AcceleratorPerf {
+    decode_tps: Vec<f64>,
+    ttft_ms: Vec<f64>,
+}
+
+fn perf_metrics(record: &ResultRecord) -> Option<&crate::metrics::PerfPerformanceMetrics> {
+    match &record.performance.capability_metrics {
+        CapabilityPerformanceMetrics::Perf(metrics) => Some(metrics),
+        _ => None,
+    }
+}
+
+/// "LLM Accelerator Comparison": a bundle × accelerator throughput/TTFT pivot
+/// plus a backend-family viability rollup. Reproduced from records, not
+/// hand-authored.
+fn render_llm_accelerator_comparison(out: &mut String, records: &[ResultRecord]) {
+    let llm_records: Vec<&ResultRecord> = records.iter().filter(|r| is_llm_record(r)).collect();
+    if llm_records.is_empty() {
+        out.push_str("No LLM (`llama.cpp`/GGUF or `mistralrs`/HF) records in this input set.\n");
+        return;
+    }
+
+    render_llm_throughput(out, &llm_records);
+    out.push_str("\n### Backend-family viability\n\n");
+    render_llm_viability(out, &llm_records);
+    out.push_str("\n### Build provenance\n\n");
+    render_llm_provenance(out, &llm_records);
+}
+
+/// Build-SHA provenance per accelerator, from `identity.git_sha` of the records
+/// whose numbers feed the tables above (on-target passing cells). Surfaces pin
+/// mismatch honestly: an accelerator whose SHA set differs from the others is
+/// prior-pin data. Fully data-driven — no pin is hardcoded.
+fn render_llm_provenance(out: &mut String, llm_records: &[&ResultRecord]) {
+    out.push_str(
+        "Distinct build SHAs (`identity.git_sha`) of the on-target passing records backing the \
+         numbers above, per accelerator. An accelerator whose SHA set differs from the others is \
+         **prior-pin** data (pin mismatch — confirmatory only, not a fresh re-run).\n\n",
+    );
+    out.push_str("| accelerator | build SHAs |\n|---|---|\n");
+
+    let mut by_accel: BTreeMap<&'static str, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for record in llm_records {
+        if record.coverage.terminal_outcome != TerminalOutcome::Passed
+            || record.coverage.resolved_accelerator != record.coverage.requested_accelerator
+        {
+            continue;
+        }
+        let accelerator = record.coverage.requested_accelerator.as_str();
+        if !COMPARISON_ACCELERATORS.contains(&accelerator) {
+            continue;
+        }
+        let sha = record
+            .identity
+            .git_sha
+            .as_deref()
+            .map(short_sha)
+            .unwrap_or_else(|| "unknown".to_owned());
+        by_accel.entry(accelerator).or_default().insert(sha);
+    }
+
+    if by_accel.is_empty() {
+        out.push_str("| `none` | — |\n");
+        return;
+    }
+    for accelerator in COMPARISON_ACCELERATORS {
+        let shas = by_accel.get(accelerator);
+        let rendered = shas
+            .filter(|set| !set.is_empty())
+            .map(|set| {
+                set.iter()
+                    .map(|sha| format!("`{sha}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "—".to_owned());
+        out.push_str(&format!("| `{accelerator}` | {rendered} |\n"));
+    }
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(8).collect()
+}
+
+/// Decode throughput (tok/s) and TTFT (ms), one row per LLM bundle, pivoted by
+/// the cpu/cuda/metal target. Numbers come only from passing `perf` cells; a
+/// `—` means no passing perf metric for that bundle × accelerator (see the
+/// viability rollup below for whether the path was blocked vs simply not run).
+fn render_llm_throughput(out: &mut String, llm_records: &[&ResultRecord]) {
+    out.push_str(
+        "Decode throughput (tok/s) and TTFT (ms) per LLM bundle, by target accelerator. \
+         Values are from passing `perf` cells; `—` = no passing perf metric for that pairing.\n\n",
+    );
+    out.push_str(
+        "| bundle | family | cpu tok/s | cpu ttft ms | cuda tok/s | cuda ttft ms | metal tok/s | metal ttft ms |\n",
+    );
+    out.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
+
+    // (bundle, family) -> accelerator -> accumulated perf metrics.
+    let mut rows: BTreeMap<(String, &'static str), BTreeMap<&'static str, AcceleratorPerf>> =
+        BTreeMap::new();
+    for record in llm_records {
+        if record.coverage.terminal_outcome != TerminalOutcome::Passed {
+            continue;
+        }
+        // Only count a cell under an accelerator column if it actually ran there.
+        // Blocked/fallback cells leave `resolved_accelerator` echoing the request,
+        // so guard on resolved == requested to avoid e.g. a silent cpu-fallback
+        // pass landing a cpu-speed number in the cuda column.
+        if record.coverage.resolved_accelerator != record.coverage.requested_accelerator {
+            continue;
+        }
+        let Some(metrics) = perf_metrics(record) else {
+            continue;
+        };
+        let accelerator = record.coverage.requested_accelerator.as_str();
+        if !COMPARISON_ACCELERATORS.contains(&accelerator) {
+            continue;
+        }
+        let family = backend_family_label(&record.coverage.backend);
+        let entry = rows
+            .entry((record.coverage.bundle_id.clone(), family))
+            .or_default()
+            .entry(accelerator)
+            .or_default();
+        if let Some(tps) = metrics.mean_decode_tokens_per_second {
+            entry.decode_tps.push(tps);
+        }
+        if let Some(ttft) = metrics.mean_ttft_first_token_ms {
+            entry.ttft_ms.push(ttft);
+        }
+    }
+
+    if rows.is_empty() {
+        out.push_str("| `none` | `none` | — | — | — | — | — | — |\n");
+        return;
+    }
+
+    for ((bundle, family), per_accel) in &rows {
+        out.push_str(&format!("| `{bundle}` | {family} |"));
+        for accelerator in COMPARISON_ACCELERATORS {
+            let cell = per_accel.get(accelerator);
+            let tps = cell.and_then(|c| mean_f64(&c.decode_tps));
+            let ttft = cell.and_then(|c| mean_f64(&c.ttft_ms));
+            out.push_str(&format!(
+                " {} | {} |",
+                format_decimal(tps, 1),
+                format_decimal(ttft, 0)
+            ));
+        }
+        out.push('\n');
+    }
+}
+
+/// Backend-family × accelerator rollup: how many LLM cells resolved to the
+/// requested accelerator and how the outcomes split. Surfaces "GGUF runs
+/// everywhere; mistralrs does not forward to CUDA/Metal and is unusably slow on
+/// CPU".
+fn render_llm_viability(out: &mut String, llm_records: &[&ResultRecord]) {
+    out.push_str(
+        "`on_target` = passed cells that actually resolved to the requested accelerator (a \
+         passed cell that silently fell back to CPU is counted in `passed` but not \
+         `on_target`). `mean decode tok/s` is averaged over on-target passing `perf` cells.\n\n",
+    );
+    out.push_str(
+        "| family | accelerator | cells | passed | on_target | blocked | failed | mean decode tok/s |\n",
+    );
+    out.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
+
+    #[derive(Default)]
+    struct Viability {
+        cells: u64,
+        passed: u64,
+        on_target: u64,
+        blocked: u64,
+        failed: u64,
+        decode_tps: Vec<f64>,
+    }
+
+    let mut rollup: BTreeMap<(&'static str, &'static str), Viability> = BTreeMap::new();
+    for record in llm_records {
+        let accelerator = record.coverage.requested_accelerator.as_str();
+        if !COMPARISON_ACCELERATORS.contains(&accelerator) {
+            continue;
+        }
+        let on_target =
+            record.coverage.resolved_accelerator == record.coverage.requested_accelerator;
+        let family = backend_family_label(&record.coverage.backend);
+        let entry = rollup.entry((family, accelerator)).or_default();
+        entry.cells += 1;
+        match record.coverage.terminal_outcome {
+            TerminalOutcome::Passed => {
+                entry.passed += 1;
+                if on_target {
+                    entry.on_target += 1;
+                    if let Some(tps) =
+                        perf_metrics(record).and_then(|m| m.mean_decode_tokens_per_second)
+                    {
+                        entry.decode_tps.push(tps);
+                    }
+                }
+            }
+            TerminalOutcome::Blocked => entry.blocked += 1,
+            TerminalOutcome::Failed => entry.failed += 1,
+            TerminalOutcome::Skipped => {}
+        }
+    }
+
+    if rollup.is_empty() {
+        out.push_str("| `none` | `none` | 0 | 0 | 0 | 0 | 0 | — |\n");
+        return;
+    }
+
+    for ((family, accelerator), v) in &rollup {
+        out.push_str(&format!(
+            "| {family} | `{accelerator}` | {} | {} | {} | {} | {} | {} |\n",
+            v.cells,
+            v.passed,
+            v.on_target,
+            v.blocked,
+            v.failed,
+            format_decimal(mean_f64(&v.decode_tps), 1)
+        ));
+    }
+}
+
+fn mean_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn format_decimal(value: Option<f64>, places: usize) -> String {
+    value
+        .map(|value| format!("{value:.places$}"))
+        .unwrap_or_else(|| "—".to_owned())
 }
 
 fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
@@ -834,7 +1104,8 @@ fn take_value(args: &[String], index: &mut usize, flag: &str) -> Result<String> 
 mod tests {
     use super::*;
     use crate::metrics::{
-        AsrPerformanceMetrics, CapabilityPerformanceMetrics, TtsPerformanceMetrics,
+        AsrPerformanceMetrics, CapabilityPerformanceMetrics, PerfPerformanceMetrics,
+        TtsPerformanceMetrics,
     };
     use crate::platform::PlatformSnapshot;
     use crate::result::{
@@ -961,6 +1232,108 @@ mod tests {
         assert!(!markdown.contains("measured_null"));
         assert!(!markdown.contains("unmeasured"));
         assert!(markdown.contains("measured_value"));
+    }
+
+    fn llm_perf_record(
+        bundle: &str,
+        backend: &str,
+        accelerator: AcceleratorClass,
+        decode_tps: Option<f64>,
+        ttft_ms: Option<f64>,
+    ) -> ResultRecord {
+        let mut record = test_record();
+        record.coverage.bundle_id = bundle.to_owned();
+        record.coverage.cell_id = format!("{bundle}__perf");
+        record.coverage.capability = "perf".to_owned();
+        record.coverage.backend = backend.to_owned();
+        record.coverage.requested_accelerator = accelerator;
+        record.coverage.resolved_accelerator = accelerator;
+        record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::Perf(PerfPerformanceMetrics {
+                mean_decode_tokens_per_second: decode_tps,
+                mean_ttft_first_token_ms: ttft_ms,
+                ..Default::default()
+            });
+        record
+    }
+
+    #[test]
+    fn llm_accelerator_comparison_pivots_throughput_and_viability() {
+        let cpu = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Cpu,
+            Some(11.5),
+            Some(540.0),
+        );
+        let cuda = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Cuda,
+            Some(95.2),
+            Some(120.0),
+        );
+
+        // mistralrs requested CUDA but did not forward — blocked, no metric.
+        let mut mistral_cuda =
+            llm_perf_record("qwen3_4b", "mistralrs", AcceleratorClass::Cuda, None, None);
+        mistral_cuda.coverage.resolved_accelerator = AcceleratorClass::Cpu;
+        mistral_cuda.coverage.terminal_outcome = TerminalOutcome::Blocked;
+        mistral_cuda.coverage.reason = Some(OutcomeReason::AcceleratorMismatch);
+
+        let mut markdown = String::new();
+        render_llm_accelerator_comparison(&mut markdown, &[cpu, cuda, mistral_cuda]);
+
+        // Throughput pivot: one bundle row carries both cpu and cuda numbers.
+        assert!(markdown.contains("`qwen3_4b_gguf` | llama.cpp/GGUF | 11.5 | 540 | 95.2 | 120 |"));
+        // Viability rollup: mistralrs/HF on cuda is blocked, never on-target.
+        // cols: cells | passed | on_target | blocked | failed | mean tok/s
+        assert!(markdown.contains("Backend-family viability"));
+        assert!(markdown.contains("| mistralrs/HF | `cuda` | 1 | 0 | 0 | 1 | 0 | — |"));
+        assert!(markdown.contains("| llama.cpp/GGUF | `cuda` | 1 | 1 | 1 | 0 | 0 | 95.2 |"));
+    }
+
+    #[test]
+    fn llm_accelerator_comparison_marks_prior_pin_provenance() {
+        let mut cpu = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Cpu,
+            Some(14.3),
+            Some(16000.0),
+        );
+        cpu.identity.git_sha = Some("e8f27b6e12c325f257aefa0e1f4714cce630330f".to_owned());
+
+        // Metal data from a prior #399-cycle pin — different sha.
+        let mut metal = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Metal,
+            Some(64.5),
+            Some(774.0),
+        );
+        metal.identity.git_sha = Some("874c9f69abcdef0123456789".to_owned());
+
+        let mut markdown = String::new();
+        render_llm_accelerator_comparison(&mut markdown, &[cpu, metal]);
+
+        assert!(markdown.contains("Build provenance"));
+        assert!(markdown.contains("| `cpu` | `e8f27b6e` |"));
+        assert!(markdown.contains("| `metal` | `874c9f69` |"));
+        // cuda had no records -> dash.
+        assert!(markdown.contains("| `cuda` | — |"));
+    }
+
+    #[test]
+    fn llm_accelerator_comparison_handles_no_llm_records() {
+        let mut asr = test_record();
+        asr.coverage.capability = "asr".to_owned();
+        asr.coverage.backend = "whisper".to_owned();
+
+        let mut markdown = String::new();
+        render_llm_accelerator_comparison(&mut markdown, &[asr]);
+
+        assert!(markdown.contains("No LLM"));
     }
 
     #[test]
