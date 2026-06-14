@@ -272,10 +272,12 @@ async fn update_call_status(
         return;
     };
     let mut guard = state.write().await;
-    if let Some(call) = guard.call_by_control_id_mut(call_control_id) {
+    let terminal_summary_call_id = if let Some(call) = guard.call_by_control_id_mut(call_control_id)
+    {
         call.status = status;
         let terminal_reason = termination_reason(event_type, payload);
-        if matches!(status, CallStatus::Ended | CallStatus::Failed) {
+        let is_terminal = matches!(status, CallStatus::Ended | CallStatus::Failed);
+        if is_terminal {
             call.terminal_reason = terminal_reason.clone();
         }
         let timeline_message = terminal_reason
@@ -300,6 +302,12 @@ async fn update_call_status(
             terminal_reason = terminal_reason.as_deref(),
             "{message}"
         );
+        is_terminal.then(|| call.gateway_call_id.clone())
+    } else {
+        None
+    };
+    if let Some(gateway_call_id) = terminal_summary_call_id {
+        guard.emit_quality_report_summary(&gateway_call_id, "call_terminal");
     }
 }
 
