@@ -109,7 +109,7 @@ Replay a capture and compute WER without another phone call:
 
 ```sh
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
-  --artifact-root /home/dchung/artifacts/hf-cache \
+  --artifact-root "$HOME/artifacts/hf-cache" \
   replay-capture /home/dchung/telnyx-test/captures/<gateway-call-id>/<stream-id> \
   --backend sherpa \
   --reference-file /home/dchung/telnyx-test/reference.txt
@@ -127,7 +127,7 @@ Replay the golden corpus across comparable backends:
 
 ```sh
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
-  --artifact-root /home/dchung/artifacts/hf-cache \
+  --artifact-root "$HOME/artifacts/hf-cache" \
   replay-corpus bins/telnyx-gateway/corpus/asr-golden.json \
   --backend sherpa-zipformer-2023 \
   --backend sherpa-zipformer-kroko-2025 \
@@ -396,7 +396,8 @@ Artifacts are loaded from:
 
 1. `--artifact-root <path>`
 2. `MOTLIE_VOICE_ARTIFACT_ROOT`
-3. `.agents/skills/voice/artifacts/hf-cache`
+3. `$HOME/artifacts/hf-cache`, the operator convention also written as `~/artifacts/hf-cache`
+4. `.agents/skills/voice/artifacts/hf-cache` when `HOME` is unset
 
 Missing artifacts fail startup or warmup loudly. Use the curated
 `motlie-models-download` workflow or another explicit preload step before

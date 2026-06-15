@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 #[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 use std::path::Path;
 use std::path::PathBuf;
@@ -669,10 +670,20 @@ pub fn default_artifact_root(cli_root: Option<PathBuf>) -> PathBuf {
     if let Some(root) = cli_root {
         return root;
     }
-    if let Some(root) = std::env::var_os("MOTLIE_VOICE_ARTIFACT_ROOT") {
-        return PathBuf::from(root);
-    }
-    PathBuf::from(".agents/skills/voice/artifacts/hf-cache")
+    default_artifact_root_from_env(
+        std::env::var_os("MOTLIE_VOICE_ARTIFACT_ROOT"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn default_artifact_root_from_env(env_root: Option<OsString>, home: Option<OsString>) -> PathBuf {
+    env_root
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.map(PathBuf::from)
+                .map(|home| home.join("artifacts/hf-cache"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".agents/skills/voice/artifacts/hf-cache"))
 }
 
 #[cfg(test)]
@@ -684,6 +695,30 @@ mod tests {
             text: text.to_string(),
             update: motlie_model::TranscriptionUpdate::default(),
         }
+    }
+
+    #[test]
+    fn default_artifact_root_prefers_env_over_home_convention() {
+        assert_eq!(
+            default_artifact_root_from_env(Some("/env/root".into()), Some("/home/user".into())),
+            PathBuf::from("/env/root")
+        );
+    }
+
+    #[test]
+    fn default_artifact_root_uses_home_artifact_convention() {
+        assert_eq!(
+            default_artifact_root_from_env(None, Some("/home/user".into())),
+            PathBuf::from("/home/user/artifacts/hf-cache")
+        );
+    }
+
+    #[test]
+    fn default_artifact_root_falls_back_when_home_is_unset() {
+        assert_eq!(
+            default_artifact_root_from_env(None, None),
+            PathBuf::from(".agents/skills/voice/artifacts/hf-cache")
+        );
     }
 
     #[test]

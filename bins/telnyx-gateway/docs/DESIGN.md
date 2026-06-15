@@ -3989,7 +3989,7 @@ Recommended v1 defaults:
 - Sherpa ONNX Zipformer streaming ASR artifacts
 - Kokoro-82M or Piper TTS artifacts, including Kokoro incremental files when `tts.generation_mode=streaming`
 
-Use `--artifact-root <path>` when the artifacts are not under the default local cache.
+By convention, preload shared operator artifacts under `~/artifacts/hf-cache`. The gateway defaults to `$HOME/artifacts/hf-cache` unless `--artifact-root <path>` or `MOTLIE_VOICE_ARTIFACT_ROOT` overrides it.
 
 #### 8. Start the gateway with artifact root and listen address
 
@@ -3999,7 +3999,7 @@ Use `--artifact-root <path>` when the artifacts are not under the default local 
   --tui \
   --socket /tmp/motlie-telnyx-gateway.sock \
   --load ./telnyx-gateway.state.repl \
-  --artifact-root /home/dchung/artifacts/hf-cache
+  --artifact-root "$HOME/artifacts/hf-cache"
 ```
 
 The exact operator commands can evolve, but the binary should always separate:
