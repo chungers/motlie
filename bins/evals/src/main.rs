@@ -3,6 +3,7 @@ pub mod cli;
 pub mod driver;
 pub mod metrics;
 pub mod platform;
+pub mod profile;
 pub mod report;
 pub mod result;
 pub mod runner;
