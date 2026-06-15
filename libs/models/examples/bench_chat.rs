@@ -51,8 +51,10 @@ mod bench_chat_example {
         feature = "model-gemma4-12b-qat-gguf"
     ))]
     use motlie_model_llama_cpp::LlamaCppTextSpec;
-    #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
-    use motlie_model_mistral::{MistralMultimodalSpec, MistralTextSpec};
+    #[cfg(feature = "model-gemma4-e2b")]
+    use motlie_model_mistral::MistralMultimodalSpec;
+    #[cfg(feature = "model-qwen3-4b")]
+    use motlie_model_mistral::MistralTextSpec;
     use motlie_models::{
         default_artifact_root, quantization_label_gguf, quantization_label_isq, CuratedBundle,
     };

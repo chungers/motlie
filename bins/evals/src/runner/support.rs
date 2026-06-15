@@ -514,6 +514,11 @@ pub fn build_record(
                 context.runtime_flags.precision.as_deref(),
             )
         });
+    let coverage_quantization = context
+        .runtime_flags
+        .precision
+        .clone()
+        .unwrap_or_else(|| artifact_quantization.clone());
     let host_id = platform
         .host_id
         .clone()
@@ -532,7 +537,7 @@ pub fn build_record(
             &host_slug,
             &backend,
             checkpoint_format.as_deref().unwrap_or("unknown"),
-            &artifact_quantization,
+            &coverage_quantization,
             accelerator.requested_class,
             accelerator.resolved_class,
         )
@@ -621,7 +626,7 @@ fn default_coverage(
     host_slug: &str,
     backend: &str,
     checkpoint_format: &str,
-    artifact_quantization: &str,
+    coverage_quantization: &str,
     requested_accelerator: crate::result::AcceleratorClass,
     resolved_accelerator: crate::result::AcceleratorClass,
 ) -> CoverageSection {
@@ -637,7 +642,7 @@ fn default_coverage(
     );
     grouping_keys.insert("backend".to_owned(), backend.to_owned());
     grouping_keys.insert("checkpoint_format".to_owned(), checkpoint_format.to_owned());
-    grouping_keys.insert("quantization".to_owned(), artifact_quantization.to_owned());
+    grouping_keys.insert("quantization".to_owned(), coverage_quantization.to_owned());
     grouping_keys.insert("profile".to_owned(), context.profile.name.clone());
 
     CoverageSection {
@@ -649,7 +654,7 @@ fn default_coverage(
         bundle_id: prepared.bundle_id.as_str().to_owned(),
         model_family: format!("{:?}", prepared.descriptor.family),
         checkpoint_format: checkpoint_format.to_owned(),
-        quantization: artifact_quantization.to_owned(),
+        quantization: coverage_quantization.to_owned(),
         backend: backend.to_owned(),
         profile: context.profile.name.clone(),
         host_id: host_id.to_owned(),
@@ -672,7 +677,7 @@ fn artifact_quantization_label(checkpoint_format: Option<&str>, precision: Optio
     {
         precision.unwrap_or("gguf_default").to_owned()
     } else {
-        precision.unwrap_or("default").to_owned()
+        "default".to_owned()
     }
 }
 

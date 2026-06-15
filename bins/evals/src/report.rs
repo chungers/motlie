@@ -565,9 +565,9 @@ fn render_llm_throughput(out: &mut String, llm_records: &[&ResultRecord]) {
 }
 
 /// Backend-family × accelerator rollup: how many LLM cells resolved to the
-/// requested accelerator and how the outcomes split. Surfaces "GGUF runs
-/// everywhere; mistralrs does not forward to CUDA/Metal and is unusably slow on
-/// CPU".
+/// requested accelerator and how the outcomes split. This stays data-driven so
+/// backend-specific accelerator fixes show up as changed viability, not as
+/// hardcoded prose.
 fn render_llm_viability(out: &mut String, llm_records: &[&ResultRecord]) {
     out.push_str(
         "`on_target` = passed cells that actually resolved to the requested accelerator (a \
@@ -1383,22 +1383,25 @@ mod tests {
             Some(120.0),
         );
 
-        // mistralrs requested CUDA but did not forward — blocked, no metric.
-        let mut mistral_cuda =
-            llm_perf_record("qwen3_4b", "mistralrs", AcceleratorClass::Cuda, None, None);
-        mistral_cuda.coverage.resolved_accelerator = AcceleratorClass::Cpu;
-        mistral_cuda.coverage.terminal_outcome = TerminalOutcome::Blocked;
-        mistral_cuda.coverage.reason = Some(OutcomeReason::AcceleratorMismatch);
+        // mistralrs CUDA now forwards when the backend reports a CUDA observation.
+        let mistral_cuda = llm_perf_record(
+            "qwen3_4b",
+            "mistralrs",
+            AcceleratorClass::Cuda,
+            Some(47.3),
+            Some(230.0),
+        );
 
         let mut markdown = String::new();
         render_llm_accelerator_comparison(&mut markdown, &[cpu, cuda, mistral_cuda]);
 
         // Throughput pivot: one bundle row carries both cpu and cuda numbers.
         assert!(markdown.contains("`qwen3_4b_gguf` | llama.cpp/GGUF | 11.5 | 540 | 95.2 | 120 |"));
-        // Viability rollup: mistralrs/HF on cuda is blocked, never on-target.
+        // Viability rollup: mistralrs/HF CUDA is counted as on-target only after
+        // the backend observation proves it.
         // cols: cells | passed | on_target | blocked | failed | mean tok/s
         assert!(markdown.contains("Backend-family viability"));
-        assert!(markdown.contains("| mistralrs/HF | `cuda` | 1 | 0 | 0 | 1 | 0 | — |"));
+        assert!(markdown.contains("| mistralrs/HF | `cuda` | 1 | 1 | 1 | 0 | 0 | 47.3 |"));
         assert!(markdown.contains("| llama.cpp/GGUF | `cuda` | 1 | 1 | 1 | 0 | 0 | 95.2 |"));
     }
 

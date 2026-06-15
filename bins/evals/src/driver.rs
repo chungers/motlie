@@ -653,9 +653,9 @@ fn run_child_cell(
     run_command.args(["--snapshot-id", &snapshot.id]);
     run_command.args(["--cell-id", &cell.id]);
     run_command.args(["--depth", cell.depth.as_str()]);
-    let child_quantization = cell_quantization_scheme(cell)?.as_str().to_owned();
+    let artifact_quantization = cell_artifact_quantization_scheme(cell)?.as_str().to_owned();
     run_command.args(["--checkpoint-format", &cell.checkpoint_format]);
-    run_command.args(["--artifact-quantization", &child_quantization]);
+    run_command.args(["--artifact-quantization", &artifact_quantization]);
     if let Some(precision) = cell_runtime_precision(cell)? {
         run_command.arg("--precision").arg(precision);
     }
@@ -908,7 +908,7 @@ fn pre_run_record(
     profile: &str,
     platform: &PlatformSnapshot,
     accelerator: &AcceleratorSection,
-    coverage: CoverageSection,
+    mut coverage: CoverageSection,
     status: AcceptanceStatus,
     failure_reason: Option<String>,
     run_id: &str,
@@ -931,6 +931,13 @@ fn pre_run_record(
     );
 
     let coverage_quantization = coverage.quantization.clone();
+    let artifact_quantization = cell_artifact_quantization_scheme(cell)
+        .map(|scheme| scheme.as_str().to_owned())
+        .unwrap_or_else(|_| coverage_quantization.clone());
+    let accelerator = synthetic_pre_run_accelerator(accelerator);
+    let accelerator_status = synthetic_pre_run_accelerator_status(&accelerator);
+    coverage.requested_accelerator = accelerator.requested_class;
+    coverage.resolved_accelerator = accelerator.resolved_class;
 
     ResultRecord {
         schema_version: RESULT_SCHEMA_VERSION,
@@ -948,7 +955,7 @@ fn pre_run_record(
             selector: cell.selector.clone(),
             backend: Some(cell.backend.clone()),
             checkpoint_format: Some(cell.checkpoint_format.clone()),
-            artifact_quantization: Some(coverage_quantization.clone()),
+            artifact_quantization: Some(artifact_quantization),
             artifact_snapshot: snapshot.git_sha.clone(),
             artifact_patterns: cell.artifact.patterns.clone(),
             artifact_files: Vec::new(),
@@ -959,7 +966,7 @@ fn pre_run_record(
             name: profile.to_owned(),
         },
         platform,
-        accelerator: accelerator.clone(),
+        accelerator,
         runtime: RuntimeSection {
             cargo_features: cell.features_for_profile(profile),
             build_profile: None,
@@ -979,12 +986,31 @@ fn pre_run_record(
             behavior_status: status.clone(),
             performance_status: AcceptanceStatus::NotMeasured,
             resource_status: AcceptanceStatus::NotMeasured,
-            accelerator_status: accelerator::evaluate_use(accelerator),
+            accelerator_status,
             overall_status: status,
             failure_reason,
             assertions: Vec::new(),
             gates: Vec::new(),
         },
+    }
+}
+
+fn synthetic_pre_run_accelerator(accelerator: &AcceleratorSection) -> AcceleratorSection {
+    let mut accelerator = accelerator.clone();
+    if accelerator.fallback_reason == Some(OutcomeReason::BackendOffloadUnverified) {
+        accelerator.fallback_reason = None;
+        accelerator.backend_mode = Some("backend_not_started".to_owned());
+        accelerator.offload = None;
+        accelerator.use_proof_source = Some("pre_run:backend_not_started".to_owned());
+    }
+    accelerator
+}
+
+fn synthetic_pre_run_accelerator_status(accelerator: &AcceleratorSection) -> AcceptanceStatus {
+    if accelerator.use_proof_source.as_deref() == Some("pre_run:backend_not_started") {
+        AcceptanceStatus::NotMeasured
+    } else {
+        accelerator::evaluate_use(accelerator)
     }
 }
 
@@ -1317,6 +1343,18 @@ fn cell_runtime_precision(cell: &SnapshotCell) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(scheme.as_str().to_owned()))
+}
+
+fn cell_artifact_quantization_scheme(cell: &SnapshotCell) -> Result<QuantizationScheme> {
+    let scheme = cell_quantization_scheme(cell)?;
+    if matches!(
+        scheme,
+        QuantizationScheme::IsqQ4 | QuantizationScheme::IsqQ8
+    ) {
+        default_quantization_scheme(cell)
+    } else {
+        Ok(scheme)
+    }
 }
 
 fn cell_quantization_scheme(cell: &SnapshotCell) -> Result<QuantizationScheme> {
@@ -1693,6 +1731,96 @@ mod tests {
     }
 
     #[test]
+    fn child_failure_record_does_not_claim_backend_offload_unverified() {
+        let snapshot = EvalSnapshot {
+            schema_version: 1,
+            id: "snap".to_owned(),
+            git_sha: None,
+            cells: Vec::new(),
+        };
+        let mut cell = test_snapshot_cell();
+        cell.bundle_id = "qwen3_4b".to_owned();
+        cell.quantization = "bf16".to_owned();
+        let platform = PlatformSnapshot {
+            os: Some("linux".to_owned()),
+            arch: Some("aarch64".to_owned()),
+            target_triple: None,
+            hostname: Some("DGX Spark".to_owned()),
+            host_id: Some("DGX Spark".to_owned()),
+            host_slug: Some("dgx-spark".to_owned()),
+            total_memory_bytes: None,
+            available_memory_bytes: None,
+            total_swap_bytes: None,
+            free_swap_bytes: None,
+            gpu_backend: Some("nvidia".to_owned()),
+            gpus: vec![GpuSnapshot {
+                index: Some(0),
+                backend: Some("nvidia".to_owned()),
+                id: Some("GPU-1".to_owned()),
+                model: Some("NVIDIA GB10".to_owned()),
+                total_memory_bytes: None,
+                free_memory_bytes: None,
+                unified_memory: Some(false),
+                recommended_max_working_set_size_bytes: None,
+            }],
+            accelerator_metadata: BTreeMap::new(),
+            unavailable: Vec::new(),
+        };
+        let speculative = accelerator::resolve(AcceleratorClass::Cuda, &platform, None, None);
+        assert_eq!(
+            speculative.fallback_reason,
+            Some(OutcomeReason::BackendOffloadUnverified)
+        );
+        let coverage = coverage_for_cell(
+            &snapshot,
+            &cell,
+            "dgx-spark",
+            &platform,
+            &speculative,
+            ApplicabilityDecision::BlockedPreRun,
+            TerminalOutcome::Blocked,
+            Some(OutcomeReason::NativeLinkFailed),
+        )
+        .expect("coverage");
+
+        let record = pre_run_record(
+            &snapshot,
+            &cell,
+            "dgx-spark",
+            &platform,
+            &speculative,
+            coverage,
+            AcceptanceStatus::Blocked,
+            Some("child eval invocation failed".to_owned()),
+            "run",
+            &[],
+        );
+
+        assert_eq!(
+            record.coverage.reason,
+            Some(OutcomeReason::NativeLinkFailed)
+        );
+        assert_eq!(record.accelerator.requested_class, AcceleratorClass::Cuda);
+        assert_eq!(record.accelerator.resolved_class, AcceleratorClass::Cuda);
+        assert_eq!(record.coverage.resolved_accelerator, AcceleratorClass::Cuda);
+        assert_eq!(record.accelerator.selected_devices.len(), 1);
+        assert_eq!(record.accelerator.fallback_reason, None);
+        assert_eq!(
+            record.accelerator.backend_mode.as_deref(),
+            Some("backend_not_started")
+        );
+        assert_eq!(
+            record.accelerator.use_proof_source.as_deref(),
+            Some("pre_run:backend_not_started")
+        );
+        assert_eq!(
+            record.acceptance.accelerator_status,
+            AcceptanceStatus::NotMeasured
+        );
+        assert_eq!(record.acceptance.overall_status, AcceptanceStatus::Blocked);
+    }
+
+    #[test]
     fn child_timeout_reason_does_not_depend_on_log_marker() {
         let cell = test_snapshot_cell();
         let log_path = std::env::temp_dir().join(format!(
@@ -1831,6 +1959,35 @@ unauthorized access to model cache"#,
         assert_eq!(
             cell_quantization_scheme(&cell).unwrap(),
             QuantizationScheme::GgufQ8_0
+        );
+
+        cell.bundle_id = "qwen3_4b".to_owned();
+        cell.quantization = "isq_q4".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::IsqQ4
+        );
+        assert_eq!(
+            cell_runtime_precision(&cell).unwrap(),
+            Some("isq_q4".to_owned())
+        );
+        assert_eq!(
+            cell_artifact_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::Bf16
+        );
+
+        cell.quantization = "isq_q8".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::IsqQ8
+        );
+        assert_eq!(
+            cell_runtime_precision(&cell).unwrap(),
+            Some("isq_q8".to_owned())
+        );
+        assert_eq!(
+            cell_artifact_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::Bf16
         );
 
         cell.quantization = "q6_k".to_owned();
