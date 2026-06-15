@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const TEXT_CALL_PROTOCOL: &str = "motlie.telnyx.text.v1";
 pub const TEXT_CALL_DEBUG_EXTENSION: &str = "motlie.telnyx.text.debug.v1";
 pub const TEXT_CALL_PARTIALS_EXTENSION: &str = "motlie.telnyx.text.partials.v1";
+pub const TEXT_CALL_EARLY_TURNS_EXTENSION: &str = "motlie.telnyx.text.early_turns.v1";
 pub const TEXT_CALL_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -38,7 +39,10 @@ impl Default for TextStreamDescriptor {
             transport: "websocket".to_string(),
             content: TEXT_CALL_CONTENT_TYPE.to_string(),
             turn_based: true,
-            extensions: vec![TEXT_CALL_PARTIALS_EXTENSION.to_string()],
+            extensions: vec![
+                TEXT_CALL_PARTIALS_EXTENSION.to_string(),
+                TEXT_CALL_EARLY_TURNS_EXTENSION.to_string(),
+            ],
         }
     }
 }
@@ -155,6 +159,54 @@ pub enum GatewayTextFrame {
         speech_state: CallerSpeechState,
         reply_allowed: bool,
     },
+    #[serde(rename = "caller.turn.provisional")]
+    CallerTurnProvisional {
+        provisional_turn_id: String,
+        utterance_id: String,
+        generation: u64,
+        sequence: u64,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confidence: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stability: Option<f32>,
+        speech_state: CallerSpeechState,
+        reply_allowed: bool,
+    },
+    #[serde(rename = "caller.turn.provisional.update")]
+    CallerTurnProvisionalUpdate {
+        provisional_turn_id: String,
+        utterance_id: String,
+        generation: u64,
+        sequence: u64,
+        text: String,
+        append_or_replace: String,
+    },
+    #[serde(rename = "caller.turn.provisional.cancel")]
+    CallerTurnProvisionalCancel {
+        provisional_turn_id: String,
+        utterance_id: String,
+        generation: u64,
+        sequence: u64,
+        reason: String,
+    },
+    #[serde(rename = "caller.turn.provisional.commit")]
+    CallerTurnProvisionalCommit {
+        provisional_turn_id: String,
+        turn_id: String,
+        utterance_id: String,
+        coalesced_utterance_ids: Vec<String>,
+        generation: u64,
+        sequence: u64,
+        final_text: String,
+    },
+    #[serde(rename = "playback.provisional.started")]
+    ProvisionalPlaybackStarted {
+        provisional_turn_id: String,
+        generation: u64,
+        playback_id: String,
+        sequence: u64,
+    },
     #[serde(rename = "playback.started")]
     PlaybackStarted { turn_id: String, sequence: u64 },
     #[serde(rename = "playback.finished")]
@@ -192,6 +244,20 @@ pub enum AgentTextFrame {
     },
     #[serde(rename = "agent.turn")]
     AgentTurn { turn_id: String, text: String },
+    #[serde(rename = "agent.turn.provisional.partial")]
+    AgentTurnProvisionalPartial {
+        provisional_turn_id: String,
+        generation: u64,
+        text: String,
+        #[serde(default = "default_true")]
+        append: bool,
+    },
+    #[serde(rename = "agent.turn.provisional")]
+    AgentTurnProvisional {
+        provisional_turn_id: String,
+        generation: u64,
+        text: String,
+    },
     #[serde(rename = "agent.close")]
     AgentClose { reason: Option<String> },
 }

@@ -26,6 +26,11 @@ use crate::adapter::{
 };
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::{self, ConversationRuntime};
+use crate::early_response::{
+    spawn_early_response_pipeline, EarlyResponseCancelReason, EarlyResponseCommitBoundary,
+    EarlyResponseCommitMember, EarlyResponseInput, EarlyResponsePartial,
+    EarlyResponsePipelineHandle, EarlyResponsePipelineServices,
+};
 use crate::operator::state::{
     speech_echo_signature, CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission,
     SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
@@ -361,6 +366,34 @@ impl SharedMediaRegistry {
         Ok(active.playback_id)
     }
 
+    pub async fn cancel_speech_playback_for_reason(
+        &self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        reason: SpeechClearReason,
+    ) -> anyhow::Result<bool> {
+        let mut guard = self.inner.lock().await;
+        let entry = guard
+            .get_mut(gateway_call_id)
+            .with_context(|| format!("media stream is not ready for call {gateway_call_id}"))?;
+        let Some(active) = entry.active_speech.as_ref() else {
+            return Ok(false);
+        };
+        if active.playback_id != playback_id {
+            return Ok(false);
+        }
+        let Some(active) = entry.active_speech.take() else {
+            return Ok(false);
+        };
+        active.cancel.cancel();
+        entry.pending_clears.push_back(PendingClear {
+            playback_id: active.playback_id,
+            requested_at: Instant::now(),
+            reason,
+        });
+        Ok(true)
+    }
+
     async fn take_pending_clear(&self, gateway_call_id: &str) -> Option<PendingClear> {
         self.inner
             .lock()
@@ -592,6 +625,8 @@ struct MediaSocketState {
     canceled_playbacks: HashSet<String>,
     media_registry: SharedMediaRegistry,
     conversation: Option<ConversationRuntime>,
+    text_calls: Option<SharedTextCallRegistry>,
+    early_response: Option<EarlyResponsePipelineHandle>,
     outbound_frame_count: usize,
     outbound_underrun_ticks: usize,
     outbound_pre_audio_wait_ticks: usize,
@@ -635,6 +670,8 @@ impl MediaSocketState {
             canceled_playbacks: HashSet::new(),
             media_registry,
             conversation: None,
+            text_calls: None,
+            early_response: None,
             outbound_frame_count: 0,
             outbound_underrun_ticks: 0,
             outbound_pre_audio_wait_ticks: 0,
@@ -670,6 +707,7 @@ pub async fn handle_socket(
     text_calls: SharedTextCallRegistry,
 ) {
     let mut media_state = MediaSocketState::with_conversation(media_registry.clone(), conversation);
+    media_state.text_calls = Some(text_calls.clone());
     let mut silence_keepalive = time::interval(SILENCE_KEEPALIVE_INTERVAL);
     silence_keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -731,6 +769,9 @@ pub async fn handle_socket(
     }
     emit_quality_transport_rollups(&state, &mut media_state).await;
     finalize_capture(&mut media_state).await;
+    if let Some(handle) = media_state.early_response.take() {
+        handle.cancel_call(EarlyResponseCancelReason::Hangup);
+    }
     if let Some(call_id) = media_state.gateway_call_id.as_deref() {
         media_registry.unregister_call(call_id).await;
     }
@@ -1715,6 +1756,7 @@ async fn ingest_frame(
                         "barge_in.speech_onset.deferred_for_echo_guard"
                     );
                 } else {
+                    cancel_early_response_for_barge_in(media_state);
                     if let Some(text_calls) = text_calls {
                         cancel_text_call_speech_for_barge_in(
                             state,
@@ -1848,6 +1890,7 @@ async fn open_asr_session(
     media_state.quality_config = quality_config;
     media_state.active_quality_asr = Some(quality_session);
     media_state.session = Some(asr.open_session(asr_backend).await?);
+    ensure_early_response_pipeline(state, media_state, gateway_call_id).await;
     tracing::info!(
         gateway_call_id,
         stream_id,
@@ -1857,6 +1900,41 @@ async fn open_asr_session(
         "asr.session.opened"
     );
     Ok(())
+}
+
+async fn ensure_early_response_pipeline(
+    state: &SharedState,
+    media_state: &mut MediaSocketState,
+    gateway_call_id: &str,
+) {
+    if media_state.early_response.is_some() || !media_state.quality_config.early_response.enabled {
+        return;
+    }
+    let Some(runtime) = media_state.conversation.as_ref() else {
+        return;
+    };
+    let tts_backend = state.read().await.conversation_tts_backend;
+    let text_calls = media_state.text_calls.clone().unwrap_or_default();
+    let handle = spawn_early_response_pipeline(
+        gateway_call_id.to_string(),
+        media_state.quality_config.early_response.clone(),
+        EarlyResponsePipelineServices {
+            state: state.clone(),
+            media_registry: media_state.media_registry.clone(),
+            tts: runtime.tts_registry(),
+            text_calls,
+            tts_backend,
+            processor: runtime.early_response_processor(),
+        },
+    );
+    media_state.early_response = Some(handle);
+    tracing::info!(gateway_call_id, "early_response.pipeline.started");
+}
+
+fn cancel_early_response_for_barge_in(media_state: &MediaSocketState) {
+    if let Some(handle) = media_state.early_response.as_ref() {
+        handle.cancel_call(EarlyResponseCancelReason::CallerBargeIn);
+    }
 }
 
 fn record_raw_capture(capture: Option<&mut MediaCapture>, raw: &str) {
@@ -2635,6 +2713,7 @@ async fn record_and_forward_reconciled_events(
             media_format: media_state.media_format.as_ref(),
             capture: media_state.capture.as_mut(),
             text_calls,
+            early_response: media_state.early_response.clone(),
             quality_session,
             echo_config: Some(&media_state.quality_config.echo_suppression),
             partial_speech_state: input.partial_speech_state,
@@ -3163,6 +3242,7 @@ struct TranscriptRecordContext<'a> {
     media_format: Option<&'a MediaFormat>,
     capture: Option<&'a mut MediaCapture>,
     text_calls: Option<&'a SharedTextCallRegistry>,
+    early_response: Option<EarlyResponsePipelineHandle>,
     quality_session: Option<&'a ActiveAsrQualitySession>,
     echo_config: Option<&'a EchoSuppressionQualityConfig>,
     partial_speech_state: CallerSpeechState,
@@ -3190,9 +3270,17 @@ struct FinalTurnCandidate {
     utterance_ids: Vec<String>,
     confidence: Option<f32>,
     coalesced_turn_ids: Vec<String>,
+    members: Vec<FinalTurnMember>,
+}
+
+struct FinalTurnMember {
+    utterance_id: String,
+    text: String,
+    transcript_event_ids: Vec<String>,
 }
 
 struct PartialTurnCandidate {
+    sequence: u64,
     utterance_id: String,
     text: String,
     confidence: Option<f32>,
@@ -3273,6 +3361,7 @@ fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCa
     let mut utterance_ids = Vec::new();
     let mut confidence = None;
     let mut coalesced_turn_ids = Vec::new();
+    let mut members = Vec::new();
     for turn in final_turns {
         if turn_id.is_none() {
             turn_id = Some(turn.turn_id);
@@ -3291,6 +3380,7 @@ fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCa
             confidence = turn.confidence;
         }
         coalesced_turn_ids.extend(turn.coalesced_turn_ids);
+        members.extend(turn.members);
         let trimmed = turn.text.trim();
         if !trimmed.is_empty() {
             if !text.is_empty() {
@@ -3313,6 +3403,7 @@ fn coalesce_final_turns(final_turns: Vec<FinalTurnCandidate>) -> Vec<FinalTurnCa
             utterance_ids,
             confidence,
             coalesced_turn_ids,
+            members,
         }]
     }
 }
@@ -3541,24 +3632,38 @@ async fn record_transcript_events(
                 .is_enabled()
                 .then(|| format!("trn_{}", uuid::Uuid::new_v4().simple()));
             let turn_id = turn_id.clone().unwrap_or_else(new_local_turn_id);
+            let transcript_event_ids = transcript_event_id.into_iter().collect::<Vec<_>>();
+            let utterance_ids = context
+                .quality_session
+                .map(|session| vec![session.utterance_id.clone()])
+                .unwrap_or_default();
+            let members = context
+                .quality_session
+                .map(|session| {
+                    vec![FinalTurnMember {
+                        utterance_id: session.utterance_id.clone(),
+                        text: text.clone(),
+                        transcript_event_ids: transcript_event_ids.clone(),
+                    }]
+                })
+                .unwrap_or_default();
             final_turns.push(FinalTurnCandidate {
                 turn_id: turn_id.clone(),
                 text: text.clone(),
                 finalized_at: Instant::now(),
-                transcript_event_ids: transcript_event_id.into_iter().collect(),
+                transcript_event_ids,
                 asr_session_ids: context
                     .quality_session
                     .map(|session| vec![session.asr_session_id.clone()])
                     .unwrap_or_default(),
-                utterance_ids: context
-                    .quality_session
-                    .map(|session| vec![session.utterance_id.clone()])
-                    .unwrap_or_default(),
+                utterance_ids,
                 confidence: transcript_confidence,
                 coalesced_turn_ids: vec![turn_id],
+                members,
             });
         } else if let Some(session) = context.quality_session {
             partial_turns.push(PartialTurnCandidate {
+                sequence: partial_turns.len() as u64,
                 utterance_id: session.utterance_id.clone(),
                 text: text.clone(),
                 confidence: transcript_confidence,
@@ -3596,8 +3701,25 @@ async fn record_transcript_events(
         );
     }
     drop(guard);
+    if let Some(early_response) = context.early_response.as_ref() {
+        for partial_turn in &partial_turns {
+            if matches!(partial_turn.speech_state, CallerSpeechState::Speaking) {
+                early_response.cancel_call(EarlyResponseCancelReason::CallerBargeIn);
+            }
+            early_response.try_send(EarlyResponseInput::Partial(EarlyResponsePartial {
+                call_id: gateway_call_id.to_string(),
+                utterance_id: partial_turn.utterance_id.clone(),
+                sequence: partial_turn.sequence,
+                received_at_ms: partial_turn.quality_session.opened_at.elapsed().as_millis() as u64,
+                text: partial_turn.text.clone(),
+                confidence: partial_turn.confidence,
+                stability: partial_turn.stability,
+                speech_state: partial_turn.speech_state,
+            }));
+        }
+    }
     if let Some(text_calls) = context.text_calls {
-        for partial_turn in partial_turns {
+        for partial_turn in &partial_turns {
             match text_calls
                 .send_caller_partial(
                     gateway_call_id,
@@ -3629,6 +3751,30 @@ async fn record_transcript_events(
         }
     }
     let final_turns = coalesce_final_turns(final_turns);
+    if let Some(early_response) = context.early_response.as_ref() {
+        for final_turn in &final_turns {
+            early_response.try_send(EarlyResponseInput::CommitBoundary(
+                EarlyResponseCommitBoundary {
+                    call_id: gateway_call_id.to_string(),
+                    sequence: final_turn.finalized_at.elapsed().as_millis() as u64,
+                    turn_id: final_turn.turn_id.clone(),
+                    coalesced_turn_ids: final_turn.coalesced_turn_ids.clone(),
+                    final_text: final_turn.text.clone(),
+                    members: final_turn
+                        .members
+                        .iter()
+                        .enumerate()
+                        .map(|(member_index, member)| EarlyResponseCommitMember {
+                            utterance_id: member.utterance_id.clone(),
+                            member_index,
+                            member_final_text: member.text.clone(),
+                            transcript_event_ids: member.transcript_event_ids.clone(),
+                        })
+                        .collect(),
+                },
+            ));
+        }
+    }
     for final_turn in final_turns {
         let mut emitted_join = false;
         if let Some(text_calls) = context.text_calls {
@@ -5179,6 +5325,7 @@ mod tests {
                 media_format: Some(&format),
                 capture: None,
                 text_calls: Some(&text_calls),
+                early_response: None,
                 quality_session: Some(&quality_session),
                 echo_config: None,
                 partial_speech_state: CallerSpeechState::Speaking,
@@ -5309,6 +5456,7 @@ mod tests {
                     media_format: Some(&format),
                     capture: None,
                     text_calls: Some(&text_calls),
+                    early_response: None,
                     quality_session: Some(&quality_session),
                     echo_config: None,
                     partial_speech_state,
@@ -5372,6 +5520,7 @@ mod tests {
                 media_format: Some(&format),
                 capture: None,
                 text_calls: Some(&text_calls),
+                early_response: None,
                 quality_session: None,
                 echo_config: None,
                 partial_speech_state: CallerSpeechState::Speaking,
@@ -5433,6 +5582,7 @@ mod tests {
                 media_format: Some(&format),
                 capture: None,
                 text_calls: Some(&text_calls),
+                early_response: None,
                 quality_session: None,
                 echo_config: Some(&echo_snapshot),
                 partial_speech_state: CallerSpeechState::Speaking,
@@ -5490,6 +5640,7 @@ mod tests {
                 media_format: Some(&format),
                 capture: None,
                 text_calls: Some(&text_calls),
+                early_response: None,
                 quality_session: None,
                 echo_config: None,
                 partial_speech_state: CallerSpeechState::Speaking,
@@ -5787,6 +5938,7 @@ mod tests {
                 media_format: Some(&format),
                 capture: None,
                 text_calls: None,
+                early_response: None,
                 quality_session: None,
                 echo_config: None,
                 partial_speech_state: CallerSpeechState::Speaking,
@@ -5826,6 +5978,7 @@ mod tests {
                 media_format: Some(&format),
                 capture: None,
                 text_calls: None,
+                early_response: None,
                 quality_session: None,
                 echo_config: None,
                 partial_speech_state: CallerSpeechState::Speaking,

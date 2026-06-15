@@ -23,6 +23,7 @@ use tokio::task;
 
 pub const KOKORO_SAMPLE_RATE_HZ: u32 = 24_000;
 pub const PIPER_SAMPLE_RATE_HZ: u32 = 22_050;
+#[cfg(any(feature = "kokoro", feature = "piper"))]
 const TTS_WARMUP_TEXT: &str = "Ready.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,55 +1,78 @@
 use std::cmp::Reverse;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use futures_util::{stream, Stream, StreamExt};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use crate::media::{SharedMediaRegistry, SpeechClearReason};
+use crate::operator::state::SharedState;
+use crate::speech::{self, AppendSpeechHandle, SpeechConflictPolicy, SpeechQueueRequest};
 use crate::text_calls::turns::CallerSpeechState;
+use crate::text_calls::SharedTextCallRegistry;
+use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
+use tokio::sync::mpsc;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+const EARLY_RESPONSE_INPUT_CAPACITY: usize = 8;
+const EARLY_RESPONSE_EVENT_CAPACITY: usize = 32;
+const EARLY_RESPONSE_PRIORITY_CANCEL_CAPACITY: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AppendOrReplace {
     Append,
     Replace,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EarlyResponseAudioMode {
     SpeakProvisionally,
     PrepareOnly,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BoundaryRequirement {
     None,
     Clause,
     Sentence,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MissingSignalPolicy {
     Conservative,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EarlyResponseStartTiming {
     EndpointCandidateOnly,
     WhileSpeaking,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EarlyResponseAppendMode {
     ReplaceOnly,
     PrefixMonotonicBackend,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EarlyResponsePolicy {
     pub enabled: bool,
     pub audio_mode: EarlyResponseAudioMode,
     pub min_text_chars: usize,
     pub min_text_tokens: usize,
     pub boundary: BoundaryRequirement,
-    pub min_confidence: Option<ScoreThreshold>,
-    pub min_stability: Option<ScoreThreshold>,
+    pub min_confidence: Option<f32>,
+    pub min_stability: Option<f32>,
     pub missing_signal_policy: MissingSignalPolicy,
     pub allowed_start_speech_states: Vec<CallerSpeechState>,
     pub allowed_update_speech_states: Vec<CallerSpeechState>,
@@ -68,8 +91,8 @@ impl Default for EarlyResponsePolicy {
             min_text_chars: 12,
             min_text_tokens: 3,
             boundary: BoundaryRequirement::Clause,
-            min_confidence: ScoreThreshold::new(0.70),
-            min_stability: ScoreThreshold::new(0.80),
+            min_confidence: Some(0.70),
+            min_stability: Some(0.80),
             missing_signal_policy: MissingSignalPolicy::Conservative,
             allowed_start_speech_states: vec![CallerSpeechState::EndpointCandidate],
             allowed_update_speech_states: vec![
@@ -100,21 +123,6 @@ impl EarlyResponsePolicy {
         }
     }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ScoreThreshold(f32);
-
-impl ScoreThreshold {
-    pub fn new(value: f32) -> Option<Self> {
-        (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(Self(value))
-    }
-
-    pub fn get(self) -> f32 {
-        self.0
-    }
-}
-
-impl Eq for ScoreThreshold {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EarlyResponseInput {
@@ -217,12 +225,14 @@ impl EarlyResponseEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EarlyResponseCommitRole {
     PrimaryPlayback,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EarlyResponseCancelReason {
     AsrCorrection,
     FinalTranscriptMismatch,
@@ -284,8 +294,20 @@ impl EarlyResponsePriorityCancelSink for NoopEarlyResponseCancelSink {
     }
 }
 
-pub trait EarlyResponseProcessor {
-    fn process_event(&self, event: EarlyResponseEvent) -> Option<EarlyResponseIntent>;
+pub type EarlyResponseEventStream = Pin<Box<dyn Stream<Item = EarlyResponseEvent> + Send>>;
+pub type EarlyResponseIntentStream = Pin<Box<dyn Stream<Item = EarlyResponseIntent> + Send>>;
+
+pub trait EarlyResponseProcessor: Send {
+    fn process(&mut self, events: EarlyResponseEventStream) -> EarlyResponseIntentStream;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IdentityEarlyResponseProcessor;
+
+impl EarlyResponseProcessor for IdentityEarlyResponseProcessor {
+    fn process(&mut self, events: EarlyResponseEventStream) -> EarlyResponseIntentStream {
+        Box::pin(events.filter_map(|event| async move { identity_passthrough(event) }))
+    }
 }
 
 pub fn identity_passthrough(event: EarlyResponseEvent) -> Option<EarlyResponseIntent> {
@@ -354,12 +376,12 @@ pub fn aggregate_early_resp_partials<S, C>(
     cancel_sink: C,
 ) -> impl Stream<Item = EarlyResponseEvent>
 where
-    S: Stream<Item = EarlyResponseInput> + Unpin,
+    S: Stream<Item = EarlyResponseInput>,
     C: EarlyResponsePriorityCancelSink,
 {
     stream::unfold(
         (
-            partial_stream,
+            Box::pin(partial_stream),
             EarlyResponseAggregator::new(policy, cancel_sink),
             VecDeque::new(),
         ),
@@ -368,11 +390,581 @@ where
                 if let Some(event) = pending.pop_front() {
                     return Some((event, (partial_stream, aggregator, pending)));
                 }
-                let input = partial_stream.next().await?;
+                let input = partial_stream.as_mut().next().await?;
                 pending.extend(aggregator.handle_input(input));
             }
         },
     )
+}
+
+#[derive(Clone)]
+pub struct EarlyResponsePipelineHandle {
+    call_id: String,
+    tx: mpsc::Sender<EarlyResponseInput>,
+}
+
+impl EarlyResponsePipelineHandle {
+    pub fn try_send(&self, input: EarlyResponseInput) -> bool {
+        match self.tx.try_send(input) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    gateway_call_id = self.call_id.as_str(),
+                    error = %error,
+                    "early_response.input.drop"
+                );
+                false
+            }
+        }
+    }
+
+    pub fn cancel_call(&self, reason: EarlyResponseCancelReason) {
+        let _ = self.try_send(EarlyResponseInput::CancelCall {
+            call_id: self.call_id.clone(),
+            reason,
+        });
+    }
+}
+
+pub struct EarlyResponsePipelineServices {
+    pub state: SharedState,
+    pub media_registry: SharedMediaRegistry,
+    pub tts: SharedTtsRegistry,
+    pub text_calls: SharedTextCallRegistry,
+    pub tts_backend: LiveTtsBackend,
+    pub processor: Box<dyn EarlyResponseProcessor + Send>,
+}
+
+pub fn spawn_early_response_pipeline(
+    call_id: String,
+    policy: EarlyResponsePolicy,
+    services: EarlyResponsePipelineServices,
+) -> EarlyResponsePipelineHandle {
+    let (input_tx, input_rx) = mpsc::channel(EARLY_RESPONSE_INPUT_CAPACITY);
+    let (event_tx, event_rx) = mpsc::channel(EARLY_RESPONSE_EVENT_CAPACITY);
+    let (cancel_tx, cancel_rx) = mpsc::channel(EARLY_RESPONSE_PRIORITY_CANCEL_CAPACITY);
+    let registry = ProvisionalPlaybackRegistry::default();
+    let cancel_sink = PipelinePriorityCancelSink {
+        registry: registry.clone(),
+        tx: cancel_tx.clone(),
+    };
+
+    tokio::spawn(run_priority_cancel_worker(
+        services.media_registry.clone(),
+        cancel_rx,
+    ));
+
+    let mut processor = services.processor;
+    let mut intents = processor.process(Box::pin(receiver_stream(event_rx)));
+    let intent_services = EarlyResponseIntentServices {
+        state: services.state.clone(),
+        media_registry: services.media_registry.clone(),
+        tts: services.tts.clone(),
+        tts_backend: services.tts_backend,
+        text_calls: services.text_calls.clone(),
+        registry: registry.clone(),
+        cancel_tx: cancel_tx.clone(),
+        policy: policy.clone(),
+    };
+    tokio::spawn(async move {
+        while let Some(intent) = intents.next().await {
+            if let Err(error) = handle_early_response_intent(&intent_services, intent).await {
+                tracing::warn!(error = %error, "early_response.intent.failed");
+            }
+        }
+    });
+
+    let event_registry = registry.clone();
+    let event_text_calls = services.text_calls.clone();
+    let event_call_id = call_id.clone();
+    tokio::spawn(async move {
+        let input_stream = receiver_stream(input_rx);
+        let mut events = Box::pin(aggregate_early_resp_partials(
+            input_stream,
+            policy,
+            cancel_sink,
+        ));
+        while let Some(event) = events.as_mut().next().await {
+            event_registry.observe_event(&event);
+            if let Err(error) = event_text_calls
+                .send_early_response_event(&event_call_id, event.clone())
+                .await
+            {
+                tracing::warn!(
+                    gateway_call_id = event_call_id.as_str(),
+                    error = %error,
+                    "text_call.early_response.forward_failed"
+                );
+            }
+            if event_tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    EarlyResponsePipelineHandle {
+        call_id,
+        tx: input_tx,
+    }
+}
+
+fn receiver_stream<T>(rx: mpsc::Receiver<T>) -> impl Stream<Item = T> {
+    stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
+struct EarlyResponseIntentServices {
+    state: SharedState,
+    media_registry: SharedMediaRegistry,
+    tts: SharedTtsRegistry,
+    tts_backend: LiveTtsBackend,
+    text_calls: SharedTextCallRegistry,
+    registry: ProvisionalPlaybackRegistry,
+    cancel_tx: mpsc::Sender<PlaybackCancelCommand>,
+    policy: EarlyResponsePolicy,
+}
+
+async fn handle_early_response_intent(
+    services: &EarlyResponseIntentServices,
+    intent: EarlyResponseIntent,
+) -> anyhow::Result<()> {
+    match intent {
+        EarlyResponseIntent::Speak {
+            provisional_turn_id,
+            call_id,
+            utterance_id,
+            generation,
+            text,
+            append_or_replace,
+        } => {
+            if text.trim().is_empty()
+                || !services
+                    .registry
+                    .is_current(&call_id, &provisional_turn_id, generation)
+            {
+                return Ok(());
+            }
+            match append_or_replace {
+                AppendOrReplace::Append => {
+                    append_provisional_speech(
+                        services,
+                        call_id,
+                        provisional_turn_id,
+                        generation,
+                        text,
+                    )
+                    .await
+                }
+                AppendOrReplace::Replace => {
+                    start_provisional_speech(
+                        services,
+                        call_id,
+                        provisional_turn_id,
+                        utterance_id,
+                        generation,
+                        text,
+                    )
+                    .await
+                }
+            }
+        }
+        EarlyResponseIntent::Cancel {
+            provisional_turn_id,
+            call_id,
+            generation,
+            reason,
+            ..
+        } => {
+            cancel_provisional_playback(
+                &services.registry,
+                &services.cancel_tx,
+                &call_id,
+                &provisional_turn_id,
+                generation,
+                reason,
+            );
+            Ok(())
+        }
+        EarlyResponseIntent::Commit {
+            provisional_turn_id,
+            call_id,
+            generation,
+            turn_id,
+        } => {
+            if let Some(handle) =
+                services
+                    .registry
+                    .finish_generation(&call_id, &provisional_turn_id, generation)
+            {
+                handle.finish().await.context("finish provisional speech")?;
+                tracing::info!(
+                    gateway_call_id = call_id.as_str(),
+                    provisional_turn_id = provisional_turn_id.as_str(),
+                    generation,
+                    turn_id = turn_id.as_str(),
+                    playback_id = handle.playback_id.as_str(),
+                    "early_response.provisional.committed"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn start_provisional_speech(
+    services: &EarlyResponseIntentServices,
+    call_id: String,
+    provisional_turn_id: String,
+    utterance_id: String,
+    generation: u64,
+    text: String,
+) -> anyhow::Result<()> {
+    let (handle, queued) = speech::queue_append_speech_with_request(
+        &services.state,
+        &services.media_registry,
+        &services.tts,
+        SpeechQueueRequest {
+            tts_backend: services.tts_backend,
+            gateway_call_id: call_id.clone(),
+            text: text.clone(),
+            source_label: "early response".to_string(),
+            conflict_policy: SpeechConflictPolicy::CancelAndReplace,
+            turn_finalized_at: None,
+            latest_turn_finalized_at: None,
+            turn_id: Some(provisional_turn_id.clone()),
+            coalesced_turn_ids: Vec::new(),
+            prebuffer_chunks_override: Some(
+                services.policy.provisional_max_prebuffer_frames.max(1),
+            ),
+        },
+        vec![text],
+    )
+    .await?;
+    if !services
+        .registry
+        .is_current(&call_id, &provisional_turn_id, generation)
+    {
+        handle.cancel_now();
+        let _ = services.cancel_tx.try_send(PlaybackCancelCommand {
+            call_id: call_id.clone(),
+            playback_id: queued.playback_id.clone(),
+            reason: EarlyResponseCancelReason::StaleGeneration,
+        });
+        return Ok(());
+    }
+    services.registry.insert_playback(
+        call_id.clone(),
+        provisional_turn_id.clone(),
+        generation,
+        handle.clone(),
+    );
+    services
+        .text_calls
+        .send_early_response_playback_started(
+            &call_id,
+            provisional_turn_id.clone(),
+            generation,
+            queued.playback_id.clone(),
+        )
+        .await?;
+    tracing::info!(
+        gateway_call_id = call_id.as_str(),
+        utterance_id = utterance_id.as_str(),
+        provisional_turn_id = provisional_turn_id.as_str(),
+        generation,
+        playback_id = queued.playback_id.as_str(),
+        "early_response.provisional.speech_started"
+    );
+    Ok(())
+}
+
+async fn append_provisional_speech(
+    services: &EarlyResponseIntentServices,
+    call_id: String,
+    provisional_turn_id: String,
+    generation: u64,
+    text: String,
+) -> anyhow::Result<()> {
+    let Some(handle) =
+        services
+            .registry
+            .promote_for_append(&call_id, &provisional_turn_id, generation)
+    else {
+        tracing::warn!(
+            gateway_call_id = call_id.as_str(),
+            provisional_turn_id = provisional_turn_id.as_str(),
+            generation,
+            "early_response.provisional.append_without_playback"
+        );
+        return Ok(());
+    };
+    handle
+        .append_chunks(vec![text], false)
+        .await
+        .context("append provisional speech")?;
+    Ok(())
+}
+
+fn cancel_provisional_playback(
+    registry: &ProvisionalPlaybackRegistry,
+    cancel_tx: &mpsc::Sender<PlaybackCancelCommand>,
+    call_id: &str,
+    provisional_turn_id: &str,
+    generation: u64,
+    reason: EarlyResponseCancelReason,
+) {
+    let Some(handle) = registry.cancel_generation(call_id, provisional_turn_id, generation) else {
+        return;
+    };
+    handle.cancel_now();
+    let command = PlaybackCancelCommand {
+        call_id: call_id.to_string(),
+        playback_id: handle.playback_id.clone(),
+        reason,
+    };
+    if let Err(error) = cancel_tx.try_send(command) {
+        tracing::warn!(
+            gateway_call_id = call_id,
+            provisional_turn_id,
+            generation,
+            error = %error,
+            "early_response.priority_cancel.drop"
+        );
+    }
+}
+
+async fn run_priority_cancel_worker(
+    media_registry: SharedMediaRegistry,
+    mut rx: mpsc::Receiver<PlaybackCancelCommand>,
+) {
+    while let Some(command) = rx.recv().await {
+        let reason = speech_clear_reason_for(command.reason);
+        match media_registry
+            .cancel_speech_playback_for_reason(&command.call_id, &command.playback_id, reason)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                gateway_call_id = command.call_id.as_str(),
+                playback_id = command.playback_id.as_str(),
+                error = %error,
+                "early_response.priority_cancel.failed"
+            ),
+        }
+    }
+}
+
+fn speech_clear_reason_for(reason: EarlyResponseCancelReason) -> SpeechClearReason {
+    match reason {
+        EarlyResponseCancelReason::CallerBargeIn => SpeechClearReason::BargeIn,
+        _ => SpeechClearReason::CancelAndReplace,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PlaybackCancelCommand {
+    call_id: String,
+    playback_id: String,
+    reason: EarlyResponseCancelReason,
+}
+
+#[derive(Clone, Debug, Eq)]
+struct ProvisionalBaseKey {
+    call_id: String,
+    provisional_turn_id: String,
+}
+
+impl PartialEq for ProvisionalBaseKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.call_id == other.call_id && self.provisional_turn_id == other.provisional_turn_id
+    }
+}
+
+impl Hash for ProvisionalBaseKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.call_id.hash(state);
+        self.provisional_turn_id.hash(state);
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ProvisionalGenerationKey {
+    call_id: String,
+    provisional_turn_id: String,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ProvisionalPlayback {
+    generation: u64,
+    handle: AppendSpeechHandle,
+}
+
+#[derive(Default)]
+struct ProvisionalPlaybackState {
+    latest: HashMap<ProvisionalBaseKey, u64>,
+    canceled: HashSet<ProvisionalGenerationKey>,
+    playbacks: HashMap<ProvisionalBaseKey, ProvisionalPlayback>,
+}
+
+#[derive(Clone, Default)]
+struct ProvisionalPlaybackRegistry {
+    inner: Arc<Mutex<ProvisionalPlaybackState>>,
+}
+
+impl ProvisionalPlaybackRegistry {
+    fn observe_event(&self, event: &EarlyResponseEvent) {
+        let mut guard = self.inner.lock().expect("early response registry lock");
+        match event {
+            EarlyResponseEvent::Started {
+                call_id,
+                provisional_turn_id,
+                generation,
+                ..
+            }
+            | EarlyResponseEvent::Updated {
+                call_id,
+                provisional_turn_id,
+                generation,
+                ..
+            }
+            | EarlyResponseEvent::Committed {
+                call_id,
+                provisional_turn_id,
+                generation,
+                ..
+            } => {
+                guard.latest.insert(
+                    ProvisionalBaseKey {
+                        call_id: call_id.clone(),
+                        provisional_turn_id: provisional_turn_id.clone(),
+                    },
+                    *generation,
+                );
+            }
+            EarlyResponseEvent::Canceled {
+                call_id,
+                provisional_turn_id,
+                generation,
+                ..
+            } => {
+                guard.canceled.insert(ProvisionalGenerationKey {
+                    call_id: call_id.clone(),
+                    provisional_turn_id: provisional_turn_id.clone(),
+                    generation: *generation,
+                });
+            }
+        }
+    }
+
+    fn is_current(&self, call_id: &str, provisional_turn_id: &str, generation: u64) -> bool {
+        let guard = self.inner.lock().expect("early response registry lock");
+        let base = ProvisionalBaseKey {
+            call_id: call_id.to_string(),
+            provisional_turn_id: provisional_turn_id.to_string(),
+        };
+        let gen = ProvisionalGenerationKey {
+            call_id: call_id.to_string(),
+            provisional_turn_id: provisional_turn_id.to_string(),
+            generation,
+        };
+        guard.latest.get(&base).copied() == Some(generation) && !guard.canceled.contains(&gen)
+    }
+
+    fn insert_playback(
+        &self,
+        call_id: String,
+        provisional_turn_id: String,
+        generation: u64,
+        handle: AppendSpeechHandle,
+    ) {
+        let mut guard = self.inner.lock().expect("early response registry lock");
+        let base = ProvisionalBaseKey {
+            call_id,
+            provisional_turn_id,
+        };
+        if let Some(previous) = guard
+            .playbacks
+            .insert(base, ProvisionalPlayback { generation, handle })
+        {
+            previous.handle.cancel_now();
+        }
+    }
+
+    fn promote_for_append(
+        &self,
+        call_id: &str,
+        provisional_turn_id: &str,
+        generation: u64,
+    ) -> Option<AppendSpeechHandle> {
+        let mut guard = self.inner.lock().expect("early response registry lock");
+        let base = ProvisionalBaseKey {
+            call_id: call_id.to_string(),
+            provisional_turn_id: provisional_turn_id.to_string(),
+        };
+        let playback = guard.playbacks.get_mut(&base)?;
+        if generation <= playback.generation {
+            return None;
+        }
+        playback.generation = generation;
+        Some(playback.handle.clone())
+    }
+
+    fn finish_generation(
+        &self,
+        call_id: &str,
+        provisional_turn_id: &str,
+        generation: u64,
+    ) -> Option<AppendSpeechHandle> {
+        let mut guard = self.inner.lock().expect("early response registry lock");
+        let base = ProvisionalBaseKey {
+            call_id: call_id.to_string(),
+            provisional_turn_id: provisional_turn_id.to_string(),
+        };
+        let playback = guard.playbacks.remove(&base)?;
+        (playback.generation == generation).then_some(playback.handle)
+    }
+
+    fn cancel_generation(
+        &self,
+        call_id: &str,
+        provisional_turn_id: &str,
+        generation: u64,
+    ) -> Option<AppendSpeechHandle> {
+        let mut guard = self.inner.lock().expect("early response registry lock");
+        guard.canceled.insert(ProvisionalGenerationKey {
+            call_id: call_id.to_string(),
+            provisional_turn_id: provisional_turn_id.to_string(),
+            generation,
+        });
+        let base = ProvisionalBaseKey {
+            call_id: call_id.to_string(),
+            provisional_turn_id: provisional_turn_id.to_string(),
+        };
+        let playback = guard.playbacks.remove(&base)?;
+        (playback.generation == generation).then_some(playback.handle)
+    }
+}
+
+#[derive(Clone)]
+struct PipelinePriorityCancelSink {
+    registry: ProvisionalPlaybackRegistry,
+    tx: mpsc::Sender<PlaybackCancelCommand>,
+}
+
+impl EarlyResponsePriorityCancelSink for PipelinePriorityCancelSink {
+    fn cancel_provisional(&self, key: ProvisionalPlaybackKey, reason: EarlyResponseCancelReason) {
+        cancel_provisional_playback(
+            &self.registry,
+            &self.tx,
+            &key.call_id,
+            &key.provisional_turn_id,
+            key.generation,
+            reason,
+        );
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -503,26 +1095,33 @@ where
                     return Vec::new();
                 }
                 if active.updates >= self.policy.max_updates_per_utterance {
+                    // The update cap is a churn guard. Canceling beats freezing a stale
+                    // provisional generation that may already have reached audio.
                     return self.cancel_active(
                         key,
                         active,
                         EarlyResponseCancelReason::MaxUpdatesExceeded,
                     );
                 }
-                self.cancel_sink.cancel_provisional(
-                    ProvisionalPlaybackKey {
-                        call_id: active.call_id.clone(),
-                        provisional_turn_id: active.provisional_turn_id.clone(),
-                        generation: active.generation,
-                        playback_id: None,
-                    },
-                    EarlyResponseCancelReason::SupersededByNewGeneration,
-                );
+                let previous_text = active.text.clone();
+                let append_or_replace =
+                    append_or_replace_for(self.policy.append_mode, &previous_text, &accepted_text);
+                if matches!(append_or_replace, AppendOrReplace::Replace) {
+                    self.cancel_sink.cancel_provisional(
+                        ProvisionalPlaybackKey {
+                            call_id: active.call_id.clone(),
+                            provisional_turn_id: active.provisional_turn_id.clone(),
+                            generation: active.generation,
+                            playback_id: None,
+                        },
+                        EarlyResponseCancelReason::SupersededByNewGeneration,
+                    );
+                }
                 active.generation += 1;
                 active.updates += 1;
                 active.last_emitted_at_ms = partial.received_at_ms;
-                let append_or_replace =
-                    append_or_replace_for(self.policy.append_mode, &active.text, &accepted_text);
+                let output_text =
+                    updated_output_text(append_or_replace, &previous_text, &accepted_text);
                 active.text = accepted_text.clone();
                 self.active.insert(key, active.clone());
                 vec![EarlyResponseEvent::Updated {
@@ -530,7 +1129,7 @@ where
                     call_id: active.call_id,
                     utterance_id: active.utterance_id,
                     generation: active.generation,
-                    text: accepted_text,
+                    text: output_text,
                     append_or_replace,
                 }]
             }
@@ -565,6 +1164,7 @@ where
             }
         }
 
+        candidates.retain(|candidate| candidate.prefix_coverage > 0);
         candidates.sort_by_key(|candidate| {
             (
                 Reverse(candidate.prefix_coverage),
@@ -703,11 +1303,15 @@ where
             && boundary_matches(self.policy.boundary, text)
     }
 
-    fn policy_accepts_score(&self, score: Option<f32>, threshold: Option<ScoreThreshold>) -> bool {
+    fn policy_accepts_score(&self, score: Option<f32>, threshold: Option<f32>) -> bool {
         match (score, threshold, self.policy.missing_signal_policy) {
             (_, None, _) => true,
             (Some(score), Some(threshold), _) => {
-                score.is_finite() && (0.0..=1.0).contains(&score) && score >= threshold.get()
+                score.is_finite()
+                    && threshold.is_finite()
+                    && (0.0..=1.0).contains(&score)
+                    && (0.0..=1.0).contains(&threshold)
+                    && score >= threshold
             }
             (None, Some(_), MissingSignalPolicy::Conservative) => false,
         }
@@ -749,25 +1353,14 @@ struct CommitCandidate {
 }
 
 fn provisional_turn_id_for(partial: &EarlyResponsePartial) -> String {
-    format!(
-        "pt_{}_{}_{}",
-        token_component(&partial.call_id),
-        token_component(&partial.utterance_id),
-        partial.sequence
-    )
-}
-
-fn token_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    let mut hasher = Sha256::new();
+    hasher.update(partial.call_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(partial.utterance_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(partial.sequence.to_be_bytes());
+    let digest = hasher.finalize();
+    format!("pt_{}", hex::encode(&digest[..16]))
 }
 
 fn boundary_matches(requirement: BoundaryRequirement, text: &str) -> bool {
@@ -794,12 +1387,28 @@ fn append_or_replace_for(
     match mode {
         EarlyResponseAppendMode::ReplaceOnly => AppendOrReplace::Replace,
         EarlyResponseAppendMode::PrefixMonotonicBackend => {
-            if accepted_text.starts_with(previous_text) {
+            if accepted_text.starts_with(previous_text) && accepted_text.len() > previous_text.len()
+            {
                 AppendOrReplace::Append
             } else {
                 AppendOrReplace::Replace
             }
         }
+    }
+}
+
+fn updated_output_text(
+    append_or_replace: AppendOrReplace,
+    previous_text: &str,
+    accepted_text: &str,
+) -> String {
+    match append_or_replace {
+        AppendOrReplace::Replace => accepted_text.to_string(),
+        AppendOrReplace::Append => accepted_text
+            .strip_prefix(previous_text)
+            .unwrap_or(accepted_text)
+            .trim_start()
+            .to_string(),
     }
 }
 
@@ -889,16 +1498,14 @@ mod tests {
     fn partial_starts_provisional_when_policy_gates_pass() {
         let mut aggregator =
             EarlyResponseAggregator::new(enabled_policy(), NoopEarlyResponseCancelSink);
-        let events = aggregator.handle_input(EarlyResponseInput::Partial(partial(
-            "I need a tow truck.",
-            7,
-            100,
-        )));
+        let first = partial("I need a tow truck.", 7, 100);
+        let provisional_turn_id = provisional_turn_id_for(&first);
+        let events = aggregator.handle_input(EarlyResponseInput::Partial(first));
 
         assert_eq!(
             events,
             vec![EarlyResponseEvent::Started {
-                provisional_turn_id: "pt_call-1_utt-1_7".to_string(),
+                provisional_turn_id,
                 call_id: "call-1".to_string(),
                 utterance_id: "utt-1".to_string(),
                 generation: 1,
@@ -938,13 +1545,11 @@ mod tests {
     fn later_partial_replaces_prior_generation_and_priority_cancels_old_audio() {
         let sink = RecordingCancelSink::default();
         let mut aggregator = EarlyResponseAggregator::new(enabled_policy(), sink.clone());
+        let first = partial("I need a tow truck.", 7, 100);
+        let provisional_turn_id = provisional_turn_id_for(&first);
         assert_eq!(
             aggregator
-                .handle_input(EarlyResponseInput::Partial(partial(
-                    "I need a tow truck.",
-                    7,
-                    100,
-                )))
+                .handle_input(EarlyResponseInput::Partial(first))
                 .len(),
             1
         );
@@ -957,7 +1562,7 @@ mod tests {
         assert_eq!(
             events,
             vec![EarlyResponseEvent::Updated {
-                provisional_turn_id: "pt_call-1_utt-1_7".to_string(),
+                provisional_turn_id: provisional_turn_id.clone(),
                 call_id: "call-1".to_string(),
                 utterance_id: "utt-1".to_string(),
                 generation: 2,
@@ -970,7 +1575,7 @@ mod tests {
             vec![(
                 ProvisionalPlaybackKey {
                     call_id: "call-1".to_string(),
-                    provisional_turn_id: "pt_call-1_utt-1_7".to_string(),
+                    provisional_turn_id: provisional_turn_id.clone(),
                     generation: 1,
                     playback_id: None,
                 },
@@ -1008,16 +1613,116 @@ mod tests {
     }
 
     #[test]
+    fn provisional_turn_ids_are_collision_resistant_for_punctuation_variants() {
+        let mut dotted = partial("I need a tow truck.", 7, 100);
+        dotted.call_id = "call.1".to_string();
+        let mut slashed = partial("I need a tow truck.", 7, 100);
+        slashed.call_id = "call/1".to_string();
+
+        assert_ne!(
+            provisional_turn_id_for(&dotted),
+            provisional_turn_id_for(&slashed)
+        );
+    }
+
+    #[test]
+    fn prefix_append_update_emits_suffix_only() {
+        let policy = EarlyResponsePolicy {
+            enabled: true,
+            debounce_ms: 0,
+            append_mode: EarlyResponseAppendMode::PrefixMonotonicBackend,
+            ..EarlyResponsePolicy::default()
+        };
+        let sink = RecordingCancelSink::default();
+        let mut aggregator = EarlyResponseAggregator::new(policy, sink.clone());
+        assert_eq!(
+            aggregator
+                .handle_input(EarlyResponseInput::Partial(partial(
+                    "I need a tow truck.",
+                    7,
+                    100,
+                )))
+                .len(),
+            1
+        );
+
+        let events = aggregator.handle_input(EarlyResponseInput::Partial(partial(
+            "I need a tow truck. now.",
+            8,
+            250,
+        )));
+
+        assert!(matches!(
+            events.as_slice(),
+            [EarlyResponseEvent::Updated {
+                text,
+                append_or_replace: AppendOrReplace::Append,
+                ..
+            }] if text == "now."
+        ));
+        assert!(sink.calls().is_empty());
+    }
+
+    #[test]
+    fn max_updates_cancel_active_provisional() {
+        let policy = EarlyResponsePolicy {
+            enabled: true,
+            debounce_ms: 0,
+            max_updates_per_utterance: 1,
+            ..EarlyResponsePolicy::default()
+        };
+        let sink = RecordingCancelSink::default();
+        let mut aggregator = EarlyResponseAggregator::new(policy, sink.clone());
+        assert_eq!(
+            aggregator
+                .handle_input(EarlyResponseInput::Partial(partial(
+                    "I need a tow truck.",
+                    7,
+                    100,
+                )))
+                .len(),
+            1
+        );
+        assert_eq!(
+            aggregator
+                .handle_input(EarlyResponseInput::Partial(partial(
+                    "I need a tow truck now.",
+                    8,
+                    250,
+                )))
+                .len(),
+            1
+        );
+
+        let events = aggregator.handle_input(EarlyResponseInput::Partial(partial(
+            "I need a tow truck now please.",
+            9,
+            400,
+        )));
+
+        assert!(matches!(
+            events.as_slice(),
+            [EarlyResponseEvent::Canceled {
+                reason: EarlyResponseCancelReason::MaxUpdatesExceeded,
+                ..
+            }]
+        ));
+        assert_eq!(
+            sink.calls().last().map(|(_, reason)| *reason),
+            Some(EarlyResponseCancelReason::MaxUpdatesExceeded)
+        );
+    }
+
+    #[test]
     fn commit_boundary_commits_primary_and_cancels_mismatches() {
         let sink = RecordingCancelSink::default();
         let mut aggregator = EarlyResponseAggregator::new(enabled_policy(), sink.clone());
-        aggregator.handle_input(EarlyResponseInput::Partial(partial(
-            "I need a tow truck.",
-            7,
-            100,
-        )));
+        let first = partial("I need a tow truck.", 7, 100);
+        let first_provisional_id = provisional_turn_id_for(&first);
+        aggregator.handle_input(EarlyResponseInput::Partial(first));
         let mut second = partial("Wrong city downtown.", 9, 100);
         second.utterance_id = "utt-2".to_string();
+        let second_provisional_id = provisional_turn_id_for(&second);
         aggregator.handle_input(EarlyResponseInput::Partial(second));
 
         let events = aggregator.handle_input(EarlyResponseInput::CommitBoundary(
@@ -1052,7 +1757,7 @@ mod tests {
                 turn_id,
                 role: EarlyResponseCommitRole::PrimaryPlayback,
                 ..
-            } if provisional_turn_id == "pt_call-1_utt-1_7" && turn_id == "turn-1"
+            } if provisional_turn_id == &first_provisional_id && turn_id == "turn-1"
         ));
         assert!(matches!(
             &events[1],
@@ -1060,7 +1765,56 @@ mod tests {
                 provisional_turn_id,
                 reason: EarlyResponseCancelReason::FinalTranscriptMismatch,
                 ..
-            } if provisional_turn_id == "pt_call-1_utt-2_9"
+            } if provisional_turn_id == &second_provisional_id
+        ));
+        assert_eq!(sink.calls().len(), 1);
+    }
+
+    #[test]
+    fn commit_boundary_does_not_promote_suffix_only_coalesced_member() {
+        let sink = RecordingCancelSink::default();
+        let mut aggregator = EarlyResponseAggregator::new(enabled_policy(), sink.clone());
+        let mut suffix_member = partial("Oakland downtown now.", 9, 100);
+        suffix_member.utterance_id = "utt-2".to_string();
+        let suffix_provisional_id = provisional_turn_id_for(&suffix_member);
+        assert_eq!(
+            aggregator
+                .handle_input(EarlyResponseInput::Partial(suffix_member))
+                .len(),
+            1
+        );
+
+        let events = aggregator.handle_input(EarlyResponseInput::CommitBoundary(
+            EarlyResponseCommitBoundary {
+                call_id: "call-1".to_string(),
+                sequence: 10,
+                turn_id: "turn-1".to_string(),
+                coalesced_turn_ids: vec!["turn-frag-1".to_string(), "turn-frag-2".to_string()],
+                final_text: "I need a tow truck in Oakland downtown now.".to_string(),
+                members: vec![
+                    EarlyResponseCommitMember {
+                        utterance_id: "utt-1".to_string(),
+                        member_index: 0,
+                        member_final_text: "I need a tow truck in".to_string(),
+                        transcript_event_ids: vec!["event-1".to_string()],
+                    },
+                    EarlyResponseCommitMember {
+                        utterance_id: "utt-2".to_string(),
+                        member_index: 1,
+                        member_final_text: "Oakland downtown now.".to_string(),
+                        transcript_event_ids: vec!["event-2".to_string()],
+                    },
+                ],
+            },
+        ));
+
+        assert!(matches!(
+            events.as_slice(),
+            [EarlyResponseEvent::Canceled {
+                provisional_turn_id,
+                reason: EarlyResponseCancelReason::CoalescedIntoFinalTurn,
+                ..
+            }] if provisional_turn_id == &suffix_provisional_id
         ));
         assert_eq!(sink.calls().len(), 1);
     }
