@@ -5,6 +5,7 @@
 | 2026-06-14 PDT | @codex-m6-ds-rv | Initial #524 design for a true incremental-audio TTS contract, capability shape, gateway integration path, and success gates after Telnyx live-call TTFA profiling. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Revised capability shape after David review: keep `CapabilityKind::Speech`, replace one-of `speech_generation` with a set of `SpeechGeneration` values, and avoid adding `CapabilityKind::IncrementalSpeech`. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Addressed streaming-architect review: success gates now require an independent synthesis-complete proof, cancellation is out-of-band and non-consuming, packetization is stateful, and backpressure is normative. |
+| 2026-06-14 PDT | @codex-m6-ds-rv | Fixed cancellation layering: model controls now carry only app-neutral cancellation plus an opaque diagnostic label; caller-specific stale-response suppression belongs above `libs/model`. |
 
 # Design: Incremental TTS Contract
 
@@ -164,14 +165,11 @@ pub trait IncrementalSpeechStream: Send {
 
 pub struct IncrementalSpeechControls {
     pub cancel: CancellationToken,
-    pub cancel_key: IncrementalSpeechCancelKey,
+    pub request_label: Option<IncrementalSpeechRequestLabel>,
     pub max_buffered_audio_ms: u32,
 }
 
-pub struct IncrementalSpeechCancelKey {
-    pub provisional_turn_id: ProvisionalTurnId,
-    pub generation: u64,
-}
+pub struct IncrementalSpeechRequestLabel(pub String);
 
 pub struct IncrementalSpeechChunk {
     pub samples_i16: Vec<i16>,
@@ -192,8 +190,9 @@ Notes:
 
 - Runtime sample rate is deliberate. The gateway already resamples/packetizes from backend-native rates, and an incremental contract should not force a separate const-generic implementation per backend.
 - Operational cancellation is out-of-band through `IncrementalSpeechControls::cancel`, not a consuming `cancel(self)` method. The gateway must be able to cancel while `synthesize_incremental()` or `next_audio_chunk(&mut self)` is pending.
-- `cancel_key` uses the same `(provisional_turn_id, generation)` shape as the early-response pipeline in #527 so priority cancel/cancel-and-replace can suppress stale chunks from an older provisional response.
-- `synthesize_incremental()` and every pending `next_audio_chunk()` must observe cancellation and resolve within the configured cancel-to-stop latency. After cancellation, the backend must not yield additional playable audio for the canceled generation.
+- `request_label` is optional, caller-owned, and diagnostic only. Backends may propagate it to logs/spans, but must not parse it, branch on it, or use it for stale-output suppression.
+- Application-specific correlation keys stay above `libs/model`. The Telnyx gateway/#527 early-response adapter owns its provisional-response correlation and maps superseded responses into cancellation plus gateway-side stale-chunk dropping before packetization.
+- `synthesize_incremental()` and every pending `next_audio_chunk()` must observe cancellation and resolve within the configured cancel-to-stop latency. After cancellation, the backend must not yield additional playable audio for that canceled request.
 - `finish(self)` is a post-stream summary/cleanup path after no `next_audio_chunk()` borrow is pending. It is not the operational cancel mechanism.
 - Chunks must be non-empty PCM. `samples_i16.len()` must be divisible by `channels`, and sample rate/channel count must remain stable for the stream unless a future explicit format-change event is designed.
 - Timing should be measured by callers at await boundaries. Backends may add metrics snapshots later, but the core chunk type should stay transport-neutral.
@@ -255,7 +254,7 @@ Cancellation must be tested in four windows:
 - while `next_audio_chunk()` is pending;
 - while the gateway is blocked on media queue pressure.
 
-The backend must stop producing new chunks after cancellation and return a terminal summary that lets the gateway emit accurate playback status. Cancel-and-replace uses the `(provisional_turn_id, generation)` key: a newer generation for the same provisional turn cancels older generation output, and stale chunks from older generations must be dropped even if a backend races to return them.
+The backend must stop producing new chunks after cancellation and return a terminal summary that lets the gateway emit accurate playback status. Cancel-and-replace remains a caller-layer responsibility: the Telnyx gateway/#527 adapter cancels the older request token and drops stale chunks for superseded responses before packetization. The model contract only observes cancellation and an optional opaque diagnostic label.
 
 ## Profiling
 

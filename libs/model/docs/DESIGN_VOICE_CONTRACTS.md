@@ -8,6 +8,7 @@
 | 2026-05-02 | @codex-tts | Review follow-up: replaced descriptor-equality routing with typed `TranscriptDelivery` and `SpeechGeneration` metadata so execution semantics no longer depend on summary text, and simplified voice-agent adapter dispatch. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Added #524 follow-on design pointer: true incremental-audio TTS stays under `CapabilityKind::Speech`, uses a set of `SpeechGeneration` values, and must prove first playable PCM before full utterance synthesis; buffered chunk streams remain non-incremental. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Reconciled stale streaming-TTS wording with #524: true streaming now means `IncrementalSpeechSynthesizer` / `IncrementalSpeechStream` plus `SpeechGeneration::Streaming`, not the older ambiguous `SpeechStream` shim. |
+| 2026-06-14 PDT | @codex-m6-ds-rv | Kept incremental-TTS controls app-neutral: examples use an opaque request label for diagnostics, not caller-specific stale-response keys. |
 
 # Design: Voice Contracts
 
@@ -257,7 +258,7 @@ let mut stream = handle
         },
         IncrementalSpeechControls {
             cancel,
-            cancel_key,
+            request_label,
             max_buffered_audio_ms,
         },
     )
