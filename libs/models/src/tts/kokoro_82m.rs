@@ -30,7 +30,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("kokoro_82m"),
         display_name: "Kokoro-82M v1.0 ONNX af_bella".into(),
         family: BundleFamily::Kokoro,
-        capabilities: motlie_model::Capabilities::speech_buffered_only(),
+        capabilities: motlie_model::Capabilities::speech_buffered_and_streaming(),
         eval_tracks: vec![EvalTrack::Speech],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -47,6 +47,9 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(MODEL_FILE),
             ArtifactRule::Exact(TOKENIZER_FILE),
             ArtifactRule::Exact(VOICE_FILE),
+            ArtifactRule::Exact("model.onnx"),
+            ArtifactRule::Exact("voices.bin"),
+            ArtifactRule::Exact("tokens.txt"),
         ],
         quantization: Some(QuantizationScheme::OnnxInt8),
     }
@@ -163,7 +166,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::Catalog;
-    use motlie_model::CapabilityKind;
+    use motlie_model::{CapabilityKind, SpeechGeneration};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -175,6 +178,12 @@ mod tests {
         assert_eq!(descriptor.family, BundleFamily::Kokoro);
         assert_eq!(descriptor.backend, BackendKind::Ort);
         assert!(descriptor.capabilities.supports(CapabilityKind::Speech));
+        assert!(descriptor
+            .capabilities
+            .supports_speech_generation(SpeechGeneration::Buffered));
+        assert!(descriptor
+            .capabilities
+            .supports_speech_generation(SpeechGeneration::Streaming));
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Speech]);
 
         let artifacts = descriptor
@@ -184,6 +193,9 @@ mod tests {
         assert!(artifacts.includes(MODEL_FILE));
         assert!(artifacts.includes(TOKENIZER_FILE));
         assert!(artifacts.includes(VOICE_FILE));
+        assert!(artifacts.includes("model.onnx"));
+        assert!(artifacts.includes("voices.bin"));
+        assert!(artifacts.includes("tokens.txt"));
     }
 
     #[test]

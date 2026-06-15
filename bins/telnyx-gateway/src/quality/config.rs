@@ -390,7 +390,7 @@ impl Default for TtsQualityConfig {
             chunking_enabled: true,
             max_text_chunk_chars: 90,
             first_chunk_max_chars: 40,
-            prebuffer_chunks: 2,
+            prebuffer_chunks: 1,
         }
     }
 }
@@ -1993,7 +1993,7 @@ mod tests {
         assert!(config.tts.chunking_enabled);
         assert_eq!(config.tts.max_text_chunk_chars, 90);
         assert_eq!(config.tts.first_chunk_max_chars, 40);
-        assert_eq!(config.tts.prebuffer_chunks, 2);
+        assert_eq!(config.tts.prebuffer_chunks, 1);
     }
 
     #[test]

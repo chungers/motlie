@@ -132,14 +132,17 @@ struct PendingConversationFinal {
     event: TranscriptEvent,
     quality_config: VoiceQualityConfig,
     final_transcript_at: Instant,
+    latest_final_transcript_at: Instant,
     generation: u64,
-    turn_id: Option<String>,
+    turn_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct ConversationTurnContext {
     finalized_at: Option<Instant>,
+    latest_finalized_at: Option<Instant>,
     turn_id: Option<String>,
+    coalesced_turn_ids: Vec<String>,
 }
 
 pub fn default_conversation_handler() -> SharedConversationHandler {
@@ -269,7 +272,9 @@ pub async fn handle_transcript_event_with_turn(
             Some(&quality_config),
             ConversationTurnContext {
                 finalized_at: Some(final_transcript_at),
+                latest_finalized_at: Some(final_transcript_at),
                 turn_id: turn_id.map(str::to_string),
+                coalesced_turn_ids: turn_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
             },
         )
         .await;
@@ -318,17 +323,21 @@ async fn schedule_conversation_final(
                 event: input.event.clone(),
                 quality_config: input.quality_config.clone(),
                 final_transcript_at: input.final_transcript_at,
+                latest_final_transcript_at: input.final_transcript_at,
                 generation: 0,
-                turn_id: input.turn_id.clone(),
+                turn_ids: input.turn_id.iter().cloned().collect(),
             });
         if entry.generation == 0 {
             entry.event = input.event;
         } else {
             entry.event = merge_conversation_final_events(&entry.event, input.event);
         }
-        if entry.turn_id.is_none() {
-            entry.turn_id = input.turn_id;
+        if let Some(turn_id) = input.turn_id {
+            if !entry.turn_ids.contains(&turn_id) {
+                entry.turn_ids.push(turn_id);
+            }
         }
+        entry.latest_final_transcript_at = input.final_transcript_at;
         entry.generation = entry.generation.saturating_add(1);
         entry.generation
     };
@@ -410,7 +419,9 @@ async fn schedule_conversation_final(
                 Some(&pending.quality_config),
                 ConversationTurnContext {
                     finalized_at: Some(pending.final_transcript_at),
-                    turn_id: pending.turn_id,
+                    latest_finalized_at: Some(pending.latest_final_transcript_at),
+                    turn_id: pending.turn_ids.first().cloned(),
+                    coalesced_turn_ids: pending.turn_ids,
                 },
             )
             .await
@@ -524,6 +535,10 @@ async fn emit_conversation_final_debounce_span(
     let payload = serde_json::json!({
         "debounce_ms": debounce.as_millis() as u64,
         "text_chars": pending.event.text().chars().count(),
+        "turn_id": pending.turn_ids.first(),
+        "coalesced_turn_count": pending.turn_ids.len(),
+        "coalesced_turn_ids": pending.turn_ids.as_slice(),
+        "latest_final_to_dispatch_ms": pending.latest_final_transcript_at.elapsed().as_millis() as u64,
     });
     let payload = match payload {
         serde_json::Value::Object(map) => map,
@@ -1081,7 +1096,9 @@ async fn queue_conversation_speech(
             source_label: "conversation say".to_string(),
             conflict_policy,
             turn_finalized_at: turn_context.finalized_at,
+            latest_turn_finalized_at: turn_context.latest_finalized_at,
             turn_id: turn_context.turn_id,
+            coalesced_turn_ids: turn_context.coalesced_turn_ids,
         },
     )
     .await
@@ -2101,7 +2118,9 @@ mod tests {
             SpeechConflictPolicy::Reject,
             ConversationTurnContext {
                 finalized_at: None,
+                latest_finalized_at: None,
                 turn_id: Some("turn_test".to_string()),
+                coalesced_turn_ids: vec!["turn_test".to_string()],
             },
         )
         .await;

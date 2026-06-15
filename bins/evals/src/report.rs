@@ -203,6 +203,9 @@ fn render_records_markdown(
     out.push_str("\n## LLM Accelerator Comparison\n\n");
     render_llm_accelerator_comparison(&mut out, records);
 
+    out.push_str("\n## Coverage Accounting Matrix\n\n");
+    render_accounting_matrix(&mut out, records);
+
     out.push_str("\n## Per-Cell Coverage\n\n");
     out.push_str("| cell | host | arch | run | bundle | capability | depth | profile | requested | resolved | outcome | reason |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for record in records {
@@ -644,6 +647,112 @@ fn format_decimal(value: Option<f64>, places: usize) -> String {
     value
         .map(|value| format!("{value:.places$}"))
         .unwrap_or_else(|| "—".to_owned())
+}
+
+/// The #521 coverage Accounting Matrix: 4-state coverage per
+/// `(bundle × capability) × Profile`, reconciled from the records against the
+/// `BackendKind::accel_support` declaration. One view over the reconciliation;
+/// quant rides with the bundle (1:1).
+fn render_accounting_matrix(out: &mut String, records: &[ResultRecord]) {
+    use crate::coverage::{reconcile_records, CoverageState};
+    use crate::profile::Profile;
+
+    let report = reconcile_records(records.iter());
+    if report.states.is_empty() {
+        out.push_str("No enum-keyed coverage cells in this input set.\n");
+        return;
+    }
+    out.push_str(
+        "4-state coverage per `(bundle × capability)` × Profile, reconciled from the records \
+         against the `BackendKind::accel_support` declaration. ✅ Validated · ⛔ NotApplicable(reason) \
+         · 🔧 BuildGap · ⏳ Gap · — none.\n\n",
+    );
+    out.push_str("| bundle | quant | capability |");
+    for profile in Profile::ALL {
+        out.push_str(&format!(" {} |", profile.canonical_id()));
+    }
+    out.push('\n');
+    out.push_str("|---|---|---|");
+    for _ in Profile::ALL {
+        out.push_str("---|");
+    }
+    out.push('\n');
+
+    // (bundle_id, capability+speech_mode) -> (quant label, profile -> state).
+    // Speech buffered vs streaming are distinct rows (#531).
+    type MatrixRow = (String, BTreeMap<&'static str, CoverageState>);
+    let mut rows: BTreeMap<(String, String), MatrixRow> = BTreeMap::new();
+    for (key, state) in &report.states {
+        let entry = rows
+            .entry((key.bundle_id.clone(), capability_row_label(key)))
+            .or_insert_with(|| (key.quant.as_str().to_owned(), BTreeMap::new()));
+        entry.1.insert(key.profile.canonical_id(), *state);
+    }
+    for ((bundle, capability), (quant, by_profile)) in &rows {
+        out.push_str(&format!("| `{bundle}` | `{quant}` | `{capability}` |"));
+        for profile in Profile::ALL {
+            let cell = by_profile
+                .get(profile.canonical_id())
+                .map(coverage_state_symbol)
+                .unwrap_or_else(|| "—".to_owned());
+            out.push_str(&format!(" {cell} |"));
+        }
+        out.push('\n');
+    }
+
+    if !report.findings.is_empty() {
+        out.push_str(&format!(
+            "\n**{} reconciliation finding(s)** — declaration↔runtime contradictions (fail-closed):\n",
+            report.findings.len()
+        ));
+        for (key, finding) in &report.findings {
+            out.push_str(&format!(
+                "- `{}` / `{}` / `{}`: `{:?}`\n",
+                key.bundle_id,
+                capability_row_label(key),
+                key.profile.canonical_id(),
+                finding
+            ));
+        }
+    }
+}
+
+/// Capability column label, distinguishing the Speech sub-dimension (#531):
+/// streaming TTS reads `tts (streaming)`; buffered TTS stays `tts` (unchanged).
+fn capability_row_label(key: &crate::coverage::CellKey) -> String {
+    use motlie_model::SpeechGeneration;
+    match key.speech_mode {
+        Some(SpeechGeneration::Streaming) => {
+            format!("{} (streaming)", capability_label(key.capability))
+        }
+        _ => capability_label(key.capability).to_owned(),
+    }
+}
+
+fn capability_label(capability: motlie_model::CapabilityKind) -> &'static str {
+    use motlie_model::CapabilityKind;
+    match capability {
+        CapabilityKind::Chat => "chat",
+        CapabilityKind::ToolUse => "tool_use",
+        CapabilityKind::Transcription => "asr",
+        CapabilityKind::Speech => "tts",
+        CapabilityKind::Embeddings => "embeddings",
+        CapabilityKind::Completion => "completion",
+        CapabilityKind::Ocr => "ocr",
+        CapabilityKind::Vision => "vision",
+        CapabilityKind::VoiceClone => "voice_clone",
+    }
+}
+
+fn coverage_state_symbol(state: &crate::coverage::CoverageState) -> String {
+    use crate::coverage::CoverageState;
+    match state {
+        CoverageState::Validated => "✅".to_owned(),
+        CoverageState::NotApplicable(reason) => format!("⛔ {}", reason.as_str()),
+        CoverageState::BuildGap => "🔧".to_owned(),
+        CoverageState::Gap(Some(reason)) => format!("⏳ {}", reason.as_str()),
+        CoverageState::Gap(None) => "⏳".to_owned(),
+    }
 }
 
 fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
@@ -1422,6 +1531,39 @@ mod tests {
             ("quantization".to_owned(), "q4_0".to_owned()),
             ("profile".to_owned(), "dgx-spark".to_owned()),
         ])
+    }
+
+    #[test]
+    fn accounting_matrix_renders_states_from_records() {
+        use crate::result::{AcceleratorClass, TerminalOutcome};
+
+        let mut validated = test_record();
+        validated.coverage.bundle_id = "qwen3_4b_gguf".to_owned();
+        validated.coverage.quantization = "gguf_q4_k_m".to_owned();
+        validated.coverage.capability = "chat".to_owned();
+        validated.coverage.backend = "llama_cpp".to_owned();
+        validated.coverage.profile = "local-cpu-x86_64".to_owned();
+        validated.coverage.requested_accelerator = AcceleratorClass::Cpu;
+        validated.coverage.resolved_accelerator = AcceleratorClass::Cpu;
+        validated.coverage.terminal_outcome = TerminalOutcome::Passed;
+
+        // mistralrs on metal is declared Unsupported -> ⛔ NotApplicable.
+        let mut blocked_metal = test_record();
+        blocked_metal.coverage.bundle_id = "qwen3_4b".to_owned();
+        blocked_metal.coverage.quantization = "bf16".to_owned();
+        blocked_metal.coverage.capability = "chat".to_owned();
+        blocked_metal.coverage.backend = "mistralrs".to_owned();
+        blocked_metal.coverage.profile = "apple-metal".to_owned();
+        blocked_metal.coverage.requested_accelerator = AcceleratorClass::Metal;
+        blocked_metal.coverage.resolved_accelerator = AcceleratorClass::Cpu;
+        blocked_metal.coverage.terminal_outcome = TerminalOutcome::Blocked;
+
+        let mut out = String::new();
+        render_accounting_matrix(&mut out, &[validated, blocked_metal]);
+
+        assert!(!out.contains("Coverage Accounting Matrix")); // body only, header is caller's
+        assert!(out.contains("| `qwen3_4b_gguf` | `gguf_q4_k_m` | `chat` | ✅"));
+        assert!(out.contains("⛔ upstream_no_gpu_forwarding"));
     }
 
     fn test_record() -> ResultRecord {

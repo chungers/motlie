@@ -48,6 +48,15 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
             crate::driver::run_provision(command_line, rest).await
         }
         [command, rest @ ..] if command == "report" => report::run_report(rest),
+        [command, sub, rest @ ..] if command == "coverage" && sub == "query" => {
+            crate::coverage::run_coverage_query(rest)
+        }
+        [command, sub, rest @ ..] if command == "coverage" && sub == "index" => {
+            crate::coverage::run_coverage_index(rest)
+        }
+        [command, rest @ ..] if command == "coverage-index" => {
+            crate::coverage::run_coverage_index(rest)
+        }
         _ => {
             print_usage();
             bail!("unknown evals command")
