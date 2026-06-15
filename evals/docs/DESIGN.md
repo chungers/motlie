@@ -1,3 +1,5 @@
+> Standing process policy lives in [PROCESS.md](PROCESS.md). This document is the deep design record for the coverage ontology and generated accounting/index machinery.
+
 # Eval Coverage Ontology — DESIGN
 
 ## Changelog

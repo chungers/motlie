@@ -1,5 +1,10 @@
 # Distributed Eval Runbook — evals/2026-06-infra
 
+> Operational how-to and historical cycle notes live here. Standing policies live in
+> [docs/PROCESS.md](docs/PROCESS.md); deep coverage design lives in
+> [docs/DESIGN.md](docs/DESIGN.md). If a historical note conflicts with PROCESS,
+> PROCESS is authoritative.
+
 Live operational log of the first distributed eval exercise (issue #399 v2). Documents process steps **as executed**, gotchas, and open issues, so the next round is repeatable. Entries carry datetime + self-identifier. Final version ships in the coverage-report PR (David's direction, 2026-06-10).
 
 ## Decisions (David, 2026-06-10)
@@ -60,11 +65,10 @@ artifact gate. It derives all 18 curated artifact requirements from the
 exits non-zero if any required artifact is absent. Use
 `cargo run -p evals --features all-curated -- artifacts sync` to populate gaps
 through the registry download path. The generated provenance document is
-`evals/artifacts/provenance.md` and is guarded by an all-curated regen test.
-
-`HF_TOKEN` may be used to fetch gated Hugging Face artifacts. The eval runner
-records only token presence as a boolean and must never log or serialize the
-token value.
+[`evals/artifacts/provenance.md`](artifacts/provenance.md) and is guarded by an
+all-curated regen test. Artifact provenance policy, including downloaded vs
+derived rules and env-only token handling, is authoritative in
+[docs/PROCESS.md](docs/PROCESS.md#2-artifacts-and-provenance).
 
 ## General process (David, 2026-06-11 — the standing model for eval cycles)
 1. **All cycle work merges into the `evals/<cycle>` branch first** — framework code, per-host results PRs, fixes, the coverage-report PR. The branch is the coordination + data substrate.
