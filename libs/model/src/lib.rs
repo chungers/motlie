@@ -39,14 +39,13 @@ pub use tool::{
 };
 pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpdate};
 pub use typed::{
-    AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
+    stream_speech_into_asr, AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
     BufferedSpeechSynthesizer, BufferedVoiceCloneSynthesizer, CloneReference, Compose,
     I16MonoResampler, I16ToF32, IdentityTransform, IncrementalSpeechCancelToken,
     IncrementalSpeechChunk, IncrementalSpeechControls, IncrementalSpeechRequestLabel,
     IncrementalSpeechStream, IncrementalSpeechSummary, IncrementalSpeechSynthesizer, Mono,
     SpeechStream as TypedSpeechStream, SpeechSynthesizer as TypedSpeechSynthesizer, Stereo,
     StreamingTranscriber, SynthesisRequest, TranscriptionSession, VoiceCloneSynthesizer,
-    stream_speech_into_asr,
 };
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
@@ -1611,11 +1610,9 @@ mod tests {
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::RequestResponse);
         assert_eq!(descriptor.speech_generations.len(), 1);
-        assert!(
-            descriptor
-                .speech_generations
-                .contains(&SpeechGeneration::Buffered)
-        );
+        assert!(descriptor
+            .speech_generations
+            .contains(&SpeechGeneration::Buffered));
     }
 
     #[test]
@@ -1627,11 +1624,9 @@ mod tests {
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
         assert_eq!(descriptor.speech_generations.len(), 1);
-        assert!(
-            descriptor
-                .speech_generations
-                .contains(&SpeechGeneration::Streaming)
-        );
+        assert!(descriptor
+            .speech_generations
+            .contains(&SpeechGeneration::Streaming));
     }
 
     #[test]
@@ -1640,16 +1635,12 @@ mod tests {
 
         assert_eq!(descriptor.kind, CapabilityKind::Speech);
         assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
-        assert!(
-            descriptor
-                .speech_generations
-                .contains(&SpeechGeneration::Buffered)
-        );
-        assert!(
-            descriptor
-                .speech_generations
-                .contains(&SpeechGeneration::Streaming)
-        );
+        assert!(descriptor
+            .speech_generations
+            .contains(&SpeechGeneration::Buffered));
+        assert!(descriptor
+            .speech_generations
+            .contains(&SpeechGeneration::Streaming));
     }
 
     #[test]

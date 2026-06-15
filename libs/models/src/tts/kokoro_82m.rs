@@ -178,16 +178,12 @@ mod tests {
         assert_eq!(descriptor.family, BundleFamily::Kokoro);
         assert_eq!(descriptor.backend, BackendKind::Ort);
         assert!(descriptor.capabilities.supports(CapabilityKind::Speech));
-        assert!(
-            descriptor
-                .capabilities
-                .supports_speech_generation(SpeechGeneration::Buffered)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports_speech_generation(SpeechGeneration::Streaming)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports_speech_generation(SpeechGeneration::Buffered));
+        assert!(descriptor
+            .capabilities
+            .supports_speech_generation(SpeechGeneration::Streaming));
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Speech]);
 
         let artifacts = descriptor

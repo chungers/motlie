@@ -356,7 +356,7 @@ fn synthesize_streaming_cells(report: &mut ReconcileReport) {
 /// cross-cut (e.g. `profile == "dgx-spark"`, `quant == "gguf_q4_0"`,
 /// `accelerator == "cuda"`) without ad-hoc grep. Serialized in a stable field
 /// order; the index as a whole is sorted, so regeneration is byte-stable.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct CoverageIndexEntry {
     pub bundle_id: String,
     pub quant: String,
@@ -526,6 +526,79 @@ pub fn run_coverage_index(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `evals coverage query [--index <path>] [--bundle X] [--capability X]
+/// [--profile X] [--quant X] [--accelerator X] [--speech-mode X] [--state X]` —
+/// the §F first-class slice-and-dice selector over the committed `INDEX.json`.
+/// Every flag is an exact-match filter on a typed dimension; combine freely
+/// (cross-cuts). Prints the matching cells + a count.
+pub fn run_coverage_query(args: &[String]) -> Result<()> {
+    let mut index_path = PathBuf::from("evals/results/coverage/INDEX.json");
+    let mut filters: Vec<(String, String)> = Vec::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        let flag = args[idx].clone();
+        idx += 1;
+        let value = args
+            .get(idx)
+            .cloned()
+            .with_context(|| format!("`{flag}` needs a value"))?;
+        idx += 1;
+        match flag.as_str() {
+            "--index" => index_path = PathBuf::from(value),
+            "--bundle" | "--capability" | "--profile" | "--quant" | "--accelerator"
+            | "--speech-mode" | "--state" | "--reason" => {
+                filters.push((flag.trim_start_matches("--").to_owned(), value));
+            }
+            other => bail!("unknown coverage query option `{other}`"),
+        }
+    }
+
+    let text = std::fs::read_to_string(&index_path)
+        .with_context(|| format!("failed to read coverage index `{}`", index_path.display()))?;
+    let entries: Vec<CoverageIndexEntry> = serde_json::from_str(&text)
+        .with_context(|| format!("malformed coverage index `{}`", index_path.display()))?;
+
+    let matched: Vec<&CoverageIndexEntry> = entries
+        .iter()
+        .filter(|entry| {
+            filters
+                .iter()
+                .all(|(key, want)| entry_field(entry, key) == Some(want))
+        })
+        .collect();
+
+    println!("# coverage query: {} matching cell(s)", matched.len());
+    println!("bundle\tquant\tcapability\tspeech_mode\tprofile\taccelerator\tstate\treason");
+    for entry in matched {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            entry.bundle_id,
+            entry.quant,
+            entry.capability,
+            entry.speech_mode.as_deref().unwrap_or("-"),
+            entry.profile,
+            entry.accelerator,
+            entry.state,
+            entry.reason.as_deref().unwrap_or("-"),
+        );
+    }
+    Ok(())
+}
+
+fn entry_field<'a>(entry: &'a CoverageIndexEntry, key: &str) -> Option<&'a str> {
+    match key {
+        "bundle" => Some(entry.bundle_id.as_str()),
+        "capability" => Some(entry.capability.as_str()),
+        "profile" => Some(entry.profile.as_str()),
+        "quant" => Some(entry.quant.as_str()),
+        "accelerator" => Some(entry.accelerator.as_str()),
+        "speech-mode" => entry.speech_mode.as_deref(),
+        "state" => Some(entry.state.as_str()),
+        "reason" => entry.reason.as_deref(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,6 +715,33 @@ mod tests {
             committed, regenerated,
             "coverage/INDEX.json is stale — regenerate with `evals coverage-index`",
         );
+    }
+
+    #[test]
+    fn coverage_query_filters_by_any_dimension() {
+        // §F slice-and-dice: every dimension is an exact-match field.
+        let entry = CoverageIndexEntry {
+            bundle_id: "kokoro_82m".to_owned(),
+            quant: "onnx_int8".to_owned(),
+            capability: "tts".to_owned(),
+            speech_mode: Some("streaming".to_owned()),
+            profile: "dgx-spark".to_owned(),
+            accelerator: "cuda".to_owned(),
+            state: "gap".to_owned(),
+            reason: Some("streaming_eval_out_of_scope".to_owned()),
+        };
+        assert_eq!(entry_field(&entry, "bundle"), Some("kokoro_82m"));
+        assert_eq!(entry_field(&entry, "speech-mode"), Some("streaming"));
+        assert_eq!(entry_field(&entry, "accelerator"), Some("cuda"));
+        assert_eq!(entry_field(&entry, "state"), Some("gap"));
+        // A non-matching filter value excludes the cell.
+        assert_ne!(entry_field(&entry, "profile"), Some("apple-metal"));
+        // The committed INDEX.json round-trips through the query's deserializer.
+        let text = std::fs::read_to_string(results_root().join("coverage/INDEX.json")).unwrap();
+        let entries: Vec<CoverageIndexEntry> = serde_json::from_str(&text).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.bundle_id == "kokoro_82m" && e.speech_mode.as_deref() == Some("streaming")));
     }
 
     #[test]
