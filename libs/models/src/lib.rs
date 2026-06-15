@@ -121,8 +121,8 @@ pub enum ModelsError {
     NoEmbeddingModelsEnabled,
     #[error("expected exactly one curated embedding model in this build, found {count}")]
     AmbiguousEmbeddingModelSelection { count: usize },
-    #[error("invalid checkpoint quantization: {message}")]
-    InvalidCheckpointQuantization { message: String },
+    #[error("invalid quantization scheme: {message}")]
+    InvalidQuantizationScheme { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
@@ -133,8 +133,11 @@ pub fn quantization_label_isq(quantization: Option<QuantizationScheme>) -> &'sta
     match quantization {
         Some(QuantizationScheme::IsqQ4) => "ISQ Q4",
         Some(QuantizationScheme::IsqQ8) => "ISQ Q8",
+        Some(QuantizationScheme::Bf16) => "BF16",
+        Some(QuantizationScheme::Fp32) => "F32",
+        Some(QuantizationScheme::Fp16) => "F16",
         Some(_) => "unsupported ISQ precision",
-        None => "F32 (none)",
+        None => "default",
     }
 }
 
@@ -1102,7 +1105,7 @@ fn download_checkpoint_artifacts_with_options(
     options: &ArtifactDownloadOptions,
 ) -> Result<Vec<PathBuf>> {
     checkpoint.validate_quantization().map_err(|source| {
-        ModelsError::InvalidCheckpointQuantization {
+        ModelsError::InvalidQuantizationScheme {
             message: source.to_string(),
         }
     })?;

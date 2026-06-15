@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
-            quantization,
+            quantization_scheme: quantization,
             ..Default::default()
         })
         .await
@@ -256,6 +256,7 @@ fn requested_precision_label(quantization: Option<QuantizationScheme>) -> &'stat
         Some(QuantizationScheme::GgufQ5_K_M) => "q5",
         Some(QuantizationScheme::GgufQ8_0) => "q8",
         Some(QuantizationScheme::Fp16) => "fp8",
+        Some(_) => "unsupported precision",
         None => "bundle recommended",
     }
 }

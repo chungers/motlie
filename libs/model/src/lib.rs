@@ -1151,8 +1151,8 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_quantization_rejects_runtime_only_schemes() {
-        let checkpoint = ModelCheckpoint {
+    fn checkpoint_quantization_rejects_illegal_schemes() {
+        let runtime_only = ModelCheckpoint {
             format: CheckpointFormat::Safetensors,
             source: ArtifactSource::HuggingFace {
                 repo: "example/model",
@@ -1161,11 +1161,27 @@ mod tests {
             quantization: Some(QuantizationScheme::IsqQ4),
         };
 
-        let err = checkpoint
+        let err = runtime_only
             .validate_quantization()
             .expect_err("ISQ is runtime-only and cannot describe a checkpoint");
         assert!(
             matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("runtime quantization"))
+        );
+
+        let format_mismatch = ModelCheckpoint {
+            format: CheckpointFormat::Gguf,
+            source: ArtifactSource::HuggingFace {
+                repo: "example/model",
+            },
+            include: vec![ArtifactRule::Suffix(".gguf")],
+            quantization: Some(QuantizationScheme::OnnxInt8),
+        };
+
+        let err = format_mismatch
+            .validate_quantization()
+            .expect_err("ONNX INT8 cannot describe a GGUF checkpoint");
+        assert!(
+            matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("cannot use quantization scheme"))
         );
     }
 

@@ -56,15 +56,16 @@ async fn main() -> Result<()> {
     if input.trim().is_empty() {
         bail!(
             "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- \
-             [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
+             [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b] [--precision=q4|q8|bf16] <prompt>"
         );
     }
 
+    let qwen_spec = MistralTextSpec::qwen3_4b();
     let quantization = match precision.as_deref() {
-        Some("q4") | None => Some(QuantizationScheme::GgufQ4_K_M),
-        Some("q8") => Some(QuantizationScheme::GgufQ8_0),
-        Some("f32") => None,
-        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
+        Some("q4") | None => Some(QuantizationScheme::IsqQ4),
+        Some("q8") => Some(QuantizationScheme::IsqQ8),
+        Some("bf16") | Some("default") => qwen_spec.quantization.recommended(),
+        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or bf16"),
     };
 
     let (selector_label, bundle_id, descriptor, bundle, path_kind) =
@@ -140,7 +141,7 @@ async fn main() -> Result<()> {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
-            quantization,
+            quantization_scheme: quantization,
             ..Default::default()
         })
         .await
@@ -157,7 +158,7 @@ async fn main() -> Result<()> {
     support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
     let chat = handle.chat().context("qwen3 bundle should expose chat")?;
-    let generation_defaults = MistralTextSpec::qwen3_4b().recommended_generation_params;
+    let generation_defaults = qwen_spec.recommended_generation_params.clone();
 
     if tool_demo_only {
         tool_demo_support::run_tool_demo_with_options(

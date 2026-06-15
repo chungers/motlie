@@ -93,20 +93,13 @@ mod gguf_example {
             bail!(
                 "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- \
              [--download-artifacts] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf|google/gemma4_e4b_gguf|google/gemma4_12b_gguf|google/gemma4_12b_qat_gguf] \
-             [--precision=q4|q5|q8|f16] [--thinking=off|disabled|auto] [--system=TEXT|--no-system] [--assistant=TEXT] <prompt>\n\n\
+             [--precision=q4|q5|q8] [--thinking=off|disabled|auto] [--system=TEXT|--no-system] [--assistant=TEXT] <prompt>\n\n\
              This example demonstrates chat generation via the llama.cpp backend using GGUF-quantized weights."
             );
         }
 
         let selected = select_model(chat_selector)?;
-        let quantization = match precision.as_deref() {
-            Some("q4") => Some(QuantizationScheme::GgufQ4_K_M),
-            Some("q5") => Some(QuantizationScheme::GgufQ5_K_M),
-            Some("q8") => Some(QuantizationScheme::GgufQ8_0),
-            Some("f16") => None,
-            None => selected.spec.quantization.recommended(),
-            Some(other) => bail!("unknown precision `{other}` — use q4, q5, q8, or f16"),
-        };
+        let quantization = resolve_quantization(precision.as_deref(), &selected.spec.quantization)?;
         let chat_params =
             GenerationParams::default().with_defaults(&selected.spec.recommended_generation_params);
         let effective_thinking = thinking.unwrap_or(selected.spec.thinking);
@@ -220,7 +213,7 @@ mod gguf_example {
                 artifact_policy: Some(ArtifactPolicy::LocalOnly {
                     root: artifact_root.clone(),
                 }),
-                quantization,
+                quantization_scheme: quantization,
                 ..Default::default()
             })
             .await
@@ -477,6 +470,48 @@ mod gguf_example {
         Ok(ChatModels::Qwen3_6_27B_Gguf)
     }
 
+    fn resolve_quantization(
+        precision: Option<&str>,
+        support: &motlie_model::QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        match precision {
+            Some("q4") => resolve_q4(support),
+            Some("q5") => resolve_supported("q5", QuantizationScheme::GgufQ5_K_M, support),
+            Some("q8") => resolve_supported("q8", QuantizationScheme::GgufQ8_0, support),
+            None | Some("default") => Ok(support.recommended()),
+            Some(other) => bail!("unknown precision `{other}` — use q4, q5, or q8"),
+        }
+    }
+
+    fn resolve_q4(
+        support: &motlie_model::QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        for scheme in [QuantizationScheme::GgufQ4_0, QuantizationScheme::GgufQ4_K_M] {
+            if support.supports(scheme) {
+                return Ok(Some(scheme));
+            }
+        }
+        bail!(
+            "precision `q4` is not supported by the selected GGUF model: {:?}",
+            support.supported()
+        )
+    }
+
+    fn resolve_supported(
+        label: &str,
+        scheme: QuantizationScheme,
+        support: &motlie_model::QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        if support.supports(scheme) {
+            Ok(Some(scheme))
+        } else {
+            bail!(
+                "precision `{label}` maps to `{scheme}` but the selected GGUF model supports {:?}",
+                support.supported()
+            )
+        }
+    }
+
     fn spec_for_chat_model(model: ChatModels) -> Result<LlamaCppTextSpec> {
         #[allow(unreachable_patterns)]
         match model {
@@ -503,7 +538,7 @@ mod gguf_example {
         #[cfg(feature = "model-gemma4-12b-qat-gguf")]
         if matches!(model, ChatModels::Gemma4_12B_Qat_Gguf) {
             return match quantization {
-                Some(QuantizationScheme::GgufQ4_K_M) => "GGUF Q4_0",
+                Some(QuantizationScheme::GgufQ4_0) => "GGUF Q4_0",
                 _ => "unsupported QAT GGUF precision",
             };
         }
