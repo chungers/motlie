@@ -269,6 +269,14 @@ impl QualityEvent {
         Self::new(context, "media.outbound_pacing.rollup", payload)
     }
 
+    pub fn turn_playback_linked(context: QualityEventContext, payload: Map<String, Value>) -> Self {
+        Self::new(context, "quality.turn.playback_linked", payload)
+    }
+
+    pub fn report_summary(context: QualityEventContext, payload: Map<String, Value>) -> Self {
+        Self::new(context, "quality.report.summary", payload)
+    }
+
     #[cfg(test)]
     fn test_event() -> Self {
         Self::new(
@@ -638,6 +646,40 @@ mod tests {
         );
         assert_eq!(outbound.event, "media.outbound_pacing.rollup");
         assert_eq!(outbound.payload["underrun_count"], 1);
+    }
+
+    #[test]
+    fn turn_linkage_and_summary_events_use_normalized_names() {
+        let context = QualityEventContext::new(
+            3,
+            "run_test",
+            Some("gwc_test".to_string()),
+            "cfg_test",
+            RedactionMode::MetricsOnly,
+        );
+        let link = QualityEvent::turn_playback_linked(
+            context.clone(),
+            map_from_value(json!({
+                "link_stage": "queued",
+                "turn_id": "turn_selected",
+                "playback_id": "tts_test"
+            })),
+        );
+        assert_eq!(link.event, "quality.turn.playback_linked");
+        assert_eq!(link.payload["link_stage"], "queued");
+        assert_eq!(link.payload["turn_id"], "turn_selected");
+
+        let summary = QualityEvent::report_summary(
+            context,
+            map_from_value(json!({
+                "attempted_turns": 1,
+                "played_turns": 1,
+                "canceled_after_call_end_turns": 0
+            })),
+        );
+        assert_eq!(summary.event, "quality.report.summary");
+        assert_eq!(summary.payload["attempted_turns"], 1);
+        assert_eq!(summary.payload["played_turns"], 1);
     }
 
     #[test]

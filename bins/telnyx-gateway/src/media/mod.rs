@@ -1164,6 +1164,7 @@ async fn emit_playback_terminal_spans(
                 payload,
             }
         });
+    let terminal_reason = clear.as_ref().map(|(_, reason)| reason.label());
     let barge_in_span = clear.and_then(|(requested_at, reason)| {
         (reason == SpeechClearReason::BargeIn).then(|| {
             let payload = map_from_value(json!({
@@ -1191,6 +1192,7 @@ async fn emit_playback_terminal_spans(
             pacing.pre_audio_wait_ticks,
             pacing.underrun_ticks,
         );
+        guard.record_quality_playback_terminal(call_id, playback_id, status, terminal_reason);
         if let Some(span) = terminal_span {
             guard.emit_quality_span_finished(call_id, span);
         }
@@ -2090,6 +2092,7 @@ async fn emit_quality_transport_rollups(state: &SharedState, media_state: &mut M
         redaction_mode,
         outbound_payload,
     );
+    guard.emit_quality_report_summary(&call_id, "media_stop");
 }
 
 async fn finalize_capture(media_state: &mut MediaSocketState) {

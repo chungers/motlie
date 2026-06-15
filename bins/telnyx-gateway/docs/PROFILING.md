@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-14 PDT | @codex-m6-ds-rv | Implemented the remaining #523 report-denominator and playback-linkage records: `quality.turn.playback_linked` joins selected/coalesced turns to playback lifecycle, and `quality.report.summary` snapshots carry attempted/played/canceled/excluded counts. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Addressed issue #523 live-test data/profiling gaps: transcript redaction modes now have concrete JSONL behavior, caller-turn records carry ASR/session/coalescing metadata, first-audio spans expose coalesced-turn attribution, `tts.prebuffer_chunks` defaults to 1 for lowest first-audio latency, and TTS warm runs a tiny probe synthesis. |
 | 2026-06-12 PDT | @codex-366-impl | Resolved #488 generality review: final-settle fragment classifiers and conversation final-coalescing hold policy now live under `VoiceQualityConfig.endpoint` with default-preserving values, and `bins/telnyx-agent` opts into `motlie.telnyx.text.partials.v1` so advisory partials are exercised in live calls. |
 | 2026-06-12 PDT | @codex-366-impl | Added #481/David stability ruling notes: `caller.partial.stability` is gateway-estimated stream convergence/churn only, never confidence/truth/probability/response input, and successful advisory partials emit `text_call.caller_partial.sent` for live-test analysis. |
@@ -409,6 +410,26 @@ When a final transcript becomes a M4 caller turn, emit the mapping:
 
 This mapping is required for endpointing, barge-in, suppressed-token, and transport events to be joined with the eventual `caller.turn`.
 
+When a selected/coalesced caller turn attempts assistant playback, the gateway emits explicit linkage records for the queued, first-audio, and terminal stages. This removes ambiguity between the selected response turn, the source turns that were coalesced into it, and the playback that eventually completed, failed, or was canceled.
+
+```json
+{
+  "event": "quality.turn.playback_linked",
+  "link_stage": "terminal",
+  "turn_id": "turn_selected",
+  "selected_turn_id": "turn_selected",
+  "source_turn_ids": ["turn_a", "turn_b"],
+  "coalesced_turn_ids": ["turn_a", "turn_b"],
+  "coalesced_turn_count": 2,
+  "playback_id": "tts_...",
+  "tts_backend": "piper",
+  "source_label": "conversation",
+  "first_audio_sent": true,
+  "terminal_status": "canceled",
+  "terminal_reason": "canceled_after_call_end"
+}
+```
+
 ## Acoustic, ASR, and Endpointing Spans
 
 | Span | Start | End | Category | Critical path? | Purpose |
@@ -758,6 +779,16 @@ Every aggregate report must include denominators and exclusion counts, for examp
   "turns_total": 120,
   "turns_analyzed": 110,
   "turns_excluded": 10,
+  "caller_turns": 120,
+  "attempted_turns": 118,
+  "attempted_playbacks": 118,
+  "played_turns": 112,
+  "played_playbacks": 112,
+  "completed_playbacks": 104,
+  "canceled_playbacks": 8,
+  "failed_playbacks": 0,
+  "canceled_after_call_end_turns": 2,
+  "excluded_turns_without_playback": 2,
   "exclusions": {
     "missing_final_transcript": 2,
     "high_inbound_jitter": 5,
@@ -765,6 +796,8 @@ Every aggregate report must include denominators and exclusion counts, for examp
   }
 }
 ```
+
+`quality.report.summary` may be emitted more than once per call as first-audio, playback-terminal, media-stop, and call-terminal snapshots arrive. Aggregators should use the highest `event_sequence` snapshot for each `(run_id, gateway_call_id)` when computing run-level denominators.
 
 ## Reference, WER, and Label Schema
 

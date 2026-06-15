@@ -9,7 +9,9 @@ use crate::media::{
     OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry, SpeechCancelToken,
     SpeechClearReason,
 };
-use crate::operator::state::{CallStatus, LogLevel, QualitySpanEmission, SharedState};
+use crate::operator::state::{
+    CallStatus, LogLevel, QualityPlaybackLinkage, QualitySpanEmission, SharedState,
+};
 use crate::quality::RedactionMode;
 use crate::tts::{
     split_speech_text_with_first_chunk_max_chars, LiveTtsBackend, SharedTtsRegistry, TtsAudio,
@@ -191,7 +193,18 @@ pub async fn queue_speech_with_request(
                 ),
             );
         }
-        guard.start_tts_job(&gateway_call_id, playback_id.clone(), tts_backend, &text);
+        guard.start_tts_job_with_linkage(
+            &gateway_call_id,
+            playback_id.clone(),
+            tts_backend,
+            &text,
+            QualityPlaybackLinkage {
+                turn_id: turn_id.clone(),
+                coalesced_turn_ids: coalesced_turn_ids.clone(),
+                source_label: source_label.clone(),
+            },
+            replaced_playback_id.as_deref(),
+        );
         guard.log(
             LogLevel::Info,
             format!("{source_label} requested for {gateway_call_id}: {playback_id}"),
@@ -311,7 +324,18 @@ pub async fn queue_append_speech_with_request(
                 ),
             );
         }
-        guard.start_tts_job(&gateway_call_id, playback_id.clone(), tts_backend, &text);
+        guard.start_tts_job_with_linkage(
+            &gateway_call_id,
+            playback_id.clone(),
+            tts_backend,
+            &text,
+            QualityPlaybackLinkage {
+                turn_id: turn_id.clone(),
+                coalesced_turn_ids: coalesced_turn_ids.clone(),
+                source_label: source_label.clone(),
+            },
+            replaced_playback_id.as_deref(),
+        );
         guard.log(
             LogLevel::Info,
             format!("{source_label} append speech started for {gateway_call_id}: {playback_id}"),
@@ -889,7 +913,11 @@ async fn mark_media_closed_after_call_end(
         .finish_speech(&job.gateway_call_id, &job.playback_id)
         .await;
     let mut guard = job.state.write().await;
-    guard.mark_tts_canceled(&job.gateway_call_id, &job.playback_id);
+    guard.mark_tts_canceled_with_reason(
+        &job.gateway_call_id,
+        &job.playback_id,
+        Some("canceled_after_call_end"),
+    );
     guard.log(
         LogLevel::Info,
         format!(

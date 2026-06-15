@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -218,6 +218,162 @@ pub struct TtsPlaybackState {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct QualityPlaybackLinkage {
+    pub turn_id: Option<String>,
+    pub coalesced_turn_ids: Vec<String>,
+    pub source_label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QualityPlaybackRecord {
+    playback_id: String,
+    turn_id: Option<String>,
+    source_turn_ids: Vec<String>,
+    tts_backend: LiveTtsBackend,
+    source_label: String,
+    first_audio_sent: bool,
+    terminal_status: Option<String>,
+    terminal_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct QualityTurnReportState {
+    raw_asr_final_events: usize,
+    caller_turn_ids: BTreeSet<String>,
+    coalesced_selected_turn_ids: BTreeSet<String>,
+    coalesced_source_turn_ids: BTreeSet<String>,
+    response_attempted_turn_ids: BTreeSet<String>,
+    response_attempted_playback_ids: BTreeSet<String>,
+    played_turn_ids: BTreeSet<String>,
+    played_playback_ids: BTreeSet<String>,
+    terminal_completed_playback_ids: BTreeSet<String>,
+    terminal_canceled_playback_ids: BTreeSet<String>,
+    terminal_failed_playback_ids: BTreeSet<String>,
+    canceled_after_call_end_turn_ids: BTreeSet<String>,
+    canceled_after_call_end_playback_ids: BTreeSet<String>,
+    playback_records: BTreeMap<String, QualityPlaybackRecord>,
+}
+
+impl QualityTurnReportState {
+    fn record_raw_final(&mut self) {
+        self.raw_asr_final_events = self.raw_asr_final_events.saturating_add(1);
+    }
+
+    fn record_caller_turn(&mut self, turn_id: &str, source_turn_ids: &[String]) {
+        self.caller_turn_ids.insert(turn_id.to_string());
+        if source_turn_ids.len() > 1 {
+            self.coalesced_selected_turn_ids.insert(turn_id.to_string());
+            self.coalesced_source_turn_ids
+                .extend(source_turn_ids.iter().cloned());
+        }
+    }
+
+    fn record_playback_queued(
+        &mut self,
+        playback_id: String,
+        tts_backend: LiveTtsBackend,
+        linkage: QualityPlaybackLinkage,
+    ) -> QualityPlaybackRecord {
+        let source_turn_ids =
+            normalized_source_turn_ids(linkage.turn_id.as_deref(), linkage.coalesced_turn_ids);
+        if let Some(turn_id) = linkage.turn_id.as_ref() {
+            self.response_attempted_turn_ids.insert(turn_id.clone());
+        }
+        self.response_attempted_playback_ids
+            .insert(playback_id.clone());
+        let record = QualityPlaybackRecord {
+            playback_id: playback_id.clone(),
+            turn_id: linkage.turn_id,
+            source_turn_ids,
+            tts_backend,
+            source_label: linkage.source_label,
+            first_audio_sent: false,
+            terminal_status: None,
+            terminal_reason: None,
+        };
+        self.playback_records.insert(playback_id, record.clone());
+        record
+    }
+
+    fn record_first_audio(&mut self, playback_id: &str) -> Option<QualityPlaybackRecord> {
+        let record = self.playback_records.get_mut(playback_id)?;
+        if record.first_audio_sent {
+            return None;
+        }
+        record.first_audio_sent = true;
+        if let Some(turn_id) = record.turn_id.as_ref() {
+            self.played_turn_ids.insert(turn_id.clone());
+        }
+        self.played_playback_ids.insert(playback_id.to_string());
+        Some(record.clone())
+    }
+
+    fn record_terminal(
+        &mut self,
+        playback_id: &str,
+        status: &'static str,
+        reason: Option<&str>,
+    ) -> Option<QualityPlaybackRecord> {
+        let record = self.playback_records.get_mut(playback_id)?;
+        if record.terminal_status.is_some() {
+            return None;
+        }
+        record.terminal_status = Some(status.to_string());
+        record.terminal_reason = reason.map(str::to_string);
+        match status {
+            "completed" => {
+                self.terminal_completed_playback_ids
+                    .insert(playback_id.to_string());
+            }
+            "canceled" => {
+                self.terminal_canceled_playback_ids
+                    .insert(playback_id.to_string());
+            }
+            "failed" => {
+                self.terminal_failed_playback_ids
+                    .insert(playback_id.to_string());
+            }
+            _ => {}
+        }
+        if reason == Some("canceled_after_call_end") {
+            self.canceled_after_call_end_playback_ids
+                .insert(playback_id.to_string());
+            if let Some(turn_id) = record.turn_id.as_ref() {
+                self.canceled_after_call_end_turn_ids
+                    .insert(turn_id.clone());
+            }
+        }
+        Some(record.clone())
+    }
+
+    fn summary_payload(&self, summary_reason: &str, call: &CallSession) -> Map<String, Value> {
+        let turns_without_playback = self
+            .caller_turn_ids
+            .difference(&self.response_attempted_turn_ids)
+            .count();
+        json_map(serde_json::json!({
+            "summary_reason": summary_reason,
+            "call_status": call.status.label(),
+            "terminal_reason": call.terminal_reason,
+            "raw_asr_final_events": self.raw_asr_final_events,
+            "caller_turns": self.caller_turn_ids.len(),
+            "attempted_turns": self.response_attempted_turn_ids.len(),
+            "attempted_playbacks": self.response_attempted_playback_ids.len(),
+            "coalesced_turns": self.coalesced_source_turn_ids.len(),
+            "coalesced_response_turns": self.coalesced_selected_turn_ids.len(),
+            "played_turns": self.played_turn_ids.len(),
+            "played_playbacks": self.played_playback_ids.len(),
+            "completed_playbacks": self.terminal_completed_playback_ids.len(),
+            "canceled_playbacks": self.terminal_canceled_playback_ids.len(),
+            "failed_playbacks": self.terminal_failed_playback_ids.len(),
+            "canceled_after_call_end_turns": self.canceled_after_call_end_turn_ids.len(),
+            "canceled_after_call_end_playbacks": self.canceled_after_call_end_playback_ids.len(),
+            "excluded_turns_without_playback": turns_without_playback,
+        }))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ConversationMode {
     #[default]
@@ -383,6 +539,7 @@ pub struct CallSession {
     pub echo_suppressed_transcripts: usize,
     pub last_echo_suppressed_preview: Option<String>,
     pub conversation: ConversationState,
+    pub quality_turns: QualityTurnReportState,
 }
 
 impl CallSession {
@@ -413,6 +570,7 @@ impl CallSession {
             echo_suppressed_transcripts: 0,
             last_echo_suppressed_preview: None,
             conversation: ConversationState::default(),
+            quality_turns: QualityTurnReportState::default(),
         };
         call.push_timeline("call created");
         call
@@ -699,6 +857,13 @@ impl GatewayState {
         session: Option<&ActiveAsrQualitySession>,
         mut metadata: CallerTurnEventMetadata,
     ) {
+        let source_turn_ids =
+            normalized_source_turn_ids(Some(turn_id), metadata.coalesced_turn_ids.clone());
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.quality_turns
+                .record_caller_turn(turn_id, &source_turn_ids);
+        }
+        metadata.coalesced_turn_ids = source_turn_ids;
         if !self.quality.event_sink.is_enabled() {
             return;
         }
@@ -827,6 +992,78 @@ impl GatewayState {
                 redaction_mode,
             ),
             payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    pub fn record_quality_playback_terminal(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        status: &'static str,
+        reason: Option<&str>,
+    ) {
+        let record = self.calls.get_mut(gateway_call_id).and_then(|call| {
+            call.quality_turns
+                .record_terminal(playback_id, status, reason)
+        });
+        if let Some(record) = record {
+            self.emit_quality_turn_playback_link(
+                gateway_call_id,
+                "terminal",
+                &record,
+                None,
+                record.terminal_status.as_deref(),
+                record.terminal_reason.as_deref(),
+            );
+            self.emit_quality_report_summary(gateway_call_id, "playback_terminal");
+        }
+    }
+
+    pub fn emit_quality_report_summary(&mut self, gateway_call_id: &str, summary_reason: &str) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let mut payload = {
+            let Some(call) = self.calls.get(gateway_call_id) else {
+                return;
+            };
+            call.quality_turns.summary_payload(summary_reason, call)
+        };
+        payload.insert(
+            "dropped_quality_events".to_string(),
+            Value::Number(serde_json::Number::from(
+                self.quality.event_sink.dropped_count(),
+            )),
+        );
+        let event = QualityEvent::report_summary(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
+    fn emit_quality_turn_playback_link(
+        &mut self,
+        gateway_call_id: &str,
+        link_stage: &'static str,
+        record: &QualityPlaybackRecord,
+        replaced_playback_id: Option<&str>,
+        terminal_status: Option<&str>,
+        terminal_reason: Option<&str>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::turn_playback_linked(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            playback_link_payload(
+                link_stage,
+                record,
+                replaced_playback_id,
+                terminal_status,
+                terminal_reason,
+            ),
         );
         self.quality.event_sink.emit(event);
     }
@@ -1012,6 +1249,7 @@ impl GatewayState {
                 TranscriptKind::Final => {
                     append_transcript_fragment(&mut call.final_transcript, &text);
                     call.current_partial = None;
+                    call.quality_turns.record_raw_final();
                 }
             }
             call.transcripts.push(TranscriptLine {
@@ -1135,7 +1373,26 @@ impl GatewayState {
         backend: LiveTtsBackend,
         text: &str,
     ) {
-        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+        self.start_tts_job_with_linkage(
+            gateway_call_id,
+            playback_id,
+            backend,
+            text,
+            QualityPlaybackLinkage::default(),
+            None,
+        );
+    }
+
+    pub fn start_tts_job_with_linkage(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: String,
+        backend: LiveTtsBackend,
+        text: &str,
+        linkage: QualityPlaybackLinkage,
+        replaced_playback_id: Option<&str>,
+    ) {
+        let record = if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.status = CallStatus::Speaking;
             call.tts = Some(TtsPlaybackState {
                 playback_id: playback_id.clone(),
@@ -1152,7 +1409,23 @@ impl GatewayState {
                 error: None,
                 updated_at: Utc::now(),
             });
+            let record =
+                call.quality_turns
+                    .record_playback_queued(playback_id.clone(), backend, linkage);
             call.push_timeline(format!("tts {playback_id} queued"));
+            Some(record)
+        } else {
+            None
+        };
+        if let Some(record) = record {
+            self.emit_quality_turn_playback_link(
+                gateway_call_id,
+                "queued",
+                &record,
+                replaced_playback_id,
+                None,
+                None,
+            );
         }
     }
 
@@ -1199,6 +1472,21 @@ impl GatewayState {
                 .saturating_add(pre_audio_wait_ticks);
             tts.underrun_ticks = tts.underrun_ticks.saturating_add(underrun_ticks);
         });
+        let record = self
+            .calls
+            .get_mut(gateway_call_id)
+            .and_then(|call| call.quality_turns.record_first_audio(playback_id));
+        if let Some(record) = record {
+            self.emit_quality_turn_playback_link(
+                gateway_call_id,
+                "first_audio",
+                &record,
+                None,
+                None,
+                None,
+            );
+            self.emit_quality_report_summary(gateway_call_id, "first_audio");
+        }
     }
 
     pub fn mark_tts_pacing_counts(
@@ -1235,7 +1523,7 @@ impl GatewayState {
     }
 
     pub fn mark_tts_completed(&mut self, gateway_call_id: &str, mark_name: &str) {
-        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+        let completed_playback = if let Some(call) = self.calls.get_mut(gateway_call_id) {
             let completed_playback = if let Some(tts) = call
                 .tts
                 .as_mut()
@@ -1247,7 +1535,7 @@ impl GatewayState {
             } else {
                 None
             };
-            if let Some(playback_id) = completed_playback {
+            if let Some(playback_id) = completed_playback.as_ref() {
                 if call.status == CallStatus::Speaking {
                     call.status = status_after_tts(call);
                 }
@@ -1257,6 +1545,12 @@ impl GatewayState {
                 }
                 call.push_timeline(format!("tts {playback_id} completed"));
             }
+            completed_playback
+        } else {
+            None
+        };
+        if let Some(playback_id) = completed_playback {
+            self.record_quality_playback_terminal(gateway_call_id, &playback_id, "completed", None);
         }
     }
 
@@ -1270,6 +1564,15 @@ impl GatewayState {
     }
 
     pub fn mark_tts_canceled(&mut self, gateway_call_id: &str, playback_id: &str) {
+        self.mark_tts_canceled_with_reason(gateway_call_id, playback_id, None);
+    }
+
+    pub fn mark_tts_canceled_with_reason(
+        &mut self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        terminal_reason: Option<&'static str>,
+    ) {
         let mut canceled = false;
         self.update_tts(gateway_call_id, playback_id, |tts| {
             if tts.status != TtsPlaybackStatus::Failed {
@@ -1293,6 +1596,12 @@ impl GatewayState {
                 ));
             }
         }
+        self.record_quality_playback_terminal(
+            gateway_call_id,
+            playback_id,
+            "canceled",
+            terminal_reason,
+        );
     }
 
     pub fn mark_tts_failed(&mut self, gateway_call_id: &str, playback_id: &str, error: String) {
@@ -1312,6 +1621,12 @@ impl GatewayState {
             }
             call.push_timeline(format!("tts {playback_id} failed: {error}"));
         }
+        self.record_quality_playback_terminal(
+            gateway_call_id,
+            playback_id,
+            "failed",
+            Some("tts_failed"),
+        );
     }
 
     pub fn record_echo_suppressed_transcript(&mut self, gateway_call_id: &str, text: &str) {
@@ -1383,6 +1698,57 @@ fn status_after_tts(call: &CallSession) -> CallStatus {
         CallStatus::Transcribing
     } else {
         CallStatus::MediaStarted
+    }
+}
+
+fn normalized_source_turn_ids(
+    turn_id: Option<&str>,
+    mut coalesced_turn_ids: Vec<String>,
+) -> Vec<String> {
+    coalesced_turn_ids.retain(|turn_id| !turn_id.trim().is_empty());
+    if coalesced_turn_ids.is_empty() {
+        if let Some(turn_id) = turn_id {
+            coalesced_turn_ids.push(turn_id.to_string());
+        }
+    } else if let Some(turn_id) = turn_id {
+        if !coalesced_turn_ids
+            .iter()
+            .any(|source_id| source_id == turn_id)
+        {
+            coalesced_turn_ids.insert(0, turn_id.to_string());
+        }
+    }
+    coalesced_turn_ids
+}
+
+fn playback_link_payload(
+    link_stage: &'static str,
+    record: &QualityPlaybackRecord,
+    replaced_playback_id: Option<&str>,
+    terminal_status: Option<&str>,
+    terminal_reason: Option<&str>,
+) -> Map<String, Value> {
+    json_map(serde_json::json!({
+        "link_stage": link_stage,
+        "playback_id": record.playback_id,
+        "turn_id": record.turn_id,
+        "selected_turn_id": record.turn_id,
+        "source_turn_ids": record.source_turn_ids,
+        "coalesced_turn_ids": record.source_turn_ids,
+        "coalesced_turn_count": record.source_turn_ids.len(),
+        "tts_backend": record.tts_backend.label(),
+        "source_label": record.source_label,
+        "first_audio_sent": record.first_audio_sent,
+        "terminal_status": terminal_status,
+        "terminal_reason": terminal_reason,
+        "replaced_playback_id": replaced_playback_id,
+    }))
+}
+
+fn json_map(value: Value) -> Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        _ => Map::new(),
     }
 }
 
@@ -1468,6 +1834,106 @@ mod tests {
         let tts = call.tts.as_ref().expect("new TTS should remain active");
         assert_eq!(tts.playback_id, "tts_new");
         assert_eq!(tts.status, TtsPlaybackStatus::Queued);
+    }
+
+    #[test]
+    fn quality_turn_report_counts_denominators_and_playback_linkage() {
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        state.set_quality_event_sink(QualityEventSink::with_sender(tx), None);
+        let call_id = state.add_or_update_outbound_call(
+            TelnyxIds {
+                call_control_id: "call-1".to_string(),
+                call_session_id: Some("session-1".to_string()),
+                call_leg_id: Some("leg-1".to_string()),
+                stream_id: Some("stream-1".to_string()),
+            },
+            None,
+            None,
+            CallStatus::MediaStarted,
+        );
+
+        state.add_transcript(&call_id, TranscriptKind::Final, "hello".to_string());
+        state.emit_quality_caller_turn_sent(
+            &call_id,
+            "turn_selected",
+            "hello",
+            None,
+            CallerTurnEventMetadata {
+                coalesced_turn_ids: vec!["turn_selected".to_string(), "turn_next".to_string()],
+                ..Default::default()
+            },
+        );
+        state.start_tts_job_with_linkage(
+            &call_id,
+            "tts_test".to_string(),
+            LiveTtsBackend::Piper,
+            "reply",
+            QualityPlaybackLinkage {
+                turn_id: Some("turn_selected".to_string()),
+                coalesced_turn_ids: vec!["turn_selected".to_string(), "turn_next".to_string()],
+                source_label: "test".to_string(),
+            },
+            Some("tts_replaced"),
+        );
+        state.mark_tts_first_audio_latency_and_pacing(&call_id, "tts_test", 42, 0, 0);
+        state.mark_tts_canceled_with_reason(&call_id, "tts_test", Some("canceled_after_call_end"));
+        state.emit_quality_report_summary(&call_id, "test");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        let link_stages: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "quality.turn.playback_linked")
+            .map(|event| event.payload["link_stage"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(link_stages, vec!["queued", "first_audio", "terminal"]);
+
+        let queued = events
+            .iter()
+            .find(|event| {
+                event.event == "quality.turn.playback_linked"
+                    && event.payload["link_stage"] == "queued"
+            })
+            .expect("queued link event");
+        assert_eq!(queued.payload["turn_id"], "turn_selected");
+        assert_eq!(queued.payload["source_turn_ids"][0], "turn_selected");
+        assert_eq!(queued.payload["source_turn_ids"][1], "turn_next");
+        assert_eq!(queued.payload["replaced_playback_id"], "tts_replaced");
+
+        let terminal = events
+            .iter()
+            .find(|event| {
+                event.event == "quality.turn.playback_linked"
+                    && event.payload["link_stage"] == "terminal"
+            })
+            .expect("terminal link event");
+        assert_eq!(terminal.payload["terminal_status"], "canceled");
+        assert_eq!(
+            terminal.payload["terminal_reason"],
+            "canceled_after_call_end"
+        );
+
+        let summary = events
+            .iter()
+            .rev()
+            .find(|event| event.event == "quality.report.summary")
+            .expect("summary event");
+        assert_eq!(summary.payload["raw_asr_final_events"], 1);
+        assert_eq!(summary.payload["caller_turns"], 1);
+        assert_eq!(summary.payload["attempted_turns"], 1);
+        assert_eq!(summary.payload["attempted_playbacks"], 1);
+        assert_eq!(summary.payload["coalesced_turns"], 2);
+        assert_eq!(summary.payload["coalesced_response_turns"], 1);
+        assert_eq!(summary.payload["played_turns"], 1);
+        assert_eq!(summary.payload["played_playbacks"], 1);
+        assert_eq!(summary.payload["canceled_playbacks"], 1);
+        assert_eq!(summary.payload["canceled_after_call_end_turns"], 1);
+        assert_eq!(summary.payload["canceled_after_call_end_playbacks"], 1);
+        assert_eq!(summary.payload["excluded_turns_without_playback"], 0);
     }
 
     #[test]

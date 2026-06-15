@@ -1417,6 +1417,7 @@ pub async fn hangup_gateway_call(
         call.status = CallStatus::Ended;
         call.push_timeline(reason.to_string());
     }
+    guard.emit_quality_report_summary(gateway_call_id, "call_terminal");
     Ok(())
 }
 
