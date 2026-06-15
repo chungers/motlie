@@ -249,6 +249,7 @@ async fn hangup_outbound(services: &AppServices, gateway_call_id: &str) -> anyho
             call.status = CallStatus::Ended;
             call.push_timeline("outbound text-call setup failed; hangup requested");
         }
+        guard.emit_quality_report_summary(gateway_call_id, "call_terminal");
     }
     Ok(())
 }

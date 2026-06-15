@@ -1207,7 +1207,9 @@ async fn queue_append_agent_speech_with_media_wait(
                 source_label: "text-call agent.turn.partial".to_string(),
                 conflict_policy,
                 turn_finalized_at,
+                latest_turn_finalized_at: turn_finalized_at,
                 turn_id: turn_id.clone(),
+                coalesced_turn_ids: turn_id.iter().cloned().collect(),
             },
             initial_chunks.clone(),
         )
@@ -1263,7 +1265,9 @@ async fn queue_agent_speech_with_media_wait(
                 source_label: "text-call agent.turn".to_string(),
                 conflict_policy,
                 turn_finalized_at,
+                latest_turn_finalized_at: turn_finalized_at,
                 turn_id: turn_id.clone(),
+                coalesced_turn_ids: turn_id.iter().cloned().collect(),
             },
         )
         .await
@@ -1413,6 +1417,7 @@ pub async fn hangup_gateway_call(
         call.status = CallStatus::Ended;
         call.push_timeline(reason.to_string());
     }
+    guard.emit_quality_report_summary(gateway_call_id, "call_terminal");
     Ok(())
 }
 

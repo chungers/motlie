@@ -8,6 +8,7 @@ pub use config::{
     VoiceQualityConfig,
 };
 pub use events::{
-    ActiveAsrQualitySession, QualityEvent, QualityEventContext, QualityEventPayload,
+    insert_transcript_text_fields, transcript_plaintext_included, ActiveAsrQualitySession,
+    CallerTurnEventMetadata, QualityEvent, QualityEventContext, QualityEventPayload,
     QualityEventSink,
 };

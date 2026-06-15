@@ -6,6 +6,12 @@ use crate::result::{
 };
 
 pub fn requested_for_profile(profile: &str) -> AcceleratorClass {
+    // Canonical profiles resolve through the closed `Profile` registry (#521) —
+    // the single source of truth for the Profile→Accelerator join.
+    if let Some(profile) = crate::profile::Profile::from_id(profile) {
+        return profile.accelerator_class();
+    }
+    // Non-canonical / ad-hoc profile strings keep the legacy substring fallback.
     let profile = profile.to_ascii_lowercase();
     if profile.contains("cuda") || profile.contains("dgx") {
         AcceleratorClass::Cuda
