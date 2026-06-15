@@ -106,6 +106,11 @@ pub enum ModelsError {
         filename: String,
         message: String,
     },
+    #[error("failed to prepare artifacts for bundle `{bundle_id}`: {message}")]
+    ArtifactPreparation {
+        bundle_id: BundleId,
+        message: String,
+    },
     #[error("unknown embedding model selector `{selector}`")]
     UnknownEmbeddingModel { selector: String },
     #[error("unknown ASR model selector `{selector}`")]
@@ -1051,6 +1056,44 @@ impl ArtifactProvenance {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundleArtifactSource {
+    pub label: &'static str,
+    pub source: ArtifactSource,
+    pub include: Vec<ArtifactRule>,
+    pub provenance: ArtifactProvenance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DerivedArtifactRecipe {
+    CopyFromDownloaded { source: &'static str },
+    KokoroTokensFromTokenizerJson { source: &'static str },
+}
+
+impl DerivedArtifactRecipe {
+    pub const fn source(&self) -> &'static str {
+        match self {
+            Self::CopyFromDownloaded { source } => source,
+            Self::KokoroTokensFromTokenizerJson { source } => source,
+        }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::CopyFromDownloaded { .. } => "copy from downloaded source artifact",
+            Self::KokoroTokensFromTokenizerJson { .. } => {
+                "generate from tokenizer.json model.vocab via kokoro_82m::tokens_txt_from_tokenizer_json (introduced by 91cc0f32)"
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivedBundleArtifact {
+    pub output: &'static str,
+    pub recipe: DerivedArtifactRecipe,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleArtifacts {
     pub control_name: &'static str,
     pub format: CheckpointFormat,
@@ -1058,11 +1101,21 @@ pub struct BundleArtifacts {
     pub include: Vec<ArtifactRule>,
     pub quantization: Option<QuantizationScheme>,
     pub provenance: ArtifactProvenance,
+    pub extra_sources: Vec<BundleArtifactSource>,
+    pub derived: Vec<DerivedBundleArtifact>,
 }
 
 impl BundleArtifacts {
     pub fn includes(&self, filename: &str) -> bool {
         self.include.iter().any(|rule| rule.matches(filename))
+            || self
+                .extra_sources
+                .iter()
+                .any(|source| source.include.iter().any(|rule| rule.matches(filename)))
+            || self.derived.iter().any(|artifact| {
+                artifact.output == filename
+                    || (artifact.output.ends_with('/') && filename.starts_with(artifact.output))
+            })
     }
 
     pub fn include_for_quantization(
@@ -1120,7 +1173,7 @@ pub fn download_bundle_artifacts_with_options(
             bundle_id: bundle_id.clone(),
         })?;
 
-    let downloaded = download_checkpoint_artifacts_with_options(
+    let mut downloaded = download_checkpoint_artifacts_with_options(
         &ModelCheckpoint {
             format: artifacts.format,
             source: artifacts.source.clone(),
@@ -1130,11 +1183,45 @@ pub fn download_bundle_artifacts_with_options(
         artifact_root,
         options,
     )?;
+    for source in &artifacts.extra_sources {
+        downloaded.extend(download_artifact_source_with_options(
+            &source.source,
+            &source.include,
+            artifact_root,
+            options,
+        )?);
+    }
+    prepare_downloaded_bundle_artifacts(descriptor, &mut downloaded)?;
+    downloaded.sort();
+    downloaded.dedup();
 
     Ok(ArtifactDownloadSummary {
         bundle_id: bundle_id.clone(),
         downloaded,
     })
+}
+
+fn prepare_downloaded_bundle_artifacts(
+    descriptor: &BundleDescriptor,
+    downloaded: &mut Vec<PathBuf>,
+) -> Result<()> {
+    #[cfg(feature = "model-kokoro-82m")]
+    {
+        if descriptor.id.as_str() == "kokoro_82m" {
+            tts::kokoro_82m::prepare_downloaded_artifacts(downloaded).map_err(|message| {
+                ModelsError::ArtifactPreparation {
+                    bundle_id: descriptor.id.clone(),
+                    message,
+                }
+            })?;
+        }
+    }
+    #[cfg(not(feature = "model-kokoro-82m"))]
+    {
+        let _ = (descriptor, downloaded);
+    }
+
+    Ok(())
 }
 
 fn download_checkpoint_artifacts_with_options(
@@ -1148,7 +1235,21 @@ fn download_checkpoint_artifacts_with_options(
         }
     })?;
 
-    match &checkpoint.source {
+    download_artifact_source_with_options(
+        &checkpoint.source,
+        &checkpoint.include,
+        artifact_root,
+        options,
+    )
+}
+
+fn download_artifact_source_with_options(
+    source: &ArtifactSource,
+    include: &[ArtifactRule],
+    artifact_root: &Path,
+    options: &ArtifactDownloadOptions,
+) -> Result<Vec<PathBuf>> {
+    match source {
         ArtifactSource::HuggingFace { repo } => {
             std::fs::create_dir_all(artifact_root).map_err(|source| {
                 ModelsError::CreateArtifactRoot {
@@ -1175,7 +1276,7 @@ fn download_checkpoint_artifacts_with_options(
 
             let mut downloaded = Vec::new();
             for sibling in info.siblings {
-                if checkpoint.includes(&sibling.rfilename) {
+                if include.iter().any(|rule| rule.matches(&sibling.rfilename)) {
                     let path = repo_api.get(&sibling.rfilename).map_err(|source| {
                         ModelsError::DownloadArtifact {
                             repo,
@@ -1214,7 +1315,9 @@ pub fn artifact_rules_for_quantization(
 
 fn artifact_rule_matches_gguf_quant(rule: &ArtifactRule, quantization: QuantizationScheme) -> bool {
     let raw = match rule {
-        ArtifactRule::Exact(value) | ArtifactRule::Suffix(value) => value,
+        ArtifactRule::Exact(value) | ArtifactRule::Prefix(value) | ArtifactRule::Suffix(value) => {
+            value
+        }
     };
     let normalized = raw.to_ascii_lowercase();
     if normalized.contains("tokenizer") {
@@ -1296,6 +1399,8 @@ pub(crate) fn bundle_artifacts_from_checkpoint(
         include: checkpoint.include.clone(),
         quantization: checkpoint.quantization,
         provenance,
+        extra_sources: Vec::new(),
+        derived: Vec::new(),
     }
 }
 
@@ -2221,6 +2326,8 @@ mod tests {
                 include: vec![ArtifactRule::Exact("config.json")],
                 quantization: None,
                 provenance: ArtifactProvenance::unknown(),
+                extra_sources: Vec::new(),
+                derived: Vec::new(),
             }),
             model_id: BundleId::new("qwen3_4b"),
             display_name: "Qwen3 4B".into(),
@@ -2244,6 +2351,8 @@ mod tests {
                 include: vec![ArtifactRule::Suffix(".gguf")],
                 quantization: None,
                 provenance: ArtifactProvenance::unknown(),
+                extra_sources: Vec::new(),
+                derived: Vec::new(),
             }),
             ..mistral.clone()
         };
@@ -2773,6 +2882,8 @@ mod tests {
             ],
             quantization: None,
             provenance: ArtifactProvenance::unknown(),
+            extra_sources: Vec::new(),
+            derived: Vec::new(),
         };
 
         assert!(artifacts.includes("config.json"));
@@ -2795,6 +2906,8 @@ mod tests {
             ],
             quantization: None,
             provenance: ArtifactProvenance::unknown(),
+            extra_sources: Vec::new(),
+            derived: Vec::new(),
         };
 
         assert_eq!(

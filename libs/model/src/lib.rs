@@ -271,6 +271,7 @@ pub enum ArtifactSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactRule {
     Exact(&'static str),
+    Prefix(&'static str),
     Suffix(&'static str),
 }
 
@@ -278,6 +279,7 @@ impl ArtifactRule {
     pub fn matches(&self, filename: &str) -> bool {
         match self {
             Self::Exact(expected) => filename == *expected,
+            Self::Prefix(prefix) => filename.starts_with(prefix),
             Self::Suffix(suffix) => filename.ends_with(suffix),
         }
     }
