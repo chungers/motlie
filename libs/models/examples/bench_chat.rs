@@ -46,7 +46,12 @@ mod bench_chat_example {
         ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole,
         QuantizationScheme, QuantizationSupport, StartOptions,
     };
+    #[cfg(any(
+        feature = "model-gemma4-12b-gguf",
+        feature = "model-gemma4-12b-qat-gguf"
+    ))]
     use motlie_model_llama_cpp::LlamaCppTextSpec;
+    #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
     use motlie_model_mistral::{MistralMultimodalSpec, MistralTextSpec};
     use motlie_models::{
         default_artifact_root, quantization_label_gguf, quantization_label_isq, CuratedBundle,
@@ -232,6 +237,7 @@ mod bench_chat_example {
         backend: BenchBackend,
     }
 
+    #[allow(dead_code)]
     #[derive(Clone, Copy)]
     enum BenchBackend {
         Mistral,
