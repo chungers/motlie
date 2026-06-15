@@ -38,9 +38,6 @@ pub struct Cli {
     pub asr_artifact_root: Option<PathBuf>,
 
     #[arg(long)]
-    pub no_asr_download: bool,
-
-    #[arg(long)]
     pub log_file: Option<PathBuf>,
 
     #[arg(long)]

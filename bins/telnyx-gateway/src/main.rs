@@ -57,12 +57,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(CliCommand::GoldenTts(args)) => {
             let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
-            let report = motlie_telnyx_gateway::golden_ab::generate_tts_wavs(
-                args,
-                artifact_root,
-                !cli.no_asr_download,
-            )
-            .await?;
+            let report =
+                motlie_telnyx_gateway::golden_ab::generate_tts_wavs(args, artifact_root).await?;
             print_golden_tts_report(&report);
             return Ok(());
         }
@@ -83,13 +79,9 @@ async fn main() -> anyhow::Result<()> {
             let fixed_asr =
                 ReplayBackend::new(asr_backend.label(), build_asr_factory(&cli, asr_backend));
             let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
-            let report = motlie_telnyx_gateway::golden_ab::run_tts_golden_ab(
-                args,
-                fixed_asr,
-                artifact_root,
-                !cli.no_asr_download,
-            )
-            .await?;
+            let report =
+                motlie_telnyx_gateway::golden_ab::run_tts_golden_ab(args, fixed_asr, artifact_root)
+                    .await?;
             print_tts_golden_ab_report(&report);
             return Ok(());
         }
@@ -277,23 +269,21 @@ fn print_corpus_report(report: &motlie_telnyx_gateway::replay::CorpusReplayRepor
 
 fn build_tts_registry(cli: &Cli) -> SharedTtsRegistry {
     let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
-    let allow_download = !cli.no_asr_download;
     Arc::new(TtsRegistry::new(
-        build_kokoro_tts_factory(&artifact_root, allow_download),
-        build_piper_tts_factory(&artifact_root, allow_download),
+        build_kokoro_tts_factory(&artifact_root),
+        build_piper_tts_factory(&artifact_root),
     ))
 }
 
 #[cfg(feature = "kokoro")]
-fn build_kokoro_tts_factory(artifact_root: &Path, allow_download: bool) -> SharedTtsFactory {
+fn build_kokoro_tts_factory(artifact_root: &Path) -> SharedTtsFactory {
     Arc::new(motlie_telnyx_gateway::tts::KokoroTtsFactory::new(
         artifact_root.to_path_buf(),
-        allow_download,
     ))
 }
 
 #[cfg(not(feature = "kokoro"))]
-fn build_kokoro_tts_factory(_artifact_root: &Path, _allow_download: bool) -> SharedTtsFactory {
+fn build_kokoro_tts_factory(_artifact_root: &Path) -> SharedTtsFactory {
     Arc::new(motlie_telnyx_gateway::tts::UnavailableTtsFactory::new(
         motlie_telnyx_gateway::tts::LiveTtsBackend::Kokoro82m.model_label(),
         "Kokoro-82M TTS is unavailable; rebuild with --features kokoro",
@@ -301,15 +291,14 @@ fn build_kokoro_tts_factory(_artifact_root: &Path, _allow_download: bool) -> Sha
 }
 
 #[cfg(feature = "piper")]
-fn build_piper_tts_factory(artifact_root: &Path, allow_download: bool) -> SharedTtsFactory {
+fn build_piper_tts_factory(artifact_root: &Path) -> SharedTtsFactory {
     Arc::new(motlie_telnyx_gateway::tts::PiperTtsFactory::new(
         artifact_root.to_path_buf(),
-        allow_download,
     ))
 }
 
 #[cfg(not(feature = "piper"))]
-fn build_piper_tts_factory(_artifact_root: &Path, _allow_download: bool) -> SharedTtsFactory {
+fn build_piper_tts_factory(_artifact_root: &Path) -> SharedTtsFactory {
     Arc::new(motlie_telnyx_gateway::tts::UnavailableTtsFactory::new(
         motlie_telnyx_gateway::tts::LiveTtsBackend::Piper.model_label(),
         "Piper TTS is unavailable; rebuild with --features piper",
@@ -525,11 +514,7 @@ fn build_auto_asr_factory(cli: &Cli) -> SharedAsrFactory {
 fn build_sherpa_asr_factory(cli: &Cli, artifact: SherpaAsrArtifact) -> SharedAsrFactory {
     let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
     Arc::new(
-        motlie_telnyx_gateway::adapter::SherpaAsrFactory::with_artifact(
-            artifact_root,
-            !cli.no_asr_download,
-            artifact,
-        ),
+        motlie_telnyx_gateway::adapter::SherpaAsrFactory::with_artifact(artifact_root, artifact),
     )
 }
 
@@ -545,7 +530,6 @@ fn build_moonshine_asr_factory(cli: &Cli) -> SharedAsrFactory {
     let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
     Arc::new(motlie_telnyx_gateway::adapter::MoonshineAsrFactory::new(
         artifact_root,
-        !cli.no_asr_download,
     ))
 }
 
@@ -561,7 +545,6 @@ fn build_whisper_asr_factory(cli: &Cli) -> SharedAsrFactory {
     let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
     Arc::new(motlie_telnyx_gateway::adapter::WhisperAsrFactory::new(
         artifact_root,
-        !cli.no_asr_download,
     ))
 }
 

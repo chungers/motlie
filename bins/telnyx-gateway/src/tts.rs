@@ -18,7 +18,7 @@ use motlie_model::typed::{
 #[cfg(feature = "piper")]
 use motlie_model::typed::{SpeechStream, SpeechSynthesizer};
 #[cfg(any(feature = "kokoro", feature = "piper"))]
-use motlie_model::{ArtifactPolicy, ModelError, StartOptions};
+use motlie_model::{ArtifactPolicy, StartOptions};
 #[cfg(any(feature = "kokoro", feature = "piper"))]
 use std::path::{Path, PathBuf};
 #[cfg(any(feature = "kokoro", feature = "piper"))]
@@ -267,16 +267,14 @@ impl OutboundTtsFactory for UnavailableTtsFactory {
 #[cfg(feature = "kokoro")]
 pub struct KokoroTtsFactory {
     artifact_root: PathBuf,
-    allow_download: bool,
     handle: Mutex<Option<Arc<motlie_model_kokoro::KokoroHandle>>>,
 }
 
 #[cfg(feature = "kokoro")]
 impl KokoroTtsFactory {
-    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+    pub fn new(artifact_root: PathBuf) -> Self {
         Self {
             artifact_root,
-            allow_download,
             handle: Mutex::new(None),
         }
     }
@@ -287,7 +285,7 @@ impl KokoroTtsFactory {
             return Ok(Arc::clone(handle));
         }
 
-        let handle = Arc::new(start_kokoro(&self.artifact_root, self.allow_download).await?);
+        let handle = Arc::new(start_kokoro(&self.artifact_root).await?);
         *guard = Some(Arc::clone(&handle));
         Ok(handle)
     }
@@ -402,16 +400,14 @@ impl OutboundIncrementalTtsStream for KokoroOutboundIncrementalTtsStream {
 #[cfg(feature = "piper")]
 pub struct PiperTtsFactory {
     artifact_root: PathBuf,
-    allow_download: bool,
     handle: Mutex<Option<Arc<motlie_model_piper::PiperHandle>>>,
 }
 
 #[cfg(feature = "piper")]
 impl PiperTtsFactory {
-    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+    pub fn new(artifact_root: PathBuf) -> Self {
         Self {
             artifact_root,
-            allow_download,
             handle: Mutex::new(None),
         }
     }
@@ -428,7 +424,7 @@ impl PiperTtsFactory {
             return Ok(Arc::clone(handle));
         }
 
-        let handle = Arc::new(start_piper(&self.artifact_root, self.allow_download).await?);
+        let handle = Arc::new(start_piper(&self.artifact_root).await?);
         *guard = Some(Arc::clone(&handle));
         Ok(handle)
     }
@@ -756,81 +752,19 @@ pub fn unavailable_registry() -> SharedTtsRegistry {
 }
 
 #[cfg(feature = "kokoro")]
-async fn start_kokoro(
-    artifact_root: &Path,
-    allow_download: bool,
-) -> anyhow::Result<motlie_model_kokoro::KokoroHandle> {
-    match motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root)).await {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = "kokoro/kokoro_82m",
-                "downloading Kokoro-82M artifacts"
-            );
-            download_kokoro_artifact(artifact_root)?;
-            motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root))
-                .await
-                .map_err(anyhow::Error::from)
-                .context("start Kokoro-82M after downloading artifacts")
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail_missing_artifacts("kokoro/kokoro_82m", artifact_root)
-        }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Kokoro-82M TTS"),
-    }
-}
-
-#[cfg(feature = "kokoro")]
-fn download_kokoro_artifact(artifact_root: &Path) -> anyhow::Result<()> {
-    let catalog = motlie_models::Catalog::with_defaults();
-    let bundle_id = motlie_models::tts::kokoro_82m::descriptor().id;
-    motlie_models::download_bundle_artifacts(&catalog, &bundle_id, artifact_root)
-        .map(|_| ())
+async fn start_kokoro(artifact_root: &Path) -> anyhow::Result<motlie_model_kokoro::KokoroHandle> {
+    motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root))
+        .await
         .map_err(anyhow::Error::from)
-        .context("download Kokoro-82M artifacts")
+        .context("start Kokoro-82M TTS")
 }
 
 #[cfg(feature = "piper")]
-async fn start_piper(
-    artifact_root: &Path,
-    allow_download: bool,
-) -> anyhow::Result<motlie_model_piper::PiperHandle> {
-    match motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(local_only_options(
-        artifact_root,
-    ))
-    .await
-    {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = "piper/en_us_ljspeech_medium",
-                "downloading Piper artifacts"
-            );
-            download_piper_artifact(artifact_root)?;
-            motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(local_only_options(
-                artifact_root,
-            ))
-            .await
-            .map_err(anyhow::Error::from)
-            .context("start Piper after downloading artifacts")
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail_missing_artifacts("piper/en_us_ljspeech_medium", artifact_root)
-        }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Piper TTS"),
-    }
-}
-
-#[cfg(feature = "piper")]
-fn download_piper_artifact(artifact_root: &Path) -> anyhow::Result<()> {
-    let catalog = motlie_models::Catalog::with_defaults();
-    let model = motlie_models::TtsModels::PiperEnUsLjspeechMedium;
-    motlie_models::download_bundle_artifacts(&catalog, &model.bundle_id(), artifact_root)
-        .map(|_| ())
+async fn start_piper(artifact_root: &Path) -> anyhow::Result<motlie_model_piper::PiperHandle> {
+    motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(local_only_options(artifact_root))
+        .await
         .map_err(anyhow::Error::from)
-        .context("download Piper artifacts")
+        .context("start Piper TTS")
 }
 
 #[cfg(any(feature = "kokoro", feature = "piper"))]
@@ -841,26 +775,6 @@ fn local_only_options(artifact_root: &Path) -> StartOptions {
         }),
         ..Default::default()
     }
-}
-
-#[cfg(any(feature = "kokoro", feature = "piper"))]
-fn missing_local_artifacts(error: &ModelError) -> bool {
-    match error {
-        ModelError::InvalidConfiguration(message) => {
-            message.contains(motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX)
-        }
-        _ => false,
-    }
-}
-
-#[cfg(any(feature = "kokoro", feature = "piper"))]
-fn bail_missing_artifacts<T>(label: &str, artifact_root: &Path) -> anyhow::Result<T> {
-    bail!(
-        "{} missing for {} under '{}'; rerun without --no-asr-download or preinstall artifacts",
-        motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX,
-        label,
-        artifact_root.display()
-    )
 }
 
 #[cfg(test)]

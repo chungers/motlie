@@ -33,11 +33,10 @@ Kokoro-82M is a curated in-repo ONNX backend. It uses the workspace `ort`/`ort-s
 
 ## Commands
 
-Run a one-sample smoke against Piper with echo ASR to verify the runner shape without model downloads:
+Run a one-sample smoke against Piper with echo ASR after preloading model artifacts:
 
 ```bash
 cargo run -p motlie-telnyx-gateway --features piper -- \
-  --no-asr-download \
   tts-golden-ab bins/telnyx-gateway/corpus/qwen3-call-center-golden.json \
   --engine piper \
   --asr-backend echo \
@@ -47,7 +46,7 @@ cargo run -p motlie-telnyx-gateway --features piper -- \
   --output-json /tmp/motlie-tts-golden-ab-smoke.json
 ```
 
-Run the full default matrix when Piper, Sherpa, and Kokoro artifacts are available:
+Run the full default matrix after Piper, Sherpa, and Kokoro artifacts are preloaded:
 
 ```bash
 cargo run -p motlie-telnyx-gateway --features golden-ab -- \
@@ -85,7 +84,7 @@ cargo run -p motlie-telnyx-gateway --features sherpa -- \
   --output-json /tmp/motlie-tts-golden-ab-kokoro.json
 ```
 
-Kokoro artifacts resolve through the normal model artifact policy. The curated bundle expects `onnx/model_quantized.onnx`, `tokenizer.json`, and `voices/af_bella.bin` from `onnx-community/Kokoro-82M-v1.0-ONNX`.
+Kokoro artifacts must be preloaded before running this gateway command; the gateway does not download model artifacts. The curated bundle expects `onnx/model_quantized.onnx`, `tokenizer.json`, and `voices/af_bella.bin` from `onnx-community/Kokoro-82M-v1.0-ONNX`.
 
 ## Output Layout
 
