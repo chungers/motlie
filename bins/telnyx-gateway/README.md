@@ -109,7 +109,7 @@ Replay a capture and compute WER without another phone call:
 
 ```sh
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
-  --artifact-root /home/dchung/telnyx-test/artifacts/hf-cache \
+  --artifact-root /home/dchung/artifacts/hf-cache \
   replay-capture /home/dchung/telnyx-test/captures/<gateway-call-id>/<stream-id> \
   --backend sherpa \
   --reference-file /home/dchung/telnyx-test/reference.txt
@@ -127,7 +127,7 @@ Replay the golden corpus across comparable backends:
 
 ```sh
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
-  --artifact-root /home/dchung/telnyx-test/artifacts/hf-cache \
+  --artifact-root /home/dchung/artifacts/hf-cache \
   replay-corpus bins/telnyx-gateway/corpus/asr-golden.json \
   --backend sherpa-zipformer-2023 \
   --backend sherpa-zipformer-kroko-2025 \

@@ -3999,7 +3999,7 @@ Use `--artifact-root <path>` when the artifacts are not under the default local 
   --tui \
   --socket /tmp/motlie-telnyx-gateway.sock \
   --load ./telnyx-gateway.state.repl \
-  --artifact-root ./artifacts/models/hf-cache
+  --artifact-root /home/dchung/artifacts/hf-cache
 ```
 
 The exact operator commands can evolve, but the binary should always separate:
