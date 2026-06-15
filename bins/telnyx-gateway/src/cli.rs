@@ -34,8 +34,9 @@ pub struct Cli {
     #[arg(long)]
     pub conversation_smoke_test: bool,
 
-    #[arg(long)]
-    pub asr_artifact_root: Option<PathBuf>,
+    /// Root directory containing preloaded model artifacts for ASR and TTS.
+    #[arg(long = "artifact-root", alias = "asr-artifact-root")]
+    pub artifact_root: Option<PathBuf>,
 
     #[arg(long)]
     pub log_file: Option<PathBuf>,

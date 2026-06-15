@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(CliCommand::GoldenTts(args)) => {
-            let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+            let artifact_root = default_artifact_root(cli.artifact_root.clone());
             let report =
                 motlie_telnyx_gateway::golden_ab::generate_tts_wavs(args, artifact_root).await?;
             print_golden_tts_report(&report);
@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
             let asr_backend = args.asr_backend;
             let fixed_asr =
                 ReplayBackend::new(asr_backend.label(), build_asr_factory(&cli, asr_backend));
-            let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+            let artifact_root = default_artifact_root(cli.artifact_root.clone());
             let report =
                 motlie_telnyx_gateway::golden_ab::run_tts_golden_ab(args, fixed_asr, artifact_root)
                     .await?;
@@ -268,7 +268,7 @@ fn print_corpus_report(report: &motlie_telnyx_gateway::replay::CorpusReplayRepor
 }
 
 fn build_tts_registry(cli: &Cli) -> SharedTtsRegistry {
-    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+    let artifact_root = default_artifact_root(cli.artifact_root.clone());
     Arc::new(TtsRegistry::new(
         build_kokoro_tts_factory(&artifact_root),
         build_piper_tts_factory(&artifact_root),
@@ -512,7 +512,7 @@ fn build_auto_asr_factory(cli: &Cli) -> SharedAsrFactory {
 
 #[cfg(feature = "sherpa")]
 fn build_sherpa_asr_factory(cli: &Cli, artifact: SherpaAsrArtifact) -> SharedAsrFactory {
-    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+    let artifact_root = default_artifact_root(cli.artifact_root.clone());
     Arc::new(
         motlie_telnyx_gateway::adapter::SherpaAsrFactory::with_artifact(artifact_root, artifact),
     )
@@ -527,7 +527,7 @@ fn build_sherpa_asr_factory(_cli: &Cli, _artifact: SherpaAsrArtifact) -> SharedA
 
 #[cfg(feature = "moonshine")]
 fn build_moonshine_asr_factory(cli: &Cli) -> SharedAsrFactory {
-    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+    let artifact_root = default_artifact_root(cli.artifact_root.clone());
     Arc::new(motlie_telnyx_gateway::adapter::MoonshineAsrFactory::new(
         artifact_root,
     ))
@@ -542,7 +542,7 @@ fn build_moonshine_asr_factory(_cli: &Cli) -> SharedAsrFactory {
 
 #[cfg(feature = "whisper")]
 fn build_whisper_asr_factory(cli: &Cli) -> SharedAsrFactory {
-    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+    let artifact_root = default_artifact_root(cli.artifact_root.clone());
     Arc::new(motlie_telnyx_gateway::adapter::WhisperAsrFactory::new(
         artifact_root,
     ))
