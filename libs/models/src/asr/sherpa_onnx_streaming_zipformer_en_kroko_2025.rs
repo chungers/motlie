@@ -74,6 +74,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "sherpa_onnx_streaming_zipformer_en_kroko_2025",
             &checkpoint,
+            crate::ArtifactProvenance::new("unknown", crate::ArtifactGating::Public),
         )),
     }
 }

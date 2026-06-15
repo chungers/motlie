@@ -69,6 +69,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "piper_en_us_ljspeech_medium",
             &checkpoint,
+            crate::ArtifactProvenance::new("mit", crate::ArtifactGating::Public),
         )),
     }
 }

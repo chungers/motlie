@@ -80,6 +80,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "moonshine_streaming_en",
             &checkpoint,
+            crate::ArtifactProvenance::new("mit", crate::ArtifactGating::Public),
         )),
     }
 }

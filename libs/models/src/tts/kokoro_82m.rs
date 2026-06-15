@@ -47,9 +47,6 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(MODEL_FILE),
             ArtifactRule::Exact(TOKENIZER_FILE),
             ArtifactRule::Exact(VOICE_FILE),
-            ArtifactRule::Exact("model.onnx"),
-            ArtifactRule::Exact("voices.bin"),
-            ArtifactRule::Exact("tokens.txt"),
         ],
         quantization: Some(QuantizationScheme::OnnxInt8),
     }
@@ -74,6 +71,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "kokoro_82m",
             &checkpoint,
+            crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
         )),
     }
 }
@@ -193,9 +191,6 @@ mod tests {
         assert!(artifacts.includes(MODEL_FILE));
         assert!(artifacts.includes(TOKENIZER_FILE));
         assert!(artifacts.includes(VOICE_FILE));
-        assert!(artifacts.includes("model.onnx"));
-        assert!(artifacts.includes("voices.bin"));
-        assert!(artifacts.includes("tokens.txt"));
     }
 
     #[test]

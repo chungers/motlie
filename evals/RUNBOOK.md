@@ -50,6 +50,18 @@ failures.
 
 ### Artifacts
 
+The canonical per-host Hugging Face cache for evals is
+`$HOME/artifacts/hf-cache`. It uses the standard HF layout
+`models--<owner>--<repo>/refs/main` plus `snapshots/<sha>/<files>`.
+
+`cargo run -p evals --features all-curated -- preflight` is the permanent
+artifact gate. It derives all 18 curated artifact requirements from the
+`motlie-models` registry, reports each HF source and resolved snapshot hash, and
+exits non-zero if any required artifact is absent. Use
+`cargo run -p evals --features all-curated -- artifacts sync` to populate gaps
+through the registry download path. The generated provenance document is
+`evals/artifacts/provenance.md` and is guarded by an all-curated regen test.
+
 `HF_TOKEN` may be used to fetch gated Hugging Face artifacts. The eval runner
 records only token presence as a boolean and must never log or serialize the
 token value.

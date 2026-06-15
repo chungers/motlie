@@ -26,6 +26,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+pub mod artifact_manifest;
 pub mod asr;
 pub mod chat;
 pub mod embeddings;
@@ -1013,6 +1014,42 @@ impl EmbeddingModel for CuratedHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArtifactGating {
+    Public,
+    Manual,
+    Unknown,
+}
+
+impl ArtifactGating {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Manual => "manual",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArtifactProvenance {
+    pub license: &'static str,
+    pub gating: ArtifactGating,
+}
+
+impl ArtifactProvenance {
+    pub const fn new(license: &'static str, gating: ArtifactGating) -> Self {
+        Self { license, gating }
+    }
+
+    pub const fn unknown() -> Self {
+        Self {
+            license: "unknown",
+            gating: ArtifactGating::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleArtifacts {
     pub control_name: &'static str,
@@ -1020,6 +1057,7 @@ pub struct BundleArtifacts {
     pub source: ArtifactSource,
     pub include: Vec<ArtifactRule>,
     pub quantization: Option<QuantizationScheme>,
+    pub provenance: ArtifactProvenance,
 }
 
 impl BundleArtifacts {
@@ -1048,7 +1086,7 @@ pub struct ArtifactDownloadOptions {
 }
 
 pub fn default_artifact_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/models/hf-cache")
+    artifact_manifest::canonical_artifact_root()
 }
 
 pub fn download_bundle_artifacts(
@@ -1246,6 +1284,7 @@ impl BundleDescriptor {
 pub(crate) fn bundle_artifacts_from_checkpoint(
     control_name: &'static str,
     checkpoint: &ModelCheckpoint,
+    provenance: ArtifactProvenance,
 ) -> BundleArtifacts {
     checkpoint
         .validate_quantization()
@@ -1256,6 +1295,7 @@ pub(crate) fn bundle_artifacts_from_checkpoint(
         source: checkpoint.source.clone(),
         include: checkpoint.include.clone(),
         quantization: checkpoint.quantization,
+        provenance,
     }
 }
 
@@ -2180,6 +2220,7 @@ mod tests {
                 },
                 include: vec![ArtifactRule::Exact("config.json")],
                 quantization: None,
+                provenance: ArtifactProvenance::unknown(),
             }),
             model_id: BundleId::new("qwen3_4b"),
             display_name: "Qwen3 4B".into(),
@@ -2202,6 +2243,7 @@ mod tests {
                 },
                 include: vec![ArtifactRule::Suffix(".gguf")],
                 quantization: None,
+                provenance: ArtifactProvenance::unknown(),
             }),
             ..mistral.clone()
         };
@@ -2730,6 +2772,7 @@ mod tests {
                 ArtifactRule::Suffix(".safetensors"),
             ],
             quantization: None,
+            provenance: ArtifactProvenance::unknown(),
         };
 
         assert!(artifacts.includes("config.json"));
@@ -2751,6 +2794,7 @@ mod tests {
                 ArtifactRule::Exact("Qwen3.6-27B-Q8_0.gguf"),
             ],
             quantization: None,
+            provenance: ArtifactProvenance::unknown(),
         };
 
         assert_eq!(

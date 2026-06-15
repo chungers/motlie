@@ -90,9 +90,40 @@ The commands parse scenario TOML, start one compiled bundle from local
 artifacts, emit a sectioned JSONL result record, and apply capability-specific
 assertions. Result schema v4 adds ASR time-to-first-partial and TTS
 time-to-first-audio metrics; schema v3 added the chat/perf TTFT split into first
-generated token and first answer token, plus decode tokens/second. Use
-`--artifact-root ~/.cache/huggingface/hub` when the default repo-local artifact
-cache does not contain the bundle artifacts.
+generated token and first answer token, plus decode tokens/second. The canonical
+per-host artifact cache is `$HOME/artifacts/hf-cache`; pass `--artifact-root`
+only for explicit repro work against another Hugging Face cache root.
+
+## Artifact Preflight
+
+Curated artifact provenance is generated from the `motlie-models` registry and
+committed at [`evals/artifacts/provenance.md`](artifacts/provenance.md). It lists
+each of the 18 `CuratedBundle` artifact sources, required registry rules,
+capability surface, license/gating, and the canonical cache convention.
+
+Run the permanent preflight gate before matrix work:
+
+```sh
+BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include" \
+  cargo run -p evals --features all-curated -- preflight
+```
+
+The command checks `$HOME/artifacts/hf-cache`, reports the HF repo and resolved
+snapshot hash for every bundle, lists missing files, and exits non-zero on any
+gap. To backfill missing public or token-authorized artifacts into the canonical
+cache, run:
+
+```sh
+BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include" \
+  cargo run -p evals --features all-curated -- artifacts sync
+```
+
+Regenerate the committed provenance doc after registry changes:
+
+```sh
+BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include" \
+  cargo run -p evals --features all-curated -- artifacts provenance --output evals/artifacts/provenance.md
+```
 
 On GB10/Linux AArch64, the repo `.cargo/config.toml` wires the required
 `+fp16,+fhm` target features, so no manual `RUSTFLAGS` are needed for the

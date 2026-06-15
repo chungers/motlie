@@ -73,6 +73,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "qwen3_tts_cpp_0_6b",
             &checkpoint,
+            crate::ArtifactProvenance::new("unknown", crate::ArtifactGating::Public),
         )),
     }
 }

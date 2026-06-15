@@ -54,13 +54,9 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact("config.json"),
             ArtifactRule::Exact("modules.json"),
             ArtifactRule::Exact("tokenizer.json"),
-            ArtifactRule::Exact("tokenizer.model"),
             ArtifactRule::Exact("tokenizer_config.json"),
-            ArtifactRule::Exact("special_tokens_map.json"),
             ArtifactRule::Exact("1_Pooling/config.json"),
-            ArtifactRule::Exact("2_Dense/config.json"),
             ArtifactRule::Suffix(".safetensors"),
-            ArtifactRule::Suffix(".safetensors.index.json"),
         ],
         quantization: Some(QuantizationScheme::Bf16),
     }
@@ -88,6 +84,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "qwen3_embedding_06b",
             &checkpoint,
+            crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
         )),
     }
 }
@@ -161,12 +158,9 @@ mod tests {
             .expect("descriptor should expose curated artifact control");
         assert_eq!(artifacts.control_name, "qwen3_embedding_06b");
         assert!(artifacts.includes("model.safetensors"));
-        assert!(artifacts.includes("model.safetensors.index.json"));
         assert!(artifacts.includes("config.json"));
         assert!(artifacts.includes("modules.json"));
-        assert!(artifacts.includes("tokenizer.model"));
         assert!(artifacts.includes("1_Pooling/config.json"));
-        assert!(artifacts.includes("2_Dense/config.json"));
         assert!(!artifacts.includes("README.md"));
     }
 

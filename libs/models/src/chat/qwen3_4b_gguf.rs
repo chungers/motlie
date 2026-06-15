@@ -31,7 +31,6 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
         include: vec![
             ArtifactRule::Suffix("-Q4_K_M.gguf"),
             ArtifactRule::Suffix("-Q8_0.gguf"),
-            ArtifactRule::Suffix("-f16.gguf"),
         ],
         quantization: None,
     }
@@ -66,6 +65,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "qwen3_4b_gguf",
             &checkpoint,
+            crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
         )),
     }
 }

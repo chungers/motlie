@@ -68,7 +68,6 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact("2_Dense/config.json"),
             ArtifactRule::Exact("3_Dense/config.json"),
             ArtifactRule::Suffix(".safetensors"),
-            ArtifactRule::Suffix(".safetensors.index.json"),
         ],
         quantization: Some(QuantizationScheme::Fp32),
     }
@@ -96,6 +95,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "embeddinggemma_300m",
             &checkpoint,
+            crate::ArtifactProvenance::new("gemma", crate::ArtifactGating::Manual),
         )),
     }
 }

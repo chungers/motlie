@@ -40,6 +40,8 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
             list_scenarios(PathBuf::from(root))
         }
         [command, subject] if command == "list" && subject == "bundles" => list_bundles(),
+        [command, rest @ ..] if command == "preflight" => crate::artifacts::run_preflight(rest),
+        [command, rest @ ..] if command == "artifacts" => crate::artifacts::run_artifacts(rest),
         [command, rest @ ..] if command == "run" => run_scenario(command_line, rest).await,
         [command, rest @ ..] if command == "matrix" => {
             crate::driver::run_matrix(command_line, rest).await
@@ -520,6 +522,8 @@ fn print_usage() {
     println!("usage:");
     println!("  evals list scenarios [--root PATH]");
     println!("  evals list bundles");
+    println!("  evals preflight [--artifact-root PATH] [--hf-token-env NAME] [--offline]");
+    println!("  evals artifacts check|sync|provenance [--artifact-root PATH] [--hf-token-env NAME] [--offline]");
     println!("  evals run --bundle <bundle_id> --scenario <scenario_id> [--profile NAME] [--artifact-root PATH] [--jsonl PATH] [--warmup-iterations N | --cold] [--max-wall-time-secs N]");
     println!("  evals matrix --snapshot <path> [--profile NAME] [--artifact-root PATH] [--warmup-iterations N | --cold]");
     println!("  evals provision --snapshot <path> [--artifact-root PATH]");
