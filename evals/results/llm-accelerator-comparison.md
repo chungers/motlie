@@ -5,7 +5,7 @@ Generated from `evals report --aggregate 'evals/results/**/results.jsonl' --snap
 ## Notes
 
 - `mistralrs/HF` CUDA is validated on DGX for `qwen3_4b`: existing `bf16` plus #534 `isq_q4` and `isq_q8` rows all resolve `cuda` with `backend_observation`.
-- #534 ISQ CPU rows: `gemma4_e2b isq_q4` passed on x86_64 and aarch64; `gemma4_e2b isq_q8` passed on aarch64. The x86_64 q8 direct-run probe reached the 20-minute budget without writing a JSONL row, so no x86 q8 metric is committed.
+- #534 ISQ CPU rows: `gemma4_e2b isq_q4` passed on x86_64 and aarch64; `gemma4_e2b isq_q8` passed on aarch64. The x86_64 q8 direct-run probe ended with `scenario exceeded --max-wall-time-secs=1200s wall-time backstop` before writing a JSONL row, so no x86 q8 metric is committed.
 - Metal mistralrs rows remain blocked/not-applicable per the current upstream Metal support state; no new Metal run was feasible in this DGX-hosted fix.
 
 ## LLM Accelerator Comparison
