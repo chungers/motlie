@@ -280,6 +280,36 @@
     "reason": null
   },
   {
+    "bundle_id": "gemma4_e2b",
+    "quant": "isq_q4",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "isq_q4",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "isq_q8",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
     "bundle_id": "gemma4_e2b_gguf",
     "quant": "gguf_q4_k_m",
     "capability": "chat",
@@ -736,6 +766,26 @@
     "speech_mode": null,
     "profile": "local-cpu-x86_64",
     "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "isq_q4",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "isq_q8",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
     "state": "validated",
     "reason": null
   },

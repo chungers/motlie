@@ -494,23 +494,25 @@ fn short_sha(sha: &str) -> String {
     sha.chars().take(8).collect()
 }
 
-/// Decode throughput (tok/s) and TTFT (ms), one row per LLM bundle, pivoted by
-/// the cpu/cuda/metal target. Numbers come only from passing `perf` cells; a
+/// Decode throughput (tok/s) and TTFT (ms), one row per LLM bundle × quant,
+/// pivoted by the cpu/cuda/metal target. Numbers come only from passing `perf` cells; a
 /// `—` means no passing perf metric for that bundle × accelerator (see the
 /// viability rollup below for whether the path was blocked vs simply not run).
 fn render_llm_throughput(out: &mut String, llm_records: &[&ResultRecord]) {
     out.push_str(
-        "Decode throughput (tok/s) and TTFT (ms) per LLM bundle, by target accelerator. \
+        "Decode throughput (tok/s) and TTFT (ms) per LLM bundle and quantization scheme, by target accelerator. \
          Values are from passing `perf` cells; `—` = no passing perf metric for that pairing.\n\n",
     );
     out.push_str(
-        "| bundle | family | cpu tok/s | cpu ttft ms | cuda tok/s | cuda ttft ms | metal tok/s | metal ttft ms |\n",
+        "| bundle | quant | family | cpu tok/s | cpu ttft ms | cuda tok/s | cuda ttft ms | metal tok/s | metal ttft ms |\n",
     );
-    out.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
+    out.push_str("|---|---|---|---:|---:|---:|---:|---:|---:|\n");
 
-    // (bundle, family) -> accelerator -> accumulated perf metrics.
-    let mut rows: BTreeMap<(String, &'static str), BTreeMap<&'static str, AcceleratorPerf>> =
-        BTreeMap::new();
+    // (bundle, quant, family) -> accelerator -> accumulated perf metrics.
+    let mut rows: BTreeMap<
+        (String, String, &'static str),
+        BTreeMap<&'static str, AcceleratorPerf>,
+    > = BTreeMap::new();
     for record in llm_records {
         if record.coverage.terminal_outcome != TerminalOutcome::Passed {
             continue;
@@ -531,7 +533,11 @@ fn render_llm_throughput(out: &mut String, llm_records: &[&ResultRecord]) {
         }
         let family = backend_family_label(&record.coverage.backend);
         let entry = rows
-            .entry((record.coverage.bundle_id.clone(), family))
+            .entry((
+                record.coverage.bundle_id.clone(),
+                record.coverage.quantization.clone(),
+                family,
+            ))
             .or_default()
             .entry(accelerator)
             .or_default();
@@ -544,12 +550,12 @@ fn render_llm_throughput(out: &mut String, llm_records: &[&ResultRecord]) {
     }
 
     if rows.is_empty() {
-        out.push_str("| `none` | `none` | — | — | — | — | — | — |\n");
+        out.push_str("| `none` | `none` | `none` | — | — | — | — | — | — |\n");
         return;
     }
 
-    for ((bundle, family), per_accel) in &rows {
-        out.push_str(&format!("| `{bundle}` | {family} |"));
+    for ((bundle, quant, family), per_accel) in &rows {
+        out.push_str(&format!("| `{bundle}` | `{quant}` | {family} |"));
         for accelerator in COMPARISON_ACCELERATORS {
             let cell = per_accel.get(accelerator);
             let tps = cell.and_then(|c| mean_f64(&c.decode_tps));
@@ -1396,7 +1402,8 @@ mod tests {
         render_llm_accelerator_comparison(&mut markdown, &[cpu, cuda, mistral_cuda]);
 
         // Throughput pivot: one bundle row carries both cpu and cuda numbers.
-        assert!(markdown.contains("`qwen3_4b_gguf` | llama.cpp/GGUF | 11.5 | 540 | 95.2 | 120 |"));
+        assert!(markdown
+            .contains("`qwen3_4b_gguf` | `q4_0` | llama.cpp/GGUF | 11.5 | 540 | 95.2 | 120 |"));
         // Viability rollup: mistralrs/HF CUDA is counted as on-target only after
         // the backend observation proves it.
         // cols: cells | passed | on_target | blocked | failed | mean tok/s
