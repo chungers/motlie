@@ -261,6 +261,25 @@ mod tests {
     }
 
     #[test]
+    fn inventory_only_cuda_is_unverified_until_backend_reports_device() {
+        let platform = platform_with("nvidia", "NVIDIA GB10");
+        let accelerator = resolve_for_profile("dgx-spark", &platform);
+
+        assert_eq!(accelerator.requested_class, AcceleratorClass::Cuda);
+        assert_eq!(accelerator.resolved_class, AcceleratorClass::Cuda);
+        assert_eq!(accelerator.selected_devices.len(), 1);
+        assert_eq!(
+            accelerator.fallback_reason,
+            Some(OutcomeReason::BackendOffloadUnverified)
+        );
+        assert_eq!(
+            accelerator.use_proof_source.as_deref(),
+            Some("backend:unreported")
+        );
+        assert_eq!(evaluate_use(&accelerator), AcceptanceStatus::Blocked);
+    }
+
+    #[test]
     fn backend_observation_credits_metal_use() {
         let platform = platform_with("metal", "Apple M3");
         let accelerator = resolve(
