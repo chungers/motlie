@@ -7,6 +7,15 @@
 //! The reconciliation *is* the framework's value: the declaration and the
 //! runtime evidence must agree, and any disagreement is a flagged finding
 //! (`Finding`) that fails the fail-closed completeness check.
+//!
+//! HOOK(#531) — Speech sub-dimension: the cell key will gain a
+//! capability-conditional `SpeechGeneration::{Buffered, Streaming}` sub-dimension
+//! that is present iff `capability == Speech`, so buffered vs streaming become
+//! distinct cells (DESIGN §G). `SpeechGeneration` is owned by motlie-model
+//! (#531/#524) and is intentionally NOT defined here; when it lands, add the
+//! optional field to the cell-key type (and the index entry) in this module —
+//! reconciliation/`applicability` are unaffected (accelerator support is
+//! speech-mode-independent), so the change is localized to cell keying/slicing.
 
 use motlie_model::{AccelSupport, BackendKind, Reason};
 
