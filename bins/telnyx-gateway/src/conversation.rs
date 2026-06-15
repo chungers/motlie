@@ -13,6 +13,9 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
+use crate::early_response::{
+    identity_passthrough, EarlyResponseEvent, EarlyResponseIntent, EarlyResponseProcessor,
+};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
     CallStatus, ConversationMode, LogLevel, QualitySpanEmission, SharedState,
@@ -152,6 +155,23 @@ pub fn default_conversation_handler() -> SharedConversationHandler {
 #[derive(Clone, Debug, Default)]
 pub struct SmokeTestConversationHandler;
 
+impl SmokeTestConversationHandler {
+    fn buffered_reply(text: &str) -> Option<String> {
+        let text = text.trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some(format!("I heard: {text}"))
+        }
+    }
+}
+
+impl EarlyResponseProcessor for SmokeTestConversationHandler {
+    fn process_event(&self, event: EarlyResponseEvent) -> Option<EarlyResponseIntent> {
+        identity_passthrough(event)
+    }
+}
+
 #[async_trait]
 impl ConversationHandler for SmokeTestConversationHandler {
     async fn on_transcript(
@@ -162,13 +182,10 @@ impl ConversationHandler for SmokeTestConversationHandler {
         if !event.is_final() {
             return Ok(ConversationCommand::Noop);
         }
-        let text = event.text().trim();
-        if text.is_empty() {
-            return Ok(ConversationCommand::Noop);
+        match Self::buffered_reply(event.text()) {
+            Some(text) => Ok(ConversationCommand::Say { text }),
+            None => Ok(ConversationCommand::Noop),
         }
-        Ok(ConversationCommand::Say {
-            text: format!("I heard: {text}"),
-        })
     }
 }
 
@@ -1324,6 +1341,92 @@ mod tests {
             ConversationCommand::Say { text } => assert_eq!(text, "I heard: hello"),
             _ => panic!("expected say command"),
         }
+    }
+
+    #[test]
+    fn smoke_test_handler_repeats_early_response_start_as_identity_fragment() {
+        let handler = SmokeTestConversationHandler;
+        let intent = handler.process_event(EarlyResponseEvent::Started {
+            provisional_turn_id: "pt-1".to_string(),
+            call_id: "call-1".to_string(),
+            utterance_id: "utt-1".to_string(),
+            generation: 1,
+            text: "I need a tow truck.".to_string(),
+            confidence: Some(0.91),
+            stability: Some(0.86),
+            speech_state: crate::text_calls::turns::CallerSpeechState::EndpointCandidate,
+        });
+
+        assert_eq!(
+            intent,
+            Some(EarlyResponseIntent::Speak {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 1,
+                text: "I need a tow truck.".to_string(),
+                append_or_replace: crate::early_response::AppendOrReplace::Replace,
+            })
+        );
+    }
+
+    #[test]
+    fn smoke_test_handler_preserves_early_response_update_cancel_and_commit() {
+        let handler = SmokeTestConversationHandler;
+        assert_eq!(
+            handler.process_event(EarlyResponseEvent::Updated {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                text: "I need a tow truck in Oakland.".to_string(),
+                append_or_replace: crate::early_response::AppendOrReplace::Replace,
+            }),
+            Some(EarlyResponseIntent::Speak {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                text: "I need a tow truck in Oakland.".to_string(),
+                append_or_replace: crate::early_response::AppendOrReplace::Replace,
+            })
+        );
+        assert_eq!(
+            handler.process_event(EarlyResponseEvent::Canceled {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                reason: crate::early_response::EarlyResponseCancelReason::AsrCorrection,
+            }),
+            Some(EarlyResponseIntent::Cancel {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                reason: crate::early_response::EarlyResponseCancelReason::AsrCorrection,
+            })
+        );
+        assert_eq!(
+            handler.process_event(EarlyResponseEvent::Committed {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                turn_id: "turn-1".to_string(),
+                coalesced_turn_ids: Vec::new(),
+                coalesced_utterance_ids: vec!["utt-1".to_string()],
+                member_final_text: "I need a tow truck in Oakland.".to_string(),
+                final_text: "I need a tow truck in Oakland.".to_string(),
+                role: crate::early_response::EarlyResponseCommitRole::PrimaryPlayback,
+            }),
+            Some(EarlyResponseIntent::Commit {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                generation: 2,
+                turn_id: "turn-1".to_string(),
+            })
+        );
     }
 
     #[tokio::test]
