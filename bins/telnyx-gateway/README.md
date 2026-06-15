@@ -109,7 +109,7 @@ Replay a capture and compute WER without another phone call:
 
 ```sh
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
-  --no-asr-download \
+  --artifact-root /home/dchung/telnyx-test/artifacts/hf-cache \
   replay-capture /home/dchung/telnyx-test/captures/<gateway-call-id>/<stream-id> \
   --backend sherpa \
   --reference-file /home/dchung/telnyx-test/reference.txt
@@ -127,7 +127,7 @@ Replay the golden corpus across comparable backends:
 
 ```sh
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
-  --no-asr-download \
+  --artifact-root /home/dchung/telnyx-test/artifacts/hf-cache \
   replay-corpus bins/telnyx-gateway/corpus/asr-golden.json \
   --backend sherpa-zipformer-2023 \
   --backend sherpa-zipformer-kroko-2025 \
@@ -212,8 +212,8 @@ Prerequisites:
 - Tailscale Funnel or equivalent proxies `/` to `http://127.0.0.1:8080`.
 - The selected Telnyx Call Control application has an Outbound Voice Profile.
 - The `from-number` is outbound-enabled for that profile.
-- Piper artifacts can be downloaded through the curated catalog, or are already
-  present under the gateway artifact root.
+- Piper/Kokoro artifacts are preloaded under the gateway artifact root. The
+  gateway does not download missing model artifacts at runtime.
 - A system `libespeak-ng` installation and phonemization data are available for
   Piper. The gateway auto-detects common data paths such as
   `/usr/lib/<arch>/espeak-ng-data` and `/usr/share/espeak-ng-data`; if your host
@@ -394,11 +394,13 @@ the live test.
 
 Artifacts are loaded from:
 
-1. `--asr-artifact-root <path>`
+1. `--artifact-root <path>`
 2. `MOTLIE_VOICE_ARTIFACT_ROOT`
 3. `.agents/skills/voice/artifacts/hf-cache`
 
-By default, missing Sherpa artifacts are downloaded through the curated `motlie-models` catalog. Pass `--no-asr-download` to fail closed instead.
+Missing artifacts fail startup or warmup loudly. Use the curated
+`motlie-models-download` workflow or another explicit preload step before
+starting the gateway.
 
 For local protocol testing without model startup:
 

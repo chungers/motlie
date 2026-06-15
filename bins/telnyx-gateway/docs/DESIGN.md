@@ -3980,35 +3980,33 @@ The right status area should show the Telnyx API request status and the currentl
 cargo build --release -p telnyx-gateway
 ```
 
-#### 7. Download model artifacts
+#### 7. Preload model artifacts
 
-Download the artifacts for the models you want to run.
+Preload artifacts for the ASR and TTS models before starting `telnyx-gateway`. The gateway is local-only for model loading: it may fail loudly when required artifacts are absent, but it must not download model files at runtime.
 
 Recommended v1 defaults:
 
-- Piper voice model
-- `sherpa-onnx` Zipformer2 streaming model
+- Sherpa ONNX Zipformer streaming ASR artifacts
+- Kokoro-82M or Piper TTS artifacts, including Kokoro incremental files when `tts.generation_mode=streaming`
 
-#### 8. Start the gateway with model paths and listen address
+Use `--artifact-root <path>` when the artifacts are not under the default local cache.
+
+#### 8. Start the gateway with artifact root and listen address
 
 ```bash
 ./target/release/telnyx-gateway \
-  --listen 127.0.0.1:8080 \
-  --webhook-path /telnyx/webhooks \
-  --media-path /telnyx/media \
+  --bind 127.0.0.1:8080 \
   --tui \
   --socket /tmp/motlie-telnyx-gateway.sock \
   --load ./telnyx-gateway.state.repl \
-  --telnyx-api-key "$TELNYX_API_KEY" \
-  --asr-model sherpa-onnx \
-  --tts-model piper
+  --artifact-root ./artifacts/models/hf-cache
 ```
 
-The exact model configuration flags can evolve, but the binary should always separate:
+The exact operator commands can evolve, but the binary should always separate:
 
 - local listen address
 - externally reachable webhook and media URLs
-- injected ASR/TTS backend choice
+- preloaded model artifact root and injected ASR/TTS backend choice
 - operator input mode: `--tui`, `--socket <path>`, both, or neither when only HTTP subscriber/dial APIs and loaded configuration are desired
 - Telnyx application/number selection, which can be driven from any configured operator command source
 - optional replayable state file loaded with `--load`
