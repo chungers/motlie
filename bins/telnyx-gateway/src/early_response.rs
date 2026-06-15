@@ -15,11 +15,11 @@ use crate::speech::{self, AppendSpeechHandle, SpeechConflictPolicy, SpeechQueueR
 use crate::text_calls::turns::CallerSpeechState;
 use crate::text_calls::SharedTextCallRegistry;
 use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 const EARLY_RESPONSE_INPUT_CAPACITY: usize = 8;
 const EARLY_RESPONSE_EVENT_CAPACITY: usize = 32;
-const EARLY_RESPONSE_PRIORITY_CANCEL_CAPACITY: usize = 64;
+const PROVISIONAL_PREBUFFER_FRAME_CAP: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -400,21 +400,25 @@ where
 #[derive(Clone)]
 pub struct EarlyResponsePipelineHandle {
     call_id: String,
-    tx: mpsc::Sender<EarlyResponseInput>,
+    partial_tx: EarlyResponsePartialSender,
+    control_tx: mpsc::UnboundedSender<EarlyResponseInput>,
 }
 
 impl EarlyResponsePipelineHandle {
     pub fn try_send(&self, input: EarlyResponseInput) -> bool {
-        match self.tx.try_send(input) {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(
-                    gateway_call_id = self.call_id.as_str(),
-                    error = %error,
-                    "early_response.input.drop"
-                );
-                false
-            }
+        match input {
+            EarlyResponseInput::Partial(partial) => self.partial_tx.send(partial),
+            control => match self.control_tx.send(control) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        gateway_call_id = self.call_id.as_str(),
+                        error = %error,
+                        "early_response.control.closed"
+                    );
+                    false
+                }
+            },
         }
     }
 
@@ -424,6 +428,195 @@ impl EarlyResponsePipelineHandle {
             reason,
         });
     }
+}
+
+#[derive(Default)]
+struct EarlyResponsePartialLaneState {
+    queue: VecDeque<EarlyResponsePartial>,
+    sender_count: usize,
+    closed: bool,
+}
+
+struct EarlyResponsePartialLaneInner {
+    state: Mutex<EarlyResponsePartialLaneState>,
+    notify: Notify,
+}
+
+#[derive(Clone)]
+struct EarlyResponsePartialReceiver {
+    inner: Arc<EarlyResponsePartialLaneInner>,
+}
+
+struct EarlyResponsePartialSender {
+    inner: Arc<EarlyResponsePartialLaneInner>,
+}
+
+impl Clone for EarlyResponsePartialSender {
+    fn clone(&self) -> Self {
+        let mut guard = self
+            .inner
+            .state
+            .lock()
+            .expect("early response partial lane lock");
+        guard.sender_count += 1;
+        drop(guard);
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Drop for EarlyResponsePartialSender {
+    fn drop(&mut self) {
+        let mut guard = self
+            .inner
+            .state
+            .lock()
+            .expect("early response partial lane lock");
+        guard.sender_count = guard.sender_count.saturating_sub(1);
+        if guard.sender_count == 0 {
+            guard.closed = true;
+            drop(guard);
+            self.inner.notify.notify_waiters();
+        }
+    }
+}
+
+impl EarlyResponsePartialSender {
+    fn send(&self, partial: EarlyResponsePartial) -> bool {
+        let partial_call_id = partial.call_id.clone();
+        let partial_utterance_id = partial.utterance_id.clone();
+        let mut guard = self
+            .inner
+            .state
+            .lock()
+            .expect("early response partial lane lock");
+        if guard.closed {
+            tracing::warn!(
+                gateway_call_id = partial_call_id.as_str(),
+                utterance_id = partial_utterance_id.as_str(),
+                "early_response.partial.closed"
+            );
+            return false;
+        }
+        if let Some(queued) = guard.queue.iter_mut().find(|queued| {
+            queued.call_id == partial_call_id && queued.utterance_id == partial_utterance_id
+        }) {
+            *queued = partial;
+            drop(guard);
+            self.inner.notify.notify_one();
+            tracing::debug!(
+                gateway_call_id = partial_call_id.as_str(),
+                utterance_id = partial_utterance_id.as_str(),
+                "early_response.partial.coalesced"
+            );
+            return true;
+        }
+        if guard.queue.len() >= EARLY_RESPONSE_INPUT_CAPACITY {
+            if let Some(dropped) = guard.queue.pop_front() {
+                tracing::warn!(
+                    gateway_call_id = dropped.call_id.as_str(),
+                    utterance_id = dropped.utterance_id.as_str(),
+                    "early_response.partial.drop_oldest"
+                );
+            }
+        }
+        guard.queue.push_back(partial);
+        drop(guard);
+        self.inner.notify.notify_one();
+        true
+    }
+}
+
+impl EarlyResponsePartialReceiver {
+    async fn recv(&self) -> Option<EarlyResponsePartial> {
+        loop {
+            let notified = {
+                let mut guard = self
+                    .inner
+                    .state
+                    .lock()
+                    .expect("early response partial lane lock");
+                if let Some(partial) = guard.queue.pop_front() {
+                    return Some(partial);
+                }
+                if guard.closed {
+                    return None;
+                }
+                self.inner.notify.notified()
+            };
+            notified.await;
+        }
+    }
+}
+
+fn early_response_partial_lane() -> (EarlyResponsePartialSender, EarlyResponsePartialReceiver) {
+    let inner = Arc::new(EarlyResponsePartialLaneInner {
+        state: Mutex::new(EarlyResponsePartialLaneState {
+            sender_count: 1,
+            ..EarlyResponsePartialLaneState::default()
+        }),
+        notify: Notify::new(),
+    });
+    (
+        EarlyResponsePartialSender {
+            inner: inner.clone(),
+        },
+        EarlyResponsePartialReceiver { inner },
+    )
+}
+
+fn early_response_input_stream(
+    partial_rx: EarlyResponsePartialReceiver,
+    control_rx: mpsc::UnboundedReceiver<EarlyResponseInput>,
+) -> impl Stream<Item = EarlyResponseInput> {
+    stream::unfold(
+        (partial_rx, control_rx, false, false),
+        |(partial_rx, mut control_rx, mut partial_closed, mut control_closed)| async move {
+            loop {
+                if !control_closed {
+                    match control_rx.try_recv() {
+                        Ok(input) => {
+                            return Some((
+                                input,
+                                (partial_rx, control_rx, partial_closed, control_closed),
+                            ));
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                        Err(mpsc::error::TryRecvError::Disconnected) => control_closed = true,
+                    }
+                }
+                if partial_closed && control_closed {
+                    return None;
+                }
+                tokio::select! {
+                    biased;
+                    control = control_rx.recv(), if !control_closed => {
+                        match control {
+                            Some(input) => {
+                                return Some((
+                                    input,
+                                    (partial_rx, control_rx, partial_closed, control_closed),
+                                ));
+                            }
+                            None => control_closed = true,
+                        }
+                    }
+                    partial = partial_rx.recv(), if !partial_closed => {
+                        match partial {
+                            Some(partial) => {
+                                return Some((
+                                    EarlyResponseInput::Partial(partial),
+                                    (partial_rx, control_rx, partial_closed, control_closed),
+                                ));
+                            }
+                            None => partial_closed = true,
+                        }
+                    }
+                }
+            }
+        },
+    )
 }
 
 pub struct EarlyResponsePipelineServices {
@@ -440,19 +633,14 @@ pub fn spawn_early_response_pipeline(
     policy: EarlyResponsePolicy,
     services: EarlyResponsePipelineServices,
 ) -> EarlyResponsePipelineHandle {
-    let (input_tx, input_rx) = mpsc::channel(EARLY_RESPONSE_INPUT_CAPACITY);
+    let (partial_tx, partial_rx) = early_response_partial_lane();
+    let (control_tx, control_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EARLY_RESPONSE_EVENT_CAPACITY);
-    let (cancel_tx, cancel_rx) = mpsc::channel(EARLY_RESPONSE_PRIORITY_CANCEL_CAPACITY);
     let registry = ProvisionalPlaybackRegistry::default();
     let cancel_sink = PipelinePriorityCancelSink {
         registry: registry.clone(),
-        tx: cancel_tx.clone(),
+        media_registry: services.media_registry.clone(),
     };
-
-    tokio::spawn(run_priority_cancel_worker(
-        services.media_registry.clone(),
-        cancel_rx,
-    ));
 
     let mut processor = services.processor;
     let mut intents = processor.process(Box::pin(receiver_stream(event_rx)));
@@ -463,8 +651,6 @@ pub fn spawn_early_response_pipeline(
         tts_backend: services.tts_backend,
         text_calls: services.text_calls.clone(),
         registry: registry.clone(),
-        cancel_tx: cancel_tx.clone(),
-        policy: policy.clone(),
     };
     tokio::spawn(async move {
         while let Some(intent) = intents.next().await {
@@ -478,7 +664,7 @@ pub fn spawn_early_response_pipeline(
     let event_text_calls = services.text_calls.clone();
     let event_call_id = call_id.clone();
     tokio::spawn(async move {
-        let input_stream = receiver_stream(input_rx);
+        let input_stream = early_response_input_stream(partial_rx, control_rx);
         let mut events = Box::pin(aggregate_early_resp_partials(
             input_stream,
             policy,
@@ -486,16 +672,11 @@ pub fn spawn_early_response_pipeline(
         ));
         while let Some(event) = events.as_mut().next().await {
             event_registry.observe_event(&event);
-            if let Err(error) = event_text_calls
-                .send_early_response_event(&event_call_id, event.clone())
-                .await
-            {
-                tracing::warn!(
-                    gateway_call_id = event_call_id.as_str(),
-                    error = %error,
-                    "text_call.early_response.forward_failed"
-                );
-            }
+            spawn_early_response_event_forward(
+                event_text_calls.clone(),
+                event_call_id.clone(),
+                event.clone(),
+            );
             if event_tx.send(event).await.is_err() {
                 break;
             }
@@ -504,8 +685,25 @@ pub fn spawn_early_response_pipeline(
 
     EarlyResponsePipelineHandle {
         call_id,
-        tx: input_tx,
+        partial_tx,
+        control_tx,
     }
+}
+
+fn spawn_early_response_event_forward(
+    text_calls: SharedTextCallRegistry,
+    call_id: String,
+    event: EarlyResponseEvent,
+) {
+    tokio::spawn(async move {
+        if let Err(error) = text_calls.send_early_response_event(&call_id, event).await {
+            tracing::warn!(
+                gateway_call_id = call_id.as_str(),
+                error = %error,
+                "text_call.early_response.forward_failed"
+            );
+        }
+    });
 }
 
 fn receiver_stream<T>(rx: mpsc::Receiver<T>) -> impl Stream<Item = T> {
@@ -521,8 +719,6 @@ struct EarlyResponseIntentServices {
     tts_backend: LiveTtsBackend,
     text_calls: SharedTextCallRegistry,
     registry: ProvisionalPlaybackRegistry,
-    cancel_tx: mpsc::Sender<PlaybackCancelCommand>,
-    policy: EarlyResponsePolicy,
 }
 
 async fn handle_early_response_intent(
@@ -578,7 +774,7 @@ async fn handle_early_response_intent(
         } => {
             cancel_provisional_playback(
                 &services.registry,
-                &services.cancel_tx,
+                &services.media_registry,
                 &call_id,
                 &provisional_turn_id,
                 generation,
@@ -634,9 +830,7 @@ async fn start_provisional_speech(
             latest_turn_finalized_at: None,
             turn_id: Some(provisional_turn_id.clone()),
             coalesced_turn_ids: Vec::new(),
-            prebuffer_chunks_override: Some(
-                services.policy.provisional_max_prebuffer_frames.max(1),
-            ),
+            prebuffer_chunks_override: Some(PROVISIONAL_PREBUFFER_FRAME_CAP),
         },
         vec![text],
     )
@@ -646,11 +840,12 @@ async fn start_provisional_speech(
         .is_current(&call_id, &provisional_turn_id, generation)
     {
         handle.cancel_now();
-        let _ = services.cancel_tx.try_send(PlaybackCancelCommand {
-            call_id: call_id.clone(),
-            playback_id: queued.playback_id.clone(),
-            reason: EarlyResponseCancelReason::StaleGeneration,
-        });
+        queue_provisional_media_clear(
+            &services.media_registry,
+            &call_id,
+            &queued.playback_id,
+            EarlyResponseCancelReason::StaleGeneration,
+        );
         return Ok(());
     }
     services.registry.insert_playback(
@@ -708,7 +903,7 @@ async fn append_provisional_speech(
 
 fn cancel_provisional_playback(
     registry: &ProvisionalPlaybackRegistry,
-    cancel_tx: &mpsc::Sender<PlaybackCancelCommand>,
+    media_registry: &SharedMediaRegistry,
     call_id: &str,
     provisional_turn_id: &str,
     generation: u64,
@@ -718,42 +913,34 @@ fn cancel_provisional_playback(
         return;
     };
     handle.cancel_now();
-    let command = PlaybackCancelCommand {
-        call_id: call_id.to_string(),
-        playback_id: handle.playback_id.clone(),
-        reason,
-    };
-    if let Err(error) = cancel_tx.try_send(command) {
-        tracing::warn!(
-            gateway_call_id = call_id,
-            provisional_turn_id,
-            generation,
-            error = %error,
-            "early_response.priority_cancel.drop"
-        );
-    }
+    queue_provisional_media_clear(media_registry, call_id, &handle.playback_id, reason);
 }
 
-async fn run_priority_cancel_worker(
-    media_registry: SharedMediaRegistry,
-    mut rx: mpsc::Receiver<PlaybackCancelCommand>,
+fn queue_provisional_media_clear(
+    media_registry: &SharedMediaRegistry,
+    call_id: &str,
+    playback_id: &str,
+    reason: EarlyResponseCancelReason,
 ) {
-    while let Some(command) = rx.recv().await {
-        let reason = speech_clear_reason_for(command.reason);
+    let media_registry = media_registry.clone();
+    let call_id = call_id.to_string();
+    let playback_id = playback_id.to_string();
+    tokio::spawn(async move {
+        let reason = speech_clear_reason_for(reason);
         match media_registry
-            .cancel_speech_playback_for_reason(&command.call_id, &command.playback_id, reason)
+            .cancel_speech_playback_for_reason(&call_id, &playback_id, reason)
             .await
         {
             Ok(true) => {}
             Ok(false) => {}
             Err(error) => tracing::warn!(
-                gateway_call_id = command.call_id.as_str(),
-                playback_id = command.playback_id.as_str(),
+                gateway_call_id = call_id.as_str(),
+                playback_id = playback_id.as_str(),
                 error = %error,
                 "early_response.priority_cancel.failed"
             ),
         }
-    }
+    });
 }
 
 fn speech_clear_reason_for(reason: EarlyResponseCancelReason) -> SpeechClearReason {
@@ -761,13 +948,6 @@ fn speech_clear_reason_for(reason: EarlyResponseCancelReason) -> SpeechClearReas
         EarlyResponseCancelReason::CallerBargeIn => SpeechClearReason::BargeIn,
         _ => SpeechClearReason::CancelAndReplace,
     }
-}
-
-#[derive(Clone, Debug)]
-struct PlaybackCancelCommand {
-    call_id: String,
-    playback_id: String,
-    reason: EarlyResponseCancelReason,
 }
 
 #[derive(Clone, Debug, Eq)]
@@ -951,14 +1131,14 @@ impl ProvisionalPlaybackRegistry {
 #[derive(Clone)]
 struct PipelinePriorityCancelSink {
     registry: ProvisionalPlaybackRegistry,
-    tx: mpsc::Sender<PlaybackCancelCommand>,
+    media_registry: SharedMediaRegistry,
 }
 
 impl EarlyResponsePriorityCancelSink for PipelinePriorityCancelSink {
     fn cancel_provisional(&self, key: ProvisionalPlaybackKey, reason: EarlyResponseCancelReason) {
         cancel_provisional_playback(
             &self.registry,
-            &self.tx,
+            &self.media_registry,
             &key.call_id,
             &key.provisional_turn_id,
             key.generation,
@@ -1817,6 +1997,67 @@ mod tests {
             }] if provisional_turn_id == &suffix_provisional_id
         ));
         assert_eq!(sink.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn input_stream_prioritizes_control_over_full_partial_lane() {
+        let (partial_tx, partial_rx) = early_response_partial_lane();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        for index in 0..(EARLY_RESPONSE_INPUT_CAPACITY + 2) {
+            let mut item = partial("I need a tow truck.", index as u64, 100 + index as u64);
+            item.utterance_id = format!("utt-{index}");
+            assert!(partial_tx.send(item));
+        }
+        control_tx
+            .send(EarlyResponseInput::CancelCall {
+                call_id: "call-1".to_string(),
+                reason: EarlyResponseCancelReason::CallerBargeIn,
+            })
+            .expect("control lane open");
+
+        let mut inputs = Box::pin(early_response_input_stream(partial_rx, control_rx));
+
+        assert!(matches!(
+            inputs.next().await,
+            Some(EarlyResponseInput::CancelCall {
+                reason: EarlyResponseCancelReason::CallerBargeIn,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn partial_lane_coalesces_same_utterance_to_latest_partial() {
+        let (partial_tx, partial_rx) = early_response_partial_lane();
+        let mut first = partial("I need a tow truck.", 7, 100);
+        first.utterance_id = "utt-shared".to_string();
+        let mut second = partial("I need a tow truck in Oakland.", 8, 180);
+        second.utterance_id = "utt-shared".to_string();
+        assert!(partial_tx.send(first));
+        assert!(partial_tx.send(second));
+
+        let received = partial_rx.recv().await.expect("partial available");
+
+        assert_eq!(received.utterance_id, "utt-shared");
+        assert_eq!(received.sequence, 8);
+        assert_eq!(received.text, "I need a tow truck in Oakland.");
+    }
+
+    #[tokio::test]
+    async fn partial_lane_drops_oldest_when_capacity_is_exceeded() {
+        let (partial_tx, partial_rx) = early_response_partial_lane();
+        for index in 0..EARLY_RESPONSE_INPUT_CAPACITY {
+            let mut item = partial("I need a tow truck.", index as u64, 100 + index as u64);
+            item.utterance_id = format!("utt-{index}");
+            assert!(partial_tx.send(item));
+        }
+        let mut extra = partial("I need a tow truck now.", 99, 250);
+        extra.utterance_id = "utt-extra".to_string();
+        assert!(partial_tx.send(extra));
+
+        let received = partial_rx.recv().await.expect("partial available");
+
+        assert_eq!(received.utterance_id, "utt-1");
     }
 
     #[tokio::test]

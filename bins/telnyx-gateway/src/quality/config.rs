@@ -821,7 +821,7 @@ impl VoiceQualityConfig {
             "early_response.provisional_max_prebuffer_frames",
             self.early_response.provisional_max_prebuffer_frames,
             1,
-            64,
+            1,
         )?;
         ensure_u64(
             "barge_in.clear_timeout_ms",
@@ -2165,6 +2165,20 @@ mod tests {
         assert!(error
             .to_string()
             .contains("endpoint.final_settle_tail_words"));
+    }
+
+    #[test]
+    fn early_response_provisional_prebuffer_rejects_values_above_hard_cap() {
+        let mut config = VoiceQualityConfig::default();
+        config.early_response.provisional_max_prebuffer_frames = 2;
+
+        let error = config
+            .validate_resolved()
+            .expect_err("provisional prebuffer must stay at the one-frame cap");
+
+        assert!(error
+            .to_string()
+            .contains("early_response.provisional_max_prebuffer_frames"));
     }
 
     #[test]
