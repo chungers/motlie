@@ -17,7 +17,8 @@ use crate::operator::state::{
     InboundMode, LogLevel, SharedState,
 };
 use crate::quality::{
-    OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, VoiceQualityConfig,
+    OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, TtsGenerationMode,
+    VoiceQualityConfig,
 };
 use crate::speech;
 use crate::text_calls::{SharedTextCallRegistry, TextCallStreamServices};
@@ -587,6 +588,21 @@ impl OnOffArg {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TtsGenerationModeArg {
+    Buffered,
+    Streaming,
+}
+
+impl From<TtsGenerationModeArg> for TtsGenerationMode {
+    fn from(value: TtsGenerationModeArg) -> Self {
+        match value {
+            TtsGenerationModeArg::Buffered => Self::Buffered,
+            TtsGenerationModeArg::Streaming => Self::Streaming,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum OnsetDuringPlaybackArg {
     DeferToPartial,
     Trust,
@@ -664,6 +680,7 @@ pub enum QualityTextCallCommand {
 #[derive(Debug, Subcommand)]
 pub enum QualityTtsCommand {
     Status,
+    GenerationMode { mode: TtsGenerationModeArg },
     Chunking { state: OnOffArg },
     MaxTextChunkChars { n: usize },
     FirstChunkMaxChars { n: usize },
@@ -1445,8 +1462,20 @@ async fn warm_asr_model(context: &mut GatewayContext) -> String {
 
 async fn warm_tts_model(context: &mut GatewayContext) -> String {
     let backend = context.session.next_tts_backend;
+    let generation_mode = context
+        .state
+        .read()
+        .await
+        .quality
+        .config
+        .tts
+        .generation_mode;
     let started = Instant::now();
-    match context.tts.warm(backend).await {
+    let warm_result = match generation_mode {
+        TtsGenerationMode::Buffered => context.tts.warm(backend).await,
+        TtsGenerationMode::Streaming => context.tts.warm_streaming(backend).await,
+    };
+    match warm_result {
         Ok(()) => {
             let elapsed_ms = elapsed_ms(started);
             let mut guard = context.state.write().await;
@@ -1459,15 +1488,17 @@ async fn warm_tts_model(context: &mut GatewayContext) -> String {
             guard.log(
                 LogLevel::Info,
                 format!(
-                    "warmed TTS backend {} ({}) in {elapsed_ms}ms",
+                    "warmed TTS backend {} ({}) mode={} in {elapsed_ms}ms",
                     backend.label(),
-                    backend.model_label()
+                    backend.model_label(),
+                    generation_mode.label()
                 ),
             );
             format!(
-                "warm tts={} model={} status=ready elapsed_ms={elapsed_ms}",
+                "warm tts={} model={} mode={} status=ready elapsed_ms={elapsed_ms}",
                 backend.label(),
-                backend.model_label()
+                backend.model_label(),
+                generation_mode.label()
             )
         }
         Err(error) => {
@@ -1475,15 +1506,17 @@ async fn warm_tts_model(context: &mut GatewayContext) -> String {
             context.state.write().await.log(
                 LogLevel::Warn,
                 format!(
-                    "failed to warm TTS backend {} ({}): {message}",
+                    "failed to warm TTS backend {} ({}) mode={}: {message}",
                     backend.label(),
-                    backend.model_label()
+                    backend.model_label(),
+                    generation_mode.label()
                 ),
             );
             format!(
-                "warm tts={} model={} status=failed error={message}",
+                "warm tts={} model={} mode={} status=failed error={message}",
                 backend.label(),
-                backend.model_label()
+                backend.model_label(),
+                generation_mode.label()
             )
         }
     }
@@ -2411,6 +2444,10 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             quality.config.text_call.max_active_turns
         ),
         format!(
+            "tts.generation_mode={}",
+            quality.config.tts.generation_mode.label()
+        ),
+        format!(
             "tts.chunking_enabled={}",
             quality.config.tts.chunking_enabled
         ),
@@ -2650,15 +2687,23 @@ async fn quality_tts_command(
             let guard = context.state.read().await;
             let tts = &guard.quality.config.tts;
             Ok(CommandOutput::text(format!(
-                "chunking_enabled={}
+                "generation_mode={}
+chunking_enabled={}
 max_text_chunk_chars={}
 first_chunk_max_chars={}
 prebuffer_chunks={}",
+                tts.generation_mode.label(),
                 tts.chunking_enabled,
                 tts.max_text_chunk_chars,
                 tts.first_chunk_max_chars,
                 tts.prebuffer_chunks
             )))
+        }
+        QualityTtsCommand::GenerationMode { mode } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_tts_generation_mode(mode.into()))
+            })
+            .await
         }
         QualityTtsCommand::Chunking { state } => {
             mutate_quality_config(context, |config| {
@@ -4183,8 +4228,9 @@ mod tests {
         assert_eq!(output.lines.len(), 2);
         assert!(output.lines[0]
             .starts_with("warm asr=kroko-2025 model=sherpa-zipformer-en-kroko-2025-08-06 status=ready elapsed_ms="));
-        assert!(output.lines[1]
-            .starts_with("warm tts=kokoro-82m model=kokoro/kokoro_82m status=ready elapsed_ms="));
+        assert!(output.lines[1].starts_with(
+            "warm tts=kokoro-82m model=kokoro/kokoro_82m mode=buffered status=ready elapsed_ms="
+        ));
         let guard = state.read().await;
         assert!(guard
             .model_warmups
@@ -5245,6 +5291,14 @@ mod tests {
         let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
+        let mode_output = engine
+            .run_line("quality tts generation-mode streaming")
+            .await
+            .expect("set TTS generation mode");
+        assert!(mode_output.lines[0].contains("key=tts.generation_mode"));
+        assert!(mode_output.lines[0].contains("value=streaming"));
+        assert!(mode_output.lines[0].contains("applies=new_playback_request"));
+
         let chunk_output = engine
             .run_line("quality tts max-text-chunk-chars 10")
             .await
@@ -5282,6 +5336,10 @@ mod tests {
         assert!(status
             .lines
             .iter()
+            .any(|line| line == "generation_mode=streaming"));
+        assert!(status
+            .lines
+            .iter()
             .any(|line| line == "max_text_chunk_chars=40"));
         assert!(status
             .lines
@@ -5290,6 +5348,10 @@ mod tests {
         assert!(status.lines.iter().any(|line| line == "prebuffer_chunks=3"));
 
         let guard = state.read().await;
+        assert_eq!(
+            guard.quality.config.tts.generation_mode,
+            TtsGenerationMode::Streaming
+        );
         assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
         assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
         assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
@@ -5395,6 +5457,7 @@ mod tests {
             config.set_text_call_playback_wait_timeout_ms(54_321);
             config.set_text_call_latest_response_wins(false);
             config.set_text_call_callback_timeout_ms(1_234);
+            config.set_tts_generation_mode(TtsGenerationMode::Streaming);
             config.set_tts_max_text_chunk_chars(88);
             config.set_tts_first_chunk_max_chars(44);
             config.set_tts_prebuffer_chunks(4);

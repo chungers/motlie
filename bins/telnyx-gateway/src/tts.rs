@@ -6,10 +6,15 @@ use anyhow::bail;
 use anyhow::Context;
 use async_trait::async_trait;
 use clap::ValueEnum;
-#[cfg(feature = "kokoro")]
-use motlie_model::typed::BufferedSpeechSynthesizer;
 #[cfg(any(feature = "kokoro", feature = "piper"))]
 use motlie_model::typed::SynthesisRequest;
+#[cfg(feature = "kokoro")]
+use motlie_model::typed::{
+    BufferedSpeechSynthesizer, IncrementalSpeechStream, IncrementalSpeechSynthesizer,
+};
+use motlie_model::typed::{
+    IncrementalSpeechCancelToken, IncrementalSpeechControls, IncrementalSpeechRequestLabel,
+};
 #[cfg(feature = "piper")]
 use motlie_model::typed::{SpeechStream, SpeechSynthesizer};
 #[cfg(any(feature = "kokoro", feature = "piper"))]
@@ -30,6 +35,21 @@ const TTS_WARMUP_TEXT: &str = "Ready.";
 pub struct TtsAudio {
     samples_i16: Vec<i16>,
     sample_rate_hz: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IncrementalTtsSummary {
+    pub chunks: u64,
+    pub audio_ms: u64,
+    pub canceled: bool,
+    pub synthesis_completed: bool,
+}
+
+#[async_trait]
+pub trait OutboundIncrementalTtsStream: Send {
+    async fn next_audio_chunk(&mut self) -> anyhow::Result<Option<TtsAudio>>;
+
+    async fn finish(self: Box<Self>) -> anyhow::Result<IncrementalTtsSummary>;
 }
 
 impl TtsAudio {
@@ -128,8 +148,35 @@ impl FromStr for LiveTtsBackend {
 pub trait OutboundTtsFactory: Send + Sync {
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>>;
 
+    async fn synthesize_incremental(
+        &self,
+        _text: String,
+        _cancel: IncrementalSpeechCancelToken,
+        _request_label: Option<String>,
+        _max_buffered_audio_ms: u32,
+    ) -> anyhow::Result<Box<dyn OutboundIncrementalTtsStream>> {
+        bail!(
+            "TTS backend {} does not support streaming generation",
+            self.label()
+        )
+    }
+
     async fn warm(&self) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    async fn warm_streaming(&self) -> anyhow::Result<()> {
+        let cancel = IncrementalSpeechCancelToken::new();
+        let mut stream = self
+            .synthesize_incremental("Ready.".to_string(), cancel, Some("warm".to_string()), 80)
+            .await?;
+        while stream.next_audio_chunk().await?.is_some() {}
+        let _ = stream.finish().await?;
+        Ok(())
+    }
+
+    fn supports_incremental(&self) -> bool {
+        false
     }
 
     fn label(&self) -> &'static str;
@@ -176,6 +223,10 @@ impl TtsRegistry {
 
     pub async fn warm(&self, backend: LiveTtsBackend) -> anyhow::Result<()> {
         self.factory(backend).warm().await
+    }
+
+    pub async fn warm_streaming(&self, backend: LiveTtsBackend) -> anyhow::Result<()> {
+        self.factory(backend).warm_streaming().await
     }
 }
 
@@ -269,8 +320,82 @@ impl OutboundTtsFactory for KokoroTtsFactory {
         )?])
     }
 
+    async fn synthesize_incremental(
+        &self,
+        text: String,
+        cancel: IncrementalSpeechCancelToken,
+        request_label: Option<String>,
+        max_buffered_audio_ms: u32,
+    ) -> anyhow::Result<Box<dyn OutboundIncrementalTtsStream>> {
+        let handle = self.handle().await?;
+        let controls = IncrementalSpeechControls {
+            cancel,
+            request_label: request_label.map(IncrementalSpeechRequestLabel::new),
+            max_buffered_audio_ms,
+        };
+        let stream = handle
+            .synthesize_incremental(
+                SynthesisRequest {
+                    text,
+                    params: Default::default(),
+                },
+                controls,
+            )
+            .await
+            .context("open Kokoro-82M incremental speech stream")?;
+        Ok(Box::new(KokoroOutboundIncrementalTtsStream { stream }))
+    }
+
+    fn supports_incremental(&self) -> bool {
+        true
+    }
+
     fn label(&self) -> &'static str {
         "kokoro/kokoro_82m"
+    }
+}
+
+#[cfg(feature = "kokoro")]
+struct KokoroOutboundIncrementalTtsStream {
+    stream: motlie_model_kokoro::KokoroMeteredIncrementalSpeechStream,
+}
+
+#[cfg(feature = "kokoro")]
+#[async_trait]
+impl OutboundIncrementalTtsStream for KokoroOutboundIncrementalTtsStream {
+    async fn next_audio_chunk(&mut self) -> anyhow::Result<Option<TtsAudio>> {
+        let Some(chunk) = self
+            .stream
+            .next_audio_chunk()
+            .await
+            .context("read Kokoro-82M incremental speech chunk")?
+        else {
+            return Ok(None);
+        };
+        if chunk.channels != 1 {
+            bail!(
+                "Kokoro-82M incremental speech emitted {} channels; expected mono",
+                chunk.channels
+            );
+        }
+        Ok(Some(TtsAudio::new(
+            chunk.samples_i16,
+            chunk.sample_rate_hz,
+        )?))
+    }
+
+    async fn finish(self: Box<Self>) -> anyhow::Result<IncrementalTtsSummary> {
+        let summary = self
+            .stream
+            .finish()
+            .await
+            .context("finish Kokoro-82M incremental speech stream")?;
+        Ok(IncrementalTtsSummary {
+            chunks: summary.chunks,
+            audio_ms: summary.audio_ms,
+            canceled: summary.canceled,
+            synthesis_completed: summary.synthesis_completed,
+        })
     }
 }
 

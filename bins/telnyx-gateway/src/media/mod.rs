@@ -1384,38 +1384,84 @@ pub fn packetize_tts_chunk(
     packetize_tts_samples(chunk.into_samples(), PIPER_SAMPLE_RATE_HZ, media)
 }
 
+pub struct TtsFramePacketizer {
+    media: TelnyxMediaConfig,
+    samples_per_packet: usize,
+    pending_samples: Vec<i16>,
+}
+
+impl TtsFramePacketizer {
+    pub fn new(media: TelnyxMediaConfig) -> anyhow::Result<Self> {
+        Ok(Self {
+            media,
+            samples_per_packet: samples_per_20ms(media.sample_rate_hz)?,
+            pending_samples: Vec::new(),
+        })
+    }
+
+    pub fn push_samples(
+        &mut self,
+        mut samples: Vec<i16>,
+        input_sample_rate_hz: u32,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        if input_sample_rate_hz == 0 {
+            bail!("TTS input sample rate must be non-zero");
+        }
+        if self.media.sample_rate_hz != input_sample_rate_hz {
+            samples = resample_i16_mono(
+                &WindowedSincResampler::default(),
+                &samples,
+                input_sample_rate_hz,
+                self.media.sample_rate_hz,
+            )?;
+        }
+        self.pending_samples.extend(samples);
+        self.drain_complete_packets(false)
+    }
+
+    pub fn finish(&mut self) -> anyhow::Result<Vec<Vec<u8>>> {
+        self.drain_complete_packets(true)
+    }
+
+    fn drain_complete_packets(&mut self, pad_final_packet: bool) -> anyhow::Result<Vec<Vec<u8>>> {
+        let full_packets = self.pending_samples.len() / self.samples_per_packet;
+        let mut packets = Vec::new();
+        for packet_index in 0..full_packets {
+            let start = packet_index * self.samples_per_packet;
+            let end = start + self.samples_per_packet;
+            packets.push(encode_tts_packet(
+                self.media,
+                &self.pending_samples[start..end],
+            ));
+        }
+        let drained = full_packets * self.samples_per_packet;
+        if drained > 0 {
+            self.pending_samples.drain(..drained);
+        }
+        if pad_final_packet && !self.pending_samples.is_empty() {
+            let mut packet_samples = std::mem::take(&mut self.pending_samples);
+            packet_samples.resize(self.samples_per_packet, 0);
+            packets.push(encode_tts_packet(self.media, &packet_samples));
+        }
+        Ok(packets)
+    }
+}
+
+fn encode_tts_packet(media: TelnyxMediaConfig, packet_samples: &[i16]) -> Vec<u8> {
+    match media.codec {
+        TelnyxStreamCodec::Pcmu => g711::encode_pcmu(packet_samples),
+        TelnyxStreamCodec::L16 => l16::encode_l16_le(packet_samples),
+    }
+}
+
 pub fn packetize_tts_samples(
-    mut samples: Vec<i16>,
+    samples: Vec<i16>,
     input_sample_rate_hz: u32,
     media: TelnyxMediaConfig,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
-    if input_sample_rate_hz == 0 {
-        bail!("TTS input sample rate must be non-zero");
-    }
-    if media.sample_rate_hz != input_sample_rate_hz {
-        samples = resample_i16_mono(
-            &WindowedSincResampler::default(),
-            &samples,
-            input_sample_rate_hz,
-            media.sample_rate_hz,
-        )?;
-    }
-    let samples_per_packet = samples_per_20ms(media.sample_rate_hz)?;
-    let mut packets = Vec::new();
-    for packet_samples in samples.chunks(samples_per_packet) {
-        if packet_samples.is_empty() {
-            continue;
-        }
-        let mut packet_samples = packet_samples.to_vec();
-        if packet_samples.len() < samples_per_packet {
-            packet_samples.resize(samples_per_packet, 0);
-        }
-        let payload = match media.codec {
-            TelnyxStreamCodec::Pcmu => g711::encode_pcmu(&packet_samples),
-            TelnyxStreamCodec::L16 => l16::encode_l16_le(&packet_samples),
-        };
-        packets.push(payload);
-    }
+    let mut packetizer = TtsFramePacketizer::new(media)?;
+    let mut packets = packetizer.push_samples(samples, input_sample_rate_hz)?;
+    packets.extend(packetizer.finish()?);
     Ok(packets)
 }
 

@@ -378,8 +378,27 @@ impl TextCallQualityConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TtsGenerationMode {
+    #[default]
+    Buffered,
+    Streaming,
+}
+
+impl TtsGenerationMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Buffered => "buffered",
+            Self::Streaming => "streaming",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TtsQualityConfig {
+    #[serde(default)]
+    pub generation_mode: TtsGenerationMode,
     pub chunking_enabled: bool,
     pub max_text_chunk_chars: usize,
     pub first_chunk_max_chars: usize,
@@ -389,6 +408,7 @@ pub struct TtsQualityConfig {
 impl Default for TtsQualityConfig {
     fn default() -> Self {
         Self {
+            generation_mode: TtsGenerationMode::Buffered,
             chunking_enabled: true,
             max_text_chunk_chars: 90,
             first_chunk_max_chars: 40,
@@ -1050,6 +1070,9 @@ impl VoiceQualityConfig {
             }
         }
         if let Some(tts) = patch.tts {
+            if let Some(value) = tts.generation_mode {
+                self.set_tts_generation_mode(value);
+            }
             if let Some(value) = tts.chunking_enabled {
                 self.set_tts_chunking_enabled(value);
             }
@@ -1439,6 +1462,16 @@ impl VoiceQualityConfig {
         self.outcome(
             "tts.chunking_enabled",
             value,
+            ApplyBoundary::NewPlaybackRequest,
+            false,
+        )
+    }
+
+    pub fn set_tts_generation_mode(&mut self, value: TtsGenerationMode) -> QualityMutationOutcome {
+        self.tts.generation_mode = value;
+        self.outcome(
+            "tts.generation_mode",
+            value.label(),
             ApplyBoundary::NewPlaybackRequest,
             false,
         )
@@ -1956,6 +1989,7 @@ pub struct TextCallQualityConfigPatch {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TtsQualityConfigPatch {
+    pub generation_mode: Option<TtsGenerationMode>,
     pub chunking_enabled: Option<bool>,
     pub max_text_chunk_chars: Option<usize>,
     pub first_chunk_max_chars: Option<usize>,

@@ -652,7 +652,8 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             quality.echo_suppression.long_longest_token_run
         )),
         Line::from(format!(
-            "tts: chunking={} max_chars={} first={} prebuf={} backend={} warm={} conversation_backend={}",
+            "tts: mode={} chunking={} max_chars={} first={} prebuf={} backend={} warm={} conversation_backend={}",
+            quality.tts.generation_mode.label(),
             quality.tts.chunking_enabled,
             quality.tts.max_text_chunk_chars,
             quality.tts.first_chunk_max_chars,
