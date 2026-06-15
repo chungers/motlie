@@ -5439,6 +5439,7 @@ dependencies = [
  "ndarray",
  "ort",
  "serde_json",
+ "sherpa-onnx",
  "tokenizers 0.21.4",
  "tokio",
  "tracing",

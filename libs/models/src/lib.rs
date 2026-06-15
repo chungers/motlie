@@ -2466,6 +2466,7 @@ mod tests {
         feature = "model-moonshine-streaming",
         feature = "model-sherpa-onnx-streaming",
         feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-kokoro-82m",
         feature = "model-qwen3-tts-cpp",
     ))]
     #[test]
@@ -2515,7 +2516,7 @@ mod tests {
             let descriptor = crate::tts::kokoro_82m::descriptor();
             assert_eq!(
                 descriptor.capabilities.descriptors(),
-                &[CapabilityDescriptor::speech_buffered()]
+                &[CapabilityDescriptor::speech_buffered_and_streaming()]
             );
         }
 

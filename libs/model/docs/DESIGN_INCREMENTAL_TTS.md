@@ -6,7 +6,7 @@
 | 2026-06-14 PDT | @codex-m6-ds-rv | Revised capability shape after David review: keep `CapabilityKind::Speech`, replace one-of `speech_generation` with a set of `SpeechGeneration` values, and avoid adding `CapabilityKind::IncrementalSpeech`. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Addressed streaming-architect review: success gates now require an independent synthesis-complete proof, cancellation is out-of-band and non-consuming, packetization is stateful, and backpressure is normative. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Fixed cancellation layering: model controls now carry only app-neutral cancellation plus an opaque diagnostic label; caller-specific stale-response suppression belongs above `libs/model`. |
-| 2026-06-15 PDT | @codex-m6-ds-rv | Added the first implementation slice: repo-local incremental TTS traits, multi-valued speech-generation metadata, and a Sherpa ONNX Kokoro callback-backed production candidate while keeping the existing ORT Kokoro bundle buffered-only. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Corrected the implementation abstraction: `kokoro/kokoro_82m` is the single curated Kokoro model and advertises both buffered and streaming speech generation; the callback runtime is internal to `motlie-model-kokoro`. |
 
 # Design: Incremental TTS Contract
 
@@ -23,7 +23,7 @@ Related work:
 
 ## Problem
 
-The current `SpeechSynthesizer -> SpeechStream` contract does not prove low-latency audio generation. A backend can synthesize full PCM first and then return a stream that only slices that buffer. That is exactly what current Piper and Kokoro do in Motlie.
+The current `SpeechSynthesizer -> SpeechStream` contract does not prove low-latency audio generation. A backend can synthesize full PCM first and then return a stream that only slices that buffer. That is exactly what current Piper and the Kokoro buffered compatibility path do in Motlie.
 
 For Telnyx, that distinction is critical. The gateway can remove its own prebuffer wait, but `tts.request_to_first_audio` is still bounded by the time the backend takes to return the first complete synthesized text chunk. To reduce first-audio latency further, the backend must yield playable PCM while synthesis is still in progress.
 
@@ -37,7 +37,7 @@ For Telnyx, that distinction is critical. The gateway can remove its own prebuff
 - a blocked-media-queue test proves the backend does not generate more audio than the configured buffering budget while the gateway is not accepting frames;
 - a buffered full-audio result wrapped in a chunk iterator, sentence callback, or gateway-side slicer does not satisfy this gate.
 
-The first production backend may be new. Existing Piper/Kokoro must remain advertised as buffered until they meet this gate. PR #531 adds a Sherpa ONNX Kokoro callback-backed adapter as the first real production candidate; the existing `motlie-model-kokoro` ORT bundle remains buffered-only because it still returns one completed ONNX output tensor.
+PR #531 makes `kokoro/kokoro_82m` the first production model surface that advertises both `SpeechGeneration::Buffered` and `SpeechGeneration::Streaming`. The buffered path remains the existing full-output synthesis path; the streaming path is a callback-backed runtime inside `motlie-model-kokoro` and must still prove the success gate on real artifacts before gateway streaming mode is enabled by default.
 
 ## Current State
 
@@ -72,15 +72,15 @@ pub trait SpeechSynthesizer: Send + Sync {
 - full PCM sliced into transport chunks;
 - model-generated PCM yielded incrementally during inference.
 
-Piper and Kokoro currently call `Session::run(...)`, extract the complete output tensor, convert to PCM, then wrap the completed buffer in `BufferedSpeechChunkStream`.
+Piper and the Kokoro buffered path call `Session::run(...)`, extract the complete output tensor, convert to PCM, then wrap the completed buffer in `BufferedSpeechChunkStream`.
 
 ## Backend Finding
 
-Current Motlie Piper/Kokoro backends are direct ONNX/runtime wrappers, not wrappers around a lower-level incremental audio generator.
+Current Motlie Piper remains a full-output wrapper. Kokoro now has two generation paths behind the same curated model surface: a full-output buffered path and an incremental callback path.
 
 - Piper: current Motlie code runs the ONNX session, extracts a full output tensor, appends all samples into `Vec<i16>`, and only then returns audio. Upstream Piper has a callback-oriented `textToAudio` surface, but the callback is after sentence/phrase synthesis and buffer append; it is useful for sentence-level flushing, not proof of intra-inference audio streaming.
-- Kokoro ORT: current Motlie code phonemizes/tokenizes the full request, runs one ONNX session, extracts a full output tensor, converts all samples, and only then returns audio. No local native callback or pull-stream contract exists in that backend, so it remains buffered-only.
-- Sherpa ONNX Kokoro: PR #531 adds `SherpaOnnxKokoroTtsHandle`, which uses upstream `OfflineTts::generate_with_config` progress callbacks. The callback sends only newly generated sample deltas through a bounded channel, so `next_audio_chunk()` is the backpressure boundary and the worker blocks when the caller stops pulling chunks.
+- Kokoro buffered: the existing path phonemizes/tokenizes the full request, runs one ONNX session, extracts a full output tensor, converts all samples, and returns complete PCM. This remains `SpeechGeneration::Buffered`.
+- Kokoro streaming: the same curated `kokoro/kokoro_82m` model also implements `IncrementalSpeechSynthesizer` through an internal callback runtime. The callback sends only newly generated sample deltas through a bounded channel, so `next_audio_chunk()` is the backpressure boundary and the worker blocks when the caller stops pulling chunks.
 
 Therefore #524 should not start by adding another wrapper around current `SpeechStream`. It needs a contract that can reject these buffered implementations until a backend can prove the success gate.
 
@@ -314,7 +314,7 @@ Preferred. It keeps `CapabilityKind::Speech`, removes the one-of limitation, and
 2. Add helpers such as `supports_speech_generation(...)` and descriptor constructors for buffered-only, streaming-only, and buffered-plus-streaming speech.
 3. Add `IncrementalSpeechSynthesizer` and `IncrementalSpeechStream` traits for the `SpeechGeneration::Streaming` case.
 4. Add model-layer unit tests proving the contract helpers, bounded callback channel, delta-only callback forwarding, and cancellation token behavior.
-5. Add the first real production candidate: Sherpa ONNX Kokoro via upstream progress callbacks. The existing ORT Kokoro and Piper bundles stay buffered until they expose equivalent incremental output.
+5. Add the first real production model path: `kokoro/kokoro_82m` advertises both buffered and streaming speech generation, with streaming implemented by a callback runtime inside `motlie-model-kokoro`. Piper stays buffered until it exposes equivalent incremental output.
 6. Add gateway incremental path behind capability/config checks.
 7. Add gateway-level fake/backend tests proving first outbound media queues before an independent synthesis-complete signal and that media backpressure caps generation.
 8. Update docs and reports after live test data confirms lower TTFA without increased underruns/choppiness.
@@ -323,4 +323,4 @@ Preferred. It keeps `CapabilityKind::Speech`, removes the one-of limitation, and
 
 - Should `IncrementalSpeechChunk` support `f32` samples, or should the first contract standardize on `i16` because the gateway packetizer already consumes that efficiently?
 - Should a backend be allowed to yield sentence-level chunks if each sentence requires full inference? It can be useful, but it should not satisfy the `IncrementalSpeech` success gate unless the first sentence chunk arrives before full utterance synthesis completes and is advertised honestly as sentence-incremental.
-- Does the Sherpa ONNX Kokoro callback cadence produce playable deltas early enough on real artifacts to close #524, or does it only produce sentence/terminal callbacks on some platforms? The adapter is wired to fail closed for startup/config errors, but live artifact validation must settle the actual latency win.
+- Does the Kokoro callback cadence produce playable deltas early enough on real artifacts to close #524, or does it only produce sentence/terminal callbacks on some platforms? The streaming path fails closed for startup/config errors, but live artifact validation must settle the actual latency win.
