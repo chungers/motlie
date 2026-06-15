@@ -193,6 +193,11 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                         );
                     }
                     Ok(GatewayTextFrame::SessionStart { .. })
+                    | Ok(GatewayTextFrame::CallerTurnProvisional { .. })
+                    | Ok(GatewayTextFrame::CallerTurnProvisionalUpdate { .. })
+                    | Ok(GatewayTextFrame::CallerTurnProvisionalCancel { .. })
+                    | Ok(GatewayTextFrame::CallerTurnProvisionalCommit { .. })
+                    | Ok(GatewayTextFrame::ProvisionalPlaybackStarted { .. })
                     | Ok(GatewayTextFrame::PlaybackStarted { .. })
                     | Ok(GatewayTextFrame::PlaybackFinished { .. })
                     | Ok(GatewayTextFrame::Error { .. }) => {}

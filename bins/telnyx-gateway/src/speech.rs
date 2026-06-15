@@ -41,6 +41,7 @@ pub struct SpeechQueueRequest {
     pub latest_turn_finalized_at: Option<Instant>,
     pub turn_id: Option<String>,
     pub coalesced_turn_ids: Vec<String>,
+    pub prebuffer_chunks_override: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,11 @@ impl AppendSpeechHandle {
     pub async fn cancel(&self) {
         self.cancel.cancel();
         let _ = self.tx.send(AppendSpeechCommand::Cancel).await;
+    }
+
+    pub fn cancel_now(&self) {
+        self.cancel.cancel();
+        let _ = self.tx.try_send(AppendSpeechCommand::Cancel);
     }
 }
 
@@ -109,6 +115,7 @@ pub async fn queue_speech(
             latest_turn_finalized_at: None,
             turn_id: None,
             coalesced_turn_ids: Vec::new(),
+            prebuffer_chunks_override: None,
         },
     )
     .await
@@ -130,6 +137,7 @@ pub async fn queue_speech_with_request(
         latest_turn_finalized_at,
         turn_id,
         coalesced_turn_ids,
+        prebuffer_chunks_override,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
@@ -159,7 +167,7 @@ pub async fn queue_speech_with_request(
             guard.quality.config.tts.chunking_enabled,
             guard.quality.config.tts.max_text_chunk_chars,
             guard.quality.config.tts.first_chunk_max_chars,
-            guard.quality.config.tts.prebuffer_chunks,
+            prebuffer_chunks_override.unwrap_or(guard.quality.config.tts.prebuffer_chunks),
         )
     };
     let (media_handle, replaced_playback_id) = match conflict_policy {
@@ -264,6 +272,7 @@ pub async fn queue_append_speech_with_request(
         latest_turn_finalized_at,
         turn_id,
         coalesced_turn_ids,
+        prebuffer_chunks_override,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
@@ -293,7 +302,7 @@ pub async fn queue_append_speech_with_request(
             guard.quality.config.tts.chunking_enabled,
             guard.quality.config.tts.max_text_chunk_chars,
             guard.quality.config.tts.first_chunk_max_chars,
-            guard.quality.config.tts.prebuffer_chunks,
+            prebuffer_chunks_override.unwrap_or(guard.quality.config.tts.prebuffer_chunks),
         )
     };
     let (media_handle, replaced_playback_id) = match conflict_policy {
@@ -1893,6 +1902,7 @@ mod tests {
                 latest_turn_finalized_at: None,
                 turn_id: None,
                 coalesced_turn_ids: Vec::new(),
+                prebuffer_chunks_override: None,
             },
         )
         .await
@@ -2000,6 +2010,7 @@ mod tests {
                 latest_turn_finalized_at: None,
                 turn_id: None,
                 coalesced_turn_ids: Vec::new(),
+                prebuffer_chunks_override: None,
             },
         )
         .await

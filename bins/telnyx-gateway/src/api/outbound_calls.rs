@@ -137,11 +137,12 @@ pub async fn post_outbound_call(
     )
     .await;
 
-    let (call_url, emit_partials) = match decision {
+    let (call_url, emit_partials, emit_early_turns) = match decision {
         CallbackDecision::Accept {
             call_url,
             emit_partials,
-        } => (call_url, emit_partials),
+            emit_early_turns,
+        } => (call_url, emit_partials, emit_early_turns),
         CallbackDecision::Decline => {
             let _ = hangup_outbound(&services, &gateway_call_id).await;
             return Err(ApiError::conflict(
@@ -162,6 +163,7 @@ pub async fn post_outbound_call(
             call_url,
             direction: TextCallDirection::Outbound,
             emit_partials,
+            emit_early_turns,
         },
     )
     .await
