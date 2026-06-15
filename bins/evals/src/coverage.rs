@@ -18,7 +18,9 @@
 //! speech-mode-independent).
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
+use anyhow::{bail, Context, Result};
 use motlie_model::{
     AccelSupport, BackendKind, CapabilityKind, QuantizationScheme, Reason, SpeechGeneration,
 };
@@ -78,6 +80,13 @@ pub struct CellEvidence {
     /// `resolved_accelerator` reached the target). Per David's refinement,
     /// `BuildGap` keys on THIS, not on cargo-feature strings.
     pub native_path_present: bool,
+    /// The backend reported the requested accelerator as its **verified active
+    /// execution mode** (`accelerator.backend_mode == requested`). Stronger than
+    /// `resolved_accelerator == requested` (which only records the *selected*
+    /// device — an unverified offload probe sets `backend_offload_unverified`,
+    /// not the target). Used to surface declaration↔runtime contradictions on
+    /// `Unsupported` cells without false-positiving honest probe-then-block rows.
+    pub backend_confirmed_target: bool,
 }
 
 /// A reconciliation disagreement between the declaration and the runtime — these
@@ -87,6 +96,11 @@ pub enum Finding {
     /// A record passed on a cell the declaration says is `Unsupported` — the
     /// declaration is wrong or the accelerator was misreported.
     PassedOnUnsupported { reason: Reason },
+    /// A record on an `Unsupported` cell reports the (declared-impossible) target
+    /// as its verified active backend mode — even when blocked. The declaration
+    /// says there is no path, yet the backend claims it ran on it; surfaced so a
+    /// stale declaration or a mislabeled run cannot hide.
+    BackendConfirmedUnsupportedTarget { reason: Reason },
 }
 
 /// Declared accelerator support for a bundle on a profile: the backend's
@@ -121,11 +135,18 @@ pub fn classify(support: AccelSupport, evidence: &[CellEvidence]) -> CoverageSta
 /// when they contradict. A `passed_on_target` record on an `Unsupported` cell is
 /// the contradiction the framework must surface.
 pub fn reconcile(support: AccelSupport, evidence: CellEvidence) -> Option<Finding> {
-    match support {
-        AccelSupport::Unsupported(reason) if evidence.passed_on_target => {
-            Some(Finding::PassedOnUnsupported { reason })
-        }
-        _ => None,
+    let AccelSupport::Unsupported(reason) = support else {
+        return None;
+    };
+    if evidence.passed_on_target {
+        // Succeeded on a declared-impossible accelerator.
+        Some(Finding::PassedOnUnsupported { reason })
+    } else if evidence.backend_confirmed_target {
+        // Even blocked: the backend claims the impossible target as its verified
+        // active mode — a declaration↔runtime contradiction to surface.
+        Some(Finding::BackendConfirmedUnsupportedTarget { reason })
+    } else {
+        None
     }
 }
 
@@ -247,6 +268,7 @@ pub fn evidence_from_record(record: &ResultRecord) -> CellEvidence {
             TerminalOutcome::Blocked | TerminalOutcome::Failed | TerminalOutcome::Skipped
         ),
         native_path_present: on_target || backend_reached_target,
+        backend_confirmed_target: backend_reached_target,
     }
 }
 
@@ -410,6 +432,100 @@ pub fn build_index(report: &ReconcileReport) -> Vec<CoverageIndexEntry> {
     entries
 }
 
+/// Recursively load every `results.jsonl` under `root`, **fail-closed**: any
+/// non-empty line that does not parse as a `ResultRecord` is an error (corruption
+/// must not be silently skipped — @onto-rv). Records are returned in a stable
+/// file-sorted, line order so downstream generation is deterministic.
+pub fn load_records_strict(root: &Path) -> Result<Vec<ResultRecord>> {
+    let mut files = Vec::new();
+    collect_results_jsonl(root, &mut files);
+    files.sort();
+    let mut records = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("failed to read `{}`", file.display()))?;
+        for (number, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record = serde_json::from_str::<ResultRecord>(line).with_context(|| {
+                format!(
+                    "malformed result record at `{}` line {}",
+                    file.display(),
+                    number + 1
+                )
+            })?;
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+fn collect_results_jsonl(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_results_jsonl(&path, out);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("results.jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+/// Deterministic, byte-stable JSON of the coverage index (§F): the generated
+/// enum-keyed view over the immutable raw run-dirs. Pretty-printed with a
+/// trailing newline so the committed `INDEX.json` round-trips exactly.
+pub fn generate_index_json(records: &[ResultRecord]) -> Result<String> {
+    let report = reconcile_records(records);
+    if !report.parse_errors.is_empty() {
+        bail!(
+            "{} record(s) failed to parse into the enum tuple",
+            report.parse_errors.len()
+        );
+    }
+    let index = build_index(&report);
+    let mut json = serde_json::to_string_pretty(&index)?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// `evals coverage-index --results <dir> --output <index.json>` — regenerate the
+/// derived enum-keyed view from the immutable raw run-dirs. The committed
+/// `evals/results/coverage/INDEX.json` is this output; a CI regen check asserts
+/// it is byte-identical (the raw dirs stay the source of truth, Q4).
+pub fn run_coverage_index(args: &[String]) -> Result<()> {
+    let mut results = PathBuf::from("evals/results");
+    let mut output = PathBuf::from("evals/results/coverage/INDEX.json");
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--results" => {
+                index += 1;
+                results = PathBuf::from(args.get(index).context("--results needs a value")?);
+            }
+            "--output" => {
+                index += 1;
+                output = PathBuf::from(args.get(index).context("--output needs a value")?);
+            }
+            other => bail!("unknown coverage-index option `{other}`"),
+        }
+        index += 1;
+    }
+    let records = load_records_strict(&results)?;
+    let json = generate_index_json(&records)?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create `{}`", parent.display()))?;
+    }
+    std::fs::write(&output, json)
+        .with_context(|| format!("failed to write `{}`", output.display()))?;
+    println!("coverage-index: {}", output.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,37 +607,68 @@ mod tests {
         assert_eq!(classify(targetable(), &[ev]), CoverageState::Gap(None));
     }
 
-    fn collect_results_jsonl(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_results_jsonl(&path, out);
-            } else if path.file_name().and_then(|n| n.to_str()) == Some("results.jsonl") {
-                out.push(path);
-            }
-        }
+    fn results_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/results")
     }
 
     fn committed_records() -> Vec<ResultRecord> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/results");
-        let mut files = Vec::new();
-        collect_results_jsonl(&root, &mut files);
-        files.sort();
-        let mut records = Vec::new();
-        for file in files {
-            let Ok(text) = std::fs::read_to_string(&file) else {
-                continue;
-            };
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                if let Ok(record) = serde_json::from_str::<ResultRecord>(line) {
-                    records.push(record);
-                }
-            }
-        }
-        records
+        // Strict, fail-closed load: a malformed committed row panics the test
+        // rather than being silently skipped (@onto-rv item 2b).
+        load_records_strict(&results_root()).expect("committed records must all parse")
+    }
+
+    #[test]
+    fn strict_loader_fails_closed_on_corrupt_row() {
+        // A corrupted JSONL row must be an error, not a silent skip.
+        let dir = std::env::temp_dir().join(format!("motlie-cov-{}", std::process::id()));
+        let sub = dir.join("run");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("results.jsonl"), "{ this is not json }\n").unwrap();
+        let result = load_records_strict(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.is_err(), "corrupt row must fail closed");
+    }
+
+    #[test]
+    fn coverage_index_matches_committed_artifact() {
+        // Fail-closed regen check (@onto-rv item 2a/4): the committed
+        // evals/results/coverage/INDEX.json must be byte-identical to a fresh
+        // regeneration from the immutable raw run-dirs. Dropping/altering any
+        // record changes the regen and fails here.
+        let committed = std::fs::read_to_string(results_root().join("coverage/INDEX.json"))
+            .expect("committed INDEX.json must exist");
+        let regenerated = generate_index_json(&committed_records()).expect("regen");
+        assert_eq!(
+            committed, regenerated,
+            "coverage/INDEX.json is stale — regenerate with `evals coverage-index`",
+        );
+    }
+
+    #[test]
+    fn reconcile_flags_backend_confirmed_unsupported_target() {
+        // item 3: a record on an Unsupported cell that reports the impossible
+        // target as its verified backend mode is a contradiction — even blocked.
+        let support = AccelSupport::Unsupported(Reason::NoExecutionProviderForAccelerator);
+        let confirmed = CellEvidence {
+            blocked: true,
+            backend_confirmed_target: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            reconcile(support, confirmed),
+            Some(Finding::BackendConfirmedUnsupportedTarget {
+                reason: Reason::NoExecutionProviderForAccelerator
+            }),
+        );
+        // An honest probe-then-block (selected device but unverified offload) is
+        // NOT a contradiction.
+        let probe = CellEvidence {
+            blocked: true,
+            native_path_present: true,
+            backend_confirmed_target: false,
+            ..Default::default()
+        };
+        assert_eq!(reconcile(support, probe), None);
     }
 
     #[test]

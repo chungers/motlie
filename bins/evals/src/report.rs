@@ -1561,7 +1561,7 @@ mod tests {
         let mut out = String::new();
         render_accounting_matrix(&mut out, &[validated, blocked_metal]);
 
-        assert!(out.contains("Coverage Accounting Matrix") == false); // body only, header is caller's
+        assert!(!out.contains("Coverage Accounting Matrix")); // body only, header is caller's
         assert!(out.contains("| `qwen3_4b_gguf` | `gguf_q4_k_m` | `chat` | ✅"));
         assert!(out.contains("⛔ upstream_no_gpu_forwarding"));
     }
