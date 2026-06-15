@@ -1,5 +1,6 @@
 pub mod accelerator;
 pub mod cli;
+pub mod coverage;
 pub mod driver;
 pub mod metrics;
 pub mod platform;
