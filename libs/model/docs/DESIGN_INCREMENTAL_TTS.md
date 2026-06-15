@@ -4,6 +4,7 @@
 |---|---|---|
 | 2026-06-14 PDT | @codex-m6-ds-rv | Initial #524 design for a true incremental-audio TTS contract, capability shape, gateway integration path, and success gates after Telnyx live-call TTFA profiling. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Revised capability shape after David review: keep `CapabilityKind::Speech`, replace one-of `speech_generation` with a set of `SpeechGeneration` values, and avoid adding `CapabilityKind::IncrementalSpeech`. |
+| 2026-06-14 PDT | @codex-m6-ds-rv | Addressed streaming-architect review: success gates now require an independent synthesis-complete proof, cancellation is out-of-band and non-consuming, packetization is stateful, and backpressure is normative. |
 
 # Design: Incremental TTS Contract
 
@@ -29,7 +30,9 @@ For Telnyx, that distinction is critical. The gateway can remove its own prebuff
 #524 is not complete unless at least one backend path proves true incremental audio:
 
 - the gateway receives a first playable PCM chunk before full utterance synthesis completes;
-- a test proves first outbound media can be queued before the model stream reaches its terminal chunk;
+- a test proves first outbound media can be queued before an independent synthesis-complete signal, not merely before the stream reaches its terminal chunk;
+- the fake/backend harness exposes synthesis-complete as a signal separate from `None`, `is_final`, or stream drop, so a buffered backend cannot pass by synthesizing full PCM first and dripping chunks later;
+- a blocked-media-queue test proves the backend does not generate more audio than the configured buffering budget while the gateway is not accepting frames;
 - a buffered full-audio result wrapped in a chunk iterator, sentence callback, or gateway-side slicer does not satisfy this gate.
 
 The first production backend may be new. Existing Piper/Kokoro must remain advertised as buffered until they meet this gate.
@@ -156,13 +159,18 @@ pub trait IncrementalSpeechStream: Send {
         &mut self,
     ) -> impl Future<Output = Result<Option<IncrementalSpeechChunk>, ModelError>> + Send;
 
-    fn cancel(self) -> impl Future<Output = Result<(), ModelError>> + Send;
     fn finish(self) -> impl Future<Output = Result<IncrementalSpeechSummary, ModelError>> + Send;
 }
 
 pub struct IncrementalSpeechControls {
     pub cancel: CancellationToken,
-    pub max_buffered_audio_ms: Option<u32>,
+    pub cancel_key: IncrementalSpeechCancelKey,
+    pub max_buffered_audio_ms: u32,
+}
+
+pub struct IncrementalSpeechCancelKey {
+    pub provisional_turn_id: ProvisionalTurnId,
+    pub generation: u64,
 }
 
 pub struct IncrementalSpeechChunk {
@@ -183,7 +191,11 @@ pub struct IncrementalSpeechSummary {
 Notes:
 
 - Runtime sample rate is deliberate. The gateway already resamples/packetizes from backend-native rates, and an incremental contract should not force a separate const-generic implementation per backend.
-- The stream owns cancellation and finish semantics. The gateway still has its own playback cancellation token; the adapter maps that token into `IncrementalSpeechControls`.
+- Operational cancellation is out-of-band through `IncrementalSpeechControls::cancel`, not a consuming `cancel(self)` method. The gateway must be able to cancel while `synthesize_incremental()` or `next_audio_chunk(&mut self)` is pending.
+- `cancel_key` uses the same `(provisional_turn_id, generation)` shape as the early-response pipeline in #527 so priority cancel/cancel-and-replace can suppress stale chunks from an older provisional response.
+- `synthesize_incremental()` and every pending `next_audio_chunk()` must observe cancellation and resolve within the configured cancel-to-stop latency. After cancellation, the backend must not yield additional playable audio for the canceled generation.
+- `finish(self)` is a post-stream summary/cleanup path after no `next_audio_chunk()` borrow is pending. It is not the operational cancel mechanism.
+- Chunks must be non-empty PCM. `samples_i16.len()` must be divisible by `channels`, and sample rate/channel count must remain stable for the stream unless a future explicit format-change event is designed.
 - Timing should be measured by callers at await boundaries. Backends may add metrics snapshots later, but the core chunk type should stay transport-neutral.
 
 ## Gateway Integration
@@ -213,24 +225,37 @@ agent.turn text
 
 The first outbound frame should be possible after the first chunk, not after full synthesis. Prebuffering remains explicit config. The default for an incremental backend should be no gateway-imposed extra wait beyond the first playable chunk.
 
+### Stateful Packetization
+
+The incremental gateway path must use a stateful packetizer, not the existing per-request buffered packetization shape per model chunk.
+
+Requirements:
+
+- carry resampler state across model chunks;
+- carry sub-frame PCM remainders across chunks;
+- emit explicit 20 ms Telnyx frame boundaries with monotonic media sequence state;
+- pad only at final, cancel, or configured terminal flush, never after each model chunk;
+- keep underrun metrics tied to outbound media cadence, not artificial per-chunk padding gaps;
+- reject or fail the stream if a chunk is empty, has a sample count not divisible by channel count, or changes sample rate/channel count without a separately designed format-change event.
+
 ### Backpressure
 
-The gateway media path is bounded. Incremental synthesis must not race ahead into unbounded memory. The first implementation should choose one of:
+The gateway media path is bounded. Backpressure is a contract requirement, not an implementation choice.
 
-- pull-based stream: gateway calls `next_audio_chunk()` only when it can accept more audio;
-- bounded producer channel: backend task blocks or pauses when the channel reaches `max_buffered_audio_ms`.
+The external contract is pull-based: the gateway must not request the next model chunk until packetized frames from the previous chunk have been accepted by the bounded media queue or the playback has been canceled. That makes `next_audio_chunk()` the backpressure boundary.
 
-Pull-based is preferred because it aligns naturally with packetization and backpressure.
+Backends may use an internal producer task only if it is bounded by `max_buffered_audio_ms`. Tests must prove that when the gateway media queue is blocked, the backend blocks or pauses once that budget is full and does not continue generating model audio in the background.
 
 ### Cancellation
 
-Cancellation must be tested in three windows:
+Cancellation must be tested in four windows:
 
 - before first model chunk;
 - after first chunk but before final chunk;
+- while `next_audio_chunk()` is pending;
 - while the gateway is blocked on media queue pressure.
 
-The backend must stop producing new chunks after cancellation and return a terminal summary that lets the gateway emit accurate playback status.
+The backend must stop producing new chunks after cancellation and return a terminal summary that lets the gateway emit accurate playback status. Cancel-and-replace uses the `(provisional_turn_id, generation)` key: a newer generation for the same provisional turn cancels older generation output, and stale chunks from older generations must be dropped even if a backend races to return them.
 
 ## Profiling
 
@@ -258,10 +283,13 @@ Reports must distinguish:
 Minimum contract tests:
 
 - fake incremental backend yields first chunk, waits, then yields final chunk;
-- gateway queues first outbound media frame before final model chunk is yielded;
+- fake/backend harness emits an independent synthesis-complete signal and the gateway queues first outbound media before that signal;
+- gateway queues first outbound media frame before final model chunk is yielded, but this terminal-chunk check is only secondary evidence;
 - backend advertising only `SpeechGeneration::Buffered` is never routed through incremental path;
 - backend advertising `SpeechGeneration::Streaming` but returning no chunk before terminal synthesis fails the success-gate test;
-- cancellation before/during/after first chunk stops synthesis and emits correct playback terminal status;
+- cancellation before/during/after first chunk, including while `next_audio_chunk()` is pending, stops synthesis and emits correct playback terminal status;
+- blocked media queue prevents generation beyond `max_buffered_audio_ms`;
+- stateful packetizer carries resampler state and sub-frame remainders across chunks and pads only at final/cancel;
 - profiling emits `incremental_tts=true` and model chunk indexes for incremental path only.
 
 ## Alternatives Considered
