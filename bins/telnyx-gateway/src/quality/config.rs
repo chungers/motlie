@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::early_response::EarlyResponsePolicy;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QualityProfile {
@@ -542,6 +544,8 @@ pub struct VoiceQualityConfig {
     pub asr: AsrQualityConfig,
     pub text_call: TextCallQualityConfig,
     pub tts: TtsQualityConfig,
+    #[serde(default)]
+    pub early_response: EarlyResponsePolicy,
     pub barge_in: BargeInQualityConfig,
     #[serde(default)]
     pub echo_suppression: EchoSuppressionQualityConfig,
@@ -574,6 +578,7 @@ impl VoiceQualityConfig {
             asr: AsrQualityConfig::default(),
             text_call: TextCallQualityConfig::default(),
             tts: TtsQualityConfig::default(),
+            early_response: EarlyResponsePolicy::default(),
             barge_in: BargeInQualityConfig::default(),
             echo_suppression: EchoSuppressionQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
@@ -782,6 +787,42 @@ impl VoiceQualityConfig {
             )?;
         }
         ensure_usize("tts.prebuffer_chunks", self.tts.prebuffer_chunks, 1, 64)?;
+        ensure_usize(
+            "early_response.min_text_chars",
+            self.early_response.min_text_chars,
+            1,
+            500,
+        )?;
+        ensure_usize(
+            "early_response.min_text_tokens",
+            self.early_response.min_text_tokens,
+            1,
+            100,
+        )?;
+        if let Some(value) = self.early_response.min_confidence {
+            ensure_f32("early_response.min_confidence", value, 0.0, 1.0)?;
+        }
+        if let Some(value) = self.early_response.min_stability {
+            ensure_f32("early_response.min_stability", value, 0.0, 1.0)?;
+        }
+        ensure_u64(
+            "early_response.debounce_ms",
+            self.early_response.debounce_ms,
+            0,
+            5_000,
+        )?;
+        ensure_usize(
+            "early_response.max_updates_per_utterance",
+            self.early_response.max_updates_per_utterance,
+            0,
+            128,
+        )?;
+        ensure_usize(
+            "early_response.provisional_max_prebuffer_frames",
+            self.early_response.provisional_max_prebuffer_frames,
+            1,
+            1,
+        )?;
         ensure_u64(
             "barge_in.clear_timeout_ms",
             self.barge_in.clear_timeout_ms,
@@ -1021,6 +1062,9 @@ impl VoiceQualityConfig {
             if let Some(value) = tts.prebuffer_chunks {
                 self.set_tts_prebuffer_chunks(value);
             }
+        }
+        if let Some(early_response) = patch.early_response {
+            self.early_response = early_response;
         }
         if let Some(barge_in) = patch.barge_in {
             if let Some(value) = barge_in.enabled {
@@ -1853,6 +1897,8 @@ pub struct QualityConfigPatch {
     #[serde(default)]
     pub tts: Option<TtsQualityConfigPatch>,
     #[serde(default)]
+    pub early_response: Option<EarlyResponsePolicy>,
+    #[serde(default)]
     pub barge_in: Option<BargeInQualityConfigPatch>,
     #[serde(default)]
     pub echo_suppression: Option<EchoSuppressionQualityConfigPatch>,
@@ -2119,6 +2165,20 @@ mod tests {
         assert!(error
             .to_string()
             .contains("endpoint.final_settle_tail_words"));
+    }
+
+    #[test]
+    fn early_response_provisional_prebuffer_rejects_values_above_hard_cap() {
+        let mut config = VoiceQualityConfig::default();
+        config.early_response.provisional_max_prebuffer_frames = 2;
+
+        let error = config
+            .validate_resolved()
+            .expect_err("provisional prebuffer must stay at the one-frame cap");
+
+        assert!(error
+            .to_string()
+            .contains("early_response.provisional_max_prebuffer_frames"));
     }
 
     #[test]

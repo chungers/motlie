@@ -3,6 +3,7 @@ pub mod api;
 pub mod call_control;
 pub mod cli;
 pub mod conversation;
+pub mod early_response;
 pub mod error;
 pub mod events;
 pub mod golden_ab;

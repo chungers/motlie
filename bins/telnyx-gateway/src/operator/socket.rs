@@ -12,7 +12,7 @@ use crate::operator::script::run_operator_line;
 use crate::operator::state::CallDirection;
 use crate::text_calls::turns::{
     DebugTextStreamFrame, TextCallDirection, TEXT_CALL_DEBUG_EXTENSION,
-    TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
+    TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 use crate::text_calls::websocket::{run_debug_text_stream, DebugTextCallSetup};
 
@@ -160,6 +160,7 @@ where
 struct DebugStreamAttachRequest {
     call_id: String,
     emit_partials: bool,
+    emit_early_turns: bool,
 }
 
 fn parse_debug_stream_attach(command: &str) -> Result<Option<DebugStreamAttachRequest>, String> {
@@ -187,17 +188,23 @@ fn parse_debug_stream_attach(command: &str) -> Result<Option<DebugStreamAttachRe
                 let emit_partials = extensions
                     .iter()
                     .any(|value| value == TEXT_CALL_PARTIALS_EXTENSION);
-                if let Some(unsupported) = extensions
+                let emit_early_turns = extensions
                     .iter()
-                    .find(|value| value.as_str() != TEXT_CALL_PARTIALS_EXTENSION)
-                {
+                    .any(|value| value == TEXT_CALL_EARLY_TURNS_EXTENSION);
+                if let Some(unsupported) = extensions.iter().find(|value| {
+                    !matches!(
+                        value.as_str(),
+                        TEXT_CALL_PARTIALS_EXTENSION | TEXT_CALL_EARLY_TURNS_EXTENSION
+                    )
+                }) {
                     return Err(format!(
-                        "unsupported text stream extension {unsupported}; expected {TEXT_CALL_PARTIALS_EXTENSION}"
+                        "unsupported text stream extension {unsupported}; expected {TEXT_CALL_PARTIALS_EXTENSION} or {TEXT_CALL_EARLY_TURNS_EXTENSION}"
                     ));
                 }
                 Ok(Some(DebugStreamAttachRequest {
                     call_id,
                     emit_partials,
+                    emit_early_turns,
                 }))
             }
             DebugTextStreamFrame::Detach { .. } => {
@@ -222,23 +229,27 @@ fn parse_debug_stream_attach(command: &str) -> Result<Option<DebugStreamAttachRe
         return Ok(None);
     }
     if argv.get(1).map(String::as_str) != Some("attach") {
-        return Err("usage: stream attach [--partials] <call-id>".to_string());
+        return Err("usage: stream attach [--partials] [--early-turns] <call-id>".to_string());
     }
     let mut call_id = None;
     let mut emit_partials = false;
+    let mut emit_early_turns = false;
     for arg in argv.iter().skip(2) {
         if arg == "--partials" {
             emit_partials = true;
+        } else if arg == "--early-turns" {
+            emit_early_turns = true;
         } else if call_id.replace(arg.clone()).is_some() {
-            return Err("usage: stream attach [--partials] <call-id>".to_string());
+            return Err("usage: stream attach [--partials] [--early-turns] <call-id>".to_string());
         }
     }
     let Some(call_id) = call_id else {
-        return Err("usage: stream attach [--partials] <call-id>".to_string());
+        return Err("usage: stream attach [--partials] [--early-turns] <call-id>".to_string());
     };
     Ok(Some(DebugStreamAttachRequest {
         call_id,
         emit_partials,
+        emit_early_turns,
     }))
 }
 
@@ -259,6 +270,7 @@ where
             gateway_call_id: request.call_id,
             direction,
             emit_partials: request.emit_partials,
+            emit_early_turns: request.emit_early_turns,
         },
         reader,
         writer,
