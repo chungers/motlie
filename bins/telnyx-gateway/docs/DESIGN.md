@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-15 UTC | @527-design: Revised #527 after David's PR requirement to make the early-response pipeline test-case-agnostic: ASR to pluggable transfer-function processor to TTS, with smoke/repeat only as the identity pass-through validation instance and no smoke-specific protocol assumptions. | Application Text Call Protocol and Gateway Control API, Alternatives Considered, Testing Scope for PLAN |
 | 2026-06-15 UTC | @527-design: Revised #527 after architect review to define coalesced final-boundary commit/cancel semantics, generation-scoped provisional output, out-of-band priority cancellation, provisional JIT playback limits, conservative safety gates, off-loop bounded realtime placement, and required stale-audio leakage validation. | Application Text Call Protocol and Gateway Control API, Alternatives Considered, Testing Scope for PLAN |
 | 2026-06-14 UTC | @527-design: Added #527 design for an opt-in, insertable early-response stream stage over ASR partials, explicit provisional-turn lifecycle events, cancellable TTS reconciliation, runtime policy knobs, protocol extension shape, observability, and test-scope inventory. | Application Text Call Protocol and Gateway Control API, Alternatives Considered, Testing Scope for PLAN |
 | 2026-06-12 PDT | @codex-366-impl: Resolved #488 generality review by moving final-settle fragment classifiers and conversation final-coalescing hold knobs behind `VoiceQualityConfig.endpoint` while preserving live-tuned defaults; `bins/telnyx-agent` now opts into `motlie.telnyx.text.partials.v1` so advisory partials are reachable in live calls. | Milestone 5: Conversational Realism Latency Improvements, Conversation Handler Contract, Application Text Call Protocol and Gateway Control API |
@@ -1394,7 +1395,7 @@ See `docs/INTERACTION_QUALITY.md` for the conversational-quality rationale and n
 
 #### Problem and Product Scope
 
-The current text-call path can forward advisory `caller.partial` frames before endpointing, but the response path still starts from the final `caller.turn`. That keeps simple turn-based agents correct, but it prevents low-risk early work such as the smoke handler saying `I heard: ...` from beginning when a partial is already stable enough to use.
+The current text-call path can forward advisory `caller.partial` frames before endpointing, but the response path still starts from the final `caller.turn`. That keeps simple turn-based agents correct, but it prevents a low-latency processor from transforming stable partial text into response intent before final commit.
 
 For #527, the product scope is greenfield: this is a new opt-in stream stage and protocol extension. There is no migration plan and no default behavior change. Existing ASR partial emission, `caller.partial.reply_allowed=false`, and final `caller.turn` emission stay unchanged. The new stage runs only when `motlie.telnyx.text.early_turns.v1` is negotiated and `VoiceQualityConfig.early_response.enabled` is true; early reply permission appears on provisional-turn frames, not on `caller.partial`.
 
@@ -1408,12 +1409,14 @@ This design coordinates with #525 by using the existing cancellable speech primi
 - Use explicit `(provisional_turn_id, generation)` playback keys until a final `turn_id` exists.
 - Define how many provisional utterances reconcile to one coalesced `turn_id`.
 - Make cancellation, update, and final commit semantics explicit enough for TTS and agents to avoid stale speech.
-- Keep the smoke path expressible as a trivial processor after aggregation, not as a special ASR branch.
+- Model the agent stage as a pluggable stream transfer function from early-response events to response intents.
+- Treat smoke/repeat as the identity pass-through transfer-function instance for latency-floor validation, not as a special ASR, protocol, or TTS branch.
 
 #### Non-Goals
 
 - Do not make ASR partials truth, final response input, model confidence, or calibrated probability.
 - Do not globally change handlers to respond to partials.
+- Do not bake smoke, repeat, echo, or fixed acknowledgement-phrase semantics into the protocol, processor contract, or TTS adapter.
 - Do not replace final endpointing, final coalescing, or final `caller.turn`.
 - Do not solve conversational fillers or semantic intent endpointing.
 - Do not implement #524 incremental TTS backend streaming in this issue.
@@ -1424,6 +1427,7 @@ This design coordinates with #525 by using the existing cancellable speech primi
 | Requirement | Design requirement |
 |---|---|
 | Insertable stage | `aggregate_early_resp_partials(partial_stream, policy, cancel_sink)` is a stream-transformer helper over normalized ASR-derived inputs. In live gateway use it runs behind bounded queues and a priority cancel sink. It does not own Telnyx media, model sessions, WebSocket sessions, or TTS playback. |
+| Pluggable processor | The agent stage is a signal-processing transfer function `T: Stream<EarlyResponseEvent> -> Stream<EarlyResponseIntent>`. The gateway contract does not assume repeat, echo, or smoke semantics; smoke/repeat is only the identity pass-through instance used to validate latency floor and cancellation. |
 | Existing behavior | The gateway still emits opt-in `caller.partial` exactly as today and still creates final `caller.turn` through the existing final transcript and coalescing path. |
 | Provisional identity | The first accepted partial for an utterance mints one `provisional_turn_id`; every accepted replacement increments `generation`. Downstream speech and agent output are accepted only for the active `(provisional_turn_id, generation)`. |
 | Policy gate | No `Started` event is emitted until enablement, minimum length or token count, boundary requirement, configured confidence/stability gates, speech-state allowlist, debounce, max-update, and start-timing policy all pass. A configured missing safety signal fails closed, not open. |
@@ -1459,7 +1463,7 @@ single Telnyx media socket loop
 
 bounded early-response task
   -> aggregate_early_resp_partials(partial_stream, policy, priority_cancel_sink)
-  -> early processor, for example smoke_i_heard_processor or streaming agent adapter
+  -> pluggable processor transfer function T: Stream<EarlyResponseEvent> -> Stream<EarlyResponseIntent>
   -> generation-gated provisional output adapter
   -> existing cancellable / appendable speech queue from #525
   -> provisional JIT media playback
@@ -1468,7 +1472,7 @@ priority cancel lane
   -> speech cancel token / frame-drop state / Telnyx clear request
 ```
 
-The aggregator owns only lightweight per-utterance state: last accepted text, generation, update count, last emission time, `provisional_turn_id`, and the source sequence/timestamp of accepted inputs. It never speaks. Downstream processors convert `EarlyResponseEvent` values into app frames or gateway-local smoke responses. The TTS adapter remains responsible for queuing, appending, canceling, and mapping playback terminal status.
+The aggregator owns only lightweight per-utterance state: last accepted text, generation, update count, last emission time, `provisional_turn_id`, and the source sequence/timestamp of accepted inputs. It never speaks. A downstream processor transfer function converts `EarlyResponseEvent` values into response intents; the protocol or gateway-local adapter then turns those intents into app frames or provisional speech commands. The TTS adapter remains responsible for queuing, appending, canceling, and mapping playback terminal status.
 
 Final commit is observational, not generative. The existing final transcript and coalescing path creates and emits `caller.turn` with `turn_id`; after that post-settle decision, it sends `EarlyResponseCommitBoundary` to the helper. The helper decides whether one active provisional generation survives as the primary playback for the coalesced final turn, and cancels mismatched, stale, or sibling provisional generations.
 
@@ -1486,6 +1490,91 @@ The following rules are normative for #527 and supersede any shorthand wording i
 - Missing safety signals: configured `min_confidence` or `min_stability` gates fail closed when the signal is absent. `WhileSpeaking` plus a no-confidence backend cannot silently skip the gate; it must defer to preparation-only work or a later endpoint/boundary where required signals are present.
 - `finalizing` is update-only. It may refresh an existing provisional generation, but it must not create a new `Started` event because final commit is already imminent.
 - Coalesced finals: the helper reconciles against a post-settle `CommitBoundary` that can contain many `utterance_id`s and `coalesced_turn_ids` for one final `turn_id`. At most one provisional generation becomes the primary committed playback for that final turn; compatible siblings are canceled as coalesced into the final turn, and incompatible siblings are canceled as final mismatches.
+
+#### Processor Transfer Function Contract
+
+The early-response pipeline is test-case-agnostic:
+
+```text
+ASR partial/final stream -> aggregate_early_resp_partials -> processor transfer function -> provisional TTS adapter
+```
+
+In signal-processing terms, the processor is a pluggable transfer function over the early-response stream:
+
+```text
+T: Stream<EarlyResponseEvent> -> Stream<EarlyResponseIntent>
+```
+
+`T` is the only stage that chooses response content. It may be an identity pass-through, a router, retrieval pipeline, streaming LLM, rules engine, or any other agent. It may emit no output, emit one response, stream revisions, buffer until commit, or cancel its own work. Those choices do not change the provisional-turn protocol, cancellation semantics, commit semantics, policy gates, backpressure rules, or TTS generation keying.
+
+Smoke/repeat is the degenerate validation instance of the same interface: the identity pass-through transfer function. It repeats accepted transcript chunks as response intents with gain 1 and minimal processing delay so the pipeline latency floor can be measured. It is not a special protocol mode, ASR branch, TTS branch, response prefix, or lifecycle rule.
+
+A desired API shape:
+
+```rust
+pub trait EarlyResponseProcessor<S>
+where
+    S: Stream<Item = EarlyResponseEvent>,
+{
+    type Output: Stream<Item = EarlyResponseIntent>;
+
+    fn process(&mut self, events: S) -> Self::Output;
+}
+
+pub enum EarlyResponseIntent {
+    Speak {
+        provisional_turn_id: String,
+        call_id: String,
+        utterance_id: String,
+        generation: u64,
+        text: String,
+        append_or_replace: AppendOrReplace,
+    },
+    Cancel {
+        provisional_turn_id: String,
+        call_id: String,
+        utterance_id: String,
+        generation: u64,
+        reason: EarlyResponseCancelReason,
+    },
+    Commit {
+        provisional_turn_id: String,
+        call_id: String,
+        generation: u64,
+        turn_id: String,
+    },
+}
+```
+
+The identity pass-through processor is intentionally small and boring:
+
+```rust
+fn identity_passthrough(event: EarlyResponseEvent) -> Option<EarlyResponseIntent> {
+    match event {
+        EarlyResponseEvent::Started { provisional_turn_id, call_id, utterance_id, generation, text, .. } => {
+            Some(EarlyResponseIntent::Speak {
+                provisional_turn_id,
+                call_id,
+                utterance_id,
+                generation,
+                text,
+                append_or_replace: AppendOrReplace::Replace,
+            })
+        }
+        EarlyResponseEvent::Updated { provisional_turn_id, call_id, utterance_id, generation, text, append_or_replace } => {
+            Some(EarlyResponseIntent::Speak { provisional_turn_id, call_id, utterance_id, generation, text, append_or_replace })
+        }
+        EarlyResponseEvent::Canceled { provisional_turn_id, call_id, utterance_id, generation, reason } => {
+            Some(EarlyResponseIntent::Cancel { provisional_turn_id, call_id, utterance_id, generation, reason })
+        }
+        EarlyResponseEvent::Committed { provisional_turn_id, call_id, generation, turn_id, .. } => {
+            Some(EarlyResponseIntent::Commit { provisional_turn_id, call_id, generation, turn_id })
+        }
+    }
+}
+```
+
+A routing/retrieval/LLM processor uses the same `EarlyResponseIntent` output and the same generation echo requirements. If it is slower or more conservative, it can buffer, revise, or emit no `Speak` intent until `Committed`; no gateway contract changes are required.
 
 #### Rust API Design
 
@@ -1696,17 +1785,17 @@ pub enum EarlyResponseCancelReason {
 
 `Append` is sound only for prefix-monotonic ASR. Because revising decoders can change negation, entities, or earlier tokens after audio has already played, `ReplaceOnly` is the default. `PrefixMonotonicBackend` may enable append only when the backend contract guarantees prefix stability for the accepted span and the policy uses a strict stable boundary, preferably `Sentence`. Even with `Replace`, cancellation cannot un-speak audio already emitted; it only bounds further leakage through priority cancel and JIT playback.
 
-A smoke processor should remain trivial but generation-aware:
+The generic pipeline wiring is the same for identity pass-through and slower agents:
 
 ```rust
 let early_events = aggregate_early_resp_partials(partial_stream, policy, cancel_sink);
-let smoke_responses = smoke_i_heard_processor(early_events);
+let response_intents = processor.process(early_events);
+let speech_commands = provisional_output_adapter(response_intents);
 
-// Started -> speak "I heard: <text>" for (provisional_turn_id, generation).
-// Updated(Replace) -> priority-cancel the prior generation, then speak replacement.
-// Updated(Append) -> append only when policy/backend prefix-monotonic capability allows it.
-// Canceled -> priority-cancel the exact generation and stop processor work.
-// Committed -> attach the surviving primary playback attribution to turn_id.
+// Started or Updated -> processor may emit Speak for the active generation.
+// Canceled -> adapter priority-cancels the exact generation.
+// Committed -> adapter attaches surviving primary playback attribution to turn_id.
+// A processor may also buffer, revise, or emit no Speak intent without changing the contract.
 ```
 
 #### Coalesced Final Boundary Semantics
@@ -1810,11 +1899,11 @@ Gateway-to-application provisional frames:
 {"type":"caller.turn.provisional.commit","provisional_turn_id":"pt_01HZ...","turn_id":"turn_01HZ...","utterance_id":"utt_01HZ...","coalesced_utterance_ids":["utt_01HZ..."],"sequence":45,"generation":2,"final_text":"I need a tow truck in Oakland."}
 ```
 
-Application-to-gateway early output frames must echo the generation they are answering:
+Application-to-gateway early output frames carry processor response intents and must echo the generation they are answering. These frames do not imply repeat/echo semantics:
 
 ```json
-{"type":"agent.turn.provisional.partial","provisional_turn_id":"pt_01HZ...","generation":2,"text":"I heard: I need a tow truck in Oakland","append":false}
-{"type":"agent.turn.provisional","provisional_turn_id":"pt_01HZ...","generation":2,"text":"I heard: I need a tow truck in Oakland."}
+{"type":"agent.turn.provisional.partial","provisional_turn_id":"pt_01HZ...","generation":2,"text":"I can help with towing in Oakland","append":false}
+{"type":"agent.turn.provisional","provisional_turn_id":"pt_01HZ...","generation":2,"text":"I can help with towing in Oakland."}
 ```
 
 Gateway handling for generation mismatch:
@@ -1865,20 +1954,21 @@ Implementation should add normalized records for provisional lifecycle and TTS a
 - `tts.provisional.committed`
 - `tts.provisional.stale_audio_leakage_measured`
 
-Required join keys are `gateway_call_id`, `asr_session_id` when available, `utterance_id`, `provisional_turn_id`, `generation`, `turn_id` after commit, `coalesced_turn_ids`, `coalesced_utterance_ids`, `playback_id`, `config_id`, run id, host id, and git sha. Metrics should include partial-to-provisional latency, provisional-to-first-agent-token latency, provisional-to-first-audio latency, final endpoint lead time, coalesced-boundary survival rate, cancel/supersede rate, priority-cancel-to-frame-drop latency, and stale-audio leakage after cancellation.
+Required join keys are `gateway_call_id`, `asr_session_id` when available, `processor_id`, `processor_kind`, `utterance_id`, `provisional_turn_id`, `generation`, `turn_id` after commit, `coalesced_turn_ids`, `coalesced_utterance_ids`, `playback_id`, `config_id`, run id, host id, and git sha. Metrics should include partial-to-provisional latency, processor input-to-output latency, provisional-to-first-agent-token latency, provisional-to-first-audio latency, final endpoint lead time, coalesced-boundary survival rate, cancel/supersede rate, priority-cancel-to-frame-drop latency, and stale-audio leakage after cancellation.
 
 #### Components and Subsystems To Test
 
 Detailed test cases belong in a future PLAN, but the DESIGN requires coverage of these components:
 
 - `aggregate_early_resp_partials` as a deterministic stream transformer with a fake priority cancel sink.
+- `EarlyResponseProcessor` transfer functions as pluggable stream processors that receive the same event contract regardless of identity pass-through, routing, retrieval, or LLM behavior.
 - Off-loop bounded input/output queues, drop-oldest partial coalescing, and non-blocking ASR/media producer behavior under full queues.
 - Policy validation, clamping, config snapshot, replay restore, and `quality status` rendering.
 - Conservative missing-signal gates for no-confidence/no-stability backends.
 - Protocol negotiation and serde for `motlie.telnyx.text.early_turns.v1`.
 - Generation echo and stale-generation rejection on `agent.turn.provisional*` frames.
 - Text-call session state for active provisional turns, invalid ids, commit, cancel, and teardown cleanup.
-- Gateway-local smoke processor behavior from `Started`, `Updated`, `Committed`, and `Canceled`.
+- Pluggable processor transfer-function behavior from `Started`, `Updated`, `Committed`, and `Canceled`, including identity pass-through and a buffered/revising fake agent.
 - TTS replace/cancel integration through the #525 speech queue and playback terminal status.
 - Priority cancel path into speech/media that is independent of FIFO event delivery.
 - Final coalesced `caller.turn` reconciliation with many utterances to one `turn_id`, including primary survivor selection and sibling cancellation.
@@ -4255,6 +4345,26 @@ Cons:
 
 `EarlyResponseAudioMode::PrepareOnly` is therefore a deployment knob, not a scoped-down milestone.
 
+### Alternative 9: Bake Smoke/Repeat Semantics Into the Gateway Contract
+
+Decision: reject.
+
+Pros:
+
+- Robustness: the first validation path would have fewer moving parts because the gateway could repeat accepted transcript chunks directly.
+- Correctness: identity behavior is easy to reason about for a narrow smoke test.
+- UX: repeat output gives a clear latency-floor signal during loopback validation.
+- Operability: fewer processor knobs are needed for the first local test.
+
+Cons:
+
+- Robustness: it creates a test-case-shaped protocol that real routing, retrieval, or LLM agents cannot reuse cleanly.
+- Correctness: repeat-specific text assumptions can leak into cancellation, commit, and TTS attribution rules that should be processor-neutral.
+- UX: a gateway-owned echo path would validate a different product than the intended ASR to agent to TTS pipeline.
+- Operability: logs and tests would overfit the smoke path and under-test slower transfer functions that buffer or revise.
+
+The chosen design keeps repeat as the identity pass-through transfer function on the same processor interface used by all agents.
+
 ## Testing Scope for PLAN
 
 - webhook parsing and signature verification tests
@@ -4277,7 +4387,7 @@ Issue #527 early-response PLAN should also cover:
 - conservative missing-signal tests for no-confidence/no-stability backends
 - protocol serde and negotiation for `motlie.telnyx.text.early_turns.v1`
 - text-call session tests for active provisional ids, invalid provisional ids, stale generations, commit mapping, cancel cleanup, and teardown cleanup
-- smoke processor tests proving `I heard: ...` starts from `Started`, updates safely, and cancels on mismatch
+- processor transfer-function tests proving identity pass-through emits repeat intents from `Started`, updates safely, and cancels on mismatch, plus a buffered/revising fake agent on the same interface
 - speech queue integration tests proving `Updated(Replace)`, `Canceled`, barge-in, and hangup stop stale provisional TTS through the priority cancel path
 - final `caller.turn` reconciliation tests proving existing final emission remains unchanged, including many utterances coalesced to one `turn_id`
 - concurrent-call and overlapping-utterance isolation tests
