@@ -6,12 +6,13 @@
 | 2026-06-14 PDT | @codex-m6-ds-rv | Revised capability shape after David review: keep `CapabilityKind::Speech`, replace one-of `speech_generation` with a set of `SpeechGeneration` values, and avoid adding `CapabilityKind::IncrementalSpeech`. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Addressed streaming-architect review: success gates now require an independent synthesis-complete proof, cancellation is out-of-band and non-consuming, packetization is stateful, and backpressure is normative. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Fixed cancellation layering: model controls now carry only app-neutral cancellation plus an opaque diagnostic label; caller-specific stale-response suppression belongs above `libs/model`. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Added the first implementation slice: repo-local incremental TTS traits, multi-valued speech-generation metadata, and a Sherpa ONNX Kokoro callback-backed production candidate while keeping the existing ORT Kokoro bundle buffered-only. |
 
 # Design: Incremental TTS Contract
 
 ## Status
 
-Draft for #524. This is brownfield model-contract work: existing buffered TTS backends and callers stay valid, but the model layer must expose a separate, honest contract for backends that can produce playable audio before full utterance synthesis completes.
+Implementation draft for #524. This is brownfield model-contract work: existing buffered TTS backends and callers stay valid, but the model layer now exposes a separate, honest contract for backends that can produce playable audio before full utterance synthesis completes.
 
 Related work:
 
@@ -36,7 +37,7 @@ For Telnyx, that distinction is critical. The gateway can remove its own prebuff
 - a blocked-media-queue test proves the backend does not generate more audio than the configured buffering budget while the gateway is not accepting frames;
 - a buffered full-audio result wrapped in a chunk iterator, sentence callback, or gateway-side slicer does not satisfy this gate.
 
-The first production backend may be new. Existing Piper/Kokoro must remain advertised as buffered until they meet this gate.
+The first production backend may be new. Existing Piper/Kokoro must remain advertised as buffered until they meet this gate. PR #531 adds a Sherpa ONNX Kokoro callback-backed adapter as the first real production candidate; the existing `motlie-model-kokoro` ORT bundle remains buffered-only because it still returns one completed ONNX output tensor.
 
 ## Current State
 
@@ -78,7 +79,8 @@ Piper and Kokoro currently call `Session::run(...)`, extract the complete output
 Current Motlie Piper/Kokoro backends are direct ONNX/runtime wrappers, not wrappers around a lower-level incremental audio generator.
 
 - Piper: current Motlie code runs the ONNX session, extracts a full output tensor, appends all samples into `Vec<i16>`, and only then returns audio. Upstream Piper has a callback-oriented `textToAudio` surface, but the callback is after sentence/phrase synthesis and buffer append; it is useful for sentence-level flushing, not proof of intra-inference audio streaming.
-- Kokoro: current Motlie code phonemizes/tokenizes the full request, runs one ONNX session, extracts a full output tensor, converts all samples, and only then returns audio. No local native callback or pull-stream contract exists in the backend.
+- Kokoro ORT: current Motlie code phonemizes/tokenizes the full request, runs one ONNX session, extracts a full output tensor, converts all samples, and only then returns audio. No local native callback or pull-stream contract exists in that backend, so it remains buffered-only.
+- Sherpa ONNX Kokoro: PR #531 adds `SherpaOnnxKokoroTtsHandle`, which uses upstream `OfflineTts::generate_with_config` progress callbacks. The callback sends only newly generated sample deltas through a bounded channel, so `next_audio_chunk()` is the backpressure boundary and the worker blocks when the caller stops pulling chunks.
 
 Therefore #524 should not start by adding another wrapper around current `SpeechStream`. It needs a contract that can reject these buffered implementations until a backend can prove the success gate.
 
@@ -164,7 +166,7 @@ pub trait IncrementalSpeechStream: Send {
 }
 
 pub struct IncrementalSpeechControls {
-    pub cancel: CancellationToken,
+    pub cancel: IncrementalSpeechCancelToken,
     pub request_label: Option<IncrementalSpeechRequestLabel>,
     pub max_buffered_audio_ms: u32,
 }
@@ -183,6 +185,7 @@ pub struct IncrementalSpeechSummary {
     pub chunks: u64,
     pub audio_ms: u64,
     pub canceled: bool,
+    pub synthesis_completed: bool,
 }
 ```
 
@@ -310,14 +313,14 @@ Preferred. It keeps `CapabilityKind::Speech`, removes the one-of limitation, and
 1. Change `CapabilityDescriptor::speech_generation: Option<SpeechGeneration>` to `speech_generations: BTreeSet<SpeechGeneration>`.
 2. Add helpers such as `supports_speech_generation(...)` and descriptor constructors for buffered-only, streaming-only, and buffered-plus-streaming speech.
 3. Add `IncrementalSpeechSynthesizer` and `IncrementalSpeechStream` traits for the `SpeechGeneration::Streaming` case.
-4. Add a fake/test backend proving the contract and gateway integration before touching production backends.
-5. Add gateway incremental path behind capability/config checks.
-6. Evaluate candidate production backends. Piper/Kokoro stay buffered unless their underlying runtime exposes real incremental output.
-7. Update docs and reports after live test data confirms lower TTFA without increased underruns/choppiness.
+4. Add model-layer unit tests proving the contract helpers, bounded callback channel, delta-only callback forwarding, and cancellation token behavior.
+5. Add the first real production candidate: Sherpa ONNX Kokoro via upstream progress callbacks. The existing ORT Kokoro and Piper bundles stay buffered until they expose equivalent incremental output.
+6. Add gateway incremental path behind capability/config checks.
+7. Add gateway-level fake/backend tests proving first outbound media queues before an independent synthesis-complete signal and that media backpressure caps generation.
+8. Update docs and reports after live test data confirms lower TTFA without increased underruns/choppiness.
 
 ## Open Questions
 
 - Should `IncrementalSpeechChunk` support `f32` samples, or should the first contract standardize on `i16` because the gateway packetizer already consumes that efficiently?
-- Should `IncrementalSpeechControls` use a repo-local cancellation token type instead of `tokio_util::sync::CancellationToken` to keep `libs/model` dependency-light?
 - Should a backend be allowed to yield sentence-level chunks if each sentence requires full inference? It can be useful, but it should not satisfy the `IncrementalSpeech` success gate unless the first sentence chunk arrives before full utterance synthesis completes and is advertised honestly as sentence-incremental.
-- Which production backend should be the first real implementation if Piper/Kokoro remain full-output ONNX paths?
+- Does the Sherpa ONNX Kokoro callback cadence produce playable deltas early enough on real artifacts to close #524, or does it only produce sentence/terminal callbacks on some platforms? The adapter is wired to fail closed for startup/config errors, but live artifact validation must settle the actual latency win.

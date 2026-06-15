@@ -38,11 +38,14 @@ pub use tool::{
 };
 pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpdate};
 pub use typed::{
-    stream_speech_into_asr, AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
+    AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
     BufferedSpeechSynthesizer, BufferedVoiceCloneSynthesizer, CloneReference, Compose,
-    I16MonoResampler, I16ToF32, IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
-    SpeechSynthesizer as TypedSpeechSynthesizer, Stereo, StreamingTranscriber, SynthesisRequest,
-    TranscriptionSession, VoiceCloneSynthesizer,
+    I16MonoResampler, I16ToF32, IdentityTransform, IncrementalSpeechCancelToken,
+    IncrementalSpeechChunk, IncrementalSpeechControls, IncrementalSpeechRequestLabel,
+    IncrementalSpeechStream, IncrementalSpeechSummary, IncrementalSpeechSynthesizer, Mono,
+    SpeechStream as TypedSpeechStream, SpeechSynthesizer as TypedSpeechSynthesizer, Stereo,
+    StreamingTranscriber, SynthesisRequest, TranscriptionSession, VoiceCloneSynthesizer,
+    stream_speech_into_asr,
 };
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
@@ -208,7 +211,7 @@ pub struct CapabilityDescriptor {
     pub outputs: Vec<ContentKind>,
     pub interaction: InteractionStyle,
     pub transcription_delivery: Option<TranscriptDelivery>,
-    pub speech_generation: Option<SpeechGeneration>,
+    pub speech_generations: BTreeSet<SpeechGeneration>,
 }
 
 impl CapabilityDescriptor {
@@ -226,7 +229,7 @@ impl CapabilityDescriptor {
             outputs,
             interaction,
             transcription_delivery: None,
-            speech_generation: None,
+            speech_generations: BTreeSet::new(),
         }
     }
 
@@ -349,6 +352,18 @@ impl CapabilityDescriptor {
         .with_speech_generation(SpeechGeneration::Streaming)
     }
 
+    pub fn speech_buffered_and_streaming() -> Self {
+        Self::new(
+            CapabilityKind::Speech,
+            "Speech synthesis supporting both full-output buffered audio and true incremental PCM audio.",
+            vec![ContentKind::Text],
+            vec![ContentKind::Audio],
+            InteractionStyle::Streaming,
+        )
+        .with_speech_generation(SpeechGeneration::Buffered)
+        .with_speech_generation(SpeechGeneration::Streaming)
+    }
+
     pub fn voice_clone() -> Self {
         Self::new(
             CapabilityKind::VoiceClone,
@@ -365,7 +380,7 @@ impl CapabilityDescriptor {
     }
 
     fn with_speech_generation(mut self, generation: SpeechGeneration) -> Self {
-        self.speech_generation = Some(generation);
+        self.speech_generations.insert(generation);
         self
     }
 }
@@ -415,8 +430,19 @@ impl Capabilities {
     }
 
     pub fn speech_generation_for(&self) -> Option<SpeechGeneration> {
+        self.speech_generations_for()
+            .and_then(|generations| generations.iter().next().copied())
+    }
+
+    pub fn speech_generations_for(&self) -> Option<&BTreeSet<SpeechGeneration>> {
         self.descriptor_for(CapabilityKind::Speech)
-            .and_then(|descriptor| descriptor.speech_generation)
+            .map(|descriptor| &descriptor.speech_generations)
+            .filter(|generations| !generations.is_empty())
+    }
+
+    pub fn supports_speech_generation(&self, generation: SpeechGeneration) -> bool {
+        self.speech_generations_for()
+            .is_some_and(|generations| generations.contains(&generation))
     }
 
     pub fn supports(&self, capability: CapabilityKind) -> bool {
@@ -486,6 +512,14 @@ impl Capabilities {
 
     pub fn speech_buffered_only() -> Self {
         Self::new(vec![CapabilityDescriptor::speech_buffered()])
+    }
+
+    pub fn speech_streaming_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::speech_stream()])
+    }
+
+    pub fn speech_buffered_and_streaming() -> Self {
+        Self::new(vec![CapabilityDescriptor::speech_buffered_and_streaming()])
     }
 
     pub fn speech_buffered_with_voice_clone() -> Self {
@@ -1082,9 +1116,11 @@ mod tests {
         let bundle_id = BundleId::new("test_bundle");
 
         let no_support = QuantizationSupport::none();
-        assert!(no_support
-            .resolve(Some(QuantizationBits::Four), &bundle_id)
-            .is_err());
+        assert!(
+            no_support
+                .resolve(Some(QuantizationBits::Four), &bundle_id)
+                .is_err()
+        );
         assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
 
         let q4_q8 = QuantizationSupport::with_recommended(
@@ -1110,9 +1146,11 @@ mod tests {
         );
 
         let q8_only = QuantizationSupport::without_recommended([QuantizationBits::Eight]);
-        assert!(q8_only
-            .resolve(Some(QuantizationBits::Four), &bundle_id)
-            .is_err());
+        assert!(
+            q8_only
+                .resolve(Some(QuantizationBits::Four), &bundle_id)
+                .is_err()
+        );
         assert_eq!(
             q8_only
                 .resolve(Some(QuantizationBits::Eight), &bundle_id)
@@ -1200,9 +1238,11 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::RequestResponse);
-        assert_eq!(
-            descriptor.speech_generation,
-            Some(SpeechGeneration::Buffered)
+        assert_eq!(descriptor.speech_generations.len(), 1);
+        assert!(
+            descriptor
+                .speech_generations
+                .contains(&SpeechGeneration::Buffered)
         );
     }
 
@@ -1214,9 +1254,29 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
-        assert_eq!(
-            descriptor.speech_generation,
-            Some(SpeechGeneration::Streaming)
+        assert_eq!(descriptor.speech_generations.len(), 1);
+        assert!(
+            descriptor
+                .speech_generations
+                .contains(&SpeechGeneration::Streaming)
+        );
+    }
+
+    #[test]
+    fn speech_buffered_and_streaming_descriptor_supports_both_modes() {
+        let descriptor = CapabilityDescriptor::speech_buffered_and_streaming();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Speech);
+        assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
+        assert!(
+            descriptor
+                .speech_generations
+                .contains(&SpeechGeneration::Buffered)
+        );
+        assert!(
+            descriptor
+                .speech_generations
+                .contains(&SpeechGeneration::Streaming)
         );
     }
 
@@ -1318,6 +1378,8 @@ mod tests {
             capabilities.speech_generation_for(),
             Some(SpeechGeneration::Buffered)
         );
+        assert!(capabilities.supports_speech_generation(SpeechGeneration::Buffered));
+        assert!(!capabilities.supports_speech_generation(SpeechGeneration::Streaming));
         assert_eq!(capabilities.transcription_delivery_for(), None);
         assert_eq!(
             capabilities.descriptor_for(CapabilityKind::Transcription),

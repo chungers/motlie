@@ -11,7 +11,14 @@
 use ort as _;
 
 mod common;
+mod speech;
 mod transcription;
+
+pub use speech::{
+    SherpaOnnxKokoroBufferedSpeechStream, SherpaOnnxKokoroIncrementalSpeechStream,
+    SherpaOnnxKokoroTtsAdapter, SherpaOnnxKokoroTtsArtifactSpec, SherpaOnnxKokoroTtsBundle,
+    SherpaOnnxKokoroTtsHandle, SherpaOnnxKokoroTtsSpec,
+};
 
 pub use transcription::{
     SherpaOnnxHandle, SherpaOnnxStream, SherpaOnnxStreamingAdapter, SherpaOnnxStreamingBundle,

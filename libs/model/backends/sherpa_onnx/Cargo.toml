@@ -22,7 +22,7 @@ sherpa-onnx = "1.13.2"
 motlie-model-ort = { path = "../ort" }
 ndarray = "0.17"
 ort.workspace = true
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"
 
 [dev-dependencies]

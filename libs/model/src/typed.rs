@@ -1,5 +1,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{ModelError, SpeechParams, TranscriptionParams, TranscriptionUpdate};
 
@@ -265,6 +267,101 @@ pub trait SpeechStream: Send {
         &mut self,
     ) -> impl Future<Output = Result<Option<Self::Chunk>, ModelError>> + Send;
     fn finish(self) -> impl Future<Output = Result<(), ModelError>> + Send;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IncrementalSpeechCancelToken {
+    canceled: Arc<AtomicBool>,
+}
+
+impl IncrementalSpeechCancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IncrementalSpeechRequestLabel(String);
+
+impl IncrementalSpeechRequestLabel {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct IncrementalSpeechControls {
+    pub cancel: IncrementalSpeechCancelToken,
+    pub request_label: Option<IncrementalSpeechRequestLabel>,
+    pub max_buffered_audio_ms: u32,
+}
+
+impl Default for IncrementalSpeechControls {
+    fn default() -> Self {
+        Self {
+            cancel: IncrementalSpeechCancelToken::new(),
+            request_label: None,
+            max_buffered_audio_ms: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IncrementalSpeechChunk {
+    pub samples_i16: Vec<i16>,
+    pub sample_rate_hz: u32,
+    pub channels: u16,
+    pub chunk_index: u64,
+    pub is_final: bool,
+}
+
+impl IncrementalSpeechChunk {
+    pub fn audio_ms(&self) -> u64 {
+        if self.sample_rate_hz == 0 || self.channels == 0 {
+            return 0;
+        }
+        let frames = self.samples_i16.len() as u64 / self.channels as u64;
+        frames.saturating_mul(1000) / self.sample_rate_hz as u64
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IncrementalSpeechSummary {
+    pub chunks: u64,
+    pub audio_ms: u64,
+    pub canceled: bool,
+    pub synthesis_completed: bool,
+}
+
+pub trait IncrementalSpeechSynthesizer: Send + Sync {
+    type Request;
+    type Stream: IncrementalSpeechStream;
+
+    fn synthesize_incremental(
+        &self,
+        request: Self::Request,
+        controls: IncrementalSpeechControls,
+    ) -> impl Future<Output = Result<Self::Stream, ModelError>> + Send;
+}
+
+pub trait IncrementalSpeechStream: Send {
+    fn next_audio_chunk(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<IncrementalSpeechChunk>, ModelError>> + Send;
+
+    fn finish(self) -> impl Future<Output = Result<IncrementalSpeechSummary, ModelError>> + Send;
 }
 
 #[derive(Clone, Debug, PartialEq)]

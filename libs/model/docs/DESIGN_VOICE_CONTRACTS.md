@@ -9,6 +9,7 @@
 | 2026-06-14 PDT | @codex-m6-ds-rv | Added #524 follow-on design pointer: true incremental-audio TTS stays under `CapabilityKind::Speech`, uses a set of `SpeechGeneration` values, and must prove first playable PCM before full utterance synthesis; buffered chunk streams remain non-incremental. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Reconciled stale streaming-TTS wording with #524: true streaming now means `IncrementalSpeechSynthesizer` / `IncrementalSpeechStream` plus `SpeechGeneration::Streaming`, not the older ambiguous `SpeechStream` shim. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Kept incremental-TTS controls app-neutral: examples use an opaque request label for diagnostics, not caller-specific stale-response keys. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Implementation update: added `IncrementalSpeechSynthesizer` / `IncrementalSpeechStream`, changed speech-generation metadata to a set, and added a Sherpa ONNX Kokoro callback-backed production candidate without changing buffered Piper or ORT Kokoro semantics. |
 
 # Design: Voice Contracts
 
