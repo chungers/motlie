@@ -678,12 +678,13 @@ fn render_accounting_matrix(out: &mut String, records: &[ResultRecord]) {
     }
     out.push('\n');
 
-    // (bundle_id, capability) -> (quant label, profile -> state).
+    // (bundle_id, capability+speech_mode) -> (quant label, profile -> state).
+    // Speech buffered vs streaming are distinct rows (#531).
     type MatrixRow = (String, BTreeMap<&'static str, CoverageState>);
-    let mut rows: BTreeMap<(String, &'static str), MatrixRow> = BTreeMap::new();
+    let mut rows: BTreeMap<(String, String), MatrixRow> = BTreeMap::new();
     for (key, state) in &report.states {
         let entry = rows
-            .entry((key.bundle_id.clone(), capability_label(key.capability)))
+            .entry((key.bundle_id.clone(), capability_row_label(key)))
             .or_insert_with(|| (key.quant.as_str().to_owned(), BTreeMap::new()));
         entry.1.insert(key.profile.canonical_id(), *state);
     }
@@ -708,11 +709,23 @@ fn render_accounting_matrix(out: &mut String, records: &[ResultRecord]) {
             out.push_str(&format!(
                 "- `{}` / `{}` / `{}`: `{:?}`\n",
                 key.bundle_id,
-                capability_label(key.capability),
+                capability_row_label(key),
                 key.profile.canonical_id(),
                 finding
             ));
         }
+    }
+}
+
+/// Capability column label, distinguishing the Speech sub-dimension (#531):
+/// streaming TTS reads `tts (streaming)`; buffered TTS stays `tts` (unchanged).
+fn capability_row_label(key: &crate::coverage::CellKey) -> String {
+    use motlie_model::SpeechGeneration;
+    match key.speech_mode {
+        Some(SpeechGeneration::Streaming) => {
+            format!("{} (streaming)", capability_label(key.capability))
+        }
+        _ => capability_label(key.capability).to_owned(),
     }
 }
 
@@ -737,7 +750,8 @@ fn coverage_state_symbol(state: &crate::coverage::CoverageState) -> String {
         CoverageState::Validated => "✅".to_owned(),
         CoverageState::NotApplicable(reason) => format!("⛔ {}", reason.as_str()),
         CoverageState::BuildGap => "🔧".to_owned(),
-        CoverageState::Gap => "⏳".to_owned(),
+        CoverageState::Gap(Some(reason)) => format!("⏳ {}", reason.as_str()),
+        CoverageState::Gap(None) => "⏳".to_owned(),
     }
 }
 

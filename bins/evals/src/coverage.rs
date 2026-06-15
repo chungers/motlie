@@ -8,18 +8,20 @@
 //! runtime evidence must agree, and any disagreement is a flagged finding
 //! (`Finding`) that fails the fail-closed completeness check.
 //!
-//! HOOK(#531) — Speech sub-dimension: the cell key will gain a
-//! capability-conditional `SpeechGeneration::{Buffered, Streaming}` sub-dimension
-//! that is present iff `capability == Speech`, so buffered vs streaming become
-//! distinct cells (DESIGN §G). `SpeechGeneration` is owned by motlie-model
-//! (#531/#524) and is intentionally NOT defined here; when it lands, add the
-//! optional field to the cell-key type (and the index entry) in this module —
-//! reconciliation/`applicability` are unaffected (accelerator support is
-//! speech-mode-independent), so the change is localized to cell keying/slicing.
+//! Speech sub-dimension (#531, WIRED): `CellKey.speech_mode` carries the
+//! capability-conditional `SpeechGeneration::{Buffered, Streaming}` (present iff
+//! `capability == Speech`; DESIGN §G), so buffered vs streaming are distinct
+//! cells. Streaming eval is out of scope this iteration: streaming cells are
+//! *synthesized* as declared `Gap(StreamingEvalOutOfScope)` (accounted, never
+//! silently absent) for bundles advertising streaming, while no streaming eval
+//! runs. `applicability` is unaffected (accelerator support is
+//! speech-mode-independent).
 
 use std::collections::BTreeMap;
 
-use motlie_model::{AccelSupport, BackendKind, CapabilityKind, QuantizationScheme, Reason};
+use motlie_model::{
+    AccelSupport, BackendKind, CapabilityKind, QuantizationScheme, Reason, SpeechGeneration,
+};
 use motlie_models::CuratedBundle;
 
 use crate::profile::Profile;
@@ -38,7 +40,27 @@ pub enum CoverageState {
     /// native path (recorded native-provider evidence shows it absent). Buildable.
     BuildGap,
     /// The path is available but no passing record exists / never scheduled.
-    Gap,
+    /// Carries an optional eval-level reason (e.g. a dimension value that is
+    /// declared but deliberately out of scope this iteration — accounted, never
+    /// silently absent).
+    Gap(Option<GapReason>),
+}
+
+/// Eval-level reason a cell is a `Gap` (distinct from the model-capability
+/// `Reason` that drives `NotApplicable`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GapReason {
+    /// The cell is a declared dimension value whose eval is out of scope for this
+    /// iteration (e.g. streaming TTS, #531) — declared, not run, not silent.
+    StreamingEvalOutOfScope,
+}
+
+impl GapReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StreamingEvalOutOfScope => "streaming_eval_out_of_scope",
+        }
+    }
 }
 
 /// The runtime evidence distilled from one result record for a cell, reduced to
@@ -88,8 +110,8 @@ pub fn classify(support: AccelSupport, evidence: &[CellEvidence]) -> CoverageSta
             } else {
                 // No passing record and no build-absent evidence: unscheduled, or
                 // ran with the path present but did not pass — both are "should
-                // run / fill", i.e. a transient Gap.
-                CoverageState::Gap
+                // run / fill", i.e. a transient Gap (no special eval reason).
+                CoverageState::Gap(None)
             }
         }
     }
@@ -118,6 +140,10 @@ pub struct CellKey {
     pub quant: QuantizationScheme,
     pub capability: CapabilityKind,
     pub profile: Profile,
+    /// Capability-conditional Speech sub-dimension (#531): `Some(mode)` iff
+    /// `capability == Speech`, `None` otherwise — keeps the matrix sparse
+    /// (DESIGN §G). Buffered and Streaming are distinct cells.
+    pub speech_mode: Option<SpeechGeneration>,
 }
 
 /// Why a record failed to parse into the enum-keyed tuple — every variant is a
@@ -179,11 +205,16 @@ pub fn parse_cell(
     let backend = backend_from_token(&coverage.backend)
         .ok_or_else(|| TupleParseError::UnknownBackend(coverage.backend.clone()))?;
 
+    // Speech sub-dimension: today only buffered TTS is run, so a recorded Speech
+    // cell is Buffered (streaming has no records — it is synthesized as a declared
+    // out-of-scope Gap in `reconcile_records`). Non-Speech cells carry no mode.
+    let speech_mode = (capability == CapabilityKind::Speech).then_some(SpeechGeneration::Buffered);
     let key = CellKey {
         bundle_id: coverage.bundle_id.clone(),
         quant,
         capability,
         profile,
+        speech_mode,
     };
     Ok((key, backend, evidence_from_record(record)))
 }
@@ -258,7 +289,44 @@ where
         let support = applicability(backend, key.profile);
         report.states.insert(key, classify(support, &evidence));
     }
+    synthesize_streaming_cells(&mut report);
     report
+}
+
+/// Curated bundles that advertise `SpeechGeneration::Streaming` in addition to
+/// Buffered (mirrors the motlie-model descriptor, #531 —
+/// `kokoro_82m` is the one curated bundle advertising both modes). Kept as a
+/// declared canonical-id set so the feature-light report can account streaming
+/// without compiling the catalog; HOOK(#531) for when more bundles add streaming.
+fn bundle_advertises_streaming(bundle_id: &str) -> bool {
+    matches!(bundle_id, "kokoro_82m")
+}
+
+/// Account for the declared-but-out-of-scope Streaming sub-dimension: for every
+/// covered Buffered Speech cell whose bundle advertises streaming, emit the
+/// matching Streaming cell as a `Gap(StreamingEvalOutOfScope)`. Streaming is
+/// therefore declared and visible (honest coverage), never silently absent —
+/// while no streaming eval is executed this iteration (David).
+fn synthesize_streaming_cells(report: &mut ReconcileReport) {
+    let buffered_keys: Vec<CellKey> = report
+        .states
+        .keys()
+        .filter(|key| {
+            key.speech_mode == Some(SpeechGeneration::Buffered)
+                && bundle_advertises_streaming(&key.bundle_id)
+        })
+        .cloned()
+        .collect();
+    for buffered in buffered_keys {
+        let streaming = CellKey {
+            speech_mode: Some(SpeechGeneration::Streaming),
+            ..buffered
+        };
+        report
+            .states
+            .entry(streaming)
+            .or_insert(CoverageState::Gap(Some(GapReason::StreamingEvalOutOfScope)));
+    }
 }
 
 /// One typed, slice-able entry of the coverage index (§F). Every dimension is a
@@ -271,10 +339,20 @@ pub struct CoverageIndexEntry {
     pub bundle_id: String,
     pub quant: String,
     pub capability: String,
+    /// Speech sub-dimension (`buffered`/`streaming`), present iff capability is
+    /// Speech/`tts` (#531); `None` otherwise.
+    pub speech_mode: Option<String>,
     pub profile: String,
     pub accelerator: String,
     pub state: String,
     pub reason: Option<String>,
+}
+
+fn speech_mode_token(mode: SpeechGeneration) -> &'static str {
+    match mode {
+        SpeechGeneration::Buffered => "buffered",
+        SpeechGeneration::Streaming => "streaming",
+    }
 }
 
 fn capability_token(capability: CapabilityKind) -> &'static str {
@@ -298,7 +376,7 @@ fn state_fields(state: &CoverageState) -> (&'static str, Option<String>) {
             ("not_applicable", Some(reason.as_str().to_owned()))
         }
         CoverageState::BuildGap => ("build_gap", None),
-        CoverageState::Gap => ("gap", None),
+        CoverageState::Gap(reason) => ("gap", reason.map(|r| r.as_str().to_owned())),
     }
 }
 
@@ -318,6 +396,7 @@ pub fn build_index(report: &ReconcileReport) -> Vec<CoverageIndexEntry> {
                 bundle_id: key.bundle_id.clone(),
                 quant: key.quant.as_str().to_owned(),
                 capability: capability_token(key.capability).to_owned(),
+                speech_mode: key.speech_mode.map(|m| speech_mode_token(m).to_owned()),
                 profile: key.profile.canonical_id().to_owned(),
                 accelerator: key.profile.accelerator().as_str().to_owned(),
                 state: state.to_owned(),
@@ -397,7 +476,7 @@ mod tests {
 
     #[test]
     fn classify_no_records_is_gap() {
-        assert_eq!(classify(targetable(), &[]), CoverageState::Gap);
+        assert_eq!(classify(targetable(), &[]), CoverageState::Gap(None));
     }
 
     #[test]
@@ -409,7 +488,7 @@ mod tests {
             native_path_present: true,
             ..Default::default()
         };
-        assert_eq!(classify(targetable(), &[ev]), CoverageState::Gap);
+        assert_eq!(classify(targetable(), &[ev]), CoverageState::Gap(None));
     }
 
     fn collect_results_jsonl(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -517,6 +596,51 @@ mod tests {
         let json = serde_json::to_string(&index).expect("index serializes");
         assert!(json.contains("\"capability\":\"asr\""));
         assert!(json.contains("\"state\":"));
+    }
+
+    #[test]
+    fn streaming_cells_are_declared_out_of_scope_gaps() {
+        // #531: kokoro_82m advertises Buffered + Streaming. Buffered cells stay as
+        // recorded; streaming cells are synthesized as declared out-of-scope Gaps
+        // (accounted, never silently absent), and they introduce no findings.
+        let records = committed_records();
+        let report = reconcile_records(&records);
+
+        let streaming: Vec<_> = report
+            .states
+            .iter()
+            .filter(|(key, _)| {
+                key.bundle_id == "kokoro_82m"
+                    && key.speech_mode == Some(SpeechGeneration::Streaming)
+            })
+            .collect();
+        assert!(!streaming.is_empty(), "streaming cells must be declared");
+        assert!(streaming.iter().all(|(_, state)| matches!(
+            state,
+            CoverageState::Gap(Some(GapReason::StreamingEvalOutOfScope))
+        )));
+
+        // A matching Buffered cell exists for each synthesized streaming cell.
+        for (streaming_key, _) in &streaming {
+            let buffered = CellKey {
+                speech_mode: Some(SpeechGeneration::Buffered),
+                ..(*streaming_key).clone()
+            };
+            assert!(report.states.contains_key(&buffered));
+        }
+        // Streaming declaration does not break the fail-closed bar.
+        assert!(report.findings.is_empty() && report.parse_errors.is_empty());
+
+        // Index surfaces the speech_mode + the gap reason (sliceable).
+        let index = build_index(&report);
+        assert!(index
+            .iter()
+            .any(|e| e.speech_mode.as_deref() == Some("streaming")
+                && e.state == "gap"
+                && e.reason.as_deref() == Some("streaming_eval_out_of_scope")));
+        assert!(index
+            .iter()
+            .any(|e| e.speech_mode.as_deref() == Some("buffered")));
     }
 
     #[test]
