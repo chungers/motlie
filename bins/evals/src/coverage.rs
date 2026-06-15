@@ -261,6 +261,76 @@ where
     report
 }
 
+/// One typed, slice-able entry of the coverage index (§F). Every dimension is a
+/// canonical string field, so the index is queryable by ANY dimension and any
+/// cross-cut (e.g. `profile == "dgx-spark"`, `quant == "gguf_q4_0"`,
+/// `accelerator == "cuda"`) without ad-hoc grep. Serialized in a stable field
+/// order; the index as a whole is sorted, so regeneration is byte-stable.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize)]
+pub struct CoverageIndexEntry {
+    pub bundle_id: String,
+    pub quant: String,
+    pub capability: String,
+    pub profile: String,
+    pub accelerator: String,
+    pub state: String,
+    pub reason: Option<String>,
+}
+
+fn capability_token(capability: CapabilityKind) -> &'static str {
+    match capability {
+        CapabilityKind::Chat => "chat",
+        CapabilityKind::ToolUse => "tool_use",
+        CapabilityKind::Transcription => "asr",
+        CapabilityKind::Speech => "tts",
+        CapabilityKind::Embeddings => "embeddings",
+        CapabilityKind::Completion => "completion",
+        CapabilityKind::Ocr => "ocr",
+        CapabilityKind::Vision => "vision",
+        CapabilityKind::VoiceClone => "voice_clone",
+    }
+}
+
+fn state_fields(state: &CoverageState) -> (&'static str, Option<String>) {
+    match state {
+        CoverageState::Validated => ("validated", None),
+        CoverageState::NotApplicable(reason) => {
+            ("not_applicable", Some(reason.as_str().to_owned()))
+        }
+        CoverageState::BuildGap => ("build_gap", None),
+        CoverageState::Gap => ("gap", None),
+    }
+}
+
+/// Build the deterministic, enum-keyed coverage index from a record set: one
+/// entry per reconciled cell, sorted by `(bundle, quant, capability, profile)`
+/// (via the `BTreeMap` key order in the reconcile report), so the output is
+/// byte-stable across runs given the same inputs (Q4 / David's regen
+/// constraint). The Accounting Matrix (report) is one pivot over this; arbitrary
+/// slices are a filter on the typed fields.
+pub fn build_index(report: &ReconcileReport) -> Vec<CoverageIndexEntry> {
+    let mut entries: Vec<CoverageIndexEntry> = report
+        .states
+        .iter()
+        .map(|(key, state)| {
+            let (state, reason) = state_fields(state);
+            CoverageIndexEntry {
+                bundle_id: key.bundle_id.clone(),
+                quant: key.quant.as_str().to_owned(),
+                capability: capability_token(key.capability).to_owned(),
+                profile: key.profile.canonical_id().to_owned(),
+                accelerator: key.profile.accelerator().as_str().to_owned(),
+                state: state.to_owned(),
+                reason,
+            }
+        })
+        .collect();
+    // Sort by the canonical string fields (Ord derive) so the order is stable
+    // and independent of enum discriminant order — byte-stable regen (§9/§F).
+    entries.sort();
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +482,41 @@ mod tests {
             "{} declaration/runtime contradictions found (fail-closed)",
             report.findings.len(),
         );
+    }
+
+    #[test]
+    fn coverage_index_is_deterministic_and_sliceable() {
+        let records = committed_records();
+        let report = reconcile_records(&records);
+
+        // Byte-stable regeneration (Q4 / David's constraint): same inputs ->
+        // identical, sorted output.
+        let index = build_index(&report);
+        assert_eq!(index, build_index(&report), "index regen must be stable");
+        let mut sorted = index.clone();
+        sorted.sort();
+        assert_eq!(
+            index, sorted,
+            "index entries must be in stable sorted order"
+        );
+        assert!(!index.is_empty());
+
+        // Slice-and-dice by ANY dimension + cross-cut (§F).
+        assert!(index.iter().any(|e| e.profile == "dgx-spark"));
+        assert!(index
+            .iter()
+            .filter(|e| e.quant == "gguf_q4_0")
+            .all(|e| e.bundle_id == "gemma4_12b_qat_gguf")); // 1:1 quant<->bundle
+        assert!(index
+            .iter()
+            .filter(|e| e.accelerator == "cuda")
+            .all(|e| e.profile == "dgx-spark" || e.profile == "cuda-workstation"));
+        assert!(index.iter().any(|e| e.capability == "asr"));
+
+        // Serializes with stable typed fields.
+        let json = serde_json::to_string(&index).expect("index serializes");
+        assert!(json.contains("\"capability\":\"asr\""));
+        assert!(json.contains("\"state\":"));
     }
 
     #[test]
