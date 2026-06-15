@@ -1,23 +1,23 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use axum::extract::ws::{Message, WebSocket};
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use chrono::Utc;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
+use motlie_voice::VoiceError;
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
-use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
-use motlie_voice::VoiceError;
+use motlie_voice::pipeline::resample::{WindowedSincResampler, resample_i16_mono};
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
-use tokio::sync::{mpsc, Mutex, Notify};
+use serde_json::{Map, Value, json};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{
@@ -27,22 +27,23 @@ use crate::adapter::{
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::{self, ConversationRuntime};
 use crate::early_response::{
-    spawn_early_response_pipeline, EarlyResponseCancelReason, EarlyResponseCommitBoundary,
-    EarlyResponseCommitMember, EarlyResponseInput, EarlyResponsePartial,
-    EarlyResponsePipelineHandle, EarlyResponsePipelineServices,
+    EarlyResponseCancelReason, EarlyResponseCommitBoundary, EarlyResponseCommitMember,
+    EarlyResponseInput, EarlyResponsePartial, EarlyResponsePipelineHandle,
+    EarlyResponsePipelineServices, spawn_early_response_pipeline,
 };
 use crate::operator::state::{
-    speech_echo_signature, CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission,
-    SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
+    CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission, SharedState,
+    StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
+    speech_echo_signature,
 };
 use crate::quality::{
-    insert_transcript_text_fields, transcript_plaintext_included, ActiveAsrQualitySession,
-    CallerTurnEventMetadata, EchoSuppressionQualityConfig, OnsetDuringPlaybackPolicy,
-    RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
+    ActiveAsrQualitySession, CallerTurnEventMetadata, EchoSuppressionQualityConfig,
+    OnsetDuringPlaybackPolicy, RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
+    insert_transcript_text_fields, transcript_plaintext_included,
 };
 use crate::speech;
-use crate::text_calls::turns::{CallerSpeechState, PlaybackFinishedStatus};
 use crate::text_calls::SharedTextCallRegistry;
+use crate::text_calls::turns::{CallerSpeechState, PlaybackFinishedStatus};
 use crate::tts::PIPER_SAMPLE_RATE_HZ;
 
 mod capture;
@@ -3628,7 +3629,8 @@ async fn record_transcript_events(
         if suppressed {
             let suppression_reason = event
                 .suppression_reason()
-                .map(AsrTranscriptSuppressionReason::label);
+                .map(AsrTranscriptSuppressionReason::label)
+                .unwrap_or("adapter_suppressed");
             let transcript_preview = include_transcript_text.then(|| transcript_preview(&text));
             tracing::warn!(
                 gateway_call_id,
@@ -3645,6 +3647,14 @@ async fn record_transcript_events(
                 transcript_chars = text.chars().count(),
                 transcript_preview = transcript_preview.as_deref(),
                 "transcript.suppressed_repeated_token"
+            );
+            guard.emit_quality_transcript_suppressed(
+                gateway_call_id,
+                context.quality_session,
+                kind_label,
+                suppression_reason,
+                &text,
+                Map::new(),
             );
             continue;
         }
@@ -3668,6 +3678,23 @@ async fn record_transcript_events(
                 longest_token_run = echo.longest_token_run,
                 transcript_preview = transcript_preview.as_deref(),
                 "transcript.suppressed_assistant_echo"
+            );
+            let mut extra = Map::new();
+            extra.insert(
+                "token_coverage_percent".to_string(),
+                json!(echo.token_coverage_percent),
+            );
+            extra.insert(
+                "longest_token_run".to_string(),
+                json!(echo.longest_token_run),
+            );
+            guard.emit_quality_transcript_suppressed(
+                gateway_call_id,
+                context.quality_session,
+                kind_label,
+                "assistant_echo",
+                &text,
+                extra,
             );
             continue;
         }
@@ -3956,8 +3983,8 @@ fn validate_media_format(format: &MediaFormat) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use motlie_model::typed::{AudioBuf, Mono};
@@ -3966,11 +3993,11 @@ mod tests {
     use crate::adapter::{
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
-    use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
-    use crate::text_calls::turns::{CallerSpeechState, GatewayTextFrame};
+    use crate::operator::state::{CallStatus, TelnyxIds, TtsPlaybackStatus, shared_state};
     use crate::text_calls::SharedTextCallRegistry;
+    use crate::text_calls::turns::{CallerSpeechState, GatewayTextFrame};
     use crate::tts::{
-        LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
+        LiveTtsBackend, OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry,
     };
 
     fn continue_decision(speech_onset: bool, speech_state: CallerSpeechState) -> AsrFrameDecision {
@@ -4175,19 +4202,22 @@ mod tests {
         .expect("failed prebuffered chunk should release active playback");
 
         assert!(next_outbound_command(&mut media_state).is_none());
-        assert!(media_registry
-            .active_speech_playback_id(&gateway_call_id)
-            .await
-            .is_none());
+        assert!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .is_none()
+        );
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         let tts = call.tts.as_ref().expect("TTS state should exist");
         assert_eq!(tts.status, TtsPlaybackStatus::Failed);
-        assert!(tts
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("second chunk failed")));
+        assert!(
+            tts.error
+                .as_deref()
+                .is_some_and(|error| error.contains("second chunk failed"))
+        );
         assert_eq!(call.status, CallStatus::MediaStarted);
         drop(guard);
 
@@ -4457,14 +4487,16 @@ mod tests {
         handle_text(&media_one, &state, &asr, &mut media_state)
             .await
             .expect("first non-one media chunk should establish reorder base");
-        assert!(state
-            .read()
-            .await
-            .calls
-            .get(&gateway_call_id)
-            .expect("call exists")
-            .transcripts
-            .is_empty());
+        assert!(
+            state
+                .read()
+                .await
+                .calls
+                .get(&gateway_call_id)
+                .expect("call exists")
+                .transcripts
+                .is_empty()
+        );
 
         let media_two = media_event("stream-1", "8", &chunk);
         handle_text(&media_two, &state, &asr, &mut media_state)
@@ -4600,14 +4632,16 @@ mod tests {
         )
         .await
         .expect("silence should be accepted by transport");
-        assert!(state
-            .read()
-            .await
-            .calls
-            .get(&gateway_call_id)
-            .expect("call exists")
-            .transcripts
-            .is_empty());
+        assert!(
+            state
+                .read()
+                .await
+                .calls
+                .get(&gateway_call_id)
+                .expect("call exists")
+                .transcripts
+                .is_empty()
+        );
 
         let speech = STANDARD.encode(l16_samples(16_000, 4_000));
         handle_text(
@@ -5541,8 +5575,13 @@ mod tests {
         let mut text_rx = text_calls
             .insert_test_session(gateway_call_id.clone())
             .await;
+        let (quality_tx, mut quality_rx) = mpsc::channel(8);
         {
             let mut guard = state.write().await;
+            guard.set_quality_event_sink(
+                crate::quality::QualityEventSink::with_sender(quality_tx),
+                None,
+            );
             guard.start_tts_job(
                 &gateway_call_id,
                 "tts_echo".to_string(),
@@ -5584,6 +5623,24 @@ mod tests {
                 .await
                 .is_err(),
             "assistant echo should not become caller.turn"
+        );
+        let mut suppression_event = None;
+        while let Ok(Some(event)) = time::timeout(Duration::from_secs(1), quality_rx.recv()).await {
+            if event.event == "transcript.suppressed" {
+                suppression_event = Some(event);
+                break;
+            }
+        }
+        let suppression_event =
+            suppression_event.expect("quality suppression event should be emitted");
+        assert_eq!(suppression_event.event, "transcript.suppressed");
+        assert_eq!(
+            suppression_event.payload["suppression_reason"],
+            json!("assistant_echo")
+        );
+        assert_eq!(
+            suppression_event.payload["transcript_kind"],
+            json!("transcript.final")
         );
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
@@ -6114,9 +6171,11 @@ mod tests {
         .await
         .expect_err("unsupported codec should fail at start");
 
-        assert!(error
-            .to_string()
-            .contains("unsupported inbound media encoding"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported inbound media encoding")
+        );
         assert!(media_state.session.is_none());
         assert!(media_state.gateway_call_id.is_none());
         assert!(media_state.media_format.is_none());

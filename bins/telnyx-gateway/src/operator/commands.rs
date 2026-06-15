@@ -6,15 +6,19 @@ use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegis
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
-use crate::conversation::{default_conversation_handler, ConversationRuntime};
+use crate::conversation::{ConversationRuntime, default_conversation_handler};
+use crate::early_response::{
+    BoundaryRequirement, EarlyResponseAppendMode, EarlyResponseAudioMode, EarlyResponseStartTiming,
+    MissingSignalPolicy,
+};
 use crate::media::SharedMediaRegistry;
 #[cfg(test)]
 use crate::media::{OutboundMediaCommand, SpeechCancelToken};
 use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{
-    asr_warm_key, tts_warm_key, CallStatus, ConversationMode, ConversationStatus, GatewayState,
-    InboundMode, LogLevel, SharedState,
+    CallStatus, ConversationMode, ConversationStatus, GatewayState, InboundMode, LogLevel,
+    SharedState, asr_warm_key, tts_warm_key,
 };
 use crate::quality::{
     OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, TtsGenerationMode,
@@ -22,7 +26,7 @@ use crate::quality::{
 };
 use crate::speech;
 use crate::text_calls::{SharedTextCallRegistry, TextCallStreamServices};
-use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
+use crate::tts::{LiveTtsBackend, SharedTtsRegistry, unavailable_registry};
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
@@ -538,6 +542,10 @@ pub enum QualityCommand {
         #[command(subcommand)]
         command: QualityTtsCommand,
     },
+    EarlyResponse {
+        #[command(subcommand)]
+        command: QualityEarlyResponseCommand,
+    },
     Logging {
         #[command(subcommand)]
         command: QualityLoggingCommand,
@@ -685,6 +693,13 @@ pub enum QualityTtsCommand {
     MaxTextChunkChars { n: usize },
     FirstChunkMaxChars { n: usize },
     PrebufferChunks { n: usize },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityEarlyResponseCommand {
+    Status,
+    On,
+    Off,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2385,6 +2400,9 @@ async fn quality_command(
         QualityCommand::Asr { command } => quality_asr_command(context, command).await,
         QualityCommand::TextCall { command } => quality_text_call_command(context, command).await,
         QualityCommand::Tts { command } => quality_tts_command(context, command).await,
+        QualityCommand::EarlyResponse { command } => {
+            quality_early_response_command(context, command).await
+        }
         QualityCommand::Logging { command } => quality_logging_command(context, command).await,
         QualityCommand::Judge { command } => quality_judge_command(context, command).await,
         QualityCommand::BargeIn { command } => quality_barge_in_command(context, command).await,
@@ -2462,6 +2480,10 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
         format!(
             "tts.prebuffer_chunks={}",
             quality.config.tts.prebuffer_chunks
+        ),
+        format!(
+            "early_response.enabled={}",
+            quality.config.early_response.enabled
         ),
         format!(
             "barge_in.onset_during_playback={}",
@@ -2724,6 +2746,88 @@ prebuffer_chunks={}",
         }
         QualityTtsCommand::PrebufferChunks { n } => {
             mutate_quality_config(context, |config| Ok(config.set_tts_prebuffer_chunks(n))).await
+        }
+    }
+}
+
+fn early_response_audio_mode_label(value: EarlyResponseAudioMode) -> &'static str {
+    match value {
+        EarlyResponseAudioMode::SpeakProvisionally => "speak_provisionally",
+        EarlyResponseAudioMode::PrepareOnly => "prepare_only",
+    }
+}
+
+fn early_response_boundary_label(value: BoundaryRequirement) -> &'static str {
+    match value {
+        BoundaryRequirement::None => "none",
+        BoundaryRequirement::Clause => "clause",
+        BoundaryRequirement::Sentence => "sentence",
+    }
+}
+
+fn early_response_missing_signal_label(value: MissingSignalPolicy) -> &'static str {
+    match value {
+        MissingSignalPolicy::Conservative => "conservative",
+    }
+}
+
+fn early_response_start_timing_label(value: EarlyResponseStartTiming) -> &'static str {
+    match value {
+        EarlyResponseStartTiming::EndpointCandidateOnly => "endpoint_candidate_only",
+        EarlyResponseStartTiming::WhileSpeaking => "while_speaking",
+    }
+}
+
+fn early_response_append_mode_label(value: EarlyResponseAppendMode) -> &'static str {
+    match value {
+        EarlyResponseAppendMode::ReplaceOnly => "replace_only",
+        EarlyResponseAppendMode::PrefixMonotonicBackend => "prefix_monotonic_backend",
+    }
+}
+
+fn optional_score_label(value: Option<f32>) -> String {
+    value
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "none".to_string())
+}
+
+async fn quality_early_response_command(
+    context: &mut GatewayContext,
+    command: QualityEarlyResponseCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityEarlyResponseCommand::Status => {
+            let guard = context.state.read().await;
+            let early = &guard.quality.config.early_response;
+            Ok(CommandOutput::text(format!(
+                "enabled={}\naudio_mode={}\nboundary={}\nmin_text_chars={}\nmin_text_tokens={}\nmin_confidence={}\nmin_stability={}\nmissing_signal_policy={}\ndebounce_ms={}\nmax_updates_per_utterance={}\nstart_timing={}\nappend_mode={}\nprovisional_max_prebuffer_frames={}",
+                early.enabled,
+                early_response_audio_mode_label(early.audio_mode),
+                early_response_boundary_label(early.boundary),
+                early.min_text_chars,
+                early.min_text_tokens,
+                optional_score_label(early.min_confidence),
+                optional_score_label(early.min_stability),
+                early_response_missing_signal_label(early.missing_signal_policy),
+                early.debounce_ms,
+                early.max_updates_per_utterance,
+                early_response_start_timing_label(early.start_timing),
+                early_response_append_mode_label(early.append_mode),
+                early.provisional_max_prebuffer_frames
+            )))
+        }
+        QualityEarlyResponseCommand::On => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_early_response_enabled(true)),
+            )
+            .await
+        }
+        QualityEarlyResponseCommand::Off => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_early_response_enabled(false))
+            })
+            .await
         }
     }
 }
@@ -3338,6 +3442,7 @@ fn quality_help() -> String {
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
+        "quality early-response status|on|off           bool default=false applies=new_call",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
@@ -3903,16 +4008,16 @@ mod tests {
 
     use motlie_driver::CommandEngine;
     use tokio::sync::mpsc;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     use super::*;
     use crate::adapter::LiveAsrBackend;
     use crate::call_control::TelnyxClient;
     use crate::conversation::handle_transcript_event;
     use crate::operator::state::{
-        shared_state, CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus,
+        CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus, shared_state,
     };
-    use crate::tts::{StaticTtsFactory, TtsRegistry, KOKORO_SAMPLE_RATE_HZ};
+    use crate::tts::{KOKORO_SAMPLE_RATE_HZ, StaticTtsFactory, TtsRegistry};
     use motlie_model::TranscriptionUpdate;
     use motlie_voice::app::TranscriptEvent;
 
@@ -3937,10 +4042,12 @@ mod tests {
 
         let output = engine.run_line("status").await.expect("status");
 
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line.starts_with("listener: 127.0.0.1:")));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.starts_with("listener: 127.0.0.1:"))
+        );
         assert!(!output.lines.iter().any(|line| line.contains("Some(")));
     }
 
@@ -4092,10 +4199,12 @@ mod tests {
         let output = engine.run_line("tts status").await.expect("tts status");
 
         assert!(output.lines.iter().any(|line| line == "next=kokoro-82m"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "next_model=kokoro/kokoro_82m"));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "next_model=kokoro/kokoro_82m")
+        );
         assert!(output.lines.iter().any(|line| line == "status=unavailable"));
         assert!(output.lines.iter().any(|line| {
             line == "reason=Kokoro-82M TTS is unavailable; rebuild with --features kokoro"
@@ -4232,12 +4341,16 @@ mod tests {
             "warm tts=kokoro-82m model=kokoro/kokoro_82m mode=buffered status=ready elapsed_ms="
         ));
         let guard = state.read().await;
-        assert!(guard
-            .model_warmups
-            .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025)));
-        assert!(guard
-            .model_warmups
-            .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m)));
+        assert!(
+            guard
+                .model_warmups
+                .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025))
+        );
+        assert!(
+            guard
+                .model_warmups
+                .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m))
+        );
     }
 
     #[tokio::test]
@@ -4253,12 +4366,16 @@ mod tests {
         assert_eq!(output.lines.len(), 1);
         assert!(output.lines[0].starts_with("warm tts=kokoro-82m"));
         let guard = state.read().await;
-        assert!(!guard
-            .model_warmups
-            .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025)));
-        assert!(guard
-            .model_warmups
-            .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m)));
+        assert!(
+            !guard
+                .model_warmups
+                .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025))
+        );
+        assert!(
+            guard
+                .model_warmups
+                .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m))
+        );
     }
 
     #[tokio::test]
@@ -4512,19 +4629,22 @@ mod tests {
             .expect("dial should create dry-run outbound call");
 
         assert!(output.lines[0].starts_with("dial requested for gwc_"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line
-                == "conversation attached in auto mode; smoke-test echo replies require:"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "  conversation smoke-test on"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line.contains("speak ") && line.contains("<text to say>")));
+        assert!(
+            output.lines.iter().any(|line| line
+                == "conversation attached in auto mode; smoke-test echo replies require:")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "  conversation smoke-test on")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.contains("speak ") && line.contains("<text to say>"))
+        );
         let guard = state.read().await;
         let call_id = engine
             .context()
@@ -4771,10 +4891,12 @@ mod tests {
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let status = engine.run_line("status").await.expect("status");
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "conversation-handler: disabled"));
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "conversation-handler: disabled")
+        );
 
         let enabled = engine
             .run_line("conversation smoke-test on")
@@ -5021,10 +5143,12 @@ mod tests {
 
         let output = engine.run_line("call show").await.expect("call show");
 
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "assembled transcript:"));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "assembled transcript:")
+        );
         assert!(output.lines.iter().any(|line| line == "HELLO WORLD"));
         assert!(output.lines.iter().any(|line| line == "final: HELLO"));
         assert!(output.lines.iter().any(|line| line == "partial: WORLD"));
@@ -5072,14 +5196,18 @@ mod tests {
             .await
             .expect("socket show");
 
-        assert!(tui_show
-            .lines
-            .iter()
-            .any(|line| line == &format!("call: {call_two}")));
-        assert!(socket_show
-            .lines
-            .iter()
-            .any(|line| line == &format!("call: {call_one}")));
+        assert!(
+            tui_show
+                .lines
+                .iter()
+                .any(|line| line == &format!("call: {call_two}"))
+        );
+        assert!(
+            socket_show
+                .lines
+                .iter()
+                .any(|line| line == &format!("call: {call_one}"))
+        );
     }
 
     fn add_test_call(state: &mut GatewayState, call_control_id: &str) -> String {
@@ -5139,26 +5267,42 @@ mod tests {
             .await
             .expect("quality status");
 
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "include_transcript_text=false"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "redaction_mode=metrics-only"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "barge_in.onset_during_playback=defer_to_partial"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "echo_suppression.enabled=true"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "echo_suppression.tail_window_ms=2000"));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "include_transcript_text=false")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "redaction_mode=metrics-only")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "barge_in.onset_during_playback=defer_to_partial")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "echo_suppression.enabled=true")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "echo_suppression.tail_window_ms=2000")
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "early_response.enabled=false")
+        );
     }
 
     #[tokio::test]
@@ -5213,8 +5357,10 @@ mod tests {
             .run_line("quality endpoint conversation-incomplete-tail-hold-ms 99999")
             .await
             .expect("set conversation incomplete tail hold");
-        assert!(conversation_hold_output.lines[0]
-            .contains("key=endpoint.conversation_incomplete_tail_hold_ms"));
+        assert!(
+            conversation_hold_output.lines[0]
+                .contains("key=endpoint.conversation_incomplete_tail_hold_ms")
+        );
         assert!(conversation_hold_output.lines[0].contains("applies=new_turn"));
         assert!(conversation_hold_output.lines[0].contains("clamped=true"));
         assert_eq!(
@@ -5257,22 +5403,30 @@ mod tests {
             .run_line("quality text-call status")
             .await
             .expect("text-call status");
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "media_ready_timeout_ms=2345"));
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "playback_wait_timeout_ms=3456"));
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "latest_response_wins=false"));
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "callback_timeout_ms=4567"));
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "media_ready_timeout_ms=2345")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "playback_wait_timeout_ms=3456")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "latest_response_wins=false")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "callback_timeout_ms=4567")
+        );
 
         let guard = state.read().await;
         assert_eq!(guard.quality.config.text_call.media_ready_timeout_ms, 2_345);
@@ -5333,18 +5487,24 @@ mod tests {
             .run_line("quality tts status")
             .await
             .expect("tts status");
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "generation_mode=streaming"));
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "max_text_chunk_chars=40"));
-        assert!(status
-            .lines
-            .iter()
-            .any(|line| line == "first_chunk_max_chars=45"));
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "generation_mode=streaming")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "max_text_chunk_chars=40")
+        );
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "first_chunk_max_chars=45")
+        );
         assert!(status.lines.iter().any(|line| line == "prebuffer_chunks=3"));
 
         let guard = state.read().await;
@@ -5355,6 +5515,43 @@ mod tests {
         assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
         assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
         assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
+    }
+
+    #[tokio::test]
+    async fn quality_early_response_commands_update_live_config_knob() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let enabled = engine
+            .run_line("quality early-response on")
+            .await
+            .expect("enable early response");
+        assert!(enabled.lines[0].contains("key=early_response.enabled"));
+        assert!(enabled.lines[0].contains("value=true"));
+        assert!(enabled.lines[0].contains("applies=new_call"));
+
+        let status = engine
+            .run_line("quality early-response status")
+            .await
+            .expect("early response status");
+        assert!(status.lines.iter().any(|line| line == "enabled=true"));
+        assert!(status.lines.iter().any(|line| line == "boundary=clause"));
+        assert!(
+            status
+                .lines
+                .iter()
+                .any(|line| line == "provisional_max_prebuffer_frames=1")
+        );
+        assert!(state.read().await.quality.config.early_response.enabled);
+
+        let disabled = engine
+            .run_line("quality early-response off")
+            .await
+            .expect("disable early response");
+        assert!(disabled.lines[0].contains("value=false"));
+        assert!(!state.read().await.quality.config.early_response.enabled);
     }
 
     #[tokio::test]
@@ -5394,23 +5591,29 @@ mod tests {
             .run_line("quality barge-in status")
             .await
             .expect("barge status");
-        assert!(barge_status
-            .lines
-            .iter()
-            .any(|line| line == "onset_during_playback=trust"));
+        assert!(
+            barge_status
+                .lines
+                .iter()
+                .any(|line| line == "onset_during_playback=trust")
+        );
         let echo_status = engine
             .run_line("quality echo-suppression status")
             .await
             .expect("echo status");
         assert!(echo_status.lines.iter().any(|line| line == "enabled=false"));
-        assert!(echo_status
-            .lines
-            .iter()
-            .any(|line| line == "tail_window_ms=50"));
-        assert!(echo_status
-            .lines
-            .iter()
-            .any(|line| line == "short_token_coverage_percent=100"));
+        assert!(
+            echo_status
+                .lines
+                .iter()
+                .any(|line| line == "tail_window_ms=50")
+        );
+        assert!(
+            echo_status
+                .lines
+                .iter()
+                .any(|line| line == "short_token_coverage_percent=100")
+        );
 
         let guard = state.read().await;
         assert_eq!(

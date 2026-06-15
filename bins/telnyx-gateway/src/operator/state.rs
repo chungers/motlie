@@ -934,6 +934,45 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
+    pub fn emit_quality_transcript_suppressed(
+        &mut self,
+        gateway_call_id: &str,
+        session: Option<&ActiveAsrQualitySession>,
+        transcript_kind: &'static str,
+        suppression_reason: &'static str,
+        text: &str,
+        extra: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let (context, include_transcript_text) = if let Some(session) = session {
+            (
+                self.quality_event_context_with_config_and_redaction(
+                    Some(gateway_call_id.to_string()),
+                    session.config_id.clone(),
+                    session.redaction_mode,
+                ),
+                session.include_transcript_text,
+            )
+        } else {
+            (
+                self.quality_event_context(Some(gateway_call_id.to_string())),
+                self.quality.config.logging.include_transcript_text,
+            )
+        };
+        let event = QualityEvent::transcript_suppressed(
+            context,
+            session,
+            transcript_kind,
+            suppression_reason,
+            text,
+            include_transcript_text,
+            extra,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
     pub fn emit_quality_span_finished(&mut self, gateway_call_id: &str, span: QualitySpanEmission) {
         if !self.quality.event_sink.is_enabled() {
             return;

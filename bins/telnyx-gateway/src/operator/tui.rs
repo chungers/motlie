@@ -5,21 +5,21 @@ use chrono::{DateTime, Local, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use motlie_driver::{CommandEffect, CommandEngine, HistoryBuffer};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Terminal;
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
 use crate::operator::script::run_operator_line;
-use crate::operator::session::{ordered_call_ids, OperatorSession};
+use crate::operator::session::{OperatorSession, ordered_call_ids};
 use crate::operator::state::{
-    asr_warm_key, tts_warm_key, CallStatus, GatewayState, LogLevel, ModelWarmStatus,
+    CallStatus, GatewayState, LogLevel, ModelWarmStatus, asr_warm_key, tts_warm_key,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -661,6 +661,15 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             tts_backend.label(),
             tts_warm,
             conversation_tts_backend.label()
+        )),
+        Line::from(format!(
+            "early: enabled={} boundary={:?} min_chars={} debounce={}ms updates={} prebuf_frames={}",
+            quality.early_response.enabled,
+            quality.early_response.boundary,
+            quality.early_response.min_text_chars,
+            quality.early_response.debounce_ms,
+            quality.early_response.max_updates_per_utterance,
+            quality.early_response.provisional_max_prebuffer_frames
         )),
         Line::from(format!(
             "text-call: max={} media_ready={}ms playback_wait={}ms callback={}ms latest_wins={}",

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -200,6 +200,39 @@ impl QualityEvent {
             text,
         );
         Self::new(context, "text_call.caller_turn.sent", payload)
+    }
+
+    pub fn transcript_suppressed(
+        context: QualityEventContext,
+        session: Option<&ActiveAsrQualitySession>,
+        transcript_kind: impl Into<String>,
+        suppression_reason: impl Into<String>,
+        text: &str,
+        include_transcript_text: bool,
+        mut extra: Map<String, Value>,
+    ) -> Self {
+        let redaction_mode = context.redaction_mode;
+        let mut payload = map_from_value(json!({
+            "asr_session_id": session.map(|session| session.asr_session_id.clone()),
+            "utterance_id": session.map(|session| session.utterance_id.clone()),
+            "transcript_kind": transcript_kind.into(),
+            "suppression_reason": suppression_reason.into(),
+            "text_words": text.split_whitespace().count(),
+            "text_chars": text.chars().count(),
+            "transcript_text_included": transcript_plaintext_included(
+                redaction_mode,
+                include_transcript_text
+            ),
+        }));
+        payload.append(&mut extra);
+        insert_transcript_text_fields(
+            &mut payload,
+            redaction_mode,
+            include_transcript_text,
+            "text",
+            text,
+        );
+        Self::new(context, "transcript.suppressed", payload)
     }
 
     pub fn caller_partial_sent(

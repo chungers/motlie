@@ -103,6 +103,7 @@ pub enum JudgeMode {
 #[serde(rename_all = "snake_case")]
 pub enum ApplyBoundary {
     Immediate,
+    NewCall,
     NextAsrSession,
     NewTextCallSession,
     NewTurn,
@@ -116,6 +117,7 @@ impl ApplyBoundary {
     pub fn label(self) -> &'static str {
         match self {
             Self::Immediate => "immediate",
+            Self::NewCall => "new_call",
             Self::NextAsrSession => "next_asr_session",
             Self::NewTextCallSession => "new_text_call_session",
             Self::NewTurn => "new_turn",
@@ -609,6 +611,9 @@ impl VoiceQualityConfig {
             QualityProfile::Fast => {
                 config.endpoint.trailing_silence_ms = 550;
                 config.endpoint.final_settle_ms = 350;
+                config.endpoint.merge_window_ms = 120;
+                config.endpoint.conversation_incomplete_tail_hold_ms = 700;
+                config.endpoint.conversation_playback_hold_poll_ms = 50;
                 config.asr.finish_pad_ms = 80;
             }
             QualityProfile::Balanced => {}
@@ -1517,6 +1522,16 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_early_response_enabled(&mut self, value: bool) -> QualityMutationOutcome {
+        self.early_response.enabled = value;
+        self.outcome(
+            "early_response.enabled",
+            value,
+            ApplyBoundary::NewCall,
+            false,
+        )
+    }
+
     pub fn set_barge_in_enabled(&mut self, value: bool) -> QualityMutationOutcome {
         self.barge_in.enabled = value;
         self.outcome(
@@ -2196,9 +2211,11 @@ mod tests {
         let error = config
             .validate_resolved()
             .expect_err("policy list entries with surrounding whitespace should be rejected");
-        assert!(error
-            .to_string()
-            .contains("endpoint.final_settle_tail_words"));
+        assert!(
+            error
+                .to_string()
+                .contains("endpoint.final_settle_tail_words")
+        );
     }
 
     #[test]
@@ -2210,9 +2227,11 @@ mod tests {
             .validate_resolved()
             .expect_err("provisional prebuffer must stay at the one-frame cap");
 
-        assert!(error
-            .to_string()
-            .contains("early_response.provisional_max_prebuffer_frames"));
+        assert!(
+            error
+                .to_string()
+                .contains("early_response.provisional_max_prebuffer_frames")
+        );
     }
 
     #[test]

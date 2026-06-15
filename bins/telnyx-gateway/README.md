@@ -401,7 +401,9 @@ Artifacts are loaded from:
 
 Missing artifacts fail startup or warmup loudly. Use the curated
 `motlie-models-download` workflow or another explicit preload step before
-starting the gateway.
+starting the gateway. For Kokoro streaming, `motlie-models-download kokoro_82m`
+also prepares the Sherpa-compatible `tokens.txt` from Kokoro `tokenizer.json`;
+the gateway does not repair or download artifacts at runtime.
 
 For local protocol testing without model startup:
 
