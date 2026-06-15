@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::early_response::EarlyResponsePolicy;
+use crate::early_response::{EarlyResponsePolicy, EarlyResponseStartTiming};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1527,6 +1527,22 @@ impl VoiceQualityConfig {
         self.outcome(
             "early_response.enabled",
             value,
+            ApplyBoundary::NewCall,
+            false,
+        )
+    }
+
+    pub fn set_early_response_start_timing(
+        &mut self,
+        value: EarlyResponseStartTiming,
+    ) -> QualityMutationOutcome {
+        self.early_response.set_start_timing(value);
+        self.outcome(
+            "early_response.start_timing",
+            match value {
+                EarlyResponseStartTiming::EndpointCandidateOnly => "endpoint_candidate_only",
+                EarlyResponseStartTiming::WhileSpeaking => "while_speaking",
+            },
             ApplyBoundary::NewCall,
             false,
         )

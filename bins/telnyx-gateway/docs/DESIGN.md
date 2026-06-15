@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-15 PDT | @codex-m6-ds-rv: Corrected the live early-response default to start from stable `speaking` partials, keeping `endpoint_candidate_only` as an explicit conservative knob, and documented the matching state lists. | Application Text Call Protocol and Gateway Control API |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Expanded #529 implementation from helper-only to live opt-in early-response wiring: bounded media-to-pipeline queue, stream processor transfer function, provisional cancel/TTS adapter, early-turn protocol negotiation, and smoke identity coverage. | Application Text Call Protocol and Gateway Control API, Cancellation and Reconciliation, Testing Scope for PLAN |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Staged the first #529 implementation slice: gateway-local early-response aggregator/identity processor contracts plus smoke/repeat tests that cover both buffered final input and streaming provisional fragment output. | Application Text Call Protocol and Gateway Control API, Testing Scope for PLAN |
 | 2026-06-15 UTC | @527-design: Revised #527 after David's PR requirement to make the early-response pipeline test-case-agnostic: ASR to pluggable transfer-function processor to TTS, with smoke/repeat only as the identity pass-through validation instance and no smoke-specific protocol assumptions. | Application Text Call Protocol and Gateway Control API, Alternatives Considered, Testing Scope for PLAN |
@@ -1835,7 +1836,7 @@ allowed_start_speech_states = ["endpoint_candidate"]
 allowed_update_speech_states = ["endpoint_candidate", "finalizing"]
 debounce_ms = 120
 max_updates_per_utterance = 3
-start_timing = "endpoint_candidate_only"
+start_timing = "while_speaking"
 append_mode = "replace_only"
 provisional_max_prebuffer_frames = 1
 ```
@@ -1851,11 +1852,11 @@ early_response.boundary=clause
 early_response.min_confidence=0.70
 early_response.min_stability=0.80
 early_response.missing_signal_policy=conservative
-early_response.allowed_start_speech_states=endpoint_candidate
-early_response.allowed_update_speech_states=endpoint_candidate,finalizing
+early_response.allowed_start_speech_states=speaking,endpoint_candidate
+early_response.allowed_update_speech_states=speaking,endpoint_candidate,finalizing
 early_response.debounce_ms=120
 early_response.max_updates_per_utterance=3
-early_response.start_timing=endpoint_candidate_only
+early_response.start_timing=while_speaking
 early_response.append_mode=replace_only
 early_response.provisional_max_prebuffer_frames=1
 ```

@@ -17,7 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-15 PDT | @codex-m6-ds-rv | After live streaming-TTS testing, made `tts.chunking_enabled` apply to streaming gateway requests, added `quality early-response status|on|off`, and documented Kokoro `tokens.txt` preparation by `motlie-models-download`. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | After live streaming-TTS testing, made committed streaming TTS hold the first tiny text chunk until the second prepared text chunk has audio, changed early-response start timing to `while_speaking` by default, added `quality early-response start-timing`, and documented Kokoro `tokens.txt` preparation by `motlie-models-download`. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Implemented the remaining #523 report-denominator and playback-linkage records: `quality.turn.playback_linked` joins selected/coalesced turns to playback lifecycle, and `quality.report.summary` snapshots carry attempted/played/canceled/excluded counts. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Added explicit gateway TTS generation-mode selection: `tts.generation_mode=buffered|streaming` is operator-switchable, included in config snapshots/spans, and `warm` probes the selected path. Streaming mode uses the model incremental contract and does not silently fall back to buffered synthesis. |
 | 2026-06-14 PDT | @codex-m6-ds-rv | Addressed issue #523 live-test data/profiling gaps: transcript redaction modes now have concrete JSONL behavior, caller-turn records carry ASR/session/coalescing metadata, first-audio spans expose coalesced-turn attribution, `tts.prebuffer_chunks` defaults to 1 for lowest first-audio latency, and TTS warm runs a tiny probe synthesis. |
@@ -1023,11 +1023,12 @@ Prompt requirements:
 | `text_call.latest_response_wins` | `bool` | `true,false` | `true` | reject non-bool | new agent turn | Cancel-and-replace policy. |
 | `text_call.callback_timeout_ms` | `DurationMs` | `100..60000` | `5000` | clamp to range | new callback attempt | Subscriber responsiveness. |
 | `tts.generation_mode` | enum | `buffered,streaming` | `buffered` | reject unknown | new playback request | Selects the gateway TTS execution path. `buffered` uses existing full/chunk synthesis; `streaming` requires a backend implementing true incremental TTS and fails visibly instead of falling back to buffered synthesis. |
-| `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. Applies to buffered synthesis and to streaming mode, where the gateway opens incremental TTS requests per prepared text chunk. |
+| `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. Applies to buffered synthesis and to streaming mode, where the gateway opens incremental TTS requests per prepared text chunk. For committed streaming turns, the gateway holds the first tiny text chunk until the next prepared text chunk has audio to avoid outbound underruns; provisional append playback stays one-frame JIT. |
 | `tts.max_text_chunk_chars` | `Count` | `40..500` | `90` | clamp to range | new playback request | Packs complete sentence segments up to this size before falling back to word splits for oversized segments. |
 | `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `40` | `0` disables, otherwise clamp to range | new playback request | Sentence-boundary first-chunk ramp for lower first-audio latency; `0` restores full-size first-chunk synthesis. |
 | `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Prepared text chunks required before playback starts; the telephony default starts playback as soon as the first prepared chunk is available. Raise this only when a deployment explicitly prefers extra smoothing over first-audio latency. |
 | `early_response.enabled` | `bool` | `true,false` | `false` | reject non-bool | new call | Enables the opt-in provisional early-response pipeline for new calls. Use `quality early-response on` before dialing for live identity tests. |
+| `early_response.start_timing` | enum | `while_speaking,endpoint_candidate_only` | `while_speaking` | reject unknown | new call | Selects whether stable partials may start provisional work while the caller is still speaking or only after the low-energy endpoint-candidate window. `while_speaking` is the live-test default for snappier identity/agent response; `endpoint_candidate_only` preserves the older conservative delay. |
 | `barge_in.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables barge-in path. |
 | `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. During active playback, `barge_in.onset_during_playback` decides whether onset trusts the caller interruption immediately or defers only likely assistant echo to partial/final ASR confirmation. |
 | `barge_in.onset_during_playback` | `OnsetDuringPlaybackPolicy` enum | `defer_to_partial`, `trust` | `defer_to_partial` | reject unknown | next ASR session | Distinguishes audible assistant echo from real caller interruption. The default keeps the live-tuned echo guard but still allows onset cancellation when active playback is not yet audible or has no echo signature. |
@@ -1331,10 +1332,14 @@ quality text-call playback-wait-timeout-ms <ms>
 quality text-call latest-response-wins on|off
 quality text-call callback-timeout-ms <ms>
 quality tts status
+quality tts generation-mode buffered|streaming
 quality tts chunking on|off
 quality tts max-text-chunk-chars <n>
 quality tts first-chunk-max-chars <n>
 quality tts prebuffer-chunks <n>
+quality early-response status
+quality early-response on|off
+quality early-response start-timing while-speaking|endpoint-candidate-only
 # `warm tts` loads the configured TTS backend and runs a tiny discarded probe synthesis.
 quality logging status
 quality logging on <path>

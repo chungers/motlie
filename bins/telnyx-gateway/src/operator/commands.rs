@@ -601,6 +601,21 @@ pub enum TtsGenerationModeArg {
     Streaming,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum EarlyResponseStartTimingArg {
+    EndpointCandidateOnly,
+    WhileSpeaking,
+}
+
+impl From<EarlyResponseStartTimingArg> for EarlyResponseStartTiming {
+    fn from(value: EarlyResponseStartTimingArg) -> Self {
+        match value {
+            EarlyResponseStartTimingArg::EndpointCandidateOnly => Self::EndpointCandidateOnly,
+            EarlyResponseStartTimingArg::WhileSpeaking => Self::WhileSpeaking,
+        }
+    }
+}
+
 impl From<TtsGenerationModeArg> for TtsGenerationMode {
     fn from(value: TtsGenerationModeArg) -> Self {
         match value {
@@ -700,6 +715,7 @@ pub enum QualityEarlyResponseCommand {
     Status,
     On,
     Off,
+    StartTiming { timing: EarlyResponseStartTimingArg },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2829,6 +2845,12 @@ async fn quality_early_response_command(
             })
             .await
         }
+        QualityEarlyResponseCommand::StartTiming { timing } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_early_response_start_timing(timing.into()))
+            })
+            .await
+        }
     }
 }
 
@@ -3442,7 +3464,7 @@ fn quality_help() -> String {
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
-        "quality early-response status|on|off           bool default=false applies=new_call",
+        "quality early-response status|on|off|start-timing <endpoint-candidate-only|while-speaking>",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
@@ -5538,6 +5560,7 @@ mod tests {
             .expect("early response status");
         assert!(status.lines.iter().any(|line| line == "enabled=true"));
         assert!(status.lines.iter().any(|line| line == "boundary=clause"));
+        assert!(status.lines.iter().any(|line| line == "start_timing=while_speaking"));
         assert!(
             status
                 .lines
@@ -5545,6 +5568,18 @@ mod tests {
                 .any(|line| line == "provisional_max_prebuffer_frames=1")
         );
         assert!(state.read().await.quality.config.early_response.enabled);
+
+        let timing = engine
+            .run_line("quality early-response start-timing endpoint-candidate-only")
+            .await
+            .expect("set early response start timing");
+        assert!(timing.lines[0].contains("key=early_response.start_timing"));
+        assert!(timing.lines[0].contains("value=endpoint_candidate_only"));
+        assert!(timing.lines[0].contains("applies=new_call"));
+        assert_eq!(
+            state.read().await.quality.config.early_response.start_timing,
+            EarlyResponseStartTiming::EndpointCandidateOnly
+        );
 
         let disabled = engine
             .run_line("quality early-response off")

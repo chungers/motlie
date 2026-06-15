@@ -56,6 +56,36 @@ pub enum EarlyResponseStartTiming {
     WhileSpeaking,
 }
 
+fn start_states_for_timing(timing: EarlyResponseStartTiming) -> Vec<CallerSpeechState> {
+    match timing {
+        EarlyResponseStartTiming::EndpointCandidateOnly => {
+            vec![CallerSpeechState::EndpointCandidate]
+        }
+        EarlyResponseStartTiming::WhileSpeaking => {
+            vec![
+                CallerSpeechState::Speaking,
+                CallerSpeechState::EndpointCandidate,
+            ]
+        }
+    }
+}
+
+fn update_states_for_timing(timing: EarlyResponseStartTiming) -> Vec<CallerSpeechState> {
+    match timing {
+        EarlyResponseStartTiming::EndpointCandidateOnly => {
+            vec![
+                CallerSpeechState::EndpointCandidate,
+                CallerSpeechState::Finalizing,
+            ]
+        }
+        EarlyResponseStartTiming::WhileSpeaking => vec![
+            CallerSpeechState::Speaking,
+            CallerSpeechState::EndpointCandidate,
+            CallerSpeechState::Finalizing,
+        ],
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EarlyResponseAppendMode {
@@ -85,6 +115,7 @@ pub struct EarlyResponsePolicy {
 
 impl Default for EarlyResponsePolicy {
     fn default() -> Self {
+        let start_timing = EarlyResponseStartTiming::WhileSpeaking;
         Self {
             enabled: false,
             audio_mode: EarlyResponseAudioMode::SpeakProvisionally,
@@ -94,14 +125,11 @@ impl Default for EarlyResponsePolicy {
             min_confidence: Some(0.70),
             min_stability: Some(0.80),
             missing_signal_policy: MissingSignalPolicy::Conservative,
-            allowed_start_speech_states: vec![CallerSpeechState::EndpointCandidate],
-            allowed_update_speech_states: vec![
-                CallerSpeechState::EndpointCandidate,
-                CallerSpeechState::Finalizing,
-            ],
+            allowed_start_speech_states: start_states_for_timing(start_timing),
+            allowed_update_speech_states: update_states_for_timing(start_timing),
             debounce_ms: 120,
             max_updates_per_utterance: 3,
-            start_timing: EarlyResponseStartTiming::EndpointCandidateOnly,
+            start_timing,
             append_mode: EarlyResponseAppendMode::ReplaceOnly,
             provisional_max_prebuffer_frames: 1,
         }
@@ -121,6 +149,20 @@ impl EarlyResponsePolicy {
             max_updates_per_utterance: 8,
             ..Self::default()
         }
+    }
+
+    pub fn set_start_timing(&mut self, timing: EarlyResponseStartTiming) {
+        self.start_timing = timing;
+        self.allowed_start_speech_states = start_states_for_timing(timing);
+        self.allowed_update_speech_states = update_states_for_timing(timing);
+    }
+
+    fn allows_start_speech_state(&self, state: CallerSpeechState) -> bool {
+        self.allowed_start_speech_states.contains(&state)
+    }
+
+    fn allows_update_speech_state(&self, state: CallerSpeechState) -> bool {
+        self.allowed_update_speech_states.contains(&state)
     }
 }
 
@@ -1197,20 +1239,10 @@ where
                 })
                 .unwrap_or_default();
         }
-        if active.is_none()
-            && !self
-                .policy
-                .allowed_start_speech_states
-                .contains(&partial.speech_state)
-        {
+        if active.is_none() && !self.policy.allows_start_speech_state(partial.speech_state) {
             return Vec::new();
         }
-        if active.is_some()
-            && !self
-                .policy
-                .allowed_update_speech_states
-                .contains(&partial.speech_state)
-        {
+        if active.is_some() && !self.policy.allows_update_speech_state(partial.speech_state) {
             return active
                 .map(|active| {
                     self.cancel_active(
@@ -1695,6 +1727,37 @@ mod tests {
                 speech_state: CallerSpeechState::EndpointCandidate,
             }]
         );
+    }
+
+    #[test]
+    fn default_policy_can_start_while_caller_is_speaking() {
+        let mut speaking = partial("I need a tow truck.", 7, 100);
+        speaking.speech_state = CallerSpeechState::Speaking;
+        let mut aggregator =
+            EarlyResponseAggregator::new(enabled_policy(), NoopEarlyResponseCancelSink);
+
+        assert!(matches!(
+            aggregator
+                .handle_input(EarlyResponseInput::Partial(speaking))
+                .as_slice(),
+            [EarlyResponseEvent::Started {
+                speech_state: CallerSpeechState::Speaking,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn endpoint_candidate_only_timing_does_not_start_on_speaking_partial() {
+        let mut policy = enabled_policy();
+        policy.set_start_timing(EarlyResponseStartTiming::EndpointCandidateOnly);
+        let mut speaking = partial("I need a tow truck.", 7, 100);
+        speaking.speech_state = CallerSpeechState::Speaking;
+        let mut aggregator = EarlyResponseAggregator::new(policy, NoopEarlyResponseCancelSink);
+
+        assert!(aggregator
+            .handle_input(EarlyResponseInput::Partial(speaking))
+            .is_empty());
     }
 
     #[test]

@@ -619,6 +619,7 @@ async fn run_append_speech_job_inner(
             let chunk_index = text_chunks;
             text_chunks = text_chunks.saturating_add(1);
             if job.speech.tts_generation_mode == TtsGenerationMode::Streaming {
+                let mut initial_reservoir = StreamingInitialFrameReservoir::disabled();
                 let result = stream_text_request_to_media(
                     &job.speech,
                     chunk_index,
@@ -635,6 +636,7 @@ async fn run_append_speech_job_inner(
                     &mut emitted_first_synthesis,
                     &mut emitted_first_packetize,
                     &mut emitted_prebuffer_ready,
+                    &mut initial_reservoir,
                 )
                 .await;
                 if let Err(failure) = result {
@@ -1278,6 +1280,51 @@ async fn run_buffered_speech_job_inner(
 
 const INCREMENTAL_TTS_MAX_BUFFERED_AUDIO_MS: u32 = 80;
 
+#[derive(Default)]
+struct StreamingInitialFrameReservoir {
+    enabled: bool,
+    released: bool,
+    chunks: Vec<PreparedSpeechChunk>,
+}
+
+impl StreamingInitialFrameReservoir {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            released: !enabled,
+            chunks: Vec::new(),
+        }
+    }
+
+    fn disabled() -> Self {
+        Self::new(false)
+    }
+
+    fn take_ready(
+        &mut self,
+        chunk: PreparedSpeechChunk,
+        text_chunk_index: usize,
+    ) -> Option<Vec<PreparedSpeechChunk>> {
+        if !self.enabled || self.released {
+            return Some(vec![chunk]);
+        }
+        self.chunks.push(chunk);
+        if text_chunk_index == 0 {
+            return None;
+        }
+        self.released = true;
+        Some(std::mem::take(&mut self.chunks))
+    }
+
+    fn flush(&mut self) -> Option<Vec<PreparedSpeechChunk>> {
+        if self.chunks.is_empty() {
+            return None;
+        }
+        self.released = true;
+        Some(std::mem::take(&mut self.chunks))
+    }
+}
+
 async fn run_streaming_speech_job_inner(
     job: &SpeechJob,
 ) -> Result<SpeechJobOutcome, SpeechJobFailure> {
@@ -1309,6 +1356,7 @@ async fn run_streaming_speech_job_inner(
     let mut emitted_first_synthesis = false;
     let mut emitted_first_packetize = false;
     let mut emitted_prebuffer_ready = false;
+    let mut initial_reservoir = StreamingInitialFrameReservoir::new(text_chunk_count > 1);
 
     for (text_chunk_index, text_chunk) in text_chunks.iter().enumerate() {
         if job.cancel.is_canceled() {
@@ -1329,6 +1377,23 @@ async fn run_streaming_speech_job_inner(
             &mut first_packet_for_playback,
             &mut emitted_first_synthesis,
             &mut emitted_first_packetize,
+            &mut emitted_prebuffer_ready,
+            &mut initial_reservoir,
+        )
+        .await?;
+    }
+
+    if let Some(prepared_chunks) = initial_reservoir.flush() {
+        enqueue_streaming_prepared_chunks(
+            job,
+            text_chunk_count,
+            job.tts_chunking_enabled,
+            false,
+            synthesis_started_at,
+            prepared_chunks,
+            &mut queued_frames,
+            &mut enqueue_duration,
+            &mut first_packet_for_playback,
             &mut emitted_prebuffer_ready,
         )
         .await?;
@@ -1409,6 +1474,7 @@ async fn stream_text_request_to_media(
     emitted_first_synthesis: &mut bool,
     emitted_first_packetize: &mut bool,
     emitted_prebuffer_ready: &mut bool,
+    initial_reservoir: &mut StreamingInitialFrameReservoir,
 ) -> Result<(), SpeechJobFailure> {
     if job.cancel.is_canceled() {
         return Ok(());
@@ -1512,6 +1578,7 @@ async fn stream_text_request_to_media(
             first_packet_for_playback,
             emitted_first_packetize,
             emitted_prebuffer_ready,
+            initial_reservoir,
         )
         .await?;
     }
@@ -1537,6 +1604,7 @@ async fn stream_text_request_to_media(
         first_packet_for_playback,
         emitted_first_packetize,
         emitted_prebuffer_ready,
+        initial_reservoir,
     )
     .await?;
 
@@ -1588,6 +1656,7 @@ async fn enqueue_streaming_frames(
     first_packet_for_playback: &mut bool,
     emitted_first_packetize: &mut bool,
     emitted_prebuffer_ready: &mut bool,
+    initial_reservoir: &mut StreamingInitialFrameReservoir,
 ) -> Result<(), SpeechJobFailure> {
     if frames.is_empty() {
         return Ok(());
@@ -1614,15 +1683,54 @@ async fn enqueue_streaming_frames(
         .await;
     }
     *total_frames = (*total_frames).saturating_add(frames.len());
-    let mut prepared = vec![PreparedSpeechChunk {
+    let prepared = PreparedSpeechChunk {
         text_chunk_index,
         audio_chunk_count,
         sample_rate_hz,
         frames,
-    }];
+    };
+    let Some(prepared_chunks) = initial_reservoir.take_ready(prepared, text_chunk_index) else {
+        return Ok(());
+    };
+    enqueue_streaming_prepared_chunks(
+        job,
+        text_chunk_count,
+        text_chunking_enabled,
+        append_stream,
+        synthesis_started_at,
+        prepared_chunks,
+        queued_frames,
+        enqueue_duration,
+        first_packet_for_playback,
+        emitted_prebuffer_ready,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_streaming_prepared_chunks(
+    job: &SpeechJob,
+    text_chunk_count: usize,
+    text_chunking_enabled: bool,
+    append_stream: bool,
+    synthesis_started_at: Instant,
+    mut prepared: Vec<PreparedSpeechChunk>,
+    queued_frames: &mut usize,
+    enqueue_duration: &mut Duration,
+    first_packet_for_playback: &mut bool,
+    emitted_prebuffer_ready: &mut bool,
+) -> Result<(), SpeechJobFailure> {
+    if prepared.is_empty() {
+        return Ok(());
+    }
     if !*emitted_prebuffer_ready {
         *emitted_prebuffer_ready = true;
         let buffered_frames = prepared_frame_count(&prepared);
+        let prepared_text_chunks = prepared
+            .iter()
+            .map(|chunk| chunk.text_chunk_index)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         emit_speech_span(
             job,
             "tts.prebuffer_ready",
@@ -1633,12 +1741,14 @@ async fn enqueue_streaming_frames(
             serde_json::json!({
                 "playback_id": job.playback_id.as_str(),
                 "tts_backend": job.tts_backend.label(),
-                "prepared_text_chunks": 1,
+                "prepared_text_chunks": prepared_text_chunks,
+                "prepared_frame_batches": prepared.len(),
                 "text_chunks": text_chunk_count,
                 "frames": buffered_frames,
                 "text_chunking_enabled": text_chunking_enabled,
                 "append_stream": append_stream,
                 "streaming_incremental": true,
+                "streaming_initial_reservoir": !append_stream && text_chunk_count > 1,
                 "max_text_chunk_chars": job.tts_max_text_chunk_chars,
                 "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                 "max_buffered_audio_ms": INCREMENTAL_TTS_MAX_BUFFERED_AUDIO_MS,
@@ -2063,6 +2173,77 @@ mod tests {
         }
     }
 
+    struct BlockingSecondIncrementalTtsFactory {
+        sample_rate_hz: u32,
+        samples_per_chunk: usize,
+        calls: AtomicUsize,
+        second_started: Notify,
+        release_second: Notify,
+    }
+
+    impl BlockingSecondIncrementalTtsFactory {
+        fn new(sample_rate_hz: u32, samples_per_chunk: usize) -> Self {
+            Self {
+                sample_rate_hz,
+                samples_per_chunk,
+                calls: AtomicUsize::new(0),
+                second_started: Notify::new(),
+                release_second: Notify::new(),
+            }
+        }
+
+        async fn wait_for_second_call(&self) {
+            loop {
+                if self.calls.load(Ordering::SeqCst) >= 2 {
+                    return;
+                }
+                self.second_started.notified().await;
+            }
+        }
+
+        fn release_second_call(&self) {
+            self.release_second.notify_waiters();
+        }
+    }
+
+    #[async_trait]
+    impl OutboundTtsFactory for BlockingSecondIncrementalTtsFactory {
+        async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+            bail!("buffered synthesis should not be used by this test")
+        }
+
+        async fn synthesize_incremental(
+            &self,
+            _text: String,
+            _cancel: IncrementalSpeechCancelToken,
+            _request_label: Option<String>,
+            _max_buffered_audio_ms: u32,
+        ) -> anyhow::Result<Box<dyn OutboundIncrementalTtsStream>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 2 {
+                self.second_started.notify_one();
+                self.release_second.notified().await;
+            }
+            Ok(Box::new(SingleChunkIncrementalTtsStream {
+                chunk: Some(TtsAudio::new(
+                    vec![call as i16; self.samples_per_chunk],
+                    self.sample_rate_hz,
+                )?),
+                audio_ms: (self.samples_per_chunk as u64)
+                    .saturating_mul(1_000)
+                    .saturating_div(self.sample_rate_hz as u64),
+            }))
+        }
+
+        fn supports_incremental(&self) -> bool {
+            true
+        }
+
+        fn label(&self) -> &'static str {
+            "blocking-incremental-test-tts"
+        }
+    }
+
     struct ModeTrackingTtsFactory {
         sample_rate_hz: u32,
         samples_per_chunk: usize,
@@ -2421,6 +2602,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_generation_holds_initial_frames_until_second_text_chunk_has_audio() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_outbound_call(
+                TelnyxIds {
+                    call_control_id: "call-control-1".to_string(),
+                    call_session_id: Some("session-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                None,
+                None,
+                CallStatus::MediaStarted,
+            )
+        };
+        {
+            let mut guard = state.write().await;
+            guard
+                .quality
+                .config
+                .set_tts_generation_mode(TtsGenerationMode::Streaming);
+            guard.quality.config.set_tts_first_chunk_max_chars(40);
+            guard.quality.config.set_tts_max_text_chunk_chars(90);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
+        }
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let factory = Arc::new(BlockingSecondIncrementalTtsFactory::new(24_000, 2_400));
+        let tts = Arc::new(TtsRegistry::new(factory.clone(), factory.clone()));
+
+        let queued = queue_speech(
+            &state,
+            &media_registry,
+            &tts,
+            LiveTtsBackend::Kokoro82m,
+            gateway_call_id,
+            "Alpha beta gamma. This second sentence blocks so a one-fragment first chunk cannot starve playback."
+                .to_string(),
+            "test streaming reservoir",
+        )
+        .await
+        .expect("speech should be queued");
+
+        timeout(Duration::from_secs(1), factory.wait_for_second_call())
+            .await
+            .expect("second incremental request should start");
+        assert!(
+            timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "committed streaming should hold first text chunk frames until second chunk has audio"
+        );
+
+        factory.release_second_call();
+        let mut saw_frame = false;
+        for _ in 0..16 {
+            let Some(command) = timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .expect("speech job should finish")
+            else {
+                break;
+            };
+            match command {
+                OutboundMediaCommand::Frame(frame) => {
+                    assert_eq!(frame.playback_id, queued.playback_id);
+                    saw_frame = true;
+                }
+                OutboundMediaCommand::Mark { playback_id } => {
+                    assert_eq!(playback_id, queued.playback_id);
+                    break;
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+        assert!(saw_frame);
+    }
+
+    #[tokio::test]
     async fn queue_speech_waits_for_all_chunks_before_enqueuing_frames() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = {
@@ -2694,11 +2958,10 @@ mod tests {
         assert_eq!(tts.playback_id, queued.playback_id);
         assert_eq!(tts.status, TtsPlaybackStatus::Canceled);
         assert!(tts.error.is_none());
-        assert!(
-            guard.logs.iter().any(|entry| {
-                entry.level == LogLevel::Info && entry.message.contains("stopped")
-            })
-        );
+        assert!(guard
+            .logs
+            .iter()
+            .any(|entry| { entry.level == LogLevel::Info && entry.message.contains("stopped") }));
         assert!(!guard.logs.iter().any(|entry| {
             entry.level == LogLevel::Error && entry.message.contains("speak failed")
         }));

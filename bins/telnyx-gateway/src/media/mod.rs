@@ -3779,9 +3779,6 @@ async fn record_transcript_events(
     drop(guard);
     if let Some(early_response) = context.early_response.as_ref() {
         for partial_turn in &partial_turns {
-            if matches!(partial_turn.speech_state, CallerSpeechState::Speaking) {
-                early_response.cancel_call(EarlyResponseCancelReason::CallerBargeIn);
-            }
             early_response.try_send(EarlyResponseInput::Partial(EarlyResponsePartial {
                 call_id: gateway_call_id.to_string(),
                 utterance_id: partial_turn.utterance_id.clone(),
