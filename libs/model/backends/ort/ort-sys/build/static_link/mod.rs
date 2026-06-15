@@ -14,6 +14,86 @@ pub enum BinariesSource {
     UserProvided,
 }
 
+fn link_cuda_provider_prerequisites(provider_lib_dir: &Path, target_os: &str) {
+    if target_os != "linux" {
+        log::warning!(
+            "ONNX Runtime CUDA provider archive is present, but CUDA prerequisite linking is only mapped for Linux"
+        );
+        return;
+    }
+
+    for dir in cuda_lib_dir_candidates() {
+        if dir.is_dir() {
+            add_search_dir(dir);
+        }
+    }
+    for dir in cudnn_lib_dir_candidates() {
+        if dir.is_dir() {
+            add_search_dir(dir);
+        }
+    }
+
+    for lib in [
+        "cublasLt_static",
+        "cublas_static",
+        "curand_static",
+        "cufft_static",
+        "cudart_static",
+        "cudadevrt",
+        "culibos",
+    ] {
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
+
+    if provider_lib_dir.join("libmotlie_ort_cuda_dlink.a").exists() {
+        println!("cargo:rustc-link-lib=static=motlie_ort_cuda_dlink");
+    }
+
+    println!("cargo:rustc-link-lib=dylib=cuda");
+    println!("cargo:rustc-link-lib=dylib=cudnn");
+    for lib in ["dl", "pthread", "rt", "m"] {
+        println!("cargo:rustc-link-lib={lib}");
+    }
+}
+
+fn cuda_lib_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for home in cuda_home_candidates() {
+        dirs.push(home.join("targets").join("sbsa-linux").join("lib"));
+        dirs.push(home.join("targets").join("x86_64-linux").join("lib"));
+        dirs.push(home.join("lib64"));
+        dirs.push(home.join("lib"));
+    }
+    dirs
+}
+
+fn cuda_home_candidates() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    for var in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Some(path) = env::var_os(var) {
+            homes.push(PathBuf::from(path));
+        }
+    }
+    homes.push(PathBuf::from("/usr/local/cuda"));
+    homes.push(PathBuf::from("/usr/local/cuda-13.0"));
+    homes
+}
+
+fn cudnn_lib_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for var in ["CUDNN_HOME", "CUDNN_PATH"] {
+        if let Some(path) = env::var_os(var) {
+            let root = PathBuf::from(path);
+            dirs.push(root.join("lib64"));
+            dirs.push(root.join("lib"));
+            dirs.push(root);
+        }
+    }
+    dirs.push(PathBuf::from("/usr/lib/aarch64-linux-gnu"));
+    dirs.push(PathBuf::from("/usr/lib/x86_64-linux-gnu"));
+    dirs
+}
+
 pub fn static_link_prerequisites(source: BinariesSource) {
     let target_triple = env::var("TARGET").unwrap();
 
@@ -145,6 +225,9 @@ pub fn static_link(base_lib_dir: &Path) -> bool {
         .exists()
     {
         println!("cargo:rustc-link-lib=static=onnxruntime");
+        if optional_link_lib(base_lib_dir, "onnxruntime_providers_cuda") {
+            link_cuda_provider_prerequisites(base_lib_dir, &target_os);
+        }
         return true;
     }
 
@@ -167,6 +250,12 @@ pub fn static_link(base_lib_dir: &Path) -> bool {
             base_lib_dir.join(&profile),
             base_lib_dir.join("lib"),
             base_lib_dir.join(&profile).join("_deps"),
+            Box::new(|p: PathBuf, _| p),
+        ),
+        (
+            base_lib_dir.to_owned(),
+            base_lib_dir.join("lib"),
+            base_lib_dir.join("_deps"),
             Box::new(|p: PathBuf, _| p),
         ),
         (
@@ -434,6 +523,9 @@ pub fn static_link(base_lib_dir: &Path) -> bool {
             optional_link_lib(&lib_dir, "onnxruntime_providers_acl");
             optional_link_lib(&lib_dir, "onnxruntime_providers_armnn");
             optional_link_lib(&lib_dir, "onnxruntime_providers_azure");
+            if optional_link_lib(&lib_dir, "onnxruntime_providers_cuda") {
+                link_cuda_provider_prerequisites(&lib_dir, &target_os);
+            }
             if optional_link_lib(&lib_dir, "onnxruntime_providers_coreml") {
                 println!("cargo:rustc-link-lib=framework=CoreML");
                 println!("cargo:rustc-link-lib=coreml_proto");

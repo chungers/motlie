@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, QuantizationScheme,
+    StartOptions,
 };
 use motlie_model_moonshine::{MoonshineHandle, MoonshineStreamingBundle, MoonshineStreamingSpec};
 
@@ -38,7 +39,7 @@ pub(crate) fn identity() -> ModelIdentity {
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
-            build: vec![BuildConstraint::CpuOnly],
+            build: Vec::new(),
         },
     }
 }
@@ -56,7 +57,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(STREAMING_CONFIG_FILE),
             ArtifactRule::Exact(TOKENIZER_JSON_FILE),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Fp32),
     }
 }
 
@@ -73,10 +74,7 @@ pub fn descriptor() -> BundleDescriptor {
         backend: BackendKind::Ort,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
-            build: vec![
-                BuildConstraint::CpuOnly,
-                BuildConstraint::Feature("backend-moonshine".into()),
-            ],
+            build: vec![BuildConstraint::Feature("backend-moonshine".into())],
         },
         eval_tracks: identity.eval_tracks,
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
@@ -187,7 +185,7 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "moonshine_streaming_en");
         assert_eq!(descriptor.display_name, "Moonshine Streaming EN");
         assert_eq!(descriptor.backend, BackendKind::Ort);
-        assert!(descriptor
+        assert!(!descriptor
             .requirements
             .build
             .contains(&BuildConstraint::CpuOnly));

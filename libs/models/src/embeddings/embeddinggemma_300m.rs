@@ -4,7 +4,7 @@ use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, CheckpointFormat, ContentKind, EmbeddingDistance,
     EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
-    StartOptions,
+    QuantizationScheme, StartOptions,
 };
 use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingHandle, MistralEmbeddingSpec};
 
@@ -70,7 +70,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Suffix(".safetensors"),
             ArtifactRule::Suffix(".safetensors.index.json"),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Fp32),
     }
 }
 
@@ -111,7 +111,7 @@ pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
 }
 
 pub fn bundle() -> crate::CuratedBundle {
-    crate::CuratedBundle::GoogleGemma300m
+    crate::CuratedBundle::EmbeddingGemma300m
 }
 
 pub async fn start(options: StartOptions) -> Result<MistralEmbeddingHandle, ModelError> {

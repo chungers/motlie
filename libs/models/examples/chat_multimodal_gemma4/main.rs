@@ -20,7 +20,7 @@ mod gemma4_multimodal_example {
     use anyhow::{bail, ensure, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart,
-        QuantizationBits, StartOptions,
+        QuantizationScheme, QuantizationSupport, StartOptions,
     };
     use motlie_model_mistral::MistralMultimodalSpec;
     use motlie_models::{
@@ -81,15 +81,13 @@ mod gemma4_multimodal_example {
         if input.trim().is_empty() {
             bail!(
                 "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b[,model-gemma4-e4b] --example chat_multimodal_gemma4 -- \
-             [--model=gemma4-e2b|gemma4-e4b] [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
+             [--model=gemma4-e2b|gemma4-e4b] [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--precision=q4|q8|bf16] [--image=/path/to/image] <prompt>"
             );
         }
 
         let selected_model = select_model(model_name.as_deref())?;
-        let quantization = resolve_quantization(
-            precision.as_deref(),
-            selected_model.recommended_quantization,
-        )?;
+        let quantization =
+            resolve_quantization(precision.as_deref(), &selected_model.quantization_support)?;
         let selector_label = selected_model.selector_label.clone();
         let bundle_id = selected_model.bundle_id.clone();
         let descriptor = selected_model.descriptor.clone();
@@ -148,7 +146,7 @@ mod gemma4_multimodal_example {
                 artifact_policy: Some(ArtifactPolicy::LocalOnly {
                     root: artifact_root.clone(),
                 }),
-                quantization,
+                quantization_scheme: quantization,
                 ..Default::default()
             })
             .await
@@ -301,7 +299,7 @@ mod gemma4_multimodal_example {
         descriptor: BundleDescriptor,
         bundle: CuratedBundle,
         generation_defaults: motlie_model::GenerationParams,
-        recommended_quantization: Option<QuantizationBits>,
+        quantization_support: QuantizationSupport,
     }
 
     fn select_model(model_name: Option<&str>) -> Result<SelectedGemmaModel> {
@@ -355,20 +353,34 @@ mod gemma4_multimodal_example {
             descriptor: model.descriptor(),
             bundle: model.bundle(),
             generation_defaults: spec.recommended_generation_params,
-            recommended_quantization: spec.quantization.recommended(),
+            quantization_support: spec.quantization,
         }
     }
 
     fn resolve_quantization(
         precision: Option<&str>,
-        recommended: Option<QuantizationBits>,
-    ) -> Result<Option<QuantizationBits>> {
+        support: &QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
         match precision {
-            Some("q4") => Ok(Some(QuantizationBits::Four)),
-            Some("q8") => Ok(Some(QuantizationBits::Eight)),
-            Some("f32") | Some("full") | Some("none") => Ok(None),
-            None => Ok(recommended),
-            Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
+            Some("q4") => resolve_supported_precision("q4", QuantizationScheme::IsqQ4, support),
+            Some("q8") => resolve_supported_precision("q8", QuantizationScheme::IsqQ8, support),
+            Some("bf16") | Some("default") | None => Ok(support.recommended()),
+            Some(other) => bail!("unknown precision `{other}` — use q4, q8, or bf16"),
+        }
+    }
+
+    fn resolve_supported_precision(
+        label: &str,
+        scheme: QuantizationScheme,
+        support: &QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        if support.supports(scheme) {
+            Ok(Some(scheme))
+        } else {
+            bail!(
+                "precision `{label}` maps to `{scheme}` but the selected model supports {:?}",
+                support.supported()
+            )
         }
     }
 

@@ -23,6 +23,14 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(link_error)");
     println!("cargo:rerun-if-env-changed=MOTLIE_ORT_SOURCE");
     println!("cargo:rerun-if-env-changed=SHERPA_ONNX_ARCHIVE_DIR");
+    println!("cargo:rerun-if-env-changed=MOTLIE_ORT_CUDA_STATIC_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=MOTLIE_ORT_CUDA_ARCH");
+    println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=CUDNN_HOME");
+    println!("cargo:rerun-if-env-changed=CUDNN_PATH");
+    println!("cargo:rerun-if-changed=build/patches/onnxruntime-v1.24.2-static-cuda.patch");
+    println!("cargo:rerun-if-changed=../vendor/onnxruntime/VERSION_NUMBER");
 
     if env::var("DOCS_RS").is_ok() || cfg!(feature = "disable-linking") {
         // On docs.rs, A) we don't need to link, and B) we don't have network, so we couldn't download anything if we wanted to.

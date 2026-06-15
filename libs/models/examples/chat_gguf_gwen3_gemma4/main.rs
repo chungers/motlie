@@ -11,12 +11,12 @@ fn main() -> anyhow::Result<()> {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 )))]
 mod gguf_example {
     pub fn run() -> anyhow::Result<()> {
         anyhow::bail!(
-            "enable at least one GGUF chat feature: model-qwen3-4b-gguf, model-qwen3-6-27b-gguf, model-gemma4-e2b-gguf, model-gemma4-e4b-gguf, model-gemma4-12b-gguf, or model-gemma4-12b-qat-q4-0-gguf"
+            "enable at least one GGUF chat feature: model-qwen3-4b-gguf, model-qwen3-6-27b-gguf, model-gemma4-e2b-gguf, model-gemma4-e4b-gguf, model-gemma4-12b-gguf, or model-gemma4-12b-qat-gguf"
         )
     }
 }
@@ -27,13 +27,13 @@ mod gguf_example {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 ))]
 mod gguf_example {
     use anyhow::{bail, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, BundleId, ChatMessage, ChatModel, ChatRequest, ChatRole,
-        CompletionModel, GenerationParams, QuantizationBits, StartOptions, ThinkingMode,
+        CompletionModel, GenerationParams, QuantizationScheme, StartOptions, ThinkingMode,
     };
     use motlie_model_llama_cpp::LlamaCppTextSpec;
     use motlie_models::{
@@ -92,21 +92,14 @@ mod gguf_example {
         if input.trim().is_empty() {
             bail!(
                 "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- \
-             [--download-artifacts] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf|google/gemma4_e4b_gguf|google/gemma4_12b_gguf|google/gemma4_12b_qat_q4_0_gguf] \
-             [--precision=q4|q5|q8|f16] [--thinking=off|disabled|auto] [--system=TEXT|--no-system] [--assistant=TEXT] <prompt>\n\n\
+             [--download-artifacts] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf|google/gemma4_e4b_gguf|google/gemma4_12b_gguf|google/gemma4_12b_qat_gguf] \
+             [--precision=q4|q5|q8] [--thinking=off|disabled|auto] [--system=TEXT|--no-system] [--assistant=TEXT] <prompt>\n\n\
              This example demonstrates chat generation via the llama.cpp backend using GGUF-quantized weights."
             );
         }
 
         let selected = select_model(chat_selector)?;
-        let quantization = match precision.as_deref() {
-            Some("q4") => Some(QuantizationBits::Four),
-            Some("q5") => Some(QuantizationBits::Five),
-            Some("q8") => Some(QuantizationBits::Eight),
-            Some("f16") => None,
-            None => selected.spec.quantization.recommended(),
-            Some(other) => bail!("unknown precision `{other}` — use q4, q5, q8, or f16"),
-        };
+        let quantization = resolve_quantization(precision.as_deref(), &selected.spec.quantization)?;
         let chat_params =
             GenerationParams::default().with_defaults(&selected.spec.recommended_generation_params);
         let effective_thinking = thinking.unwrap_or(selected.spec.thinking);
@@ -220,7 +213,7 @@ mod gguf_example {
                 artifact_policy: Some(ArtifactPolicy::LocalOnly {
                     root: artifact_root.clone(),
                 }),
-                quantization,
+                quantization_scheme: quantization,
                 ..Default::default()
             })
             .await
@@ -459,10 +452,10 @@ mod gguf_example {
         not(feature = "model-gemma4-e4b-gguf"),
         not(feature = "model-gemma4-e2b-gguf"),
         not(feature = "model-gemma4-12b-gguf"),
-        feature = "model-gemma4-12b-qat-q4-0-gguf"
+        feature = "model-gemma4-12b-qat-gguf"
     ))]
     fn default_gguf_model() -> Result<ChatModels> {
-        Ok(ChatModels::Gemma4_12B_QatQ4_0_Gguf)
+        Ok(ChatModels::Gemma4_12B_Qat_Gguf)
     }
 
     #[cfg(all(
@@ -470,11 +463,53 @@ mod gguf_example {
         not(feature = "model-gemma4-e4b-gguf"),
         not(feature = "model-gemma4-e2b-gguf"),
         not(feature = "model-gemma4-12b-gguf"),
-        not(feature = "model-gemma4-12b-qat-q4-0-gguf"),
+        not(feature = "model-gemma4-12b-qat-gguf"),
         feature = "model-qwen3-6-27b-gguf"
     ))]
     fn default_gguf_model() -> Result<ChatModels> {
         Ok(ChatModels::Qwen3_6_27B_Gguf)
+    }
+
+    fn resolve_quantization(
+        precision: Option<&str>,
+        support: &motlie_model::QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        match precision {
+            Some("q4") => resolve_q4(support),
+            Some("q5") => resolve_supported("q5", QuantizationScheme::GgufQ5_K_M, support),
+            Some("q8") => resolve_supported("q8", QuantizationScheme::GgufQ8_0, support),
+            None | Some("default") => Ok(support.recommended()),
+            Some(other) => bail!("unknown precision `{other}` — use q4, q5, or q8"),
+        }
+    }
+
+    fn resolve_q4(
+        support: &motlie_model::QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        for scheme in [QuantizationScheme::GgufQ4_0, QuantizationScheme::GgufQ4_K_M] {
+            if support.supports(scheme) {
+                return Ok(Some(scheme));
+            }
+        }
+        bail!(
+            "precision `q4` is not supported by the selected GGUF model: {:?}",
+            support.supported()
+        )
+    }
+
+    fn resolve_supported(
+        label: &str,
+        scheme: QuantizationScheme,
+        support: &motlie_model::QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        if support.supports(scheme) {
+            Ok(Some(scheme))
+        } else {
+            bail!(
+                "precision `{label}` maps to `{scheme}` but the selected GGUF model supports {:?}",
+                support.supported()
+            )
+        }
     }
 
     fn spec_for_chat_model(model: ChatModels) -> Result<LlamaCppTextSpec> {
@@ -490,20 +525,20 @@ mod gguf_example {
             ChatModels::Gemma4E4B_Gguf => Ok(LlamaCppTextSpec::gemma4_e4b()),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             ChatModels::Gemma4_12B_Gguf => Ok(LlamaCppTextSpec::gemma4_12b()),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            ChatModels::Gemma4_12B_QatQ4_0_Gguf => Ok(LlamaCppTextSpec::gemma4_12b_qat_q4_0()),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            ChatModels::Gemma4_12B_Qat_Gguf => Ok(LlamaCppTextSpec::gemma4_12b_qat()),
             other => bail!("`{}` is not a llama.cpp GGUF chat model", other.as_str()),
         }
     }
 
     fn quantization_label_for_model(
         model: ChatModels,
-        quantization: Option<QuantizationBits>,
+        quantization: Option<QuantizationScheme>,
     ) -> &'static str {
-        #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-        if matches!(model, ChatModels::Gemma4_12B_QatQ4_0_Gguf) {
+        #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+        if matches!(model, ChatModels::Gemma4_12B_Qat_Gguf) {
             return match quantization {
-                Some(QuantizationBits::Four) => "GGUF Q4_0",
+                Some(QuantizationScheme::GgufQ4_0) => "GGUF Q4_0",
                 _ => "unsupported QAT GGUF precision",
             };
         }
@@ -526,8 +561,8 @@ mod gguf_example {
             return ThinkingMode::Disabled;
         }
 
-        #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-        if matches!(model, ChatModels::Gemma4_12B_QatQ4_0_Gguf) {
+        #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+        if matches!(model, ChatModels::Gemma4_12B_Qat_Gguf) {
             return ThinkingMode::Disabled;
         }
 

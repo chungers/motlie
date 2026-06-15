@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, map_quantization_bits, observe_embedding_request,
+    configure_artifact_policy, lock_metrics, map_quantization_scheme, observe_embedding_request,
     observe_memory, should_force_cpu, snapshot_embedding_metrics, EmbeddingMetricState,
     RuntimeMetricState,
 };
@@ -13,7 +13,7 @@ use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest,
     EmbeddingResponse, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
-    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    ModelMetricSnapshot, QuantizationScheme, QuantizationSupport, ResolvedCheckpoint, StartOptions,
     UnsupportedChat, UnsupportedCompletion,
 };
 
@@ -54,7 +54,14 @@ impl MistralEmbeddingSpec {
             model_id: "google/embeddinggemma-300m",
             arch: MistralEmbeddingArch::EmbeddingGemma,
             capabilities: Capabilities::embeddings_only(),
-            quantization: QuantizationSupport::none(),
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationScheme::Fp32],
+                QuantizationScheme::Fp32,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("curated quantization construction failed (this is a bug): {e}");
+                QuantizationSupport::without_recommended([QuantizationScheme::Fp32])
+            }),
         }
     }
 
@@ -65,7 +72,17 @@ impl MistralEmbeddingSpec {
             model_id: "Qwen/Qwen3-Embedding-0.6B",
             arch: MistralEmbeddingArch::Qwen3Embedding,
             capabilities: Capabilities::embeddings_only(),
-            quantization: QuantizationSupport::without_recommended([QuantizationBits::Eight]),
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationScheme::Bf16, QuantizationScheme::IsqQ8],
+                QuantizationScheme::Bf16,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("curated quantization construction failed (this is a bug): {e}");
+                QuantizationSupport::without_recommended([
+                    QuantizationScheme::Bf16,
+                    QuantizationScheme::IsqQ8,
+                ])
+            }),
         }
     }
 }
@@ -126,7 +143,7 @@ impl BackendAdapter for MistralEmbeddingAdapter {
     ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
         let (model_id, options) = crate::common::resolve_local_checkpoint(
             checkpoint,
             CheckpointFormat::Safetensors,
@@ -189,7 +206,7 @@ impl ModelBundle for MistralEmbeddingBundle {
         let resolved_quantization = self
             .metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
         let model =
             build_embedding_model(self.model_id, self.arch, resolved_quantization, options).await?;
 
@@ -345,7 +362,7 @@ fn new_embedding_handle(
     display_name: String,
     capabilities: Capabilities,
     quantization: QuantizationSupport,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
     model: mistralrs::Model,
 ) -> MistralEmbeddingHandle {
     let metrics = Arc::new(Mutex::new(EmbeddingMetricsState::default()));
@@ -373,12 +390,12 @@ fn new_embedding_handle(
 async fn build_embedding_model(
     model_id: &str,
     arch: MistralEmbeddingArch,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization: _, // already resolved by caller
+        quantization_scheme: _, // already resolved by caller
         unpack_root,
         max_concurrency,
     } = options;
@@ -399,12 +416,22 @@ async fn build_embedding_model(
         hf_cache_root = configured.hf_cache_root;
     }
 
-    let mut builder = EmbeddingModelBuilder::new(model_target)
-        .with_loader_type(arch.loader_type())
-        .with_dtype(ModelDType::F32);
+    let mut builder = EmbeddingModelBuilder::new(model_target).with_loader_type(arch.loader_type());
 
-    if let Some(bits) = resolved_quantization {
-        builder = builder.with_auto_isq(map_quantization_bits(bits)?);
+    if let Some(scheme) = resolved_quantization {
+        builder = match scheme {
+            QuantizationScheme::Bf16 => builder.with_dtype(ModelDType::BF16),
+            QuantizationScheme::Fp16 => builder.with_dtype(ModelDType::F16),
+            QuantizationScheme::Fp32 => builder.with_dtype(ModelDType::F32),
+            QuantizationScheme::IsqQ4 | QuantizationScheme::IsqQ8 => {
+                builder.with_auto_isq(map_quantization_scheme(scheme)?)
+            }
+            other => {
+                return Err(ModelError::InvalidConfiguration(format!(
+                    "mistral.rs embedding backend does not support {other:?} quantization"
+                )))
+            }
+        };
     }
 
     if should_force_cpu() {
@@ -453,9 +480,13 @@ mod tests {
         assert_eq!(spec.model_id, "Qwen/Qwen3-Embedding-0.6B");
         assert_eq!(spec.arch, MistralEmbeddingArch::Qwen3Embedding);
         assert!(spec.capabilities.supports(CapabilityKind::Embeddings));
-        assert_eq!(spec.quantization.recommended(), None);
-        assert!(spec.quantization.supports(QuantizationBits::Eight));
-        assert!(!spec.quantization.supports(QuantizationBits::Four));
+        assert_eq!(
+            spec.quantization.recommended(),
+            Some(QuantizationScheme::Bf16)
+        );
+        assert!(spec.quantization.supports(QuantizationScheme::Bf16));
+        assert!(spec.quantization.supports(QuantizationScheme::IsqQ8));
+        assert!(!spec.quantization.supports(QuantizationScheme::IsqQ4));
     }
 
     #[test]
@@ -468,8 +499,12 @@ mod tests {
         );
         assert_eq!(adapter.backend_kind(), BackendKind::MistralRs);
         assert_eq!(adapter.capabilities(), &Capabilities::embeddings_only());
-        assert_eq!(adapter.quantization().recommended(), None);
-        assert!(adapter.quantization().supports(QuantizationBits::Eight));
+        assert_eq!(
+            adapter.quantization().recommended(),
+            Some(QuantizationScheme::Bf16)
+        );
+        assert!(adapter.quantization().supports(QuantizationScheme::Bf16));
+        assert!(adapter.quantization().supports(QuantizationScheme::IsqQ8));
     }
 
     #[tokio::test]

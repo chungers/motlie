@@ -96,7 +96,7 @@ impl BackendAdapter for PiperSpeechAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.model_filename)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -156,7 +156,7 @@ impl PiperSpeechBundle {
     pub async fn start_typed(&self, options: StartOptions) -> Result<PiperHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.spec.model_filename, policy)?
@@ -410,9 +410,14 @@ struct PiperSynthesisScales {
 }
 
 fn piper_ort_target() -> OrtExecutionTarget {
-    match std::env::var("MOTLIE_PIPER_ALLOW_CUDA") {
-        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => OrtExecutionTarget::Auto,
-        _ => OrtExecutionTarget::CpuOnly,
+    #[cfg(feature = "cuda")]
+    {
+        OrtExecutionTarget::Auto
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        OrtExecutionTarget::CpuOnly
     }
 }
 
@@ -445,10 +450,8 @@ fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelErr
     let target = piper_ort_target();
     let execution_target = resolved_execution_target(target);
     Ok(PiperRuntime {
-        // @codex-tts 2026-04-27 -- Piper exits with glibc heap corruption on this host when
-        // the ONNX Runtime CUDA execution provider is enabled during teardown. Default to CPU
-        // for Piper as a stability workaround, but allow explicit opt-in probing with
-        // MOTLIE_PIPER_ALLOW_CUDA=1 on hosts that may not reproduce the crash. See issue #230.
+        // Target selection is feature-driven and resolved once so runtime telemetry
+        // exactly matches the ORT execution provider used by the session.
         session: Mutex::new(build_session_with_target(
             "piper",
             &artifacts.model,

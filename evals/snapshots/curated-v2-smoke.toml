@@ -578,8 +578,8 @@ max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
 
 [[cells]]
-id = "gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0"
-bundle_id = "gemma4_12b_qat_q4_0_gguf"
+id = "gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0"
+bundle_id = "gemma4_12b_qat_gguf"
 scenario = "chat_smoke"
 capability = "chat"
 depth = "smoke"
@@ -587,7 +587,7 @@ model_family = "gemma"
 checkpoint_format = "gguf"
 quantization = "q4_0"
 backend = "llama_cpp"
-features = ["model-gemma4-12b-qat-q4-0-gguf"]
+features = ["model-gemma4-12b-qat-gguf"]
 profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
 [cells.profile_features]
 "apple-metal" = ["metal", "accelerate"]
@@ -601,8 +601,8 @@ max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
 
 [[cells]]
-id = "gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0"
-bundle_id = "gemma4_12b_qat_q4_0_gguf"
+id = "gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0"
+bundle_id = "gemma4_12b_qat_gguf"
 scenario = "bench_chat_startup"
 capability = "perf"
 depth = "smoke"
@@ -610,7 +610,7 @@ model_family = "gemma"
 checkpoint_format = "gguf"
 quantization = "q4_0"
 backend = "llama_cpp"
-features = ["model-gemma4-12b-qat-q4-0-gguf"]
+features = ["model-gemma4-12b-qat-gguf"]
 profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
 [cells.profile_features]
 "apple-metal" = ["metal", "accelerate"]
@@ -624,8 +624,8 @@ max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
 
 [[cells]]
-id = "gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0"
-bundle_id = "gemma4_12b_qat_q4_0_gguf"
+id = "gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0"
+bundle_id = "gemma4_12b_qat_gguf"
 scenario = "tool_use_weather_cel_smoke"
 capability = "tool_use"
 depth = "smoke"
@@ -633,7 +633,7 @@ model_family = "gemma"
 checkpoint_format = "gguf"
 quantization = "q4_0"
 backend = "llama_cpp"
-features = ["model-gemma4-12b-qat-q4-0-gguf"]
+features = ["model-gemma4-12b-qat-gguf"]
 profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
 [cells.profile_features]
 "apple-metal" = ["metal", "accelerate"]
@@ -701,6 +701,28 @@ cpu_depth_allowed = ["smoke"]
 [[cells]]
 id = "sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default"
 bundle_id = "sherpa_onnx_streaming_zipformer_en"
+scenario = "asr_short_transcription"
+capability = "asr"
+depth = "smoke"
+model_family = "sherpa_onnx"
+checkpoint_format = "onnx"
+quantization = "default"
+backend = "sherpa_onnx"
+features = ["model-sherpa-onnx-streaming"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "sherpa-onnx-cuda"]
+"cuda-workstation" = ["cuda", "sherpa-onnx-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["*.onnx"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "sherpa_onnx_streaming_zipformer_en_kroko_2025__asr_short_transcription__smoke__hf_default"
+bundle_id = "sherpa_onnx_streaming_zipformer_en_kroko_2025"
 scenario = "asr_short_transcription"
 capability = "asr"
 depth = "smoke"

@@ -16,8 +16,9 @@ use motlie_model::{
     CapabilityKind, ChatFinishReason, ChatModel, ChatRequest, ChatResponse, ChatRole,
     CheckpointFormat, CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
     GenerationTiming, GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint,
-    RuntimeAcceleratorObservation, StartOptions, ToolChoice, ToolSpec, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationScheme, QuantizationSupport,
+    ResolvedCheckpoint, RuntimeAcceleratorObservation, StartOptions, ToolChoice, ToolSpec,
+    UnsupportedEmbeddings,
 };
 use serde_json::{json, Value};
 
@@ -45,7 +46,7 @@ pub enum GgufFileLayout {
     ExactQ4_0(&'static str),
 }
 
-/// Maps `QuantizationBits` to the curated GGUF filename for a given model.
+/// Maps `QuantizationScheme` to the curated GGUF filename for a given model.
 ///
 /// llama.cpp uses pre-quantized GGUF files (unlike mistral.rs which applies
 /// ISQ at load time from safetensors). Each precision level maps to a specific
@@ -53,7 +54,7 @@ pub enum GgufFileLayout {
 fn gguf_filename(
     model_prefix: &str,
     layout: GgufFileLayout,
-    bits: Option<QuantizationBits>,
+    bits: Option<QuantizationScheme>,
 ) -> String {
     // INVARIANT: `bits` must already be resolved through the spec's
     // `QuantizationSupport`; this mapper only names the curated GGUF artifact.
@@ -63,13 +64,14 @@ fn gguf_filename(
     }
 }
 
-fn gguf_quant_suffix(bits: Option<QuantizationBits>) -> &'static str {
+fn gguf_quant_suffix(bits: Option<QuantizationScheme>) -> &'static str {
     match bits {
-        Some(QuantizationBits::Four) => "-Q4_K_M.gguf",
-        Some(QuantizationBits::Five) => "-Q5_K_M.gguf",
-        Some(QuantizationBits::Eight) => "-Q8_0.gguf",
-        Some(QuantizationBits::FloatEight) => "-FP8.gguf",
-        None => "-f16.gguf",
+        Some(QuantizationScheme::GgufQ4_K_M) => "-Q4_K_M.gguf",
+        Some(QuantizationScheme::GgufQ4_0) => "-q4_0.gguf",
+        Some(QuantizationScheme::GgufQ5_K_M) => "-Q5_K_M.gguf",
+        Some(QuantizationScheme::GgufQ8_0) => "-Q8_0.gguf",
+        Some(QuantizationScheme::Fp16) | None => "-f16.gguf",
+        Some(other) => panic!("unsupported GGUF quantization scheme: {other}"),
     }
 }
 
@@ -131,7 +133,7 @@ impl LlamaCppTextSpec {
             arch: LlamaCppTextArch::Gemma4,
             thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
-            quantization: curated_q4_q8_support_with_recommended(QuantizationBits::Eight),
+            quantization: curated_q4_q8_support_with_recommended(QuantizationScheme::GgufQ8_0),
             default_context_length: 32768,
             recommended_generation_params: GenerationParams {
                 temperature: Some(1.0),
@@ -165,10 +167,10 @@ impl LlamaCppTextSpec {
         }
     }
 
-    pub fn gemma4_12b_qat_q4_0() -> Self {
+    pub fn gemma4_12b_qat() -> Self {
         Self {
-            id: BundleId::new("gemma4_12b_qat_q4_0_gguf"),
-            display_name: "Gemma 4 12B-it QAT Q4_0 (GGUF)",
+            id: BundleId::new("gemma4_12b_qat_gguf"),
+            display_name: "Gemma 4 12B-it QAT (GGUF)",
             model_prefix: "gemma-4-12b-it-qat-q4_0",
             file_layout: GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
             arch: LlamaCppTextArch::Gemma4,
@@ -177,7 +179,7 @@ impl LlamaCppTextSpec {
             // @gemma4-cdx 2026-06-05 17:45 PDT: Google publishes the QAT
             // checkpoint as a single GGUF Q4_0 artifact, so expose only Q4
             // here rather than falling back to the standard Q4_K_M/Q8 suffixes.
-            quantization: curated_q4_only_support(),
+            quantization: curated_q4_0_only_support(),
             default_context_length: 32768,
             recommended_generation_params: GenerationParams {
                 temperature: Some(1.0),
@@ -278,7 +280,7 @@ impl BackendAdapter for LlamaCppTextAdapter {
     ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
         let model_path = resolve_checkpoint_model_path(checkpoint, resolved_quantization)?;
         let built = load_llama_model(model_path)?;
 
@@ -300,30 +302,36 @@ impl BackendAdapter for LlamaCppTextAdapter {
 
 /// Q4 recommended, Q8 supported. Inputs are compile-time constants.
 /// On the unreachable error path, degrades to no-recommended rather than panicking.
-fn curated_q4_q8_support_with_recommended(recommended: QuantizationBits) -> QuantizationSupport {
+fn curated_q4_q8_support_with_recommended(recommended: QuantizationScheme) -> QuantizationSupport {
     QuantizationSupport::with_recommended(
-        [QuantizationBits::Four, QuantizationBits::Eight],
+        [QuantizationScheme::GgufQ4_K_M, QuantizationScheme::GgufQ8_0],
         recommended,
     )
     .unwrap_or_else(|e| {
         tracing::error!("curated quantization construction failed (this is a bug): {e}");
-        QuantizationSupport::without_recommended([QuantizationBits::Four, QuantizationBits::Eight])
+        QuantizationSupport::without_recommended([
+            QuantizationScheme::GgufQ4_K_M,
+            QuantizationScheme::GgufQ8_0,
+        ])
     })
 }
 
 /// Q4 recommended, Q8 supported.
 fn curated_q4_q8_support() -> QuantizationSupport {
-    curated_q4_q8_support_with_recommended(QuantizationBits::Four)
+    curated_q4_q8_support_with_recommended(QuantizationScheme::GgufQ4_K_M)
 }
 
 /// @gemma4-cdx 2026-06-05 17:45 PDT: Q4-only support for single-file QAT
 /// GGUF checkpoints.
-fn curated_q4_only_support() -> QuantizationSupport {
-    QuantizationSupport::with_recommended([QuantizationBits::Four], QuantizationBits::Four)
-        .unwrap_or_else(|e| {
-            tracing::error!("curated quantization construction failed (this is a bug): {e}");
-            QuantizationSupport::without_recommended([QuantizationBits::Four])
-        })
+fn curated_q4_0_only_support() -> QuantizationSupport {
+    QuantizationSupport::with_recommended(
+        [QuantizationScheme::GgufQ4_0],
+        QuantizationScheme::GgufQ4_0,
+    )
+    .unwrap_or_else(|e| {
+        tracing::error!("curated quantization construction failed (this is a bug): {e}");
+        QuantizationSupport::without_recommended([QuantizationScheme::GgufQ4_0])
+    })
 }
 
 /// Qwen3.6 currently has validated GGUF Q4/Q5/Q8 artifacts in the curated repo.
@@ -331,18 +339,18 @@ fn curated_q4_only_support() -> QuantizationSupport {
 fn curated_qwen36_gguf_support() -> QuantizationSupport {
     QuantizationSupport::with_recommended(
         [
-            QuantizationBits::Four,
-            QuantizationBits::Five,
-            QuantizationBits::Eight,
+            QuantizationScheme::GgufQ4_K_M,
+            QuantizationScheme::GgufQ5_K_M,
+            QuantizationScheme::GgufQ8_0,
         ],
-        QuantizationBits::Five,
+        QuantizationScheme::GgufQ5_K_M,
     )
     .unwrap_or_else(|e| {
         tracing::error!("curated quantization construction failed (this is a bug): {e}");
         QuantizationSupport::without_recommended([
-            QuantizationBits::Four,
-            QuantizationBits::Five,
-            QuantizationBits::Eight,
+            QuantizationScheme::GgufQ4_K_M,
+            QuantizationScheme::GgufQ5_K_M,
+            QuantizationScheme::GgufQ8_0,
         ])
     })
 }
@@ -388,7 +396,7 @@ impl ModelBundle for LlamaCppTextBundle {
         let resolved_quantization = self
             .metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let built = build_llama_model(&self.spec, resolved_quantization, options)?;
 
@@ -1423,7 +1431,7 @@ struct TextHandleConfig {
     display_name: String,
     capabilities: Capabilities,
     quantization: QuantizationSupport,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
     arch: LlamaCppTextArch,
     thinking: ThinkingMode,
     context_length: u32,
@@ -1478,12 +1486,12 @@ struct BuiltModel {
 
 fn build_llama_model(
     spec: &LlamaCppTextSpec,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
     options: StartOptions,
 ) -> Result<BuiltModel, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization: _, // already resolved by caller
+        quantization_scheme: _, // already resolved by caller
         unpack_root,
         max_concurrency: _,
     } = options;
@@ -1530,7 +1538,7 @@ fn load_llama_model(model_path: PathBuf) -> Result<BuiltModel, ModelError> {
 
 fn resolve_checkpoint_model_path(
     checkpoint: &ResolvedCheckpoint,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
 ) -> Result<PathBuf, ModelError> {
     if checkpoint.checkpoint.format != CheckpointFormat::Gguf {
         return Err(ModelError::InvalidConfiguration(format!(
@@ -1598,7 +1606,7 @@ fn resolve_checkpoint_model_path(
 mod tests {
     use super::*;
     use motlie_model::{
-        BackendAdapter, BackendKind, ChatMessage, ModelCheckpoint, QuantizationBits, StartOptions,
+        BackendAdapter, BackendKind, ChatMessage, ModelCheckpoint, QuantizationScheme, StartOptions,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1638,7 +1646,7 @@ mod tests {
         assert_eq!(spec.thinking, ThinkingMode::Disabled);
         assert_eq!(
             spec.quantization.recommended(),
-            Some(QuantizationBits::Eight)
+            Some(QuantizationScheme::GgufQ8_0)
         );
         assert_eq!(spec.default_context_length, 32768);
         assert_eq!(spec.recommended_generation_params.temperature, Some(1.0));
@@ -1656,7 +1664,7 @@ mod tests {
     fn gemma4_12b_specs_default_to_answer_first_chat() {
         for spec in [
             LlamaCppTextSpec::gemma4_12b(),
-            LlamaCppTextSpec::gemma4_12b_qat_q4_0(),
+            LlamaCppTextSpec::gemma4_12b_qat(),
         ] {
             assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
             assert_eq!(spec.thinking, ThinkingMode::Disabled);
@@ -1674,12 +1682,12 @@ mod tests {
         assert_eq!(spec.thinking, ThinkingMode::Auto);
         assert_eq!(
             spec.quantization.recommended(),
-            Some(QuantizationBits::Five)
+            Some(QuantizationScheme::GgufQ5_K_M)
         );
-        assert!(spec.quantization.supports(QuantizationBits::Four));
-        assert!(spec.quantization.supports(QuantizationBits::Five));
-        assert!(spec.quantization.supports(QuantizationBits::Eight));
-        assert!(!spec.quantization.supports(QuantizationBits::FloatEight));
+        assert!(spec.quantization.supports(QuantizationScheme::GgufQ4_K_M));
+        assert!(spec.quantization.supports(QuantizationScheme::GgufQ5_K_M));
+        assert!(spec.quantization.supports(QuantizationScheme::GgufQ8_0));
+        assert!(!spec.quantization.supports(QuantizationScheme::Fp16));
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
         assert!(!spec.capabilities.supports(CapabilityKind::Vision));
@@ -1697,7 +1705,7 @@ mod tests {
         );
         assert_eq!(
             adapter.quantization().recommended(),
-            Some(QuantizationBits::Four)
+            Some(QuantizationScheme::GgufQ4_K_M)
         );
     }
 
@@ -1707,7 +1715,7 @@ mod tests {
             gguf_filename(
                 "qwen3-4b",
                 GgufFileLayout::QuantizedSuffix,
-                Some(QuantizationBits::Four)
+                Some(QuantizationScheme::GgufQ4_K_M)
             ),
             "qwen3-4b-Q4_K_M.gguf"
         );
@@ -1715,7 +1723,7 @@ mod tests {
             gguf_filename(
                 "qwen3-4b",
                 GgufFileLayout::QuantizedSuffix,
-                Some(QuantizationBits::Eight)
+                Some(QuantizationScheme::GgufQ8_0)
             ),
             "qwen3-4b-Q8_0.gguf"
         );
@@ -1723,7 +1731,7 @@ mod tests {
             gguf_filename(
                 "qwen3-4b",
                 GgufFileLayout::QuantizedSuffix,
-                Some(QuantizationBits::Five)
+                Some(QuantizationScheme::GgufQ5_K_M)
             ),
             "qwen3-4b-Q5_K_M.gguf"
         );
@@ -1731,9 +1739,9 @@ mod tests {
             gguf_filename(
                 "qwen3-4b",
                 GgufFileLayout::QuantizedSuffix,
-                Some(QuantizationBits::FloatEight)
+                Some(QuantizationScheme::Fp16)
             ),
-            "qwen3-4b-FP8.gguf"
+            "qwen3-4b-f16.gguf"
         );
         assert_eq!(
             gguf_filename("qwen3-4b", GgufFileLayout::QuantizedSuffix, None),
@@ -1743,7 +1751,7 @@ mod tests {
             gguf_filename(
                 "gemma-4-12b-it-qat-q4_0",
                 GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
-                Some(QuantizationBits::Four)
+                Some(QuantizationScheme::GgufQ4_K_M)
             ),
             "gemma-4-12b-it-qat-q4_0.gguf"
         );
@@ -2048,11 +2056,11 @@ mod tests {
                 display_name: "Qwen3 4B (GGUF)".into(),
                 capabilities: Capabilities::chat_completion_and_tool_use(),
                 quantization: QuantizationSupport::with_recommended(
-                    [QuantizationBits::Four, QuantizationBits::Eight],
-                    QuantizationBits::Four,
+                    [QuantizationScheme::GgufQ4_K_M, QuantizationScheme::GgufQ8_0],
+                    QuantizationScheme::GgufQ4_K_M,
                 )
                 .expect("test quantization support is valid"),
-                resolved_quantization: Some(QuantizationBits::Four),
+                resolved_quantization: Some(QuantizationScheme::GgufQ4_K_M),
             },
             runtime: TextRuntime::Stub(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
@@ -2151,8 +2159,9 @@ mod tests {
             path: root.clone(),
         };
 
-        let resolved = resolve_checkpoint_model_path(&checkpoint, Some(QuantizationBits::Four))
-            .expect("Q4 GGUF should be selected");
+        let resolved =
+            resolve_checkpoint_model_path(&checkpoint, Some(QuantizationScheme::GgufQ4_K_M))
+                .expect("Q4 GGUF should be selected");
         assert_eq!(resolved, gguf);
     }
 
@@ -2174,8 +2183,9 @@ mod tests {
             path: root.clone(),
         };
 
-        let error = resolve_checkpoint_model_path(&checkpoint, Some(QuantizationBits::Four))
-            .expect_err("missing Q4 GGUF should fail");
+        let error =
+            resolve_checkpoint_model_path(&checkpoint, Some(QuantizationScheme::GgufQ4_K_M))
+                .expect_err("missing Q4 GGUF should fail");
         assert!(matches!(
             error,
             ModelError::InvalidConfiguration(message)

@@ -15,7 +15,7 @@ pub const GOOGLE_GEMMA_300M_SELECTOR: &str = "google/embeddinggemma_300m";
 pub const QWEN3_EMBEDDING_06B_SELECTOR: &str = "qwen/qwen3_embedding_06b";
 
 #[cfg(feature = "model-google-gemma-300m")]
-pub mod google_gemma_300m;
+pub mod embeddinggemma_300m;
 #[cfg(feature = "model-qwen3-embedding-06b")]
 pub mod qwen3_embedding_06b;
 
@@ -23,7 +23,7 @@ pub mod qwen3_embedding_06b;
 #[non_exhaustive]
 pub enum EmbeddingModels {
     #[cfg(feature = "model-google-gemma-300m")]
-    GoogleGemma300m,
+    EmbeddingGemma300m,
     #[cfg(feature = "model-qwen3-embedding-06b")]
     Qwen3Embedding06B,
 }
@@ -36,7 +36,7 @@ impl EmbeddingModels {
     pub fn only_enabled() -> crate::Result<Self> {
         let enabled = [
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m,
+            Self::EmbeddingGemma300m,
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B,
         ];
@@ -52,7 +52,7 @@ impl EmbeddingModels {
     pub fn as_str(&self) -> &'static str {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => google_gemma_300m::SELECTOR,
+            Self::EmbeddingGemma300m => embeddinggemma_300m::SELECTOR,
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => qwen3_embedding_06b::SELECTOR,
         }
@@ -61,7 +61,7 @@ impl EmbeddingModels {
     pub fn bundle_id(&self) -> BundleId {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => google_gemma_300m::descriptor().id,
+            Self::EmbeddingGemma300m => embeddinggemma_300m::descriptor().id,
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => qwen3_embedding_06b::descriptor().id,
         }
@@ -70,7 +70,7 @@ impl EmbeddingModels {
     pub fn descriptor(&self) -> crate::BundleDescriptor {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => google_gemma_300m::descriptor(),
+            Self::EmbeddingGemma300m => embeddinggemma_300m::descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => qwen3_embedding_06b::descriptor(),
         }
@@ -79,7 +79,7 @@ impl EmbeddingModels {
     pub fn bundle(&self) -> crate::CuratedBundle {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => google_gemma_300m::bundle(),
+            Self::EmbeddingGemma300m => embeddinggemma_300m::bundle(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => qwen3_embedding_06b::bundle(),
         }
@@ -88,7 +88,7 @@ impl EmbeddingModels {
     pub fn embedding_spec(&self) -> &'static EmbeddingSpec {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => google_gemma_300m::embedding_spec(),
+            Self::EmbeddingGemma300m => embeddinggemma_300m::embedding_spec(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => qwen3_embedding_06b::embedding_spec(),
         }
@@ -111,7 +111,7 @@ impl FromStr for EmbeddingModels {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             #[cfg(feature = "model-google-gemma-300m")]
-            google_gemma_300m::SELECTOR => Ok(Self::GoogleGemma300m),
+            embeddinggemma_300m::SELECTOR => Ok(Self::EmbeddingGemma300m),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             qwen3_embedding_06b::SELECTOR => Ok(Self::Qwen3Embedding06B),
             #[cfg(not(feature = "model-google-gemma-300m"))]

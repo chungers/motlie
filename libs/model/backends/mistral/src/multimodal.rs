@@ -1,14 +1,14 @@
 use std::future::Future;
 
-use mistralrs::ModelBuilder;
+use mistralrs::{ModelBuilder, ModelDType};
 use motlie_model::{
     BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, GenerationParams,
-    ModelError, QuantizationBits, QuantizationSupport, StartOptions, UnsupportedCompletion,
+    ModelError, QuantizationScheme, QuantizationSupport, StartOptions, UnsupportedCompletion,
     UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    configure_artifact_policy, map_quantization_bits, multimodal_message_parts,
+    configure_artifact_policy, map_quantization_scheme, multimodal_message_parts,
     paged_attn_context_size, should_force_cpu, MistralMessageParts,
 };
 use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
@@ -43,14 +43,19 @@ impl MistralMultimodalSpec {
             // adapter in common.rs, not mistralrs::RequestBuilder's tool replay.
             capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
-                [QuantizationBits::Four, QuantizationBits::Eight],
-                QuantizationBits::Four,
+                [
+                    QuantizationScheme::Bf16,
+                    QuantizationScheme::IsqQ4,
+                    QuantizationScheme::IsqQ8,
+                ],
+                QuantizationScheme::Bf16,
             )
             .unwrap_or_else(|e| {
                 tracing::error!("curated quantization construction failed (this is a bug): {e}");
                 QuantizationSupport::without_recommended([
-                    QuantizationBits::Four,
-                    QuantizationBits::Eight,
+                    QuantizationScheme::Bf16,
+                    QuantizationScheme::IsqQ4,
+                    QuantizationScheme::IsqQ8,
                 ])
             }),
             recommended_generation_params: GenerationParams::default(),
@@ -67,14 +72,19 @@ impl MistralMultimodalSpec {
             // Same safetensors Gemma 4 template family and adapter path as E2B.
             capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
-                [QuantizationBits::Four, QuantizationBits::Eight],
-                QuantizationBits::Eight,
+                [
+                    QuantizationScheme::Bf16,
+                    QuantizationScheme::IsqQ4,
+                    QuantizationScheme::IsqQ8,
+                ],
+                QuantizationScheme::Bf16,
             )
             .unwrap_or_else(|e| {
                 tracing::error!("curated quantization construction failed (this is a bug): {e}");
                 QuantizationSupport::without_recommended([
-                    QuantizationBits::Four,
-                    QuantizationBits::Eight,
+                    QuantizationScheme::Bf16,
+                    QuantizationScheme::IsqQ4,
+                    QuantizationScheme::IsqQ8,
                 ])
             }),
             recommended_generation_params: GenerationParams {
@@ -126,7 +136,7 @@ impl MistralProfile for MultimodalProfile {
     fn build_model(
         model_id: &str,
         arch: Self::Arch,
-        resolved_quantization: Option<QuantizationBits>,
+        resolved_quantization: Option<QuantizationScheme>,
         options: StartOptions,
     ) -> impl Future<Output = Result<mistralrs::Model, ModelError>> + Send {
         build_multimodal_model(model_id, arch, resolved_quantization, options)
@@ -154,12 +164,12 @@ impl MistralProfile for MultimodalProfile {
 async fn build_multimodal_model(
     model_id: &str,
     _arch: MistralMultimodalArch,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization: _, // already resolved by caller
+        quantization_scheme: _, // already resolved by caller
         unpack_root,
         max_concurrency,
     } = options;
@@ -182,8 +192,20 @@ async fn build_multimodal_model(
     // Use the auto-detecting builder here. Upstream's Gemma 4 multimodal examples use
     // `ModelBuilder`, and that path preserves multimodal chat-template discovery.
     let mut builder = ModelBuilder::new(model_target);
-    if let Some(bits) = resolved_quantization {
-        builder = builder.with_auto_isq(map_quantization_bits(bits)?);
+    if let Some(scheme) = resolved_quantization {
+        builder = match scheme {
+            QuantizationScheme::Bf16 => builder.with_dtype(ModelDType::BF16),
+            QuantizationScheme::Fp16 => builder.with_dtype(ModelDType::F16),
+            QuantizationScheme::Fp32 => builder.with_dtype(ModelDType::F32),
+            QuantizationScheme::IsqQ4 | QuantizationScheme::IsqQ8 => {
+                builder.with_auto_isq(map_quantization_scheme(scheme)?)
+            }
+            other => {
+                return Err(ModelError::InvalidConfiguration(format!(
+                    "mistral.rs multimodal backend does not support {other:?} quantization"
+                )))
+            }
+        };
     }
     if should_force_cpu() {
         builder = builder.with_force_cpu();
@@ -251,7 +273,7 @@ mod tests {
         assert_eq!(spec.model_id, "google/gemma-4-E4B-it");
         assert_eq!(
             spec.quantization.recommended(),
-            Some(QuantizationBits::Eight)
+            Some(QuantizationScheme::Bf16)
         );
         assert_eq!(spec.recommended_generation_params.temperature, Some(1.0));
         assert_eq!(spec.recommended_generation_params.top_p, Some(0.95));
@@ -279,7 +301,7 @@ mod tests {
         );
         assert_eq!(
             adapter.quantization().recommended(),
-            Some(QuantizationBits::Four)
+            Some(QuantizationScheme::Bf16)
         );
     }
 
@@ -290,11 +312,11 @@ mod tests {
             "Gemma 4 E2B-it".into(),
             Capabilities::multimodal_chat_vision_and_tool_use(),
             QuantizationSupport::with_recommended(
-                [QuantizationBits::Four, QuantizationBits::Eight],
-                QuantizationBits::Four,
+                [QuantizationScheme::IsqQ4, QuantizationScheme::IsqQ8],
+                QuantizationScheme::IsqQ4,
             )
             .expect("test quantization support is valid"),
-            Some(QuantizationBits::Four),
+            Some(QuantizationScheme::IsqQ4),
             MistralStubKind::Multimodal,
         );
 

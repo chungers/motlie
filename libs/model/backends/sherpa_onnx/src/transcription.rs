@@ -106,7 +106,7 @@ impl BackendAdapter for SherpaOnnxStreamingAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.artifact_spec())?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -166,7 +166,7 @@ impl SherpaOnnxStreamingBundle {
     pub async fn start_typed(&self, options: StartOptions) -> Result<SherpaOnnxHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.artifacts.artifact_spec(), policy)?
@@ -244,10 +244,19 @@ impl BundleHandle for SherpaOnnxHandle {
     }
 
     fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        let provider = self.runtime.provider;
         Some(RuntimeAcceleratorObservation {
-            backend_mode: "sherpa_onnx:cpu".to_owned(),
-            offload: Some(sherpa_cpu_offload_reason()),
-            selected_device: None,
+            backend_mode: format!("sherpa_onnx:{}", provider.as_provider_str()),
+            offload: Some(match provider {
+                #[cfg(feature = "cuda")]
+                SherpaProviderTarget::Cuda => "cuda_execution_provider=on;provider=cuda".to_owned(),
+                SherpaProviderTarget::Cpu => sherpa_cpu_offload_reason(),
+            }),
+            selected_device: match provider {
+                #[cfg(feature = "cuda")]
+                SherpaProviderTarget::Cuda => Some("0".to_owned()),
+                SherpaProviderTarget::Cpu => None,
+            },
         })
     }
 
@@ -298,8 +307,39 @@ fn new_transcription_handle(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SherpaProviderTarget {
+    Cpu,
+    #[cfg(feature = "cuda")]
+    Cuda,
+}
+
+impl SherpaProviderTarget {
+    fn as_provider_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            #[cfg(feature = "cuda")]
+            Self::Cuda => "cuda",
+        }
+    }
+}
+
 struct SherpaOnnxRuntime {
     recognizer: Mutex<OnlineRecognizer>,
+    provider: SherpaProviderTarget,
+}
+
+fn sherpa_provider_target() -> SherpaProviderTarget {
+    #[cfg(feature = "cuda")]
+    {
+        if !motlie_model::metrics_runtime::should_force_cpu()
+            && motlie_model_ort::cuda_ep_available()
+        {
+            return SherpaProviderTarget::Cuda;
+        }
+    }
+
+    SherpaProviderTarget::Cpu
 }
 
 fn sherpa_cpu_offload_reason() -> String {
@@ -323,7 +363,8 @@ fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, Mo
     };
     config.model_config.tokens = Some(path_to_string(&artifacts.tokens)?);
     config.model_config.num_threads = NUM_THREADS;
-    config.model_config.provider = Some("cpu".to_string());
+    let provider = sherpa_provider_target();
+    config.model_config.provider = Some(provider.as_provider_str().to_owned());
     config.decoding_method = Some("modified_beam_search".to_string());
     config.max_active_paths = MODIFIED_BEAM_SEARCH_PATHS;
     config.enable_endpoint = true;
@@ -334,11 +375,15 @@ fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, Mo
     let recognizer =
         OnlineRecognizer::create(&config).ok_or_else(|| ModelError::BackendInitialization {
             backend: "sherpa-onnx",
-            message: "failed to create upstream sherpa-onnx online recognizer".into(),
+            message: format!(
+                "failed to create upstream sherpa-onnx online recognizer with provider `{}`",
+                provider.as_provider_str()
+            ),
         })?;
 
     Ok(SherpaOnnxRuntime {
         recognizer: Mutex::new(recognizer),
+        provider,
     })
 }
 

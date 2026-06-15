@@ -8,7 +8,7 @@ use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities, ChatMessage,
     ChatModel, ChatRequest, ChatResponse, CheckpointFormat, CompletionModel, CompletionRequest,
     CompletionResponse, EmbeddingModel, GenerationTiming, LoadedBundleDescriptor, ModelBundle,
-    ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport,
+    ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationScheme, QuantizationSupport,
     ResolvedCheckpoint, StartOptions, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 
@@ -37,7 +37,7 @@ pub trait MistralProfile: Sized + Send + Sync + 'static {
     fn build_model(
         model_id: &str,
         arch: Self::Arch,
-        resolved_quantization: Option<QuantizationBits>,
+        resolved_quantization: Option<QuantizationScheme>,
         options: StartOptions,
     ) -> impl Future<Output = Result<mistralrs::Model, ModelError>> + Send;
 
@@ -97,7 +97,7 @@ impl<P: MistralProfile> BackendAdapter for MistralAdapter<P> {
     ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
         let (model_id, options) =
             resolve_local_checkpoint(checkpoint, CheckpointFormat::Safetensors, options)?;
         let model = P::build_model(model_id, self.arch, resolved_quantization, options).await?;
@@ -164,7 +164,7 @@ impl<P: MistralProfile> ModelBundle for MistralBundle<P> {
         let resolved_quantization = self
             .metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
         let model =
             P::build_model(self.model_id, self.arch, resolved_quantization, options).await?;
 
@@ -193,7 +193,7 @@ impl<P: MistralProfile> MistralHandle<P> {
         display_name: String,
         capabilities: Capabilities,
         quantization: QuantizationSupport,
-        resolved_quantization: Option<QuantizationBits>,
+        resolved_quantization: Option<QuantizationScheme>,
         model: mistralrs::Model,
     ) -> Self {
         Self::new(
@@ -211,7 +211,7 @@ impl<P: MistralProfile> MistralHandle<P> {
         display_name: String,
         capabilities: Capabilities,
         quantization: QuantizationSupport,
-        resolved_quantization: Option<QuantizationBits>,
+        resolved_quantization: Option<QuantizationScheme>,
         runtime: MistralRuntime<P>,
     ) -> Self {
         let metrics = Arc::new(Mutex::new(MistralChatMetrics::default()));
@@ -241,7 +241,7 @@ impl<P: MistralProfile> MistralHandle<P> {
         display_name: String,
         capabilities: Capabilities,
         quantization: QuantizationSupport,
-        resolved_quantization: Option<QuantizationBits>,
+        resolved_quantization: Option<QuantizationScheme>,
         kind: MistralStubKind,
     ) -> Self {
         Self::new(
