@@ -63,6 +63,7 @@ pub struct ArtifactSourceEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactDerivedEntry {
+    pub label: String,
     pub output: String,
     pub source: String,
     pub recipe: String,
@@ -77,7 +78,7 @@ impl ArtifactDerivedEntry {
         }
     }
 
-    pub fn label(&self) -> String {
+    pub fn artifact_label(&self) -> String {
         if self.output.ends_with('/') {
             format!("{}** <- {} ({})", self.output, self.source, self.recipe)
         } else {
@@ -262,7 +263,7 @@ pub fn curated_artifact_entries(catalog: &Catalog) -> Result<Vec<ArtifactBundleE
         })?;
         let mut sources = Vec::with_capacity(1 + artifacts.extra_sources.len());
         sources.push(source_entry(
-            "primary",
+            artifacts.source_label,
             &artifacts.source,
             &artifacts.include,
             artifacts.provenance,
@@ -288,6 +289,7 @@ pub fn curated_artifact_entries(catalog: &Catalog) -> Result<Vec<ArtifactBundleE
                 .derived
                 .iter()
                 .map(|artifact| ArtifactDerivedEntry {
+                    label: artifact.label.to_owned(),
                     output: artifact.output.to_owned(),
                     source: artifact.recipe.source().to_owned(),
                     recipe: recipe_label(&artifact.recipe).to_owned(),
@@ -545,7 +547,7 @@ pub fn render_preflight_report(report: &ArtifactPreflightReport) -> String {
             for missing in bundle.missing_derived() {
                 output.push_str(&format!(
                     "  missing: derived {}\n",
-                    missing.artifact.label()
+                    missing.artifact.artifact_label()
                 ));
             }
         }
@@ -646,10 +648,16 @@ pub fn render_provenance_markdown(entries: &[ArtifactBundleEntry]) -> String {
         let derived = if entry.derived.is_empty() {
             "none".to_owned()
         } else {
-            entry
-                .derived
-                .iter()
-                .map(ArtifactDerivedEntry::label)
+            let mut by_label = BTreeMap::<&str, Vec<String>>::new();
+            for artifact in &entry.derived {
+                by_label
+                    .entry(artifact.label.as_str())
+                    .or_default()
+                    .push(artifact.artifact_label());
+            }
+            by_label
+                .into_iter()
+                .map(|(label, artifacts)| format!("{label}:<br>{}", artifacts.join("<br>")))
                 .collect::<Vec<_>>()
                 .join("<br>")
         };
@@ -998,6 +1006,7 @@ mod tests {
 
         let mut entry = test_entry(vec![ArtifactRequirement::Exact("config.json".to_owned())]);
         entry.derived.push(ArtifactDerivedEntry {
+            label: "test".to_owned(),
             output: "tokens.txt".to_owned(),
             source: "tokenizer.json".to_owned(),
             recipe: "test recipe".to_owned(),

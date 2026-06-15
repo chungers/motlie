@@ -1089,12 +1089,14 @@ impl DerivedArtifactRecipe {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DerivedBundleArtifact {
+    pub label: &'static str,
     pub output: &'static str,
     pub recipe: DerivedArtifactRecipe,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleArtifacts {
+    pub source_label: &'static str,
     pub control_name: &'static str,
     pub format: CheckpointFormat,
     pub source: ArtifactSource,
@@ -1393,6 +1395,7 @@ pub(crate) fn bundle_artifacts_from_checkpoint(
         .validate_quantization()
         .expect("curated checkpoint quantization must use a checkpoint-legal scheme");
     BundleArtifacts {
+        source_label: "primary",
         control_name,
         format: checkpoint.format,
         source: checkpoint.source.clone(),
@@ -2318,6 +2321,7 @@ mod tests {
 
         let mistral = BundleDescriptor {
             artifacts: Some(BundleArtifacts {
+                source_label: "primary",
                 control_name: "qwen3_4b",
                 format: CheckpointFormat::Safetensors,
                 source: ArtifactSource::HuggingFace {
@@ -2343,6 +2347,7 @@ mod tests {
             model_id: BundleId::new("qwen3_4b"),
             backend: BackendKind::LlamaCpp,
             artifacts: Some(BundleArtifacts {
+                source_label: "primary",
                 control_name: "qwen3_4b_gguf",
                 format: CheckpointFormat::Gguf,
                 source: ArtifactSource::HuggingFace {
@@ -2871,6 +2876,7 @@ mod tests {
     #[test]
     fn artifact_rules_match_expected_files() {
         let artifacts = BundleArtifacts {
+            source_label: "primary",
             control_name: "embeddinggemma_300m",
             format: CheckpointFormat::Safetensors,
             source: ArtifactSource::HuggingFace {
@@ -2894,6 +2900,7 @@ mod tests {
     #[test]
     fn gguf_artifact_rules_filter_to_requested_quantization() {
         let artifacts = BundleArtifacts {
+            source_label: "primary",
             control_name: "qwen3_6_27b_gguf",
             format: CheckpointFormat::Gguf,
             source: ArtifactSource::HuggingFace {

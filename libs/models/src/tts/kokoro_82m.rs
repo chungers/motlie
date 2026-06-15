@@ -76,6 +76,7 @@ pub fn descriptor() -> BundleDescriptor {
         &checkpoint,
         crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
     );
+    artifacts.source_label = "buffered";
     artifacts.extra_sources.push(BundleArtifactSource {
         label: "streaming",
         source: ArtifactSource::HuggingFace {
@@ -94,24 +95,28 @@ pub fn descriptor() -> BundleDescriptor {
     });
     artifacts.derived.extend([
         DerivedBundleArtifact {
+            label: "streaming",
             output: STREAMING_MODEL_FILE,
             recipe: DerivedArtifactRecipe::CopyFromDownloaded {
                 source: STREAMING_MODEL_FILE,
             },
         },
         DerivedBundleArtifact {
+            label: "streaming",
             output: STREAMING_VOICES_FILE,
             recipe: DerivedArtifactRecipe::CopyFromDownloaded {
                 source: STREAMING_VOICES_FILE,
             },
         },
         DerivedBundleArtifact {
+            label: "streaming",
             output: STREAMING_DATA_DIR,
             recipe: DerivedArtifactRecipe::CopyFromDownloaded {
                 source: STREAMING_DATA_DIR,
             },
         },
         DerivedBundleArtifact {
+            label: "streaming",
             output: STREAMING_TOKENS_FILE,
             recipe: DerivedArtifactRecipe::KokoroTokensFromTokenizerJson {
                 source: TOKENIZER_FILE,
