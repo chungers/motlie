@@ -89,7 +89,7 @@ impl BackendAdapter for WhisperCppTranscriptionAdapter {
     ) -> Result<Self::Handle, ModelError> {
         // Reject unsupported quantization requests explicitly.
         self.quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let model_path = resolve_ggml_model_path(checkpoint)?;
         let ctx = load_whisper_model(&model_path)?;
@@ -151,7 +151,7 @@ impl WhisperCppTranscriptionBundle {
         // Reject unsupported quantization requests explicitly.
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let model_path = if let Some(artifact_policy) = options.artifact_policy {
             configure_artifact_policy(self.model_filename, artifact_policy)?

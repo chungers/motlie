@@ -7,9 +7,9 @@
 ///
 /// Options:
 ///   --iterations=N         Number of measured iterations (default: 5)
-///   --precision=q4|q8|f32|f16
-///                          Quantization (default: q4; GGUF uses f16 for no quantization)
-///   --model=qwen|gemma|gemma4-12b-gguf|gemma4-12b-qat-q4-0-gguf
+///   --precision=q4|q8|bf16
+///                          Quantization alias resolved against the selected model (default: q4)
+///   --model=qwen|gemma|gemma4-12b-gguf|gemma4-12b-qat-gguf
 ///                          Model selection (default: qwen; `gemma` is Gemma 4 E2B)
 ///   --input=FILE           Read prompt from file instead of args
 ///
@@ -24,12 +24,12 @@ fn main() -> anyhow::Result<()> {
     feature = "model-qwen3-4b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 )))]
 mod bench_chat_example {
     pub fn run() -> anyhow::Result<()> {
         anyhow::bail!(
-            "enable at least one bench_chat feature: model-qwen3-4b, model-gemma4-e2b, model-gemma4-12b-gguf, or model-gemma4-12b-qat-q4-0-gguf"
+            "enable at least one bench_chat feature: model-qwen3-4b, model-gemma4-e2b, model-gemma4-12b-gguf, or model-gemma4-12b-qat-gguf"
         )
     }
 }
@@ -38,14 +38,21 @@ mod bench_chat_example {
     feature = "model-qwen3-4b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 ))]
 mod bench_chat_example {
     use anyhow::{bail, Context, Result};
     use motlie_model::{
         ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole,
-        QuantizationBits, StartOptions,
+        QuantizationScheme, QuantizationSupport, StartOptions,
     };
+    #[cfg(any(
+        feature = "model-gemma4-12b-gguf",
+        feature = "model-gemma4-12b-qat-gguf"
+    ))]
+    use motlie_model_llama_cpp::LlamaCppTextSpec;
+    #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+    use motlie_model_mistral::{MistralMultimodalSpec, MistralTextSpec};
     use motlie_models::{
         default_artifact_root, quantization_label_gguf, quantization_label_isq, CuratedBundle,
     };
@@ -82,12 +89,8 @@ mod bench_chat_example {
             "Answer in exactly one sentence: what is 2+2?".to_string()
         };
 
-        let quantization = match precision.as_deref() {
-            Some("q4") | None => Some(QuantizationBits::Four),
-            Some("q8") => Some(QuantizationBits::Eight),
-            Some("f32") | Some("f16") => None,
-            Some(other) => bail!("unknown precision `{other}`"),
-        };
+        let selected = select_model(&model_name)?;
+        let quantization = resolve_quantization(precision.as_deref(), &selected.quantization)?;
 
         let artifact_root = default_artifact_root();
 
@@ -97,13 +100,9 @@ mod bench_chat_example {
         let prompt_words = prompt.split_whitespace().count();
         let est_tokens = prompt_words * 13 / 10;
 
-        let quantization_label = match model_name.as_str() {
-            "gemma4-12b-qat-q4-0-gguf" | "gemma4_12b_qat_q4_0_gguf" => match quantization {
-                Some(QuantizationBits::Four) => "GGUF Q4_0",
-                _ => "unsupported QAT GGUF precision",
-            },
-            "gemma4-12b-gguf" | "gemma4_12b_gguf" => quantization_label_gguf(quantization),
-            _ => quantization_label_isq(quantization),
+        let quantization_label = match selected.backend {
+            BenchBackend::Gguf => quantization_label_gguf(quantization),
+            BenchBackend::Mistral => quantization_label_isq(quantization),
         };
 
         println!("=== bench_chat ===");
@@ -119,43 +118,7 @@ mod bench_chat_example {
         println!("input-words: {prompt_words}");
         println!("input-est-tokens: ~{est_tokens}");
 
-        let bundle: CuratedBundle = match model_name.as_str() {
-            "qwen" => {
-                #[cfg(feature = "model-qwen3-4b")]
-                {
-                    motlie_models::chat::qwen3_4b::bundle()
-                }
-                #[cfg(not(feature = "model-qwen3-4b"))]
-                bail!("model-qwen3-4b feature not enabled")
-            }
-            "gemma" => {
-                #[cfg(feature = "model-gemma4-e2b")]
-                {
-                    motlie_models::chat::gemma4_e2b::bundle()
-                }
-                #[cfg(not(feature = "model-gemma4-e2b"))]
-                bail!("model-gemma4-e2b feature not enabled")
-            }
-            "gemma4-12b-gguf" | "gemma4_12b_gguf" => {
-                #[cfg(feature = "model-gemma4-12b-gguf")]
-                {
-                    motlie_models::chat::gemma4_12b_gguf::bundle()
-                }
-                #[cfg(not(feature = "model-gemma4-12b-gguf"))]
-                bail!("model-gemma4-12b-gguf feature not enabled")
-            }
-            "gemma4-12b-qat-q4-0-gguf" | "gemma4_12b_qat_q4_0_gguf" => {
-                #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-                {
-                    motlie_models::chat::gemma4_12b_qat_q4_0_gguf::bundle()
-                }
-                #[cfg(not(feature = "model-gemma4-12b-qat-q4-0-gguf"))]
-                bail!("model-gemma4-12b-qat-q4-0-gguf feature not enabled")
-            }
-            other => bail!(
-                "unknown model `{other}` — use qwen, gemma, gemma4-12b-gguf, or gemma4-12b-qat-q4-0-gguf"
-            ),
-        };
+        let bundle = selected.bundle;
 
         // Startup
         println!("\n--- startup ---");
@@ -165,7 +128,7 @@ mod bench_chat_example {
                 artifact_policy: Some(ArtifactPolicy::LocalOnly {
                     root: artifact_root.clone(),
                 }),
-                quantization,
+                quantization_scheme: quantization,
                 ..Default::default()
             })
             .await
@@ -266,6 +229,135 @@ mod bench_chat_example {
 
         handle.shutdown().await.context("shutdown failed")?;
         Ok(())
+    }
+
+    struct SelectedBenchModel {
+        bundle: CuratedBundle,
+        quantization: QuantizationSupport,
+        backend: BenchBackend,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Clone, Copy)]
+    enum BenchBackend {
+        Mistral,
+        Gguf,
+    }
+
+    fn select_model(model_name: &str) -> Result<SelectedBenchModel> {
+        match model_name {
+            "qwen" => {
+                #[cfg(feature = "model-qwen3-4b")]
+                {
+                    let spec = MistralTextSpec::qwen3_4b();
+                    Ok(SelectedBenchModel {
+                        bundle: motlie_models::chat::qwen3_4b::bundle(),
+                        quantization: spec.quantization,
+                        backend: BenchBackend::Mistral,
+                    })
+                }
+                #[cfg(not(feature = "model-qwen3-4b"))]
+                bail!("model-qwen3-4b feature not enabled")
+            }
+            "gemma" => {
+                #[cfg(feature = "model-gemma4-e2b")]
+                {
+                    let spec = MistralMultimodalSpec::gemma4_e2b();
+                    Ok(SelectedBenchModel {
+                        bundle: motlie_models::chat::gemma4_e2b::bundle(),
+                        quantization: spec.quantization,
+                        backend: BenchBackend::Mistral,
+                    })
+                }
+                #[cfg(not(feature = "model-gemma4-e2b"))]
+                bail!("model-gemma4-e2b feature not enabled")
+            }
+            "gemma4-12b-gguf" | "gemma4_12b_gguf" => {
+                #[cfg(feature = "model-gemma4-12b-gguf")]
+                {
+                    let spec = LlamaCppTextSpec::gemma4_12b();
+                    Ok(SelectedBenchModel {
+                        bundle: motlie_models::chat::gemma4_12b_gguf::bundle(),
+                        quantization: spec.quantization,
+                        backend: BenchBackend::Gguf,
+                    })
+                }
+                #[cfg(not(feature = "model-gemma4-12b-gguf"))]
+                bail!("model-gemma4-12b-gguf feature not enabled")
+            }
+            "gemma4-12b-qat-gguf" | "gemma4_12b_qat_gguf" => {
+                #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+                {
+                    let spec = LlamaCppTextSpec::gemma4_12b_qat();
+                    Ok(SelectedBenchModel {
+                        bundle: motlie_models::chat::gemma4_12b_qat_gguf::bundle(),
+                        quantization: spec.quantization,
+                        backend: BenchBackend::Gguf,
+                    })
+                }
+                #[cfg(not(feature = "model-gemma4-12b-qat-gguf"))]
+                bail!("model-gemma4-12b-qat-gguf feature not enabled")
+            }
+            other => bail!(
+                "unknown model `{other}` - use qwen, gemma, gemma4-12b-gguf, or gemma4-12b-qat-gguf"
+            ),
+        }
+    }
+
+    fn resolve_quantization(
+        precision: Option<&str>,
+        support: &QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        match precision {
+            Some("q4") | None => resolve_q4(support),
+            Some("q8") => resolve_q8(support),
+            Some("bf16") => resolve_supported("bf16", QuantizationScheme::Bf16, support),
+            Some("default") => Ok(support.recommended()),
+            Some(other) => bail!("unknown precision `{other}` - use q4, q8, or bf16"),
+        }
+    }
+
+    fn resolve_q4(support: &QuantizationSupport) -> Result<Option<QuantizationScheme>> {
+        for scheme in [
+            QuantizationScheme::IsqQ4,
+            QuantizationScheme::GgufQ4_0,
+            QuantizationScheme::GgufQ4_K_M,
+        ] {
+            if support.supports(scheme) {
+                return Ok(Some(scheme));
+            }
+        }
+        bail!(
+            "precision `q4` is not supported by the selected model: {:?}",
+            support.supported()
+        )
+    }
+
+    fn resolve_q8(support: &QuantizationSupport) -> Result<Option<QuantizationScheme>> {
+        for scheme in [QuantizationScheme::IsqQ8, QuantizationScheme::GgufQ8_0] {
+            if support.supports(scheme) {
+                return Ok(Some(scheme));
+            }
+        }
+        bail!(
+            "precision `q8` is not supported by the selected model: {:?}",
+            support.supported()
+        )
+    }
+
+    fn resolve_supported(
+        label: &str,
+        scheme: QuantizationScheme,
+        support: &QuantizationSupport,
+    ) -> Result<Option<QuantizationScheme>> {
+        if support.supports(scheme) {
+            Ok(Some(scheme))
+        } else {
+            bail!(
+                "precision `{label}` maps to `{scheme}` but the selected model supports {:?}",
+                support.supported()
+            )
+        }
     }
 
     async fn run_one<C: ChatModel + ?Sized>(chat: &C, prompt: &str) -> Result<(usize, f64)> {

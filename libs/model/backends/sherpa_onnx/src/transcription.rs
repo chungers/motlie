@@ -17,8 +17,8 @@ use sherpa_onnx::{
 };
 
 use crate::common::{
-    RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec, configure_artifact_policy,
-    lock_metrics, observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec,
 };
 
 const SHERPA_ONNX_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -106,7 +106,7 @@ impl BackendAdapter for SherpaOnnxStreamingAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.artifact_spec())?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -166,7 +166,7 @@ impl SherpaOnnxStreamingBundle {
     pub async fn start_typed(&self, options: StartOptions) -> Result<SherpaOnnxHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.artifacts.artifact_spec(), policy)?
@@ -602,11 +602,9 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Onnx]);
         assert_eq!(adapter.backend_kind(), BackendKind::SherpaOnnx);
-        assert!(
-            adapter
-                .capabilities()
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(adapter
+            .capabilities()
+            .supports(CapabilityKind::Transcription));
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 

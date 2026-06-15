@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, QuantizationScheme,
+    StartOptions,
 };
 use motlie_model_moonshine::{MoonshineHandle, MoonshineStreamingBundle, MoonshineStreamingSpec};
 
@@ -56,7 +57,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(STREAMING_CONFIG_FILE),
             ArtifactRule::Exact(TOKENIZER_JSON_FILE),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Fp32),
     }
 }
 
@@ -184,17 +185,13 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "moonshine_streaming_en");
         assert_eq!(descriptor.display_name, "Moonshine Streaming EN");
         assert_eq!(descriptor.backend, BackendKind::Ort);
-        assert!(
-            !descriptor
-                .requirements
-                .build
-                .contains(&BuildConstraint::CpuOnly)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(!descriptor
+            .requirements
+            .build
+            .contains(&BuildConstraint::CpuOnly));
+        assert!(descriptor
+            .capabilities
+            .supports(CapabilityKind::Transcription));
     }
 
     #[test]
@@ -205,11 +202,9 @@ mod tests {
         #[cfg(feature = "model-moonshine-streaming")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Transcription)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Transcription)
+                .any(|bundle| bundle.id == bundle_id));
         }
     }
 

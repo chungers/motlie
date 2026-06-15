@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, CheckpointQuantization, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, QuantizationScheme,
     StartOptions,
 };
 use motlie_model_qwen3_tts_cpp::{
@@ -47,11 +47,10 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
         source: ArtifactSource::HuggingFace { repo: HF_REPO },
         include: vec![
             ArtifactRule::Exact(MODEL_FILE_Q8_0),
+            ArtifactRule::Exact(MODEL_FILE_F16),
             ArtifactRule::Exact(TOKENIZER_FILE_F16),
         ],
-        quantization: Some(CheckpointQuantization::Gguf {
-            label: "Q8_0".into(),
-        }),
+        quantization: Some(QuantizationScheme::GgufQ8_0),
     }
 }
 

@@ -195,8 +195,8 @@ cpu_depth_allowed = ["smoke"]
 
 
 [[cells]]
-id = "gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0"
-bundle_id = "gemma4_12b_qat_q4_0_gguf"
+id = "gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0"
+bundle_id = "gemma4_12b_qat_gguf"
 scenario = "bench_chat_startup"
 capability = "perf"
 depth = "smoke"
@@ -204,7 +204,7 @@ model_family = "gemma"
 checkpoint_format = "gguf"
 quantization = "q4_0"
 backend = "llama_cpp"
-features = ["model-gemma4-12b-qat-q4-0-gguf"]
+features = ["model-gemma4-12b-qat-gguf"]
 profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
 [cells.profile_features]
 "apple-metal" = ["metal", "accelerate"]

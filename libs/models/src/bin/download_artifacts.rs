@@ -1,4 +1,4 @@
-use motlie_model::{BundleId, QuantizationBits};
+use motlie_model::{BundleId, QuantizationScheme};
 use motlie_models::{
     default_artifact_root, download_bundle_artifacts_with_options, ArtifactDownloadOptions, Catalog,
 };
@@ -10,12 +10,13 @@ fn main() {
     }
 }
 
-fn parse_precision(raw: &str) -> Result<QuantizationBits, String> {
+fn parse_precision(raw: &str) -> Result<QuantizationScheme, String> {
     match raw {
-        "q4" | "q4_k_m" | "q4_0" => Ok(QuantizationBits::Four),
-        "q5" | "q5_k_m" => Ok(QuantizationBits::Five),
-        "q8" | "q8_0" => Ok(QuantizationBits::Eight),
-        "fp8" => Ok(QuantizationBits::FloatEight),
+        "q4" | "q4_k_m" => Ok(QuantizationScheme::GgufQ4_K_M),
+        "q4_0" => Ok(QuantizationScheme::GgufQ4_0),
+        "q5" | "q5_k_m" => Ok(QuantizationScheme::GgufQ5_K_M),
+        "q8" | "q8_0" => Ok(QuantizationScheme::GgufQ8_0),
+        "f16" | "fp16" => Ok(QuantizationScheme::Fp16),
         other => Err(format!(
             "unknown precision `{other}` - use q4, q5, q8, or fp8"
         )),
@@ -53,7 +54,7 @@ fn run() -> Result<(), String> {
                 let precision = args
                     .next()
                     .ok_or_else(|| "expected q4, q5, q8, or fp8 after `--precision`".to_string())?;
-                download_options.quantization = Some(parse_precision(&precision)?);
+                download_options.quantization_scheme = Some(parse_precision(&precision)?);
             }
             _ => bundle_args.push(arg),
         }

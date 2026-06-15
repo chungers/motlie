@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
-    StartOptions,
+    QuantizationScheme, StartOptions,
 };
 use motlie_model_mistral::{MistralTextBundle, MistralTextHandle, MistralTextSpec};
 
@@ -37,7 +37,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Suffix(".safetensors"),
             ArtifactRule::Suffix(".safetensors.index.json"),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Bf16),
     }
 }
 

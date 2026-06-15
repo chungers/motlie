@@ -118,7 +118,7 @@ impl BackendAdapter for MoonshineStreamingAdapter {
         options: StartOptions,
     ) -> Result<Self::Handle, ModelError> {
         self.quantization()
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.artifact_spec())?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -178,7 +178,7 @@ impl MoonshineStreamingBundle {
     pub async fn start_typed(&self, options: StartOptions) -> Result<MoonshineHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.spec.artifact_spec(), policy)?

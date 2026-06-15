@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
-    StartOptions,
+    QuantizationScheme, StartOptions,
 };
 use motlie_model_llama_cpp::{LlamaCppTextBundle, LlamaCppTextHandle, LlamaCppTextSpec};
 
@@ -11,7 +11,7 @@ use crate::{
     BundleRequirements,
 };
 
-pub const SELECTOR: &str = "google/gemma4_12b_qat_q4_0_gguf";
+pub const SELECTOR: &str = "google/gemma4_12b_qat_gguf";
 const REPO: &str = "google/gemma-4-12B-it-qat-q4_0-gguf";
 const QAT_Q4_0_GGUF_FILE: &str = "gemma-4-12b-it-qat-q4_0.gguf";
 
@@ -29,12 +29,12 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
         format: CheckpointFormat::Gguf,
         source: ArtifactSource::HuggingFace { repo: REPO },
         include: vec![ArtifactRule::Exact(QAT_Q4_0_GGUF_FILE)],
-        quantization: None,
+        quantization: Some(QuantizationScheme::GgufQ4_0),
     }
 }
 
 /// @gemma4-cdx 2026-06-05 17:45 PDT: Curated bundle descriptor for
-/// Gemma 4 12B-it QAT Q4_0 running on the llama.cpp backend with the official
+/// Gemma 4 12B-it QAT running on the llama.cpp backend with the official
 /// Google GGUF artifact.
 ///
 /// ## Weight compatibility with mistral.rs
@@ -54,11 +54,11 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 pub fn descriptor() -> BundleDescriptor {
     let identity = identity();
     let checkpoint = checkpoint();
-    let spec = LlamaCppTextSpec::gemma4_12b_qat_q4_0();
+    let spec = LlamaCppTextSpec::gemma4_12b_qat();
     BundleDescriptor {
-        id: BundleId::new("gemma4_12b_qat_q4_0_gguf"),
+        id: BundleId::new("gemma4_12b_qat_gguf"),
         model_id: identity.id,
-        display_name: "Gemma 4 12B-it QAT Q4_0 (GGUF/llama.cpp)".into(),
+        display_name: "Gemma 4 12B-it QAT (GGUF/llama.cpp)".into(),
         family: identity.family,
         capabilities: spec.capabilities,
         backend: BackendKind::LlamaCpp,
@@ -68,14 +68,14 @@ pub fn descriptor() -> BundleDescriptor {
         },
         eval_tracks: identity.eval_tracks,
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
-            "gemma4_12b_qat_q4_0_gguf",
+            "gemma4_12b_qat_gguf",
             &checkpoint,
         )),
     }
 }
 
 pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
-    let spec = LlamaCppTextSpec::gemma4_12b_qat_q4_0();
+    let spec = LlamaCppTextSpec::gemma4_12b_qat();
     crate::ModelVariantDescriptor {
         backend: BackendKind::LlamaCpp,
         capabilities: spec.capabilities,
@@ -85,11 +85,11 @@ pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
 }
 
 pub fn bundle() -> crate::CuratedBundle {
-    crate::CuratedBundle::Gemma4_12B_QatQ4_0_Gguf
+    crate::CuratedBundle::Gemma4_12B_Qat_Gguf
 }
 
 pub async fn start(options: StartOptions) -> Result<LlamaCppTextHandle, ModelError> {
-    LlamaCppTextBundle::new(LlamaCppTextSpec::gemma4_12b_qat_q4_0())
+    LlamaCppTextBundle::new(LlamaCppTextSpec::gemma4_12b_qat())
         .start(crate::resolve_typed_artifact_policy(
             options,
             resolve_local_gguf_root,
@@ -112,10 +112,10 @@ mod tests {
     fn descriptor_is_reviewable_as_data() {
         let descriptor = descriptor();
 
-        assert_eq!(descriptor.id.as_str(), "gemma4_12b_qat_q4_0_gguf");
+        assert_eq!(descriptor.id.as_str(), "gemma4_12b_qat_gguf");
         assert_eq!(
             descriptor.display_name,
-            "Gemma 4 12B-it QAT Q4_0 (GGUF/llama.cpp)"
+            "Gemma 4 12B-it QAT (GGUF/llama.cpp)"
         );
         assert_eq!(descriptor.family, BundleFamily::Gemma);
         assert_eq!(descriptor.backend, BackendKind::LlamaCpp);
@@ -125,7 +125,7 @@ mod tests {
         let artifacts = descriptor
             .artifacts
             .expect("descriptor should expose curated artifact control");
-        assert_eq!(artifacts.control_name, "gemma4_12b_qat_q4_0_gguf");
+        assert_eq!(artifacts.control_name, "gemma4_12b_qat_gguf");
         assert!(artifacts.includes("gemma-4-12b-it-qat-q4_0.gguf"));
         assert!(!artifacts.includes("gemma-4-12b-it-Q4_K_M.gguf"));
         assert!(!artifacts.includes("gemma-4-12b-it-Q8_0.gguf"));
@@ -198,7 +198,7 @@ mod tests {
             static NEXT_ID: AtomicU64 = AtomicU64::new(0);
             let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "motlie-models-gemma4-12b-qat-q4-0-gguf-test-{}-{unique}-{label}",
+                "motlie-models-gemma4-12b-qat-gguf-test-{}-{unique}-{label}",
                 std::process::id()
             ));
             std::fs::remove_dir_all(&path).ok();

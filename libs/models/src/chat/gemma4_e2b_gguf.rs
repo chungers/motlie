@@ -131,7 +131,7 @@ mod tests {
     #[cfg(feature = "model-gemma4-e2b")]
     #[test]
     fn identity_matches_logical_gemma4_model() {
-        assert_eq!(identity(), super::gemma4_e2b::identity());
+        assert_eq!(identity(), crate::chat::gemma4_e2b::identity());
     }
 
     #[test]
