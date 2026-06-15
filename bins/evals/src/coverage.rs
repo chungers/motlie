@@ -17,9 +17,13 @@
 //! reconciliation/`applicability` are unaffected (accelerator support is
 //! speech-mode-independent), so the change is localized to cell keying/slicing.
 
-use motlie_model::{AccelSupport, BackendKind, Reason};
+use std::collections::BTreeMap;
+
+use motlie_model::{AccelSupport, BackendKind, CapabilityKind, QuantizationScheme, Reason};
+use motlie_models::CuratedBundle;
 
 use crate::profile::Profile;
+use crate::result::{AcceleratorClass, ResultRecord, TerminalOutcome};
 
 /// The state of one coverage cell — exactly one of four.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +107,160 @@ pub fn reconcile(support: AccelSupport, evidence: CellEvidence) -> Option<Findin
     }
 }
 
+/// The enum-keyed coverage cell identity (#521 tuple). `bundle_id` is validated
+/// against `CuratedBundle::CANONICAL_IDS` rather than resolved to the (feature-
+/// gated) variant, so reconciliation works without the all-curated-features
+/// build. The HOOK(#531) Speech sub-dimension will be added here, conditional on
+/// `capability == Speech`.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct CellKey {
+    pub bundle_id: String,
+    pub quant: QuantizationScheme,
+    pub capability: CapabilityKind,
+    pub profile: Profile,
+}
+
+/// Why a record failed to parse into the enum-keyed tuple — every variant is a
+/// fail-closed condition (an undeclared/uncanonical value the test must reject).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TupleParseError {
+    BundleNotCanonical(String),
+    UnknownQuant(String),
+    UnknownCapability(String),
+    UnknownProfile(String),
+    UnknownBackend(String),
+}
+
+/// The mistralrs-perf scenario maps onto Chat (perf is a scenario over Chat, not
+/// a `CapabilityKind`; DESIGN §E). asr→Transcription, tts→Speech.
+fn capability_from_eval(token: &str) -> Option<CapabilityKind> {
+    match token {
+        "chat" | "perf" => Some(CapabilityKind::Chat),
+        "tool_use" => Some(CapabilityKind::ToolUse),
+        "asr" => Some(CapabilityKind::Transcription),
+        "tts" => Some(CapabilityKind::Speech),
+        "embeddings" => Some(CapabilityKind::Embeddings),
+        _ => None,
+    }
+}
+
+fn backend_from_token(token: &str) -> Option<BackendKind> {
+    match token {
+        "mistralrs" => Some(BackendKind::MistralRs),
+        "llama_cpp" => Some(BackendKind::LlamaCpp),
+        "ort" => Some(BackendKind::Ort),
+        "sherpa_onnx" => Some(BackendKind::SherpaOnnx),
+        "whisper_cpp" => Some(BackendKind::WhisperCpp),
+        "qwen3_tts_cpp" => Some(BackendKind::Qwen3TtsCpp),
+        "http" => Some(BackendKind::Http),
+        _ => None,
+    }
+}
+
+/// Parse one record into its enum-keyed cell + backend + runtime evidence —
+/// fail-closed on any non-canonical dimension value.
+pub fn parse_cell(
+    record: &ResultRecord,
+) -> Result<(CellKey, BackendKind, CellEvidence), TupleParseError> {
+    let coverage = &record.coverage;
+    if !CuratedBundle::CANONICAL_IDS.contains(&coverage.bundle_id.as_str()) {
+        return Err(TupleParseError::BundleNotCanonical(
+            coverage.bundle_id.clone(),
+        ));
+    }
+    let quant = coverage
+        .quantization
+        .parse::<QuantizationScheme>()
+        .map_err(|_| TupleParseError::UnknownQuant(coverage.quantization.clone()))?;
+    let capability = capability_from_eval(&coverage.capability)
+        .ok_or_else(|| TupleParseError::UnknownCapability(coverage.capability.clone()))?;
+    let profile = Profile::from_id(&coverage.profile)
+        .ok_or_else(|| TupleParseError::UnknownProfile(coverage.profile.clone()))?;
+    let backend = backend_from_token(&coverage.backend)
+        .ok_or_else(|| TupleParseError::UnknownBackend(coverage.backend.clone()))?;
+
+    let key = CellKey {
+        bundle_id: coverage.bundle_id.clone(),
+        quant,
+        capability,
+        profile,
+    };
+    Ok((key, backend, evidence_from_record(record)))
+}
+
+fn on_physical_target(requested: AcceleratorClass, resolved: AcceleratorClass) -> bool {
+    requested == resolved
+        && !matches!(
+            resolved,
+            AcceleratorClass::Any | AcceleratorClass::Unavailable
+        )
+}
+
+/// Distil the runtime evidence a record carries for reconciliation. `BuildGap`
+/// keys on whether the native path was present (reached the target accel, or the
+/// backend reported the target execution mode) — recorded evidence, NOT cargo
+/// features (David's refinement).
+pub fn evidence_from_record(record: &ResultRecord) -> CellEvidence {
+    let requested = record.coverage.requested_accelerator;
+    let resolved = record.coverage.resolved_accelerator;
+    let on_target = on_physical_target(requested, resolved);
+    let backend_reached_target = record
+        .accelerator
+        .backend_mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case(requested.as_str()));
+    CellEvidence {
+        passed_on_target: record.coverage.terminal_outcome == TerminalOutcome::Passed && on_target,
+        blocked: matches!(
+            record.coverage.terminal_outcome,
+            TerminalOutcome::Blocked | TerminalOutcome::Failed | TerminalOutcome::Skipped
+        ),
+        native_path_present: on_target || backend_reached_target,
+    }
+}
+
+/// The outcome of reconciling a record set: per-cell state, contradiction
+/// findings, and any records that didn't parse into the enum tuple. A clean
+/// record set has empty `findings` and `parse_errors` (the fail-closed bar).
+#[derive(Clone, Debug, Default)]
+pub struct ReconcileReport {
+    pub states: BTreeMap<CellKey, CoverageState>,
+    pub findings: Vec<(CellKey, Finding)>,
+    pub parse_errors: Vec<TupleParseError>,
+}
+
+/// Reconcile a record set into per-cell states + findings, fail-closed: a record
+/// that doesn't parse into the enum tuple, or a record that contradicts the
+/// declaration, is reported (and fails the completeness test).
+pub fn reconcile_records<'a, I>(records: I) -> ReconcileReport
+where
+    I: IntoIterator<Item = &'a ResultRecord>,
+{
+    let mut cells: BTreeMap<CellKey, (BackendKind, Vec<CellEvidence>)> = BTreeMap::new();
+    let mut report = ReconcileReport::default();
+    for record in records {
+        match parse_cell(record) {
+            Ok((key, backend, evidence)) => {
+                let support = applicability(backend, key.profile);
+                if let Some(finding) = reconcile(support, evidence) {
+                    report.findings.push((key.clone(), finding));
+                }
+                cells
+                    .entry(key)
+                    .or_insert((backend, Vec::new()))
+                    .1
+                    .push(evidence);
+            }
+            Err(err) => report.parse_errors.push(err),
+        }
+    }
+    for (key, (backend, evidence)) in cells {
+        let support = applicability(backend, key.profile);
+        report.states.insert(key, classify(support, &evidence));
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +340,78 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(classify(targetable(), &[ev]), CoverageState::Gap);
+    }
+
+    fn collect_results_jsonl(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_results_jsonl(&path, out);
+            } else if path.file_name().and_then(|n| n.to_str()) == Some("results.jsonl") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn committed_records() -> Vec<ResultRecord> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/results");
+        let mut files = Vec::new();
+        collect_results_jsonl(&root, &mut files);
+        files.sort();
+        let mut records = Vec::new();
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                if let Ok(record) = serde_json::from_str::<ResultRecord>(line) {
+                    records.push(record);
+                }
+            }
+        }
+        records
+    }
+
+    #[test]
+    fn committed_records_reconcile_fail_closed() {
+        // Fail-closed completeness over the real committed data set: every record
+        // must parse into the enum-keyed tuple (canonical bundle/quant/capability/
+        // profile/backend), and no record may contradict the declaration.
+        let records = committed_records();
+        assert!(
+            !records.is_empty(),
+            "expected committed result records under evals/results",
+        );
+        let report = reconcile_records(&records);
+        eprintln!(
+            "reconciled {} records -> {} cells, {} parse_errors, {} findings",
+            records.len(),
+            report.states.len(),
+            report.parse_errors.len(),
+            report.findings.len(),
+        );
+        for err in report.parse_errors.iter().take(10) {
+            eprintln!("  parse_error: {err:?}");
+        }
+        for (key, finding) in report.findings.iter().take(10) {
+            eprintln!(
+                "  finding: {finding:?} @ {}/{:?}/{:?}",
+                key.bundle_id, key.capability, key.profile
+            );
+        }
+        assert!(
+            report.parse_errors.is_empty(),
+            "{} records failed to parse into the enum tuple (fail-closed)",
+            report.parse_errors.len(),
+        );
+        assert!(
+            report.findings.is_empty(),
+            "{} declaration/runtime contradictions found (fail-closed)",
+            report.findings.len(),
+        );
     }
 
     #[test]
