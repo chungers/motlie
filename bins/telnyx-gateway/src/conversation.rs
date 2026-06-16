@@ -100,8 +100,8 @@ pub struct ConversationRuntime {
 }
 
 impl ConversationRuntime {
-    pub fn new(telnyx: TelnyxClient, tts: SharedTtsRegistry, smoke_test_enabled: bool) -> Self {
-        Self::new_with_processor_options(telnyx, tts, smoke_test_enabled, false)
+    pub fn new(telnyx: TelnyxClient, tts: SharedTtsRegistry, processor_enabled: bool) -> Self {
+        Self::new_with_processor_options(telnyx, tts, processor_enabled, false)
     }
 
     pub fn new_with_processor_options(
@@ -127,14 +127,6 @@ impl ConversationRuntime {
 
     pub fn set_processor_enabled(&self, enabled: bool) {
         self.processor_enabled.store(enabled, Ordering::SeqCst);
-    }
-
-    pub fn smoke_test_enabled(&self) -> bool {
-        self.processor_enabled()
-    }
-
-    pub fn set_smoke_test_enabled(&self, enabled: bool) {
-        self.set_processor_enabled(enabled);
     }
 
     pub fn final_coalescing_enabled(&self) -> bool {

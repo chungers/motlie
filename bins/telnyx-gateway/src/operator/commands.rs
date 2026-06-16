@@ -2096,7 +2096,7 @@ async fn conversation_command(
         }
         ConversationCommand::SmokeTest { state } => {
             let enabled = state.enabled();
-            context.conversation.set_smoke_test_enabled(enabled);
+            context.conversation.set_processor_enabled(enabled);
             let label = if enabled { "on" } else { "off" };
             if enabled {
                 set_barge_in_enabled(context, false, "conversation smoke-test").await?;
@@ -5107,7 +5107,7 @@ mod tests {
             enabled.lines,
             vec!["conversation smoke-test: on", "conversation barge-in: off"]
         );
-        assert!(engine.context().conversation.smoke_test_enabled());
+        assert!(engine.context().conversation.processor_enabled());
         assert!(!engine.context().conversation.final_coalescing_enabled());
         assert!(!engine.context().conversation.barge_in_enabled());
         assert!(!state.read().await.quality.config.barge_in.enabled);
@@ -5117,7 +5117,7 @@ mod tests {
             .await
             .expect("disable smoke test");
         assert_eq!(disabled.lines, vec!["conversation smoke-test: off"]);
-        assert!(!engine.context().conversation.smoke_test_enabled());
+        assert!(!engine.context().conversation.processor_enabled());
     }
 
     #[tokio::test]
