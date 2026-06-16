@@ -828,6 +828,8 @@ async fn start_provisional_speech(
             latest_turn_finalized_at: None,
             turn_id: Some(provisional_turn_id.clone()),
             coalesced_turn_ids: Vec::new(),
+            source_asr_session_ids: Vec::new(),
+            source_utterance_ids: vec![utterance_id.clone()],
             prebuffer_chunks_override: Some(services.provisional_max_prebuffer_frames),
         },
         vec![text],

@@ -1227,6 +1227,8 @@ async fn queue_conversation_speech(
             latest_turn_finalized_at: turn_context.latest_finalized_at,
             turn_id: turn_context.turn_id,
             coalesced_turn_ids: turn_context.coalesced_turn_ids,
+            source_asr_session_ids: Vec::new(),
+            source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
         },
     )

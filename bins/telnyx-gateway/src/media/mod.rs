@@ -3475,15 +3475,35 @@ struct AssistantEchoMatch {
     longest_token_run: usize,
 }
 
+fn tts_matches_asr_source(
+    tts: &TtsPlaybackState,
+    quality_session: Option<&ActiveAsrQualitySession>,
+) -> bool {
+    let Some(session) = quality_session else {
+        return false;
+    };
+    tts.source_utterance_ids
+        .iter()
+        .any(|utterance_id| utterance_id == &session.utterance_id)
+        || tts
+            .source_asr_session_ids
+            .iter()
+            .any(|asr_session_id| asr_session_id == &session.asr_session_id)
+}
+
 fn assistant_echo_match(
     call: &CallSession,
     config: &EchoSuppressionQualityConfig,
     transcript_text: &str,
+    quality_session: Option<&ActiveAsrQualitySession>,
 ) -> Option<AssistantEchoMatch> {
     if !config.enabled {
         return None;
     }
     let tts = call.tts.as_ref()?;
+    if tts_matches_asr_source(tts, quality_session) {
+        return None;
+    }
     if !tts_in_echo_window(tts, config.tail_window_ms as i64) || tts.echo_signature.is_empty() {
         return None;
     }
@@ -3622,7 +3642,9 @@ async fn record_transcript_events(
         let assistant_echo = if suppressed {
             None
         } else {
-            call.and_then(|call| assistant_echo_match(call, echo_config, &text))
+            call.and_then(|call| {
+                assistant_echo_match(call, echo_config, &text, context.quality_session)
+            })
         };
         if let Some(capture) = context.capture.as_deref_mut() {
             record_transcript_capture(
@@ -5644,6 +5666,78 @@ mod tests {
         assert!(call.transcripts.is_empty());
         assert_eq!(call.final_transcript, "");
         assert_eq!(call.echo_suppressed_transcripts, 1);
+    }
+
+    #[tokio::test]
+    async fn same_source_provisional_tts_does_not_suppress_final_transcript() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        let quality_session = {
+            let mut guard = state.write().await;
+            guard.start_quality_asr_session(&gateway_call_id, Some("stream-1"), "test")
+        };
+        let text = "The operator should ask for the patient age location and callback number";
+        {
+            let mut guard = state.write().await;
+            guard.start_tts_job_with_linkage(
+                &gateway_call_id,
+                "tts_provisional".to_string(),
+                LiveTtsBackend::Kokoro82m,
+                text,
+                crate::operator::state::QualityPlaybackLinkage {
+                    turn_id: Some("pt_same".to_string()),
+                    coalesced_turn_ids: Vec::new(),
+                    source_asr_session_ids: vec![quality_session.asr_session_id.clone()],
+                    source_utterance_ids: vec![quality_session.utterance_id.clone()],
+                    source_label: "early response".to_string(),
+                },
+                None,
+            );
+            guard.mark_tts_frames_queued(&gateway_call_id, "tts_provisional", 20);
+        }
+        let format = MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        };
+
+        let outcome = record_transcript_events(
+            &state,
+            &gateway_call_id,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text: text.to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: Some(&text_calls),
+                early_response: None,
+                quality_session: Some(&quality_session),
+                echo_config: None,
+                partial_speech_state: CallerSpeechState::Speaking,
+            },
+        )
+        .await;
+
+        assert!(!outcome.reset_requested);
+        let frame = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            frame,
+            GatewayTextFrame::CallerTurn { text: emitted, .. } if emitted == text
+        ));
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.final_transcript, text);
+        assert_eq!(call.echo_suppressed_transcripts, 0);
     }
 
     #[tokio::test]

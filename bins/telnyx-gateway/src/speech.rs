@@ -42,6 +42,8 @@ pub struct SpeechQueueRequest {
     pub latest_turn_finalized_at: Option<Instant>,
     pub turn_id: Option<String>,
     pub coalesced_turn_ids: Vec<String>,
+    pub source_asr_session_ids: Vec<String>,
+    pub source_utterance_ids: Vec<String>,
     pub prebuffer_chunks_override: Option<usize>,
 }
 
@@ -216,6 +218,8 @@ pub async fn queue_speech(
             latest_turn_finalized_at: None,
             turn_id: None,
             coalesced_turn_ids: Vec::new(),
+            source_asr_session_ids: Vec::new(),
+            source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
         },
     )
@@ -238,6 +242,8 @@ pub async fn queue_speech_with_request(
         latest_turn_finalized_at,
         turn_id,
         coalesced_turn_ids,
+        source_asr_session_ids,
+        source_utterance_ids,
         prebuffer_chunks_override,
     } = request;
     let request_started_at = Instant::now();
@@ -285,6 +291,8 @@ pub async fn queue_speech_with_request(
             QualityPlaybackLinkage {
                 turn_id: turn_id.clone(),
                 coalesced_turn_ids: coalesced_turn_ids.clone(),
+                source_asr_session_ids: source_asr_session_ids.clone(),
+                source_utterance_ids: source_utterance_ids.clone(),
                 source_label: source_label.clone(),
             },
             replaced_playback_id.as_deref(),
@@ -342,6 +350,8 @@ pub async fn queue_append_speech_with_request(
         latest_turn_finalized_at,
         turn_id,
         coalesced_turn_ids,
+        source_asr_session_ids,
+        source_utterance_ids,
         prebuffer_chunks_override,
     } = request;
     let request_started_at = Instant::now();
@@ -386,6 +396,8 @@ pub async fn queue_append_speech_with_request(
             QualityPlaybackLinkage {
                 turn_id: turn_id.clone(),
                 coalesced_turn_ids: coalesced_turn_ids.clone(),
+                source_asr_session_ids: source_asr_session_ids.clone(),
+                source_utterance_ids: source_utterance_ids.clone(),
                 source_label: source_label.clone(),
             },
             replaced_playback_id.as_deref(),
@@ -2941,6 +2953,8 @@ mod tests {
                 latest_turn_finalized_at: None,
                 turn_id: None,
                 coalesced_turn_ids: Vec::new(),
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
             },
         )
@@ -3049,6 +3063,8 @@ mod tests {
                 latest_turn_finalized_at: None,
                 turn_id: None,
                 coalesced_turn_ids: Vec::new(),
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
             },
         )
