@@ -76,7 +76,6 @@ set +a
 
 ./target/release/telnyx-gateway \
   --tui \
-  --conversation-smoke-test \
   --load /home/dchung/telnyx-test/config.repl \
   --socket /tmp/telnyx-m3-live.sock
 ```

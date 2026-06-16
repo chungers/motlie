@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-15 PDT | @codex-m6-ds-rv | Simplified gateway startup surface: removed one-off dynamic quality CLI overrides and `--turn-log-jsonl`; startup quality/logging behavior is now expressed with `--quality-config` plus replayed `--load` command files. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Removed the smoke-command committed-final debounce side effect and exposed `early_response.boundary` as a live-safe knob so identity tests can accept stable unpunctuated partials without changing stricter real-agent modes. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Clarified the processor model after consolidation: `ConversationProcessorKind` is per-call static dispatch, currently `identity`; `early_response.enabled` only gates provisional ASR input into the same processor and does not select a separate path. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Consolidated gateway-local smoke handling under the unified `ConversationProcessor` contract: identity/repeat now exercises both committed and provisional paths without adding an `I heard:` prefix; `I heard:` remains only an explicit external harness response policy. |
@@ -1232,18 +1233,20 @@ Required round-trip tests:
 
 ## Proposed CLI Surface
 
-Gateway startup:
+Gateway startup and replayed runtime-quality setup:
 
 ```text
+# telnyx-live.repl
+quality endpoint trailing-silence-ms 650
+quality speech rms-threshold 220
+quality speech peak-threshold 1100
+quality speech onset-min-silence-ms 180
+quality logging on ./turns.jsonl
+
 telnyx-gateway \
   --quality-config ./telnyx-quality.toml \
   --quality-profile balanced \
-  --endpoint-trailing-silence-ms 650 \
-  --speech-rms-threshold 220 \
-  --speech-peak-threshold 1100 \
-  --speech-onset-min-silence-ms 180 \
-  --turn-log-jsonl ./turns.jsonl \
-  --quality-report-json ./quality-report.json
+  --load ./telnyx-live.repl
 ```
 
 Offline analysis:
@@ -1269,21 +1272,24 @@ telnyx-gateway tune-endpoint ./turns.jsonl \
 Harness profiling:
 
 ```text
+# gateway-echo.repl contains: quality logging on ./gateway-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness gateway-echo \
-  --turn-log-jsonl ./gateway-echo-turns.jsonl \
+  --load ./gateway-echo.repl \
   --report-json ./gateway-echo-report.json
 
+# text-call-echo.repl contains: quality logging on ./text-call-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness text-call-echo \
   --app-url <websocket-url> \
-  --turn-log-jsonl ./text-call-echo-turns.jsonl \
+  --load ./text-call-echo.repl \
   --report-json ./text-call-echo-report.json
 
+# agent-tmux-echo.repl contains: quality logging on ./agent-tmux-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness agent-tmux-echo \
   --agent-socket <path> \
-  --turn-log-jsonl ./agent-tmux-echo-turns.jsonl \
+  --load ./agent-tmux-echo.repl \
   --report-json ./agent-tmux-echo-report.json
 ```
 
@@ -1293,8 +1299,7 @@ Replay/corpus extension:
 telnyx-gateway replay-capture <capture-dir> \
   --backend kroko-2025 \
   --chunk-ms 20 \
-  --trailing-silence-pad-ms 800 \
-  --turn-log-jsonl ./replay-turns.jsonl
+  --trailing-silence-pad-ms 800
 
 telnyx-gateway asr-golden-ab <manifest> \
   --backend sherpa-2023 \

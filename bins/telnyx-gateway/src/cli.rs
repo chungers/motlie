@@ -30,8 +30,8 @@ pub struct Cli {
     #[arg(long)]
     pub dry_run_telnyx: bool,
 
-    /// Initial shortcut for enabling gateway-local identity/repeat replies.
-    #[arg(long)]
+    /// Deprecated compatibility shortcut; prefer `conversation smoke-test on` from `--load` or socket.
+    #[arg(long, hide = true)]
     pub conversation_smoke_test: bool,
 
     /// Root directory containing preloaded model artifacts for ASR and TTS.
@@ -49,21 +49,6 @@ pub struct Cli {
 
     #[arg(long)]
     pub quality_profile: Option<QualityProfile>,
-
-    #[arg(long)]
-    pub endpoint_trailing_silence_ms: Option<u64>,
-
-    #[arg(long)]
-    pub speech_rms_threshold: Option<f32>,
-
-    #[arg(long)]
-    pub speech_peak_threshold: Option<i32>,
-
-    #[arg(long)]
-    pub speech_onset_min_silence_ms: Option<u64>,
-
-    #[arg(long)]
-    pub turn_log_jsonl: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<CliCommand>,

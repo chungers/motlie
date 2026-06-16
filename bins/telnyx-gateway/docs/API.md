@@ -8,6 +8,7 @@ Current API snapshot for the Telnyx gateway operator/TUI/socket control surface.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-15 PDT | @codex-m6-ds-rv | Removed one-off dynamic quality startup flags and `--turn-log-jsonl`; startup uses `--quality-config`, `--load`, and replayed `quality logging on <path>` / quality commands instead. `--conversation-smoke-test` is hidden/deprecated in favor of replaying `conversation smoke-test on`. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Added the current ASR -> optional aggregator -> static processor -> TTS pipeline contract and the operator/config control-knob inventory. |
 
 ## End-to-End Conversation Pipeline
@@ -104,7 +105,7 @@ Notes:
 
 ### Startup CLI vs Runtime Controls
 
-Startup CLI flags should be limited to process wiring and initial bootstrap: listener address, TUI/socket enablement, state load, artifact root, credentials, capture/log paths, and initial quality config/profile. Quality and conversation behavior that can change safely at call or playback boundaries should be controlled through `VoiceQualityConfig`, TUI/socket commands, TOML overlays, or replayed state lines. `--conversation-smoke-test` remains only an initial shortcut for the same runtime identity/repeat enablement exposed by `conversation smoke-test on`; it does not enable committed-final coalescing.
+Startup CLI flags are limited to process wiring and bootstrap defaults: listener address, TUI/socket enablement, state load, artifact root, credentials, capture/log paths, and initial quality config/profile. Quality and conversation behavior that can change safely at call or playback boundaries is controlled through `VoiceQualityConfig`, TUI/socket commands, TOML overlays, or replayed state lines. One-off startup quality overrides and `--turn-log-jsonl` are intentionally removed; use `--quality-config`, `--load`, and `quality logging on <path>` instead. `--conversation-smoke-test` is a hidden deprecated compatibility shortcut for the same runtime identity/repeat enablement exposed by `conversation smoke-test on`; prefer replaying that command with `--load`.
 
 ### Backend and Processor Selection
 
