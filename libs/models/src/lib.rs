@@ -1019,11 +1019,11 @@ pub fn download_bundle_artifacts_with_options(
     })
 }
 
+#[cfg(feature = "model-kokoro-82m")]
 fn prepare_downloaded_bundle_artifacts(
     descriptor: &BundleDescriptor,
     downloaded: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    #[cfg(feature = "model-kokoro-82m")]
     if descriptor.id.as_str() == "kokoro_82m" {
         tts::kokoro_82m::prepare_downloaded_artifacts(downloaded).map_err(|message| {
             ModelsError::ArtifactPreparation {
@@ -1033,6 +1033,14 @@ fn prepare_downloaded_bundle_artifacts(
         })?;
     }
 
+    Ok(())
+}
+
+#[cfg(not(feature = "model-kokoro-82m"))]
+fn prepare_downloaded_bundle_artifacts(
+    _descriptor: &BundleDescriptor,
+    _downloaded: &mut [PathBuf],
+) -> Result<()> {
     Ok(())
 }
 
