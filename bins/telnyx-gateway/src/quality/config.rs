@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::early_response::{EarlyResponsePolicy, EarlyResponseStartTiming};
+use crate::early_response::{BoundaryRequirement, EarlyResponsePolicy, EarlyResponseStartTiming};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1548,6 +1548,23 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_early_response_boundary(
+        &mut self,
+        value: BoundaryRequirement,
+    ) -> QualityMutationOutcome {
+        self.early_response.boundary = value;
+        self.outcome(
+            "early_response.boundary",
+            match value {
+                BoundaryRequirement::None => "none",
+                BoundaryRequirement::Clause => "clause",
+                BoundaryRequirement::Sentence => "sentence",
+            },
+            ApplyBoundary::NewCall,
+            false,
+        )
+    }
+
     pub fn set_barge_in_enabled(&mut self, value: bool) -> QualityMutationOutcome {
         self.barge_in.enabled = value;
         self.outcome(
@@ -2227,11 +2244,9 @@ mod tests {
         let error = config
             .validate_resolved()
             .expect_err("policy list entries with surrounding whitespace should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("endpoint.final_settle_tail_words")
-        );
+        assert!(error
+            .to_string()
+            .contains("endpoint.final_settle_tail_words"));
     }
 
     #[test]
@@ -2243,11 +2258,9 @@ mod tests {
             .validate_resolved()
             .expect_err("provisional prebuffer must stay at the one-frame cap");
 
-        assert!(
-            error
-                .to_string()
-                .contains("early_response.provisional_max_prebuffer_frames")
-        );
+        assert!(error
+            .to_string()
+            .contains("early_response.provisional_max_prebuffer_frames"));
     }
 
     #[test]

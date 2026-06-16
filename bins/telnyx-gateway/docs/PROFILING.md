@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-15 PDT | @codex-m6-ds-rv | Removed the smoke-command committed-final debounce side effect and exposed `early_response.boundary` as a live-safe knob so identity tests can accept stable unpunctuated partials without changing stricter real-agent modes. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Clarified the processor model after consolidation: `ConversationProcessorKind` is per-call static dispatch, currently `identity`; `early_response.enabled` only gates provisional ASR input into the same processor and does not select a separate path. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Consolidated gateway-local smoke handling under the unified `ConversationProcessor` contract: identity/repeat now exercises both committed and provisional paths without adding an `I heard:` prefix; `I heard:` remains only an explicit external harness response policy. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | After live streaming-TTS testing, made committed streaming TTS hold the first tiny text chunk until the second prepared text chunk has audio, changed early-response start timing to `while_speaking` by default, added `quality early-response start-timing`, and documented Kokoro `tokens.txt` preparation by `motlie-models-download`. |
@@ -990,6 +991,7 @@ Prompt requirements:
 | ASR suppression | `quality asr repeated-token-run-threshold <n>`, `quality asr repeated-q-run-threshold <n>` | REPL/socket/TUI implemented | run `16`, q-run `8` | hallucination suppression |
 | TTS chunking | `quality tts chunking on|off` | REPL/socket/TUI implemented | default on | first-audio latency vs smoothness |
 | TTS first chunk ramp | `quality tts first-chunk-max-chars <n>` | REPL/socket/TUI implemented | `40` | first-audio latency vs sentence-complete audio; `0` disables the ramp |
+| Early-response boundary | `quality early-response boundary <none|clause|sentence>` | REPL/socket/TUI implemented | `clause` | provisional-start latency vs semantic completeness |
 
 ### Gateway-Owned `VoiceQualityConfig` Knobs
 
@@ -1030,6 +1032,7 @@ Prompt requirements:
 | `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `40` | `0` disables, otherwise clamp to range | new playback request | Sentence-boundary first-chunk ramp for lower first-audio latency; `0` restores full-size first-chunk synthesis. |
 | `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Prepared text chunks required before playback starts; the telephony default starts playback as soon as the first prepared chunk is available. Raise this only when a deployment explicitly prefers extra smoothing over first-audio latency. |
 | `early_response.enabled` | `bool` | `true,false` | `false` | reject non-bool | new call | Enables the opt-in provisional ASR-input stage for new calls. It feeds the selected per-call `ConversationProcessorKind`; it does not choose a separate response processor. Use `quality early-response on` before dialing for live identity tests. |
+| `early_response.boundary` | enum | `none,clause,sentence` | `clause` | reject unknown | new call | Minimum text boundary before a partial can start provisional processor work. `none` is useful for identity latency smoke tests with stable unpunctuated ASR partials; `clause` and `sentence` preserve semantic-boundary gating for real agents. |
 | `early_response.start_timing` | enum | `while_speaking,endpoint_candidate_only` | `while_speaking` | reject unknown | new call | Selects whether stable partials may start provisional work while the caller is still speaking or only after the low-energy endpoint-candidate window. `while_speaking` is the live-test default for snappier identity/agent response; `endpoint_candidate_only` preserves the older conservative delay. |
 | `barge_in.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables barge-in path. |
 | `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. During active playback, `barge_in.onset_during_playback` decides whether onset trusts the caller interruption immediately or defers only likely assistant echo to partial/final ASR confirmation. |
@@ -1341,6 +1344,7 @@ quality tts first-chunk-max-chars <n>
 quality tts prebuffer-chunks <n>
 quality early-response status
 quality early-response on|off
+quality early-response boundary none|clause|sentence
 quality early-response start-timing while-speaking|endpoint-candidate-only
 # `warm tts` loads the configured TTS backend and runs a tiny discarded probe synthesis.
 quality logging status

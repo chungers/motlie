@@ -629,6 +629,23 @@ impl From<EarlyResponseStartTimingArg> for EarlyResponseStartTiming {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum EarlyResponseBoundaryArg {
+    None,
+    Clause,
+    Sentence,
+}
+
+impl From<EarlyResponseBoundaryArg> for BoundaryRequirement {
+    fn from(value: EarlyResponseBoundaryArg) -> Self {
+        match value {
+            EarlyResponseBoundaryArg::None => Self::None,
+            EarlyResponseBoundaryArg::Clause => Self::Clause,
+            EarlyResponseBoundaryArg::Sentence => Self::Sentence,
+        }
+    }
+}
+
 impl From<TtsGenerationModeArg> for TtsGenerationMode {
     fn from(value: TtsGenerationModeArg) -> Self {
         match value {
@@ -728,6 +745,7 @@ pub enum QualityEarlyResponseCommand {
     Status,
     On,
     Off,
+    Boundary { boundary: EarlyResponseBoundaryArg },
     StartTiming { timing: EarlyResponseStartTimingArg },
 }
 
@@ -2881,6 +2899,12 @@ async fn quality_early_response_command(
             })
             .await
         }
+        QualityEarlyResponseCommand::Boundary { boundary } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_early_response_boundary(boundary.into()))
+            })
+            .await
+        }
         QualityEarlyResponseCommand::StartTiming { timing } => {
             mutate_quality_config(context, |config| {
                 Ok(config.set_early_response_start_timing(timing.into()))
@@ -3497,11 +3521,14 @@ fn quality_help() -> String {
         "quality text-call latest-response-wins on|off  bool default=true applies=new_turn",
         "quality text-call callback-timeout-ms <ms>     range=100..60000 default=5000ms applies=new_turn",
         "quality tts status",
+        "quality tts generation-mode buffered|streaming default=buffered applies=new_playback_request",
         "quality tts chunking on|off                    bool default=true applies=new_playback_request",
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
-        "quality early-response status|on|off|start-timing <endpoint-candidate-only|while-speaking>",
+        "quality early-response status|on|off",
+        "quality early-response boundary <none|clause|sentence> default=clause applies=new_call",
+        "quality early-response start-timing <endpoint-candidate-only|while-speaking>",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
@@ -4996,6 +5023,7 @@ mod tests {
             vec!["conversation smoke-test: on", "conversation barge-in: off"]
         );
         assert!(engine.context().conversation.smoke_test_enabled());
+        assert!(!engine.context().conversation.final_coalescing_enabled());
         assert!(!engine.context().conversation.barge_in_enabled());
         assert!(!state.read().await.quality.config.barge_in.enabled);
 
@@ -5602,6 +5630,18 @@ mod tests {
             .iter()
             .any(|line| line == "provisional_max_prebuffer_frames=1"));
         assert!(state.read().await.quality.config.early_response.enabled);
+
+        let boundary = engine
+            .run_line("quality early-response boundary none")
+            .await
+            .expect("set early response boundary");
+        assert!(boundary.lines[0].contains("key=early_response.boundary"));
+        assert!(boundary.lines[0].contains("value=none"));
+        assert!(boundary.lines[0].contains("applies=new_call"));
+        assert_eq!(
+            state.read().await.quality.config.early_response.boundary,
+            BoundaryRequirement::None
+        );
 
         let timing = engine
             .run_line("quality early-response start-timing endpoint-candidate-only")

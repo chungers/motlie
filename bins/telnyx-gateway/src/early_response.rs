@@ -21,7 +21,6 @@ use tokio::sync::{mpsc, Notify};
 
 const EARLY_RESPONSE_INPUT_CAPACITY: usize = 8;
 const EARLY_RESPONSE_EVENT_CAPACITY: usize = 32;
-const PROVISIONAL_PREBUFFER_FRAME_CAP: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -610,6 +609,8 @@ pub fn spawn_early_response_pipeline(
         media_registry: services.media_registry.clone(),
     };
 
+    let audio_mode = policy.audio_mode;
+    let provisional_max_prebuffer_frames = policy.provisional_max_prebuffer_frames;
     let processor = services.processor;
     let processor_inputs = receiver_stream(event_rx).map(ConversationProcessorInput::EarlyResponse);
     let outputs = processor.process_stream(processor_inputs);
@@ -620,6 +621,8 @@ pub fn spawn_early_response_pipeline(
         tts_backend: services.tts_backend,
         text_calls: services.text_calls.clone(),
         registry: registry.clone(),
+        audio_mode,
+        provisional_max_prebuffer_frames,
     };
     tokio::spawn(async move {
         futures_util::pin_mut!(outputs);
@@ -702,6 +705,8 @@ struct EarlyResponseIntentServices {
     tts_backend: LiveTtsBackend,
     text_calls: SharedTextCallRegistry,
     registry: ProvisionalPlaybackRegistry,
+    audio_mode: EarlyResponseAudioMode,
+    provisional_max_prebuffer_frames: usize,
 }
 
 async fn handle_early_response_intent(
@@ -722,6 +727,16 @@ async fn handle_early_response_intent(
                     .registry
                     .is_current(&call_id, &provisional_turn_id, generation)
             {
+                return Ok(());
+            }
+            if services.audio_mode == EarlyResponseAudioMode::PrepareOnly {
+                tracing::debug!(
+                    gateway_call_id = call_id.as_str(),
+                    utterance_id = utterance_id.as_str(),
+                    provisional_turn_id = provisional_turn_id.as_str(),
+                    generation,
+                    "early_response.provisional.speech_suppressed_prepare_only"
+                );
                 return Ok(());
             }
             match append_or_replace {
@@ -813,7 +828,7 @@ async fn start_provisional_speech(
             latest_turn_finalized_at: None,
             turn_id: Some(provisional_turn_id.clone()),
             coalesced_turn_ids: Vec::new(),
-            prebuffer_chunks_override: Some(PROVISIONAL_PREBUFFER_FRAME_CAP),
+            prebuffer_chunks_override: Some(services.provisional_max_prebuffer_frames),
         },
         vec![text],
     )
@@ -1601,6 +1616,10 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
+    use crate::media::SharedMediaRegistry;
+    use crate::operator::state::shared_state;
+    use crate::text_calls::SharedTextCallRegistry;
+    use crate::tts::{unavailable_registry, LiveTtsBackend};
 
     #[derive(Clone, Default)]
     struct RecordingCancelSink {
@@ -1668,6 +1687,75 @@ mod tests {
                 speech_state: CallerSpeechState::EndpointCandidate,
             }]
         );
+    }
+
+    #[test]
+    fn clause_boundary_rejects_unpunctuated_partial() {
+        let mut aggregator =
+            EarlyResponseAggregator::new(enabled_policy(), NoopEarlyResponseCancelSink);
+
+        assert!(aggregator
+            .handle_input(EarlyResponseInput::Partial(partial(
+                "I need a tow truck",
+                7,
+                100
+            )))
+            .is_empty());
+    }
+
+    #[test]
+    fn none_boundary_can_start_from_unpunctuated_partial() {
+        let mut policy = enabled_policy();
+        policy.boundary = BoundaryRequirement::None;
+        let mut aggregator = EarlyResponseAggregator::new(policy, NoopEarlyResponseCancelSink);
+
+        assert!(matches!(
+            aggregator
+                .handle_input(EarlyResponseInput::Partial(partial("I need a tow truck", 7, 100)))
+                .as_slice(),
+            [EarlyResponseEvent::Started { text, .. }] if text == "I need a tow truck"
+        ));
+    }
+
+    #[tokio::test]
+    async fn prepare_only_suppresses_provisional_gateway_tts() {
+        let registry = ProvisionalPlaybackRegistry::default();
+        registry.observe_event(&EarlyResponseEvent::Started {
+            provisional_turn_id: "pt-1".to_string(),
+            call_id: "call-1".to_string(),
+            utterance_id: "utt-1".to_string(),
+            generation: 1,
+            text: "hello".to_string(),
+            confidence: Some(0.9),
+            stability: Some(0.9),
+            speech_state: CallerSpeechState::EndpointCandidate,
+        });
+        let services = EarlyResponseIntentServices {
+            state: shared_state("127.0.0.1:0".parse().expect("valid addr")),
+            media_registry: SharedMediaRegistry::default(),
+            tts: unavailable_registry(),
+            tts_backend: LiveTtsBackend::Piper,
+            text_calls: SharedTextCallRegistry::default(),
+            registry: registry.clone(),
+            audio_mode: EarlyResponseAudioMode::PrepareOnly,
+            provisional_max_prebuffer_frames: 1,
+        };
+
+        handle_early_response_intent(
+            &services,
+            EarlyResponseIntent::Speak {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 1,
+                text: "hello".to_string(),
+                append_or_replace: AppendOrReplace::Replace,
+            },
+        )
+        .await
+        .expect("prepare-only suppresses provisional speech");
+
+        assert!(registry.promote_for_append("call-1", "pt-1", 1).is_none());
     }
 
     #[test]

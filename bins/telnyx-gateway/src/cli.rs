@@ -30,7 +30,7 @@ pub struct Cli {
     #[arg(long)]
     pub dry_run_telnyx: bool,
 
-    /// Enable the M3 smoke-test echo conversation handler.
+    /// Initial shortcut for enabling gateway-local identity/repeat replies.
     #[arg(long)]
     pub conversation_smoke_test: bool,
 

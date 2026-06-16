@@ -135,8 +135,6 @@ impl ConversationRuntime {
 
     pub fn set_smoke_test_enabled(&self, enabled: bool) {
         self.set_processor_enabled(enabled);
-        self.final_coalescing_enabled
-            .store(enabled, Ordering::SeqCst);
     }
 
     pub fn final_coalescing_enabled(&self) -> bool {

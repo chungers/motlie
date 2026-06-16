@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
         telnyx.clone(),
         tts.clone(),
         cli.conversation_smoke_test,
-        cli.conversation_smoke_test,
+        false,
     );
     if cli.conversation_smoke_test {
         conversation.set_barge_in_enabled(false);

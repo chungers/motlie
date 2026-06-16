@@ -5,21 +5,21 @@ use chrono::{DateTime, Local, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use motlie_driver::{CommandEffect, CommandEngine, HistoryBuffer};
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::Terminal;
 
 use crate::operator::commands::{GatewayCommand, GatewayContext};
 use crate::operator::script::run_operator_line;
-use crate::operator::session::{OperatorSession, ordered_call_ids};
+use crate::operator::session::{ordered_call_ids, OperatorSession};
 use crate::operator::state::{
-    CallStatus, GatewayState, LogLevel, ModelWarmStatus, asr_warm_key, tts_warm_key,
+    asr_warm_key, tts_warm_key, CallStatus, GatewayState, LogLevel, ModelWarmStatus,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

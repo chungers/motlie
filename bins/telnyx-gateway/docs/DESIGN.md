@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-15 PDT | @codex-m6-ds-rv: Documented the current single ASR-to-processor-to-TTS pipeline, including the optional early-response aggregation stage, committed-turn-only behavior when the aggregator is disabled, and the control-knob surface now summarized in API.md. | Feeding the Conversation Handler, Returning TTS Audio |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Made conversation processor selection per-call and static-dispatch via `ConversationProcessorKind` (`Identity` only for now); `early_response.enabled` is documented as the optional provisional-input gate into the same processor, not a second response branch. | Application Text Call Protocol and Gateway Control API, Processor Transfer Function Contract |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Consolidated buffered final-turn and streaming early-response handling under one `ConversationProcessor` contract; the identity/repeat exemplar now repeats text exactly without an `I heard:` prefix and is no longer a separate processor path. | Application Text Call Protocol and Gateway Control API, Processor Transfer Function Contract |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Corrected the live early-response default to start from stable `speaking` partials, keeping `endpoint_candidate_only` as an explicit conservative knob, and documented the matching state lists. | Application Text Call Protocol and Gateway Control API |
@@ -1487,7 +1488,7 @@ The following rules are normative for #527 and supersede any shorthand wording i
 
 - Realtime placement: the live early-response adapter runs off the single Telnyx media-socket loop in its own task. The media/ASR producer uses non-blocking `try_send` into a bounded input queue with capacity `8` per call; it never awaits processor, WebSocket, TTS, logging, disk, or network I/O.
 - Input backpressure: partial inputs are coalesced by `(call_id, utterance_id)` and drop/replace the oldest pending partial when full. `CommitBoundary`, `CancelProvisional`, and call teardown are never dropped; if the normal queue is full they use the priority control lane.
-- Output backpressure: slow processors or protocol adapters may coalesce/drop stale `Updated` events for superseded generations, but must not drop `Started`, `Committed`, or `Canceled`. Dropped updates increment a quality counter.
+- Output backpressure: slow processors or protocol adapters may coalesce/drop stale `Updated` events for superseded generations, but must not drop `Started`, `Committed`, or `Canceled`. Dropped partial inputs are logged today; a structured aggregate counter is a profiling/reporting follow-up.
 - Cancellation priority: a FIFO `Stream<EarlyResponseEvent>` is not the safety mechanism. Every replacement, mismatch, stale generation, policy disablement, barge-in, hangup, or coalesced sibling cancellation calls an out-of-band priority cancel sink straight into speech/media state before or alongside the lifecycle event.
 - Playback keying: provisional speech is keyed by `(provisional_turn_id, generation)`, never by `provisional_turn_id` alone. Agent output must echo the generation it is answering; stale generations are rejected without TTS.
 - JIT playback cap: provisional audio uses just-in-time packetization and may keep at most `provisional_max_prebuffer_frames = 1` unsent 20 ms media frame beyond the frame currently being sent. Normal `tts.prebuffer_chunks` is ignored or clamped for provisional playback. Already-sent network frames remain unrecallable and must be measured.
@@ -1715,7 +1716,7 @@ pub enum EarlyResponseAppendMode {
 }
 ```
 
-`SpeakProvisionally` is the full early-audio path. `PrepareOnly` is an optional conservative mode that starts routing/retrieval/LLM/TTS warmup early while holding outbound audio until commit; it does not replace the full early-audio design. `EndpointCandidateOnly` is the safer start-timing default. `WhileSpeaking` requires explicit opt-in, `CallerSpeechState::Speaking` in `allowed_start_speech_states`, a satisfied boundary gate, and all configured confidence/stability gates present and passing.
+`SpeakProvisionally` is the full early-audio path. `PrepareOnly` is an optional conservative mode that still emits provisional events to processors/protocol adapters but suppresses provisional gateway TTS; committed-turn processing remains responsible for any final audio after endpointing. `EndpointCandidateOnly` is the safer conservative start-timing choice. The current live-test default is `WhileSpeaking`, which requires `CallerSpeechState::Speaking` in `allowed_start_speech_states`, a satisfied boundary gate, and all configured confidence/stability gates present and passing.
 
 Missing safety signals fail conservative. If `min_confidence` is configured and a partial has `confidence=None`, that partial cannot start `SpeakProvisionally`; if `min_stability` is configured and `stability=None`, it also cannot start. `MissingSignalPolicy::Conservative` may still allow preparation without audio, or defer start until `endpoint_candidate` with a strict boundary and the configured signals present. The aggregator must not synthesize confidence or stability when a backend or prior partial did not provide it.
 
@@ -1946,7 +1947,7 @@ The compatibility check should be conservative and explainable in PLAN. A normal
 
 #### Observability
 
-Implementation should add normalized records for provisional lifecycle and TTS attribution. These are additive to #523:
+Implementation should add normalized records for provisional lifecycle and TTS attribution. The current implementation emits provisional lifecycle tracing and text-call forwarding records, but the normalized records below remain the target profiling surface and are additive to #523:
 
 - `text_call.early_turn.started`
 - `text_call.early_turn.updated`
@@ -3417,17 +3418,65 @@ This isolates Telnyx transport quirks from the ASR contract.
 
 ### Feeding the Conversation Handler
 
-The gateway should not bake dialog policy into the Telnyx crate. Instead:
+The current gateway-local conversation path has one processor contract and one speech queue contract. The optional early-response stage is an ASR-partial aggregation stage in front of the same processor; it is not a separate response branch and must not contain smoke-test-specific dialog policy. The identity/repeat processor is the exemplar implementation and repeats accepted caller text exactly, without an `I heard:` prefix.
 
-- ASR partials and finals are converted into transcript text events
-- transcript events are delivered to an injected `TranscriptSink`
-- simple sinks log or forward transcripts without TTS
-- a conversation sink forwards selected transcript events to a `ConversationHandler`
-- the handler reads and mutates `ConversationContext`
-- the handler returns provider-neutral conversation commands
-- the gateway maps `ConversationCommand::Say` to TTS and `ConversationCommand::Call` to call-control actions
+End-to-end flow with early response enabled:
 
-This is the cleanest seam for integrating Motlie-specific agent logic later.
+```text
+Telnyx media
+  -> decode / resample / speech gate
+  -> streaming ASR session
+  -> ASR partials
+  -> aggregate_early_resp_partials(policy)
+  -> ConversationProcessorKind::process_stream(EarlyResponse(event))
+  -> EarlyResponseIntent::{StartOrUpdate, Cancel, Commit}
+  -> SpeechQueueRequest(source_label = "early response")
+  -> TTS generation mode: buffered or streaming
+  -> packetized 20 ms outbound media frames
+```
+
+End-to-end flow with early response disabled:
+
+```text
+Telnyx media
+  -> decode / resample / speech gate
+  -> streaming ASR session
+  -> local endpoint / ASR finish / final-settle
+  -> ConversationProcessorKind::process_stream(CommittedTurn(turn))
+  -> ConversationCommand::Say { text }
+  -> SpeechQueueRequest(source_label = "conversation say")
+  -> TTS generation mode: buffered or streaming
+  -> packetized 20 ms outbound media frames
+```
+
+The processor input contract is intentionally two-shaped because provisional ASR hypotheses and committed turns have different safety semantics:
+
+```rust
+pub enum ConversationProcessorInput {
+    EarlyResponse(EarlyResponseEvent),
+    CommittedTurn(ConversationCommittedTurn),
+}
+
+pub enum ConversationProcessorOutput {
+    EarlyResponse(EarlyResponseIntent),
+    Command(ConversationCommand),
+    Error(String),
+}
+
+pub enum ConversationProcessorKind {
+    Identity,
+}
+```
+
+Contract rules:
+
+- `ConversationProcessorKind` is per-call static dispatch. New processors are added as enum variants rather than `Box<dyn ...>` dynamic dispatch.
+- `early_response.enabled=false` removes the partial aggregation stage. The processor then sees only `CommittedTurn` after endpointing/final-settle. It does not see partial text, confidence/stability, provisional turn IDs, or provisional cancel/commit events.
+- `early_response.enabled=true` feeds accepted partials through `aggregate_early_resp_partials` before the processor. Commit/cancel reconciliation remains pipeline-level and processor-agnostic.
+- Buffered and streaming TTS are downstream execution modes selected inside the speech queue from `tts.generation_mode`; they are not separate conversation pipelines.
+- Barge-in and stale-generation cancellation are gateway responsibilities around the processor output. A processor may emit text or intent, but it must not own Telnyx media clear semantics.
+
+The concrete operator/API surface for selecting processors, enabling the aggregator, and tuning ASR/endpoint/TTS/barge-in behavior is documented in [API.md](API.md).
 
 ### Returning TTS Audio
 

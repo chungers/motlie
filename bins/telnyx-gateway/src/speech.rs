@@ -1,20 +1,20 @@
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::call_control::TelnyxMediaConfig;
 use crate::media::{
-    CallMediaHandle, OutboundFrameQualityContext, OutboundMediaCommand, OutboundMediaFrame,
-    SharedMediaRegistry, SpeechCancelToken, SpeechClearReason, TtsFramePacketizer,
-    packetize_tts_samples, percentile_u64,
+    packetize_tts_samples, percentile_u64, CallMediaHandle, OutboundFrameQualityContext,
+    OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry, SpeechCancelToken,
+    SpeechClearReason, TtsFramePacketizer,
 };
 use crate::operator::state::{
     CallStatus, LogLevel, QualityPlaybackLinkage, QualitySpanEmission, SharedState,
 };
 use crate::quality::{RedactionMode, TtsGenerationMode};
 use crate::tts::{
-    LiveTtsBackend, SharedTtsRegistry, TtsAudio, split_speech_text_with_first_chunk_max_chars,
+    split_speech_text_with_first_chunk_max_chars, LiveTtsBackend, SharedTtsRegistry, TtsAudio,
 };
 use motlie_model::typed::IncrementalSpeechCancelToken;
 
@@ -2021,16 +2021,16 @@ async fn synthesize_text_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operator::state::{CallStatus, TelnyxIds, TtsPlaybackStatus, shared_state};
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
     use crate::tts::{
-        IncrementalTtsSummary, OutboundIncrementalTtsStream, OutboundTtsFactory,
-        PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry,
+        IncrementalTtsSummary, OutboundIncrementalTtsStream, OutboundTtsFactory, TtsAudio,
+        TtsRegistry, PIPER_SAMPLE_RATE_HZ,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use tokio::sync::{Notify, mpsc};
-    use tokio::time::{Duration, timeout};
+    use tokio::sync::{mpsc, Notify};
+    use tokio::time::{timeout, Duration};
 
     struct SequencedTtsFactory {
         sample_rate_hz: u32,
