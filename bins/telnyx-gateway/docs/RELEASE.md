@@ -75,8 +75,8 @@ source /home/dchung/telnyx-test/telnyx.env
 set +a
 
 ./target/release/telnyx-gateway \
+  --config /home/dchung/telnyx-test/gateway.toml \
   --tui \
-  --load /home/dchung/telnyx-test/config.repl \
   --socket /tmp/telnyx-m3-live.sock
 ```
 

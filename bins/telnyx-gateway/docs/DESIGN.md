@@ -6,7 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
-| 2026-06-15 PDT | @codex-m6-ds-rv: Simplified gateway startup by removing one-off dynamic quality override flags and `--turn-log-jsonl`; operators now use replayable `--load` files with `quality ...` commands, including `quality logging on <path>`, and `--conversation-smoke-test` is hidden/deprecated in favor of `conversation smoke-test on`. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
+| 2026-06-15 PDT | @codex-m6-ds-rv: Replaced split startup config with one durable `--config <gateway.toml>` file and readable TOML `state dump`; `.repl` command files remain only for interactive `source <path>` replay. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Documented the current single ASR-to-processor-to-TTS pipeline, including the optional early-response aggregation stage, committed-turn-only behavior when the aggregator is disabled, and the control-knob surface now summarized in API.md. | Feeding the Conversation Handler, Returning TTS Audio |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Made conversation processor selection per-call and static-dispatch via `ConversationProcessorKind` (`Identity` only for now); `early_response.enabled` is documented as the optional provisional-input gate into the same processor, not a second response branch. | Application Text Call Protocol and Gateway Control API, Processor Transfer Function Contract |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Consolidated buffered final-turn and streaming early-response handling under one `ConversationProcessor` contract; the identity/repeat exemplar now repeats text exactly without an `I heard:` prefix and is no longer a separate processor path. | Application Text Call Protocol and Gateway Control API, Processor Transfer Function Contract |
@@ -534,7 +534,7 @@ For Telnyx, `provider_call_id` maps to `call_control_id`, `provider_session_id` 
 
 ### Milestone 2: Outbound Dialer and TTS
 
-The second milestone is outbound call control plus TTS from the shared operator command engine. The TUI shell, selected-call detail composer, startup `--load` replay, and Unix-domain socket all dispatch the same typed commands with source-local selected call and model state:
+The second milestone is outbound call control plus TTS from the shared operator command engine. The TUI shell, selected-call detail composer, startup `--config` load, and Unix-domain socket all dispatch the same typed commands with source-local selected call and model state:
 
 ```text
 motlie-driver command source (TUI or socket)
@@ -636,7 +636,7 @@ Recommended composition rule:
 - conversation handlers emit provider-neutral commands such as `Say { text }`, `Call(CallAction::Hangup)`, `Call(CallAction::Transfer { ... })`, or `Noop`
 - `bins/telnyx-gateway` maps those commands to Telnyx call-control and outbound media operations
 
-Implementation note (@codex-366-impl, 2026-06-06 13:40 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. `answer` for inbound calls, outbound `dial`, and plain `conversation attach [call]` attach in auto/approved mode by default, but the built-in identity/repeat processor is disabled by default so normal live sessions are transcription-only after attach. Operators run `conversation smoke-test on` from the TUI/socket or a replayed `--load` file to enable the identity/repeat smoke-test loop. Operators can run `conversation disapprove [call]` mid-call to cancel active conversation TTS through the M2 clear/cancel path and leave the call in transcription-only mode. Manual mode remains available through `conversation mode manual [call]`; it records the assistant proposal in the selected-call chat state, and `conversation approve [call]` / `conversation say [call]` speaks the pending proposal through that command source's selected TTS backend when a non-smoke processor proposes a response. Auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with the gateway default live TTS backend, currently `kokoro-82m` with Piper fallback; it intentionally does not use source-local `tts use` because media-triggered turns are not associated with a command source. Barge-in defaults to drop-and-regenerate for normal conversation processors: meaningful partial ASR events and frame-level speech-onset detection for attached calls trigger the drop/cancel path when playback is active, while final ASR events still drive regeneration through the processor. Because the built-in identity/repeat processor repeats caller text deterministically, `conversation smoke-test on` turns barge-in off so echo validation is not cut by partial/final/speech-onset interruption. The media path now applies the endpoint final-settle policy before any live text or conversation dispatch: `endpoint.final_settle_ms` controls the bounded hold window, and `endpoint.final_settle_trailing_punctuation`, `endpoint.final_settle_lead_words`, `endpoint.final_settle_tail_words`, and `endpoint.final_settle_dangling_suffixes` classify structurally incomplete fragments. Those fragments are held briefly, merged with the next final if one arrives, or flushed on timeout/stream end. Conversation processors with final coalescing enabled use `endpoint.merge_window_ms` as a processor-local committed-turn debounce (default 350 ms), can continue holding while active playback is present, and can extend a bounded hold using `endpoint.conversation_tail_words`, `endpoint.conversation_incomplete_tail_hold_ms`, and `endpoint.conversation_low_confidence_threshold_percent`; this does not merge live M4 `caller.turn` events. After PR #484, backend-native `TranscriptSegment.confidence` is preserved through latest-partial final repair and can explain low-confidence tails in logs, but it is not treated as calibrated endpoint stability. Operators can explicitly run `conversation barge-in on` when they are testing interruption behavior. If another final turn arrives while TTS is already active and barge-in is off, the generated assistant text is retained as a proposal instead of interrupting playback. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
+Implementation note (@codex-366-impl, 2026-06-06 13:40 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. `answer` for inbound calls, outbound `dial`, and plain `conversation attach [call]` attach in auto/approved mode by default, but the built-in identity/repeat processor is disabled by default so normal live sessions are transcription-only after attach. Operators run `conversation smoke-test on` from the TUI/socket or a interactive `source` file to enable the identity/repeat smoke-test loop. Operators can run `conversation disapprove [call]` mid-call to cancel active conversation TTS through the M2 clear/cancel path and leave the call in transcription-only mode. Manual mode remains available through `conversation mode manual [call]`; it records the assistant proposal in the selected-call chat state, and `conversation approve [call]` / `conversation say [call]` speaks the pending proposal through that command source's selected TTS backend when a non-smoke processor proposes a response. Auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with the gateway default live TTS backend, currently `kokoro-82m` with Piper fallback; it intentionally does not use source-local `tts use` because media-triggered turns are not associated with a command source. Barge-in defaults to drop-and-regenerate for normal conversation processors: meaningful partial ASR events and frame-level speech-onset detection for attached calls trigger the drop/cancel path when playback is active, while final ASR events still drive regeneration through the processor. Because the built-in identity/repeat processor repeats caller text deterministically, `conversation smoke-test on` turns barge-in off so echo validation is not cut by partial/final/speech-onset interruption. The media path now applies the endpoint final-settle policy before any live text or conversation dispatch: `endpoint.final_settle_ms` controls the bounded hold window, and `endpoint.final_settle_trailing_punctuation`, `endpoint.final_settle_lead_words`, `endpoint.final_settle_tail_words`, and `endpoint.final_settle_dangling_suffixes` classify structurally incomplete fragments. Those fragments are held briefly, merged with the next final if one arrives, or flushed on timeout/stream end. Conversation processors with final coalescing enabled use `endpoint.merge_window_ms` as a processor-local committed-turn debounce (default 350 ms), can continue holding while active playback is present, and can extend a bounded hold using `endpoint.conversation_tail_words`, `endpoint.conversation_incomplete_tail_hold_ms`, and `endpoint.conversation_low_confidence_threshold_percent`; this does not merge live M4 `caller.turn` events. After PR #484, backend-native `TranscriptSegment.confidence` is preserved through latest-partial final repair and can explain low-confidence tails in logs, but it is not treated as calibrated endpoint stability. Operators can explicitly run `conversation barge-in on` when they are testing interruption behavior. If another final turn arrives while TTS is already active and barge-in is off, the generated assistant text is retained as a proposal instead of interrupting playback. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
 
 ### Milestone 5: Conversational Realism Latency Improvements (#402)
 
@@ -747,10 +747,10 @@ The gateway should expose the same `motlie-driver` command family through startu
 
 - `--tui` enables the local terminal UI with a left REPL pane and right call roster/detail area
 - `--socket <path>` enables a Unix-domain command socket for headless local agent/tooling control
-- `--load <dump_path>` replays durable configuration commands during startup before live command sources are accepted
+- `--config <gateway.toml>` loads durable startup state before live command sources are accepted
 - the authenticated HTTP Control API remains the remote application-server control surface for inbound subscriber registration, blocking outbound text-call dial, and optional call state reads
 
-`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still locally agent-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--load` and/or the authenticated HTTP Control API for subscriber configuration and outbound appserver requests.
+`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still locally agent-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--config` and/or the authenticated HTTP Control API for subscriber configuration and outbound appserver requests.
 
 The Unix-domain socket is the preferred interface for local agent tooling. It should be sufficient for an agent to configure the gateway, poll call/event state, answer or hang up calls, dial outbound calls, and send `say` text without using the remote appserver text-call protocol. The HTTP Control API remains a separate authenticated integration surface for inbound subscriber registration and outbound appserver dial requests.
 
@@ -1032,23 +1032,23 @@ conversation say [call]
 conversation mode <manual|auto>
 ```
 
-These belong after milestone 1 and milestone 2 are independently useful. `answer`, `dial`, and `conversation attach` wire selected media final transcript events to `ConversationProcessor` in auto mode by default; they should not change the Telnyx media or model contracts. Built-in identity/repeat replies are test-only and require `conversation smoke-test on` from the TUI/socket or a replayed `--load` file. Conversation barge-in defaults on for normal conversation sessions and can be triggered by meaningful partial ASR, final overlap checks, or frame-level speech onset. The smoke-test identity/repeat loop is the exception: `conversation smoke-test on` sets barge-in off from either the TUI, socket, or replayed load file so active repeat playback can finish; operators can turn it back on explicitly when validating interruption behavior. `conversation disapprove` cancels active conversation TTS and detaches the processor so the call remains transcription-only. Manual proposals are spoken only after `conversation approve` / `conversation say`.
+These belong after milestone 1 and milestone 2 are independently useful. `answer`, `dial`, and `conversation attach` wire selected media final transcript events to `ConversationProcessor` in auto mode by default; they should not change the Telnyx media or model contracts. Built-in identity/repeat replies are test-only and require `conversation smoke-test on` from the TUI/socket or a interactive `source` file. Conversation barge-in defaults on for normal conversation sessions and can be triggered by meaningful partial ASR, final overlap checks, or frame-level speech onset. The smoke-test identity/repeat loop is the exception: `conversation smoke-test on` sets barge-in off from either the TUI, socket, or replayed load file so active repeat playback can finish; operators can turn it back on explicitly when validating interruption behavior. `conversation disapprove` cancels active conversation TTS and detaches the processor so the call remains transcription-only. Manual proposals are spoken only after `conversation approve` / `conversation say`.
 
 ### Replayable State Dumps
 
-The gateway should persist durable configuration as a replayable command script, not as an opaque binary snapshot. This makes restart behavior auditable, editable, and compatible with the same `motlie-driver` command dispatcher used by the TUI, socket, and Control API surfaces.
+The gateway should persist durable configuration as readable TOML, not as an opaque binary snapshot and not as replayed command text. This makes restart behavior auditable, editable, and independent from source-local TUI/socket command state.
 
 Supported entry points:
 
 ```text
 state dump [path]
 shutdown [dump_path]
-telnyx-gateway --load <dump_path>
+telnyx-gateway --config <gateway.toml>
 ```
 
-`state dump [path]` writes the current durable gateway state and keeps running. `shutdown [dump_path]` writes the same dump, then exits cleanly after refusing new work and draining or terminating active sessions according to normal shutdown policy. If the path is omitted, `shutdown` uses `config state-path` if set; otherwise it should use a documented default such as `./telnyx-gateway.state.repl`.
+`state dump [path]` writes the current durable gateway state TOML and keeps running. `shutdown [dump_path]` writes the same dump, then exits cleanly after refusing new work and draining or terminating active sessions according to normal shutdown policy. If the path is omitted, `shutdown` uses `config state-path` if set; otherwise it should use a documented default such as `./telnyx-gateway.toml`.
 
-`--load <dump_path>` replays the command file during startup before the gateway enables inbound handling or accepts Control API mutations. Replay should be deterministic and should fail closed: if a command fails, the gateway should report the failing line, leave inbound mode disabled, and require operator action.
+`--config <gateway.toml>` loads the TOML state before the gateway enables inbound handling or accepts Control API mutations. Invalid config fails closed with a validation error.
 
 Recommended dump format:
 
@@ -1058,7 +1058,7 @@ Recommended dump format:
 config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
 config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
 config set from-number <caller-phone-number>
-config set state-path ./telnyx-gateway.state.repl
+config set state-path ./telnyx-gateway.toml
 telnyx app use <connection-id>
 telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
 telnyx number use <called-phone-number>
@@ -1199,7 +1199,7 @@ Rules:
 - allow multiple subscribers for one phone number
 - require idempotency for create/update so agent daemons can re-register on restart
 - do not emit call transcript text through this registration API
-- keep subscriber state durable enough for `state dump` / `--load` replay
+- keep subscriber state durable enough for `state dump` / `--config` load
 
 ### Inbound Offer Protocol
 
@@ -2384,7 +2384,7 @@ bins/telnyx-gateway/src/
 - `motlie-driver` command registration and execution
 - optional left REPL pane plus right call roster/detail TUI state, rendering, and command/status routing
 - Unix-domain command socket serving, client session tracking, and command-source mux routing
-- replayable command dump generation and startup `--load` replay
+- replayable command dump generation and startup `--config` load
 - Gateway Control API routing and authentication
 - inbound text-call subscription storage keyed by phone number
 - outbound blocking dial request handling and callback offer setup
@@ -3911,29 +3911,23 @@ Recommended fallback ngrok workflow:
 
 ### Gateway Configuration Requirement
 
-The gateway binary should accept a `--listen` flag for the local bind address, a `--load <dump_path>` flag for replaying durable gateway state, a `--tui` flag for the local TUI, and a `--socket <path>` flag for a Unix-domain operator command socket. The external public URLs can be provided either as startup flags or through any configured operator command source after a tunnel starts, and then persisted with `state dump` or `shutdown <dump_path>`.
+The gateway binary should accept `--config <gateway.toml>` for durable state, optional local process overrides such as `--bind`, `--tui`, and `--socket <path>`, and a Unix-domain operator command socket for live control. The external public URLs live in the TOML and can also be changed through any configured operator command source after a tunnel starts, then persisted with `state dump` or `shutdown <dump_path>`.
 
 Example shape:
 
 ```text
 telnyx-gateway \
-  --listen 127.0.0.1:8080 \
-  --media-path /telnyx/media \
-  --webhook-path /telnyx/webhooks \
+  --config ./telnyx-gateway.toml \
   --tui \
-  --socket /tmp/motlie-telnyx-gateway.sock \
-  --load ./telnyx-gateway.state.repl
+  --socket /tmp/motlie-telnyx-gateway.sock
 ```
 
 For headless operation, omit `--tui` and keep `--socket`:
 
 ```text
 telnyx-gateway \
-  --listen 127.0.0.1:8080 \
-  --media-path /telnyx/media \
-  --webhook-path /telnyx/webhooks \
-  --socket /run/motlie/telnyx-gateway.sock \
-  --load ./telnyx-gateway.state.repl
+  --config ./telnyx-gateway.toml \
+  --socket /run/motlie/telnyx-gateway.sock
 ```
 
 Then use either the TUI REPL or a local socket client to send the same command text:
@@ -3941,7 +3935,7 @@ Then use either the TUI REPL or a local socket client to send the same command t
 ```text
 config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
 config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
-config set state-path ./telnyx-gateway.state.repl
+config set state-path ./telnyx-gateway.toml
 ```
 
 This matters because the process may listen on `127.0.0.1:8080` while Telnyx needs the externally reachable tunnel URL, not the private bind address.
@@ -3953,8 +3947,8 @@ This matters because the process may listen on `127.0.0.1:8080` while Telnyx nee
 3. use the TUI REPL or local command socket to set the public URLs
 4. use the TUI REPL or local command socket to create/select the Telnyx application and bind the phone number
 5. run `inbound enable --manual`, then make or receive calls
-6. exit with `shutdown ./telnyx-gateway.state.repl`
-7. restart later with `telnyx-gateway --load ./telnyx-gateway.state.repl ...`
+6. exit with `shutdown ./telnyx-gateway.toml`
+7. restart later with `telnyx-gateway --config ./telnyx-gateway.toml ...`
 
 ## Getting Started: Local Deployment
 
@@ -4050,10 +4044,9 @@ By convention, preload shared operator artifacts under `~/artifacts/hf-cache`. T
 
 ```bash
 ./target/release/telnyx-gateway \
-  --bind 127.0.0.1:8080 \
+  --config ./telnyx-gateway.toml \
   --tui \
   --socket /tmp/motlie-telnyx-gateway.sock \
-  --load ./telnyx-gateway.state.repl \
   --artifact-root "$HOME/artifacts/hf-cache"
 ```
 
@@ -4064,7 +4057,7 @@ The exact operator commands can evolve, but the binary should always separate:
 - preloaded model artifact root and injected ASR/TTS backend choice
 - operator input mode: `--tui`, `--socket <path>`, both, or neither when only HTTP subscriber/dial APIs and loaded configuration are desired
 - Telnyx application/number selection, which can be driven from any configured operator command source
-- optional replayable state file loaded with `--load`
+- optional durable state TOML loaded with `--config`
 
 #### 9. Start Tailscale Funnel
 

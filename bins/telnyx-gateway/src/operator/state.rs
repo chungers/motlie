@@ -91,15 +91,27 @@ impl QualityRuntimeState {
 #[derive(Clone, Debug, Default)]
 pub struct GatewayConfig {
     pub bind: Option<SocketAddr>,
+    pub tui: bool,
+    pub socket: Option<PathBuf>,
+    pub artifact_root: Option<PathBuf>,
+    pub log_file: Option<PathBuf>,
     pub public_webhook_url: Option<String>,
     pub public_media_url: Option<String>,
     pub telnyx_media: TelnyxMediaConfig,
     pub capture_dir: Option<PathBuf>,
+    pub telnyx_api_base: String,
+    pub telnyx_api_key_ref: Option<String>,
+    pub dry_run_telnyx: bool,
     pub selected_connection_id: Option<String>,
     pub selected_application_name: Option<String>,
     pub selected_phone_number: Option<String>,
     pub default_from_number: Option<String>,
     pub state_path: Option<PathBuf>,
+    pub conversation_enabled: bool,
+    pub conversation_final_coalescing_enabled: bool,
+    pub conversation_barge_in_enabled: bool,
+    pub conversation_processor: ConversationProcessorKind,
+    pub startup_warm_models: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -710,6 +722,10 @@ impl GatewayState {
             config: GatewayConfig {
                 bind: Some(bind),
                 telnyx_media: TelnyxMediaConfig::default(),
+                telnyx_api_base: "https://api.telnyx.com/v2".to_string(),
+                telnyx_api_key_ref: Some("env:TELNYX_API_KEY".to_string()),
+                conversation_barge_in_enabled: true,
+                conversation_processor: ConversationProcessorKind::Identity,
                 ..GatewayConfig::default()
             },
             inbound_mode: InboundMode::Disabled,

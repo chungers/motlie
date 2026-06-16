@@ -528,10 +528,6 @@ pub enum LogCommand {
 #[derive(Debug, Subcommand)]
 pub enum QualityCommand {
     Status,
-    #[command(hide = true)]
-    RestoreConfig {
-        encoded: String,
-    },
     Profile {
         profile: QualityProfileArg,
     },
@@ -2461,7 +2457,6 @@ async fn quality_command(
 ) -> DriverResult<CommandOutput> {
     match command {
         QualityCommand::Status => quality_status(context).await,
-        QualityCommand::RestoreConfig { encoded } => restore_quality_config(context, encoded).await,
         QualityCommand::Profile { profile } => {
             mutate_quality_config(context, |config| Ok(config.set_profile(profile.into()))).await
         }
@@ -3187,28 +3182,6 @@ long_longest_token_run={}",
     }
 }
 
-async fn restore_quality_config(
-    context: &mut GatewayContext,
-    encoded: String,
-) -> DriverResult<CommandOutput> {
-    let config = VoiceQualityConfig::from_replay_hex(&encoded)
-        .map_err(|error| DriverError::invalid_argument("encoded", format!("{error:#}")))?;
-    context
-        .conversation
-        .set_barge_in_enabled(config.barge_in.enabled);
-    let mut guard = context.state.write().await;
-    guard.set_quality_config(config);
-    if !guard.quality.config.logging.enabled {
-        guard.set_quality_event_sink(QualityEventSink::disabled(), None);
-    }
-    emit_quality_snapshots_for_active_calls(&mut guard, "restore_config", "restored", None);
-    guard.log(LogLevel::Info, "quality config restored");
-    Ok(CommandOutput::line(format!(
-        "quality restored config_id={}",
-        guard.quality.config_id
-    )))
-}
-
 async fn set_barge_in_enabled(
     context: &mut GatewayContext,
     enabled: bool,
@@ -3431,8 +3404,7 @@ fn gateway_root_help() -> String {
         "  config show                    Show replayable gateway config values",
         "  config set <key> <value>       Set webhook-url, media-url, codec, capture dir, etc.",
         "  state dump <path>              Export durable gateway config plus full resolved quality config",
-        "  load <path>                    Replay a .repl command file; comments and blanks are ignored",
-        "  source <path>                  Alias for load",
+        "  source <path>                  Replay a .repl command file in this TUI/socket source",
         "  quit [dump_path]               Optionally dump replay commands, then stop the gateway",
         "",
         "Telnyx setup:",
@@ -3552,7 +3524,7 @@ fn quality_help() -> String {
         "",
         "M6 quality commands use the existing line-oriented operator dispatcher.",
         "Transcript text remains disabled unless explicitly enabled.",
-        "Use `state dump <path>` to export the full resolved quality config for replay.",
+        "Use `state dump <path>` to export readable gateway TOML with full voice_quality config.",
         "Operator TUI Up/Down recalls submitted commands through motlie-driver HistoryBuffer.",
     ]
     .join("\n")
@@ -3666,13 +3638,13 @@ fn state_help() -> String {
     [
         "state dump <path>",
         "",
-        "Write replayable commands for durable gateway configuration.",
-        "The dump includes the full resolved VoiceQualityConfig as `quality restore-config <hex>`,",
-        "selected durable Telnyx/media/TTS/inbound settings, and excludes transient call state.",
-        "Use `load <path>` or start with `--load <path>` to rehydrate a later session.",
+        "Write readable gateway state TOML for durable startup configuration.",
+        "The dump includes selected durable Telnyx/media/TTS/inbound settings and full",
+        "resolved [voice_quality.*] config. It excludes transient call state.",
+        "Restart with `telnyx-gateway --config <path>` to rehydrate a later session.",
         "",
         "Example:",
-        "  state dump ~/telnyx-test/config.repl",
+        "  state dump ~/telnyx-test/gateway.toml",
     ]
     .join("\n")
 }
@@ -3689,21 +3661,19 @@ fn quit_help() -> String {
         "",
         "Examples:",
         "  quit",
-        "  quit ~/telnyx-test/config.repl",
+        "  quit ~/telnyx-test/gateway.toml",
     ]
     .join("\n")
 }
 
 fn load_help() -> String {
     [
-        "load <path>",
         "source <path>",
         "",
         "Replay commands from a .repl file in the current TUI or socket source.",
         "Blank lines and lines beginning with # are ignored. `~` and `~/...` are expanded.",
         "",
         "Examples:",
-        "  load ~/telnyx-test/config.repl",
         "  source /tmp/telnyx.repl",
     ]
     .join("\n")
@@ -4206,7 +4176,7 @@ mod tests {
         let rendered = output.lines.join("\n");
 
         assert!(rendered.contains("TUI shell and each agent socket connection"));
-        assert!(rendered.contains("load <path>"));
+        assert!(rendered.contains("source <path>"));
         assert!(rendered.contains("quit [dump_path]"));
         assert!(rendered.contains("tts list"));
         assert!(rendered.contains("tts use kokoro-82m|piper"));
@@ -5810,26 +5780,19 @@ mod tests {
             let guard = state.read().await;
             crate::operator::persistence::render_state_dump(&guard)
         };
-        assert!(dump.contains("quality restore-config "));
+        assert!(dump.contains("[voice_quality]"));
+        assert!(!dump.contains("restore-config"));
 
         let path = std::env::temp_dir().join(format!(
-            "motlie-quality-state-{}.repl",
+            "motlie-quality-state-{}.toml",
             uuid::Uuid::new_v4()
         ));
         std::fs::write(&path, dump).expect("write quality state dump");
 
-        let replay_state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
-        let replay_telnyx = TelnyxClient::new("https://api.example.test", None, true);
-        let replay_context = GatewayContext::new(replay_state.clone(), replay_telnyx);
-        let mut replay_engine =
-            CommandEngine::<GatewayContext, GatewayCommand>::new(replay_context);
-        crate::operator::script::run_repl_file(&mut replay_engine, &path)
-            .await
-            .expect("replay quality state dump");
-
-        let replay_guard = replay_state.read().await;
-        assert_eq!(replay_guard.quality.config, expected_config);
-        assert_eq!(replay_guard.quality.config_id, expected_config_id);
+        let replay_config = crate::operator::config_file::LoadedGatewayConfig::load(&path)
+            .expect("load quality state dump");
+        assert_eq!(replay_config.voice_quality, expected_config);
+        assert_eq!(replay_config.voice_quality.config_id(), expected_config_id);
         let _ = std::fs::remove_file(path);
     }
 

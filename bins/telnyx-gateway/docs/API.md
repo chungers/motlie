@@ -8,7 +8,7 @@ Current API snapshot for the Telnyx gateway operator/TUI/socket control surface.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-15 PDT | @codex-m6-ds-rv | Removed one-off dynamic quality startup flags and `--turn-log-jsonl`; startup uses `--quality-config`, `--load`, and replayed `quality logging on <path>` / quality commands instead. `--conversation-smoke-test` is hidden/deprecated in favor of replaying `conversation smoke-test on`. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Replaced split startup config with one durable `--config <gateway.toml>` file. `state dump` now emits readable TOML with full `[voice_quality.*]`; `.repl` command files are only sourced interactively with `source <path>`. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Added the current ASR -> optional aggregator -> static processor -> TTS pipeline contract and the operator/config control-knob inventory. |
 
 ## End-to-End Conversation Pipeline
@@ -105,7 +105,53 @@ Notes:
 
 ### Startup CLI vs Runtime Controls
 
-Startup CLI flags are limited to process wiring and bootstrap defaults: listener address, TUI/socket enablement, state load, artifact root, credentials, capture/log paths, and initial quality config/profile. Quality and conversation behavior that can change safely at call or playback boundaries is controlled through `VoiceQualityConfig`, TUI/socket commands, TOML overlays, or replayed state lines. One-off startup quality overrides and `--turn-log-jsonl` are intentionally removed; use `--quality-config`, `--load`, and `quality logging on <path>` instead. `--conversation-smoke-test` is a hidden deprecated compatibility shortcut for the same runtime identity/repeat enablement exposed by `conversation smoke-test on`; prefer replaying that command with `--load`.
+Startup uses one declarative gateway TOML file:
+
+```bash
+telnyx-gateway --config ./gateway.toml
+```
+
+The file owns durable process/Telnyx/media/conversation/startup state plus full `[voice_quality.*]`. `state dump <path>` writes the same readable TOML shape. The CLI keeps narrow process overrides (`--bind`, `--tui`, `--socket`, `--artifact-root`, `--log-file`) for local launches, but `--quality-config`, `--quality-profile`, `--load`, `--turn-log-jsonl`, and `--conversation-smoke-test` are not part of the startup surface. Runtime tuning remains available through TUI/socket `quality ...` commands. Ad hoc command scripts can be replayed inside a running TUI/socket source with `source <path>`.
+
+Minimal live-test config shape:
+
+```toml
+version = 1
+
+[process]
+bind = "127.0.0.1:8080"
+socket = "/tmp/telnyx-gateway.sock"
+artifact_root = "$HOME/artifacts/hf-cache"
+
+[telnyx]
+api_base = "https://api.telnyx.com/v2"
+api_key_ref = "env:TELNYX_API_KEY"
+selected_connection_id = "<telnyx-connection-id>"
+selected_phone_number = "<telnyx-phone-number>"
+
+[gateway]
+webhook_url = "https://<public-host>/telnyx/webhooks"
+media_url = "wss://<public-host>/telnyx/media"
+from_number = "<telnyx-phone-number>"
+
+[conversation]
+enabled = true
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[startup]
+warm_models = true
+
+[voice_quality.tts]
+generation_mode = "streaming"
+chunking_enabled = true
+prebuffer_chunks = 1
+
+[voice_quality.logging]
+enabled = true
+redaction_mode = "metrics-only"
+include_transcript_text = false
+```
 
 ### Backend and Processor Selection
 
@@ -164,7 +210,7 @@ Config-only endpoint policy lists: `endpoint.final_settle_trailing_punctuation`,
 | `early_response.append_mode` | `replace_only`, `prefix_monotonic_backend` | `replace_only` | new call | Whether updates replace or append suffix text. |
 | `early_response.provisional_max_prebuffer_frames` | count | `1` hard invariant | new call | JIT provisional playback cap to limit stale-audio leakage; validation currently requires exactly `1`. |
 
-Only `enabled`, `boundary`, and `start_timing` are currently exposed as live commands. The remaining early-response fields are quality-config/TOML/replay knobs and appear in `quality early-response status` or config snapshots.
+Only `enabled`, `boundary`, and `start_timing` are currently exposed as live commands. The remaining early-response fields are gateway TOML config knobs and appear in `quality early-response status` or config snapshots.
 
 ### TTS and Outbound Speech
 

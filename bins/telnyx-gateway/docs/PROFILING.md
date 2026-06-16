@@ -17,7 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-15 PDT | @codex-m6-ds-rv | Simplified gateway startup surface: removed one-off dynamic quality CLI overrides and `--turn-log-jsonl`; startup quality/logging behavior is now expressed with `--quality-config` plus replayed `--load` command files. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Simplified gateway startup around one durable `--config <gateway.toml>` file; `state dump` now emits readable TOML with full `[voice_quality.*]`, while `.repl` scripts are limited to interactive `source <path>` command replay. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Removed the smoke-command committed-final debounce side effect and exposed `early_response.boundary` as a live-safe knob so identity tests can accept stable unpunctuated partials without changing stricter real-agent modes. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Clarified the processor model after consolidation: `ConversationProcessorKind` is per-call static dispatch, currently `identity`; `early_response.enabled` only gates provisional ASR input into the same processor and does not select a separate path. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Consolidated gateway-local smoke handling under the unified `ConversationProcessor` contract: identity/repeat now exercises both committed and provisional paths without adding an `I heard:` prefix; `I heard:` remains only an explicit external harness response policy. |
@@ -1172,10 +1172,9 @@ max_inappropriate_cancel_rate = 0.03
 Bootstrap precedence:
 
 1. Code defaults.
-2. Profile defaults selected by `--quality-profile` or TOML profile.
-3. `--quality-config <path>` TOML overrides.
-4. `--load <state>` replayed state lines.
-5. CLI flag overrides.
+2. `--config <gateway.toml>` declarative state, including `[voice_quality.*]` patches/full config.
+3. Narrow CLI process overrides: `--bind`, `--tui`, `--socket`, `--artifact-root`, `--log-file`.
+4. Live TUI/socket commands at their documented apply boundary.
 
 Post-boot precedence:
 
@@ -1193,60 +1192,62 @@ Config hashing:
 
 ## Persistence and Parity Tests
 
-State dump/load must use replayable line-oriented commands, not a separate private config format.
+State dump/load uses a readable gateway TOML state file, not replayed command lines and not an opaque hex payload. `state dump <path>` writes durable process/Telnyx/media/conversation/startup state plus the full resolved `[voice_quality.*]` config. Restart with `telnyx-gateway --config <path>`.
 
-Example dump lines:
+Example dump shape:
 
-```text
-quality profile balanced
-quality speech rms-threshold 220
-quality speech peak-threshold 1100
-quality speech onset-min-silence-ms 180
-quality endpoint trailing-silence-ms 900
-quality endpoint min-turn-words 2
-quality endpoint min-turn-chars 6
-quality endpoint merge-window-ms 350
-quality endpoint final-settle-ms 800
-quality endpoint max-turn-words 80
-quality endpoint max-turn-duration-ms 12000
-quality asr finish-pad-ms 320
-quality asr repeated-token-run-threshold 16
-quality asr repeated-q-run-threshold 8
-quality tts first-chunk-max-chars 40
-quality text-call max-active-turns 32
-quality text-call latest-response-wins on
-quality logging include-transcript-text off
-quality logging redaction-mode metrics-only
-quality judge off
+```toml
+version = 1
+
+[process]
+bind = "127.0.0.1:8080"
+socket = "/tmp/telnyx-gateway.sock"
+artifact_root = "$HOME/artifacts/hf-cache"
+
+[telnyx]
+api_base = "https://api.telnyx.com/v2"
+api_key_ref = "env:TELNYX_API_KEY"
+
+[gateway]
+media_codec = "PCMU"
+media_sample_rate_hz = 8000
+
+[conversation]
+enabled = true
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[startup]
+warm_models = true
+
+[voice_quality.endpoint]
+trailing_silence_ms = 900
+final_settle_ms = 800
 ```
 
 Required round-trip tests:
 
 | Test | Requirement |
 |---|---|
-| CLI to resolved config | CLI flags produce the same `VoiceQualityConfig` as equivalent TOML plus state lines. |
-| REPL to state dump | Mutating via REPL then dumping state emits replay lines that recreate the same `config_id`. |
-| Socket to state dump | Mutating via socket command then dumping state emits equivalent replay lines. |
-| State load parity | Loading dumped lines after TOML and before CLI overrides follows the bootstrap precedence exactly. |
-| Validation parity | Invalid values are rejected or clamped the same way from CLI, REPL, socket, and state load. |
+| Config to resolved state | `--config <gateway.toml>` produces the expected durable gateway state and `VoiceQualityConfig`. |
+| REPL to state dump | Mutating via REPL then dumping state emits TOML that recreates the same `config_id`. |
+| Socket to state dump | Mutating via socket command then dumping state emits equivalent TOML. |
+| State load parity | Loading dumped TOML through `--config` recreates durable state without transient calls/media. |
+| Validation parity | Invalid values are rejected or clamped consistently from config TOML, REPL, socket, and state load. |
 | Boundary parity | Hot reload does not affect the active ASR session; it takes effect on the next `asr.session.started`. |
 
 ## Proposed CLI Surface
 
-Gateway startup and replayed runtime-quality setup:
+Gateway startup:
 
 ```text
-# telnyx-live.repl
-quality endpoint trailing-silence-ms 650
-quality speech rms-threshold 220
-quality speech peak-threshold 1100
-quality speech onset-min-silence-ms 180
-quality logging on ./turns.jsonl
+telnyx-gateway --config ./gateway.toml
+```
 
-telnyx-gateway \
-  --quality-config ./telnyx-quality.toml \
-  --quality-profile balanced \
-  --load ./telnyx-live.repl
+Ad hoc operator command replay while the gateway is running:
+
+```text
+source ./debug-commands.repl
 ```
 
 Offline analysis:
@@ -1275,21 +1276,21 @@ Harness profiling:
 # gateway-echo.repl contains: quality logging on ./gateway-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness gateway-echo \
-  --load ./gateway-echo.repl \
+  --config ./gateway-echo.toml \
   --report-json ./gateway-echo-report.json
 
 # text-call-echo.repl contains: quality logging on ./text-call-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness text-call-echo \
   --app-url <websocket-url> \
-  --load ./text-call-echo.repl \
+  --config ./text-call-echo.toml \
   --report-json ./text-call-echo-report.json
 
 # agent-tmux-echo.repl contains: quality logging on ./agent-tmux-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness agent-tmux-echo \
   --agent-socket <path> \
-  --load ./agent-tmux-echo.repl \
+  --config ./agent-tmux-echo.toml \
   --report-json ./agent-tmux-echo-report.json
 ```
 
@@ -1488,7 +1489,7 @@ Live sampling:
 3. Optionally enable sampled LLM judging at the report layer.
 4. Review daily or weekly reports.
 5. Apply runtime config changes through REPL/socket.
-6. Persist state as replayable `quality ...` lines.
+6. Persist state as readable gateway TOML with `state dump`.
 7. Compare before/after windows with denominators, exclusions, and confounders.
 
 Example live flow:
@@ -1499,7 +1500,7 @@ quality judge on --sample-rate 0.05 --model <judge-model>
 quality report ./reports/telnyx-quality-current.json
 quality recommendations ./reports/telnyx-quality-recommendations.json
 quality endpoint trailing-silence-ms 950
-state dump ./state-after-quality-tune.repl
+state dump ./state-after-quality-tune.toml
 ```
 
 ## Optimization Strategy

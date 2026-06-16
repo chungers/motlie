@@ -639,18 +639,6 @@ impl VoiceQualityConfig {
         format!("cfg_{}", hex::encode(digest))
     }
 
-    pub fn to_replay_hex(&self) -> String {
-        hex::encode(serde_json::to_vec(self).expect("voice quality config serializes"))
-    }
-
-    pub fn from_replay_hex(encoded: &str) -> Result<Self> {
-        let bytes = hex::decode(encoded.trim()).context("decode replay quality config hex")?;
-        let config: Self =
-            serde_json::from_slice(&bytes).context("decode replay quality config json")?;
-        config.validate_resolved()?;
-        Ok(config)
-    }
-
     pub fn validate_resolved(&self) -> Result<()> {
         ensure_f32(
             "speech.rms_threshold",
@@ -2129,62 +2117,6 @@ mod tests {
         let left = VoiceQualityConfig::default();
         let right = VoiceQualityConfig::for_profile(QualityProfile::Balanced);
         assert_eq!(left.config_id(), right.config_id());
-    }
-
-    #[test]
-    fn replay_hex_round_trips_full_resolved_config() {
-        let mut config = VoiceQualityConfig::for_profile(QualityProfile::Noisy);
-        config.set_asr_repeated_token_run_threshold(63);
-        config.set_text_call_media_ready_timeout_ms(12_345);
-        config.set_text_call_playback_wait_timeout_ms(54_321);
-        config.set_text_call_callback_timeout_ms(1_234);
-        config.set_barge_in_enabled(false);
-        config.barge_in.partial_asr_cancel_enabled = false;
-        config.set_logging_enabled(true);
-        config.set_logging_queue_capacity(7_777);
-        config.set_quality_judge_enabled(true);
-        config.set_quality_judge_batch_size(17);
-        config.targets.max_garbled_turn_rate = 0.2;
-
-        let restored = VoiceQualityConfig::from_replay_hex(&config.to_replay_hex())
-            .expect("replay hex restores");
-
-        assert_eq!(restored, config);
-        assert_eq!(restored.config_id(), config.config_id());
-    }
-
-    #[test]
-    fn replay_hex_round_trips_live_clamp_edges() {
-        let mut config = VoiceQualityConfig::default();
-        config
-            .set_speech_rms_threshold(f32::MAX)
-            .expect("finite RMS clamps");
-        config.set_speech_peak_threshold(i32::MAX);
-        config.set_speech_onset_min_silence_ms(u64::MAX);
-        config.set_endpoint_trailing_silence_ms(u64::MAX);
-
-        assert_eq!(config.speech.rms_threshold, 20_000.0);
-        assert_eq!(config.speech.peak_threshold, 32_767);
-        assert_eq!(config.speech.onset_min_silence_ms, 2_000);
-        assert_eq!(config.endpoint.trailing_silence_ms, 5_000);
-
-        let restored = VoiceQualityConfig::from_replay_hex(&config.to_replay_hex())
-            .expect("clamp-edge replay config restores");
-
-        assert_eq!(restored, config);
-        assert_eq!(restored.config_id(), config.config_id());
-    }
-
-    #[test]
-    fn replay_hex_rejects_out_of_domain_config() {
-        let mut config = VoiceQualityConfig::default();
-        config.text_call.max_active_turns = 0;
-        let encoded = config.to_replay_hex();
-
-        let error = VoiceQualityConfig::from_replay_hex(&encoded)
-            .expect_err("invalid replay config should be rejected");
-
-        assert!(error.to_string().contains("text_call.max_active_turns"));
     }
 
     #[test]
