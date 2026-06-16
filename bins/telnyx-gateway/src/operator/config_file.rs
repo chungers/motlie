@@ -64,6 +64,9 @@ impl LoadedGatewayConfig {
         let inbound = InboundConfig::from_document(document.inbound);
         let conversation_barge_in_explicit = document.conversation.barge_in_enabled.is_some();
         let mut conversation = ConversationConfig::from_document(document.conversation)?;
+        // @codex-m6-ds-rv 2026-06-16 PDT -- Transitional precedence note:
+        // voice_quality.barge_in is the runtime owner; conversation.barge_in_enabled
+        // only preserves current startup ergonomics when omitted from gateway TOML.
         if !conversation_barge_in_explicit {
             conversation.barge_in_enabled = voice_quality.barge_in.enabled;
         }
