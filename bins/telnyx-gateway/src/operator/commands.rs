@@ -3430,6 +3430,7 @@ fn gateway_root_help() -> String {
         "  listener status                Show the local HTTP/WebSocket bind address",
         "  config show                    Show replayable gateway config values",
         "  config set <key> <value>       Set webhook-url, media-url, codec, capture dir, etc.",
+        "  state dump <path>              Export durable gateway config plus full resolved quality config",
         "  load <path>                    Replay a .repl command file; comments and blanks are ignored",
         "  source <path>                  Alias for load",
         "  quit [dump_path]               Optionally dump replay commands, then stop the gateway",
@@ -3551,6 +3552,7 @@ fn quality_help() -> String {
         "",
         "M6 quality commands use the existing line-oriented operator dispatcher.",
         "Transcript text remains disabled unless explicitly enabled.",
+        "Use `state dump <path>` to export the full resolved quality config for replay.",
         "Operator TUI Up/Down recalls submitted commands through motlie-driver HistoryBuffer.",
     ]
     .join("\n")
@@ -3664,7 +3666,9 @@ fn state_help() -> String {
     [
         "state dump <path>",
         "",
-        "Write replayable commands for the current gateway configuration.",
+        "Write replayable commands for durable gateway configuration.",
+        "The dump includes the full resolved VoiceQualityConfig as `quality restore-config <hex>`,",
+        "selected durable Telnyx/media/TTS/inbound settings, and excludes transient call state.",
         "Use `load <path>` or start with `--load <path>` to rehydrate a later session.",
         "",
         "Example:",
