@@ -15,6 +15,25 @@ path = "src/lib.rs"
 
 [features]
 default = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b", "model-gemma4-e2b"]
+all-curated = [
+    "model-google-gemma-300m",
+    "model-qwen3-embedding-06b",
+    "model-qwen3-4b",
+    "model-gemma4-e2b",
+    "model-gemma4-e4b",
+    "model-gemma4-12b-gguf",
+    "model-gemma4-12b-qat-gguf",
+    "model-qwen3-4b-gguf",
+    "model-gemma4-e2b-gguf",
+    "model-gemma4-e4b-gguf",
+    "model-qwen3-6-27b-gguf",
+    "model-piper-en-us-ljspeech-medium",
+    "model-kokoro-82m",
+    "model-qwen3-tts-cpp",
+    "model-moonshine-streaming",
+    "model-sherpa-onnx-streaming",
+    "model-whisper-base-en",
+]
 model-google-gemma-300m = ["dep:motlie-model-mistral"]
 model-qwen3-embedding-06b = ["dep:motlie-model-mistral"]
 model-qwen3-4b = ["dep:motlie-model-mistral"]

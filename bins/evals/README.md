@@ -21,4 +21,4 @@ left in a host shell.
 - Link-stage failures are classified as `native_link_failed`; they must not be
   reported as Hugging Face artifact authorization failures.
 
-See `evals/README.md` and `evals/RUNBOOK.md` for operator commands.
+See `evals/README.md` for the index, `evals/RUNBOOK.md` for operator commands, and `evals/docs/PROCESS.md` for standing policies.

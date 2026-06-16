@@ -33,7 +33,6 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact("tokenizer.json"),
             ArtifactRule::Exact("tokenizer_config.json"),
             ArtifactRule::Exact("generation_config.json"),
-            ArtifactRule::Exact("special_tokens_map.json"),
             ArtifactRule::Suffix(".safetensors"),
             ArtifactRule::Suffix(".safetensors.index.json"),
         ],
@@ -60,6 +59,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "qwen3_4b",
             &checkpoint,
+            crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
         )),
     }
 }
