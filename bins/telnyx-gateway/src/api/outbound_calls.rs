@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use crate::adapter::{AsrRegistry, UnavailableAsrFactory};
     use crate::call_control::TelnyxClient;
-    use crate::conversation::{default_conversation_handler, ConversationRuntime};
+    use crate::conversation::ConversationRuntime;
     use crate::media::SharedMediaRegistry;
     use crate::operator::state::{shared_state, CallStatus};
     use crate::serve::AppServices;
@@ -349,12 +349,7 @@ mod tests {
         let tts = unavailable_registry();
         let unavailable_asr = Arc::new(UnavailableAsrFactory::new("ASR unavailable in API test"));
         let asr = Arc::new(AsrRegistry::new(unavailable_asr.clone(), unavailable_asr));
-        let conversation = ConversationRuntime::new(
-            telnyx.clone(),
-            tts.clone(),
-            default_conversation_handler(),
-            false,
-        );
+        let conversation = ConversationRuntime::new(telnyx.clone(), tts.clone(), false);
         AppServices {
             state,
             telnyx,

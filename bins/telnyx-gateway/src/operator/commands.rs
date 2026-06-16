@@ -6,7 +6,7 @@ use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegis
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
-use crate::conversation::{ConversationRuntime, default_conversation_handler};
+use crate::conversation::{ConversationProcessorKind, ConversationRuntime};
 use crate::early_response::{
     BoundaryRequirement, EarlyResponseAppendMode, EarlyResponseAudioMode, EarlyResponseStartTiming,
     MissingSignalPolicy,
@@ -17,8 +17,8 @@ use crate::media::{OutboundMediaCommand, SpeechCancelToken};
 use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{
-    CallStatus, ConversationMode, ConversationStatus, GatewayState, InboundMode, LogLevel,
-    SharedState, asr_warm_key, tts_warm_key,
+    asr_warm_key, tts_warm_key, CallStatus, ConversationMode, ConversationStatus, GatewayState,
+    InboundMode, LogLevel, SharedState,
 };
 use crate::quality::{
     OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, TtsGenerationMode,
@@ -26,7 +26,7 @@ use crate::quality::{
 };
 use crate::speech;
 use crate::text_calls::{SharedTextCallRegistry, TextCallStreamServices};
-use crate::tts::{LiveTtsBackend, SharedTtsRegistry, unavailable_registry};
+use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
@@ -49,12 +49,7 @@ impl GatewayContext {
         let echo = Arc::new(EchoAsrFactory);
         let asr = Arc::new(AsrRegistry::new(echo.clone(), echo));
         let tts = unavailable_registry();
-        let conversation = ConversationRuntime::new(
-            telnyx.clone(),
-            tts.clone(),
-            default_conversation_handler(),
-            false,
-        );
+        let conversation = ConversationRuntime::new(telnyx.clone(), tts.clone(), false);
         Self::with_services(
             state,
             telnyx,
@@ -383,6 +378,19 @@ pub enum ConversationModeArg {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConversationProcessorArg {
+    Identity,
+}
+
+impl From<ConversationProcessorArg> for ConversationProcessorKind {
+    fn from(processor: ConversationProcessorArg) -> Self {
+        match processor {
+            ConversationProcessorArg::Identity => Self::Identity,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ConversationSmokeTestArg {
     On,
     Off,
@@ -434,6 +442,11 @@ pub enum ConversationCommand {
     BargeIn {
         #[arg(value_enum)]
         state: Option<ConversationBargeInArg>,
+    },
+    Processor {
+        #[arg(value_enum)]
+        processor: ConversationProcessorArg,
+        call: Option<String>,
     },
     Attach {
         call: Option<String>,
@@ -847,8 +860,8 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
             LiveAsrBackend::default().model_label()
         ),
         format!(
-            "conversation-handler: {}",
-            context.conversation.handler_label()
+            "conversation-processor-state: {}",
+            context.conversation.processor_label()
         ),
         format!(
             "conversation-tts: {} ({}) {}",
@@ -1604,7 +1617,7 @@ async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<Comm
         lines: vec![
             format!("dial requested for {gateway_call_id}"),
             format!("selected call: {gateway_call_id}"),
-            "conversation attached in auto mode; smoke-test echo replies require:".to_string(),
+            "conversation attached in auto mode; smoke-test identity/repeat replies require:".to_string(),
             "  conversation smoke-test on".to_string(),
             format!("manual TTS smoke test: speak {gateway_call_id} <text to say>"),
             "use `status` or `call show` to inspect TTS playback; use `speak cancel` to clear active speech".to_string(),
@@ -1994,7 +2007,7 @@ async fn conversation_command(
             Ok(CommandOutput {
                 lines: conversation_status_lines(
                     call,
-                    context.conversation.handler_label(),
+                    context.conversation.processor_label(),
                     quality_barge_in_label(&guard),
                 ),
                 effects: Vec::new(),
@@ -2034,6 +2047,27 @@ async fn conversation_command(
             Ok(CommandOutput::line(format!(
                 "conversation barge-in: {}",
                 quality_barge_in_label(&guard)
+            )))
+        }
+        ConversationCommand::Processor { processor, call } => {
+            let processor = ConversationProcessorKind::from(processor);
+            let mut guard = context.state.write().await;
+            let id = resolve_call_id(
+                &guard,
+                call.as_deref(),
+                context.session.selected_call.as_deref(),
+            )?;
+            if !guard.calls.contains_key(&id) {
+                return Err(DriverError::NotFound {
+                    kind: "call",
+                    name: id,
+                });
+            }
+            guard.set_conversation_processor(&id, processor);
+            context.session.selected_call = Some(id.clone());
+            Ok(CommandOutput::line(format!(
+                "conversation processor for {id}: {}",
+                processor.label()
             )))
         }
         ConversationCommand::Attach { call } => {
@@ -2226,7 +2260,7 @@ async fn approve_conversation_proposal(
 
 fn conversation_status_lines(
     call: &crate::operator::state::CallSession,
-    handler_label: &str,
+    processor_label: &str,
     barge_in_label: &str,
 ) -> Vec<String> {
     let conversation = &call.conversation;
@@ -2235,7 +2269,8 @@ fn conversation_status_lines(
         format!("conversation: {}", conversation.status_label()),
         format!("attached: {}", conversation.attached),
         format!("mode: {}", conversation.mode.label()),
-        format!("handler: {handler_label}"),
+        format!("processor: {}", conversation.processor.label()),
+        format!("processor_state: {processor_label}"),
         format!("barge_in: {barge_in_label}"),
         format!("status: {}", conversation.status.label()),
         format!(
@@ -2263,9 +2298,10 @@ fn conversation_status_lines(
 fn call_conversation_status(call: &crate::operator::state::CallSession) -> String {
     let conversation = &call.conversation;
     let mut status = format!(
-        "{} mode={} attached={}",
+        "{} mode={} processor={} attached={}",
         conversation.status_label(),
         conversation.mode.label(),
+        conversation.processor.label(),
         conversation.attached
     );
     if let Some(playback) = &conversation.last_playback_id {
@@ -3366,7 +3402,7 @@ fn gateway_root_help() -> String {
         "Run `help conversation` for M3 call flows and `help socket` for agent protocol details.",
         "",
         "Core:",
-        "  status                         Show listener, Telnyx, ASR, media, conversation handler, and calls",
+        "  status                         Show listener, Telnyx, ASR, media, conversation processor, and calls",
         "  listener status                Show the local HTTP/WebSocket bind address",
         "  config show                    Show replayable gateway config values",
         "  config set <key> <value>       Set webhook-url, media-url, codec, capture dir, etc.",
@@ -3406,9 +3442,10 @@ fn gateway_root_help() -> String {
         "  dial <+e164> [--from +e164]    Place an outbound call; auto-attach conversation",
         "  speak [call-id] <text...>      Queue debug TTS; disabled while a text-call stream is attached",
         "  speak cancel [call-id]         Clear active TTS; allowed as an emergency control",
-        "  conversation status [call-id]  Show attachment, mode, handler, and latest turns",
-        "  conversation smoke-test on|off Enable or disable test-only echo replies",
+        "  conversation status [call-id]  Show attachment, mode, processor, and latest turns",
+        "  conversation smoke-test on|off Enable or disable test-only identity/repeat replies",
         "  conversation barge-in on|off|status Enable or disable transcript-triggered TTS clear",
+        "  conversation processor identity [call-id] Set per-call conversation processor",
         "  conversation disapprove [call-id] Stop TTS and detach conversation",
         "  reject [call-id]",
         "  hangup [call-id]",
@@ -3419,7 +3456,7 @@ fn gateway_root_help() -> String {
         "  quality endpoint trailing-silence-ms <ms>",
         "",
         "Testing:",
-        "  conversation smoke-test on    Enable test-only echo reply handler for M3 smoke tests",
+        "  conversation smoke-test on    Enable test-only identity/repeat processor for M3 smoke tests",
         "  test dial-transcribe <+e164> [--from +e164]",
         "",
         "Helpful topics:",
@@ -3507,7 +3544,7 @@ fn status_help() -> String {
         "  media codec/sample rate",
         "  capture directory",
         "  TTS backend",
-        "  conversation handler mode",
+        "  conversation processor state",
         "  call count",
         "",
         "Example:",
@@ -3764,13 +3801,13 @@ fn conversation_help() -> String {
     [
         "conversation commands",
         "",
-        "Attach or detach the selected call from the gateway-local conversation handler.",
+        "Attach or detach the selected call from the gateway-local conversation processor.",
         "The TUI and command socket share this command path.",
         "",
         "Default live behavior:",
         "  answer auto-attaches inbound calls in auto mode.",
         "  dial auto-attaches outbound calls in auto mode.",
-        "  The built-in handler is disabled by default; attached calls transcribe",
+        "  The built-in identity/repeat processor is disabled by default; attached calls transcribe",
         "  and record user turns without speaking.",
         "  Use `conversation smoke-test on` or startup `--conversation-smoke-test`",
         "  only when intentionally testing the echo/repeat TTS loop.",
@@ -3780,6 +3817,7 @@ fn conversation_help() -> String {
         "  conversation status [call-id]",
         "  conversation smoke-test <on|off>",
         "  conversation barge-in [on|off|status]",
+        "  conversation processor identity [call-id]",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
         "  conversation disapprove [call-id]",
@@ -3846,7 +3884,7 @@ fn call_control_help() -> String {
         "",
         "Control a call. If call-id is omitted, the command uses this source's selected call",
         "or the single waiting inbound call when that is unambiguous.",
-        "Answering attaches conversation in auto mode; the handler stays disabled unless",
+        "Answering attaches conversation in auto mode; the processor stays disabled unless",
         "`conversation smoke-test on` or startup `--conversation-smoke-test` is used.",
         "",
         "Examples:",
@@ -3867,12 +3905,12 @@ fn outbound_help() -> String {
         "",
         "Place an outbound call over the existing bidirectional Telnyx media WebSocket.",
         "`dial` selects the new call and auto-attaches conversation in auto mode. The",
-        "built-in conversation handler remains disabled by default, so normal live calls",
-        "transcribe without echo replies. `speak` is manual, non-blocking, and cancellable;",
+        "built-in conversation processor remains disabled by default, so normal live calls",
+        "transcribe without automatic replies. `speak` is manual, non-blocking, and cancellable;",
         "`speak cancel` sends Telnyx clear and drops local queued outbound audio.",
         "",
         "Conversation smoke test:",
-        "  conversation smoke-test on enables the test-only `I heard: ...` reply loop.",
+        "  conversation smoke-test on enables the test-only identity/repeat reply loop.",
         "  conversation smoke-test off returns attached calls to transcription-only behavior.",
         "",
         "Prerequisites:",
@@ -4001,6 +4039,7 @@ fn socket_help() -> String {
         "    conversation attach|detach [call-id]",
         "    conversation smoke-test on|off",
         "    conversation barge-in [on|off|status]",
+        "    conversation processor identity [call-id]",
         "    conversation approve [call-id]",
         "    conversation disapprove [call-id]",
         "    hangup [call-id]",
@@ -4010,7 +4049,7 @@ fn socket_help() -> String {
         "  `tts use` changes the source's next manual speak backend and the gateway-wide",
         "  conversation reply backend, because media-triggered turns are not associated",
         "  with one TUI/socket command source.",
-        "  The smoke-test handler mode and barge-in mode are also gateway-wide.",
+        "  The smoke-test processor mode and barge-in mode are also gateway-wide.",
     ]
     .join("\n")
 }
@@ -4030,16 +4069,16 @@ mod tests {
 
     use motlie_driver::CommandEngine;
     use tokio::sync::mpsc;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
 
     use super::*;
     use crate::adapter::LiveAsrBackend;
     use crate::call_control::TelnyxClient;
     use crate::conversation::handle_transcript_event;
     use crate::operator::state::{
-        CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus, shared_state,
+        shared_state, CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus,
     };
-    use crate::tts::{KOKORO_SAMPLE_RATE_HZ, StaticTtsFactory, TtsRegistry};
+    use crate::tts::{StaticTtsFactory, TtsRegistry, KOKORO_SAMPLE_RATE_HZ};
     use motlie_model::TranscriptionUpdate;
     use motlie_voice::app::TranscriptEvent;
 
@@ -4064,12 +4103,10 @@ mod tests {
 
         let output = engine.run_line("status").await.expect("status");
 
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line.starts_with("listener: 127.0.0.1:"))
-        );
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line.starts_with("listener: 127.0.0.1:")));
         assert!(!output.lines.iter().any(|line| line.contains("Some(")));
     }
 
@@ -4145,7 +4182,7 @@ mod tests {
         assert!(rendered.contains("tts list"));
         assert!(rendered.contains("tts use kokoro-82m|piper"));
         assert!(rendered.contains("conversation status [call-id]"));
-        assert!(rendered.contains("test-only echo reply handler"));
+        assert!(rendered.contains("test-only identity/repeat processor"));
         assert!(rendered.contains("help socket"));
     }
 
@@ -4185,7 +4222,9 @@ mod tests {
         assert!(outbound.contains("conversation smoke-test on"));
         assert!(socket.contains("Receive one JSON object"));
         assert!(socket.contains("Agent workflows"));
-        assert!(socket.contains("smoke-test handler mode and barge-in mode are also gateway-wide"));
+        assert!(
+            socket.contains("smoke-test processor mode and barge-in mode are also gateway-wide")
+        );
         assert!(conversation.contains("Default live behavior"));
         assert!(conversation_alias.contains("Default live behavior"));
         assert!(conversation.contains("Normal inbound TUI/socket flow"));
@@ -4221,12 +4260,10 @@ mod tests {
         let output = engine.run_line("tts status").await.expect("tts status");
 
         assert!(output.lines.iter().any(|line| line == "next=kokoro-82m"));
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "next_model=kokoro/kokoro_82m")
-        );
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "next_model=kokoro/kokoro_82m"));
         assert!(output.lines.iter().any(|line| line == "status=unavailable"));
         assert!(output.lines.iter().any(|line| {
             line == "reason=Kokoro-82M TTS is unavailable; rebuild with --features kokoro"
@@ -4311,7 +4348,7 @@ mod tests {
         engine
             .run_line("conversation smoke-test on")
             .await
-            .expect("enable smoke handler");
+            .expect("enable smoke processor");
         engine
             .run_line(&format!("call use {call_id}"))
             .await
@@ -4363,16 +4400,12 @@ mod tests {
             "warm tts=kokoro-82m model=kokoro/kokoro_82m mode=buffered status=ready elapsed_ms="
         ));
         let guard = state.read().await;
-        assert!(
-            guard
-                .model_warmups
-                .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025))
-        );
-        assert!(
-            guard
-                .model_warmups
-                .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m))
-        );
+        assert!(guard
+            .model_warmups
+            .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025)));
+        assert!(guard
+            .model_warmups
+            .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m)));
     }
 
     #[tokio::test]
@@ -4388,16 +4421,12 @@ mod tests {
         assert_eq!(output.lines.len(), 1);
         assert!(output.lines[0].starts_with("warm tts=kokoro-82m"));
         let guard = state.read().await;
-        assert!(
-            !guard
-                .model_warmups
-                .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025))
-        );
-        assert!(
-            guard
-                .model_warmups
-                .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m))
-        );
+        assert!(!guard
+            .model_warmups
+            .contains_key(&asr_warm_key(LiveAsrBackend::Kroko2025)));
+        assert!(guard
+            .model_warmups
+            .contains_key(&tts_warm_key(LiveTtsBackend::Kokoro82m)));
     }
 
     #[tokio::test]
@@ -4651,22 +4680,16 @@ mod tests {
             .expect("dial should create dry-run outbound call");
 
         assert!(output.lines[0].starts_with("dial requested for gwc_"));
-        assert!(
-            output.lines.iter().any(|line| line
-                == "conversation attached in auto mode; smoke-test echo replies require:")
-        );
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "  conversation smoke-test on")
-        );
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line.contains("speak ") && line.contains("<text to say>"))
-        );
+        assert!(output.lines.iter().any(|line| line
+            == "conversation attached in auto mode; smoke-test identity/repeat replies require:"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "  conversation smoke-test on"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line.contains("speak ") && line.contains("<text to say>")));
         let guard = state.read().await;
         let call_id = engine
             .context()
@@ -4906,19 +4929,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_smoke_test_command_toggles_echo_handler() {
+    async fn conversation_processor_command_sets_per_call_processor_without_enabling_replies() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let output = engine
+            .run_line("conversation processor identity")
+            .await
+            .expect("set processor");
+
+        assert_eq!(
+            output.lines,
+            vec![format!("conversation processor for {call_id}: identity")]
+        );
+        let status = engine
+            .run_line("conversation status")
+            .await
+            .expect("conversation status");
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "processor: identity"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "processor_state: disabled"));
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&call_id).expect("call exists");
+        assert_eq!(
+            call.conversation.processor,
+            ConversationProcessorKind::Identity
+        );
+        assert!(!call.conversation.attached);
+    }
+
+    #[tokio::test]
+    async fn conversation_smoke_test_command_toggles_identity_repeat_processor() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
         let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let status = engine.run_line("status").await.expect("status");
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "conversation-handler: disabled")
-        );
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "conversation-processor-state: disabled"));
 
         let enabled = engine
             .run_line("conversation smoke-test on")
@@ -5165,12 +5232,10 @@ mod tests {
 
         let output = engine.run_line("call show").await.expect("call show");
 
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "assembled transcript:")
-        );
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "assembled transcript:"));
         assert!(output.lines.iter().any(|line| line == "HELLO WORLD"));
         assert!(output.lines.iter().any(|line| line == "final: HELLO"));
         assert!(output.lines.iter().any(|line| line == "partial: WORLD"));
@@ -5218,18 +5283,14 @@ mod tests {
             .await
             .expect("socket show");
 
-        assert!(
-            tui_show
-                .lines
-                .iter()
-                .any(|line| line == &format!("call: {call_two}"))
-        );
-        assert!(
-            socket_show
-                .lines
-                .iter()
-                .any(|line| line == &format!("call: {call_one}"))
-        );
+        assert!(tui_show
+            .lines
+            .iter()
+            .any(|line| line == &format!("call: {call_two}")));
+        assert!(socket_show
+            .lines
+            .iter()
+            .any(|line| line == &format!("call: {call_one}")));
     }
 
     fn add_test_call(state: &mut GatewayState, call_control_id: &str) -> String {
@@ -5289,42 +5350,30 @@ mod tests {
             .await
             .expect("quality status");
 
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "include_transcript_text=false")
-        );
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "redaction_mode=metrics-only")
-        );
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "barge_in.onset_during_playback=defer_to_partial")
-        );
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "echo_suppression.enabled=true")
-        );
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "echo_suppression.tail_window_ms=2000")
-        );
-        assert!(
-            output
-                .lines
-                .iter()
-                .any(|line| line == "early_response.enabled=false")
-        );
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "include_transcript_text=false"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "redaction_mode=metrics-only"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "barge_in.onset_during_playback=defer_to_partial"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "echo_suppression.enabled=true"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "echo_suppression.tail_window_ms=2000"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "early_response.enabled=false"));
     }
 
     #[tokio::test]
@@ -5379,10 +5428,8 @@ mod tests {
             .run_line("quality endpoint conversation-incomplete-tail-hold-ms 99999")
             .await
             .expect("set conversation incomplete tail hold");
-        assert!(
-            conversation_hold_output.lines[0]
-                .contains("key=endpoint.conversation_incomplete_tail_hold_ms")
-        );
+        assert!(conversation_hold_output.lines[0]
+            .contains("key=endpoint.conversation_incomplete_tail_hold_ms"));
         assert!(conversation_hold_output.lines[0].contains("applies=new_turn"));
         assert!(conversation_hold_output.lines[0].contains("clamped=true"));
         assert_eq!(
@@ -5425,30 +5472,22 @@ mod tests {
             .run_line("quality text-call status")
             .await
             .expect("text-call status");
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "media_ready_timeout_ms=2345")
-        );
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "playback_wait_timeout_ms=3456")
-        );
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "latest_response_wins=false")
-        );
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "callback_timeout_ms=4567")
-        );
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "media_ready_timeout_ms=2345"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "playback_wait_timeout_ms=3456"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "latest_response_wins=false"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "callback_timeout_ms=4567"));
 
         let guard = state.read().await;
         assert_eq!(guard.quality.config.text_call.media_ready_timeout_ms, 2_345);
@@ -5509,24 +5548,18 @@ mod tests {
             .run_line("quality tts status")
             .await
             .expect("tts status");
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "generation_mode=streaming")
-        );
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "max_text_chunk_chars=40")
-        );
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "first_chunk_max_chars=45")
-        );
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "generation_mode=streaming"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "max_text_chunk_chars=40"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "first_chunk_max_chars=45"));
         assert!(status.lines.iter().any(|line| line == "prebuffer_chunks=3"));
 
         let guard = state.read().await;
@@ -5560,13 +5593,14 @@ mod tests {
             .expect("early response status");
         assert!(status.lines.iter().any(|line| line == "enabled=true"));
         assert!(status.lines.iter().any(|line| line == "boundary=clause"));
-        assert!(status.lines.iter().any(|line| line == "start_timing=while_speaking"));
-        assert!(
-            status
-                .lines
-                .iter()
-                .any(|line| line == "provisional_max_prebuffer_frames=1")
-        );
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "start_timing=while_speaking"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "provisional_max_prebuffer_frames=1"));
         assert!(state.read().await.quality.config.early_response.enabled);
 
         let timing = engine
@@ -5577,7 +5611,13 @@ mod tests {
         assert!(timing.lines[0].contains("value=endpoint_candidate_only"));
         assert!(timing.lines[0].contains("applies=new_call"));
         assert_eq!(
-            state.read().await.quality.config.early_response.start_timing,
+            state
+                .read()
+                .await
+                .quality
+                .config
+                .early_response
+                .start_timing,
             EarlyResponseStartTiming::EndpointCandidateOnly
         );
 
@@ -5626,29 +5666,23 @@ mod tests {
             .run_line("quality barge-in status")
             .await
             .expect("barge status");
-        assert!(
-            barge_status
-                .lines
-                .iter()
-                .any(|line| line == "onset_during_playback=trust")
-        );
+        assert!(barge_status
+            .lines
+            .iter()
+            .any(|line| line == "onset_during_playback=trust"));
         let echo_status = engine
             .run_line("quality echo-suppression status")
             .await
             .expect("echo status");
         assert!(echo_status.lines.iter().any(|line| line == "enabled=false"));
-        assert!(
-            echo_status
-                .lines
-                .iter()
-                .any(|line| line == "tail_window_ms=50")
-        );
-        assert!(
-            echo_status
-                .lines
-                .iter()
-                .any(|line| line == "short_token_coverage_percent=100")
-        );
+        assert!(echo_status
+            .lines
+            .iter()
+            .any(|line| line == "tail_window_ms=50"));
+        assert!(echo_status
+            .lines
+            .iter()
+            .any(|line| line == "short_token_coverage_percent=100"));
 
         let guard = state.read().await;
         assert_eq!(
@@ -5774,12 +5808,7 @@ mod tests {
             )),
             Arc::new(StaticTtsFactory::new(vec![1_000; 2_205])),
         ));
-        let conversation = ConversationRuntime::new(
-            telnyx.clone(),
-            tts.clone(),
-            default_conversation_handler(),
-            false,
-        );
+        let conversation = ConversationRuntime::new(telnyx.clone(), tts.clone(), false);
         GatewayContext::with_services(
             state,
             telnyx,

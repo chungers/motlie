@@ -1,7 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -9,6 +8,9 @@ use futures_util::{stream, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::conversation::{
+    ConversationProcessorInput, ConversationProcessorKind, ConversationProcessorOutput,
+};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::SharedState;
 use crate::speech::{self, AppendSpeechHandle, SpeechConflictPolicy, SpeechQueueRequest};
@@ -336,82 +338,6 @@ impl EarlyResponsePriorityCancelSink for NoopEarlyResponseCancelSink {
     }
 }
 
-pub type EarlyResponseEventStream = Pin<Box<dyn Stream<Item = EarlyResponseEvent> + Send>>;
-pub type EarlyResponseIntentStream = Pin<Box<dyn Stream<Item = EarlyResponseIntent> + Send>>;
-
-pub trait EarlyResponseProcessor: Send {
-    fn process(&mut self, events: EarlyResponseEventStream) -> EarlyResponseIntentStream;
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct IdentityEarlyResponseProcessor;
-
-impl EarlyResponseProcessor for IdentityEarlyResponseProcessor {
-    fn process(&mut self, events: EarlyResponseEventStream) -> EarlyResponseIntentStream {
-        Box::pin(events.filter_map(|event| async move { identity_passthrough(event) }))
-    }
-}
-
-pub fn identity_passthrough(event: EarlyResponseEvent) -> Option<EarlyResponseIntent> {
-    match event {
-        EarlyResponseEvent::Started {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            ..
-        } => Some(EarlyResponseIntent::Speak {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace: AppendOrReplace::Replace,
-        }),
-        EarlyResponseEvent::Updated {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace,
-        } => Some(EarlyResponseIntent::Speak {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace,
-        }),
-        EarlyResponseEvent::Canceled {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            reason,
-        } => Some(EarlyResponseIntent::Cancel {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            reason,
-        }),
-        EarlyResponseEvent::Committed {
-            provisional_turn_id,
-            call_id,
-            generation,
-            turn_id,
-            ..
-        } => Some(EarlyResponseIntent::Commit {
-            provisional_turn_id,
-            call_id,
-            generation,
-            turn_id,
-        }),
-    }
-}
-
 pub fn aggregate_early_resp_partials<S, C>(
     partial_stream: S,
     policy: EarlyResponsePolicy,
@@ -667,7 +593,7 @@ pub struct EarlyResponsePipelineServices {
     pub tts: SharedTtsRegistry,
     pub text_calls: SharedTextCallRegistry,
     pub tts_backend: LiveTtsBackend,
-    pub processor: Box<dyn EarlyResponseProcessor + Send>,
+    pub processor: ConversationProcessorKind,
 }
 
 pub fn spawn_early_response_pipeline(
@@ -684,8 +610,9 @@ pub fn spawn_early_response_pipeline(
         media_registry: services.media_registry.clone(),
     };
 
-    let mut processor = services.processor;
-    let mut intents = processor.process(Box::pin(receiver_stream(event_rx)));
+    let processor = services.processor;
+    let processor_inputs = receiver_stream(event_rx).map(ConversationProcessorInput::EarlyResponse);
+    let outputs = processor.process_stream(processor_inputs);
     let intent_services = EarlyResponseIntentServices {
         state: services.state.clone(),
         media_registry: services.media_registry.clone(),
@@ -695,9 +622,23 @@ pub fn spawn_early_response_pipeline(
         registry: registry.clone(),
     };
     tokio::spawn(async move {
-        while let Some(intent) = intents.next().await {
-            if let Err(error) = handle_early_response_intent(&intent_services, intent).await {
-                tracing::warn!(error = %error, "early_response.intent.failed");
+        futures_util::pin_mut!(outputs);
+        while let Some(output) = outputs.next().await {
+            match output {
+                ConversationProcessorOutput::EarlyResponse(intent) => {
+                    if let Err(error) = handle_early_response_intent(&intent_services, intent).await
+                    {
+                        tracing::warn!(error = %error, "early_response.intent.failed");
+                    }
+                }
+                ConversationProcessorOutput::Command(_) => {
+                    tracing::warn!(
+                        "early_response.processor.command_output_ignored_for_provisional_turn"
+                    );
+                }
+                ConversationProcessorOutput::Error(error) => {
+                    tracing::warn!(error, "early_response.processor.failed");
+                }
             }
         }
     });
@@ -2143,31 +2084,5 @@ mod tests {
             events[1],
             EarlyResponseEvent::Updated { generation: 2, .. }
         ));
-    }
-
-    #[test]
-    fn identity_passthrough_repeats_accepted_transcript_fragment_without_prefix() {
-        let event = EarlyResponseEvent::Started {
-            provisional_turn_id: "pt-1".to_string(),
-            call_id: "call-1".to_string(),
-            utterance_id: "utt-1".to_string(),
-            generation: 1,
-            text: "I need a tow truck.".to_string(),
-            confidence: Some(0.9),
-            stability: Some(0.8),
-            speech_state: CallerSpeechState::EndpointCandidate,
-        };
-
-        assert_eq!(
-            identity_passthrough(event),
-            Some(EarlyResponseIntent::Speak {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                utterance_id: "utt-1".to_string(),
-                generation: 1,
-                text: "I need a tow truck.".to_string(),
-                append_or_replace: AppendOrReplace::Replace,
-            })
-        );
     }
 }

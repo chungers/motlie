@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
+use crate::conversation::ConversationProcessorKind;
 use crate::quality::{
     ActiveAsrQualitySession, CallerTurnEventMetadata, QualityEvent, QualityEventContext,
     QualityEventSink, RedactionMode, VoiceQualityConfig,
@@ -442,6 +443,7 @@ pub struct ConversationLine {
 pub struct ConversationState {
     pub attached: bool,
     pub mode: ConversationMode,
+    pub processor: ConversationProcessorKind,
     pub status: ConversationStatus,
     pub lines: Vec<ConversationLine>,
     pub last_user_text: Option<String>,
@@ -456,6 +458,7 @@ impl Default for ConversationState {
         Self {
             attached: false,
             mode: ConversationMode::Manual,
+            processor: ConversationProcessorKind::default(),
             status: ConversationStatus::Idle,
             lines: Vec::new(),
             last_user_text: None,
@@ -1325,6 +1328,18 @@ impl GatewayState {
             call.conversation.attached = true;
             call.conversation.updated_at = Utc::now();
             call.push_timeline(format!("conversation mode -> {}", mode.label()));
+        }
+    }
+
+    pub fn set_conversation_processor(
+        &mut self,
+        gateway_call_id: &str,
+        processor: ConversationProcessorKind,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.processor = processor;
+            call.conversation.updated_at = Utc::now();
+            call.push_timeline(format!("conversation processor -> {}", processor.label()));
         }
     }
 

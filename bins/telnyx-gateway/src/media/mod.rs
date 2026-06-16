@@ -1,23 +1,23 @@
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use chrono::Utc;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
-use motlie_voice::VoiceError;
 use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
-use motlie_voice::pipeline::resample::{WindowedSincResampler, resample_i16_mono};
+use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
+use motlie_voice::VoiceError;
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
-use tokio::sync::{Mutex, Notify, mpsc};
+use serde_json::{json, Map, Value};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{
@@ -27,23 +27,22 @@ use crate::adapter::{
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::{self, ConversationRuntime};
 use crate::early_response::{
-    EarlyResponseCancelReason, EarlyResponseCommitBoundary, EarlyResponseCommitMember,
-    EarlyResponseInput, EarlyResponsePartial, EarlyResponsePipelineHandle,
-    EarlyResponsePipelineServices, spawn_early_response_pipeline,
+    spawn_early_response_pipeline, EarlyResponseCancelReason, EarlyResponseCommitBoundary,
+    EarlyResponseCommitMember, EarlyResponseInput, EarlyResponsePartial,
+    EarlyResponsePipelineHandle, EarlyResponsePipelineServices,
 };
 use crate::operator::state::{
-    CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission, SharedState,
-    StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
-    speech_echo_signature,
+    speech_echo_signature, CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission,
+    SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
 };
 use crate::quality::{
-    ActiveAsrQualitySession, CallerTurnEventMetadata, EchoSuppressionQualityConfig,
-    OnsetDuringPlaybackPolicy, RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
-    insert_transcript_text_fields, transcript_plaintext_included,
+    insert_transcript_text_fields, transcript_plaintext_included, ActiveAsrQualitySession,
+    CallerTurnEventMetadata, EchoSuppressionQualityConfig, OnsetDuringPlaybackPolicy,
+    RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
 };
 use crate::speech;
-use crate::text_calls::SharedTextCallRegistry;
 use crate::text_calls::turns::{CallerSpeechState, PlaybackFinishedStatus};
+use crate::text_calls::SharedTextCallRegistry;
 use crate::tts::PIPER_SAMPLE_RATE_HZ;
 
 mod capture;
@@ -1962,7 +1961,15 @@ async fn ensure_early_response_pipeline(
     let Some(runtime) = media_state.conversation.as_ref() else {
         return;
     };
-    let tts_backend = state.read().await.conversation_tts_backend;
+    let (tts_backend, processor) = {
+        let guard = state.read().await;
+        let processor = guard
+            .calls
+            .get(gateway_call_id)
+            .map(|call| call.conversation.processor)
+            .unwrap_or_default();
+        (guard.conversation_tts_backend, processor)
+    };
     let text_calls = media_state.text_calls.clone().unwrap_or_default();
     let handle = spawn_early_response_pipeline(
         gateway_call_id.to_string(),
@@ -1973,7 +1980,7 @@ async fn ensure_early_response_pipeline(
             tts: runtime.tts_registry(),
             text_calls,
             tts_backend,
-            processor: runtime.early_response_processor(),
+            processor,
         },
     );
     media_state.early_response = Some(handle);
@@ -3980,8 +3987,8 @@ fn validate_media_format(format: &MediaFormat) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use motlie_model::typed::{AudioBuf, Mono};
@@ -3990,11 +3997,11 @@ mod tests {
     use crate::adapter::{
         AsrRegistry, EchoAsrFactory, InboundAsrFactory, SharedAsrFactory, SharedAsrRegistry,
     };
-    use crate::operator::state::{CallStatus, TelnyxIds, TtsPlaybackStatus, shared_state};
-    use crate::text_calls::SharedTextCallRegistry;
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds, TtsPlaybackStatus};
     use crate::text_calls::turns::{CallerSpeechState, GatewayTextFrame};
+    use crate::text_calls::SharedTextCallRegistry;
     use crate::tts::{
-        LiveTtsBackend, OutboundTtsFactory, PIPER_SAMPLE_RATE_HZ, TtsAudio, TtsRegistry,
+        LiveTtsBackend, OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ,
     };
 
     fn continue_decision(speech_onset: bool, speech_state: CallerSpeechState) -> AsrFrameDecision {
@@ -4199,22 +4206,19 @@ mod tests {
         .expect("failed prebuffered chunk should release active playback");
 
         assert!(next_outbound_command(&mut media_state).is_none());
-        assert!(
-            media_registry
-                .active_speech_playback_id(&gateway_call_id)
-                .await
-                .is_none()
-        );
+        assert!(media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await
+            .is_none());
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         let tts = call.tts.as_ref().expect("TTS state should exist");
         assert_eq!(tts.status, TtsPlaybackStatus::Failed);
-        assert!(
-            tts.error
-                .as_deref()
-                .is_some_and(|error| error.contains("second chunk failed"))
-        );
+        assert!(tts
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("second chunk failed")));
         assert_eq!(call.status, CallStatus::MediaStarted);
         drop(guard);
 
@@ -4484,16 +4488,14 @@ mod tests {
         handle_text(&media_one, &state, &asr, &mut media_state)
             .await
             .expect("first non-one media chunk should establish reorder base");
-        assert!(
-            state
-                .read()
-                .await
-                .calls
-                .get(&gateway_call_id)
-                .expect("call exists")
-                .transcripts
-                .is_empty()
-        );
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .transcripts
+            .is_empty());
 
         let media_two = media_event("stream-1", "8", &chunk);
         handle_text(&media_two, &state, &asr, &mut media_state)
@@ -4629,16 +4631,14 @@ mod tests {
         )
         .await
         .expect("silence should be accepted by transport");
-        assert!(
-            state
-                .read()
-                .await
-                .calls
-                .get(&gateway_call_id)
-                .expect("call exists")
-                .transcripts
-                .is_empty()
-        );
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .transcripts
+            .is_empty());
 
         let speech = STANDARD.encode(l16_samples(16_000, 4_000));
         handle_text(
@@ -6168,11 +6168,9 @@ mod tests {
         .await
         .expect_err("unsupported codec should fail at start");
 
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported inbound media encoding")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported inbound media encoding"));
         assert!(media_state.session.is_none());
         assert!(media_state.gateway_call_id.is_none());
         assert!(media_state.media_format.is_none());
