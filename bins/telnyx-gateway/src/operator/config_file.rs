@@ -10,7 +10,7 @@ use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::ConversationProcessorKind;
 use crate::operator::script::expand_user_path;
 use crate::operator::state::{GatewayState, InboundMode};
-use crate::quality::VoiceQualityConfig;
+use crate::quality::{QualityEventSink, VoiceQualityConfig};
 use crate::tts::LiveTtsBackend;
 
 const DEFAULT_TELNYX_API_BASE: &str = "https://api.telnyx.com/v2";
@@ -25,6 +25,7 @@ pub struct LoadedGatewayConfig {
     pub conversation: ConversationConfig,
     pub startup: StartupConfig,
     pub voice_quality: VoiceQualityConfig,
+    pub quality_logging: QualityLoggingRuntimeConfig,
 }
 
 impl LoadedGatewayConfig {
@@ -49,6 +50,7 @@ impl LoadedGatewayConfig {
             conversation: ConversationConfig::default(),
             startup: StartupConfig::default(),
             voice_quality: VoiceQualityConfig::default(),
+            quality_logging: QualityLoggingRuntimeConfig::default(),
         }
     }
 
@@ -66,6 +68,7 @@ impl LoadedGatewayConfig {
             conversation.barge_in_enabled = voice_quality.barge_in.enabled;
         }
         let startup = StartupConfig::from_document(document.startup);
+        let quality_logging = QualityLoggingRuntimeConfig::from_document(document.quality_logging);
         Ok(Self {
             process,
             telnyx,
@@ -74,10 +77,11 @@ impl LoadedGatewayConfig {
             conversation,
             startup,
             voice_quality,
+            quality_logging,
         })
     }
 
-    pub fn apply_to_state(&self, state: &mut GatewayState) {
+    pub fn apply_to_state(&self, state: &mut GatewayState) -> Result<()> {
         state.config.public_webhook_url = self.gateway.webhook_url.clone();
         state.config.public_media_url = self.gateway.media_url.clone();
         state.config.telnyx_media = self.gateway.media;
@@ -95,9 +99,27 @@ impl LoadedGatewayConfig {
         state.config.tui = self.process.tui;
         state.config.socket = self.process.socket.clone();
         state.config.startup_warm_models = self.startup.warm_models;
+        state.config.conversation_enabled = self.conversation.enabled;
+        state.config.conversation_final_coalescing_enabled =
+            self.conversation.final_coalescing_enabled;
+        state.config.conversation_barge_in_enabled = self.conversation.barge_in_enabled;
+        state.config.conversation_processor = self.conversation.processor;
         state.inbound_mode = self.inbound.mode;
         state.conversation_tts_backend = self.conversation.tts_backend;
         state.set_quality_config(self.voice_quality.clone());
+        if self.voice_quality.logging.enabled {
+            let path = self.quality_logging.path.as_ref().with_context(|| {
+                "voice_quality.logging.enabled=true requires [quality_logging].path"
+            })?;
+            let sink = QualityEventSink::start_jsonl_writer(
+                path,
+                self.voice_quality.logging.queue_capacity,
+            )?;
+            state.set_quality_event_sink(sink, Some(path.clone()));
+        } else {
+            state.set_quality_event_sink(QualityEventSink::disabled(), None);
+        }
+        Ok(())
     }
 
     pub fn telnyx_api_key(&self) -> Result<Option<String>> {
@@ -293,9 +315,34 @@ impl StartupConfig {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct QualityLoggingRuntimeConfig {
+    pub path: Option<PathBuf>,
+}
+
+impl QualityLoggingRuntimeConfig {
+    fn from_document(document: QualityLoggingRuntimeConfigDocument) -> Self {
+        Self {
+            path: document.path.map(|path| expand_user_path(&path)),
+        }
+    }
+}
+
 pub fn render_state_toml(state: &GatewayState) -> String {
-    toml::to_string_pretty(&SerializableGatewayState::from(state))
-        .expect("gateway state TOML serializes")
+    let quality_log_path = state
+        .quality
+        .event_sink
+        .is_enabled()
+        .then_some(state.quality.log_path.as_ref())
+        .flatten();
+    let mut voice_quality = state.quality.config.clone();
+    voice_quality.logging.enabled = quality_log_path.is_some();
+    toml::to_string_pretty(&SerializableGatewayState::from_parts(
+        state,
+        &voice_quality,
+        quality_log_path,
+    ))
+    .expect("gateway state TOML serializes")
 }
 
 fn resolve_secret_ref(secret_ref: &str) -> Result<Option<String>> {
@@ -309,18 +356,25 @@ fn resolve_secret_ref(secret_ref: &str) -> Result<Option<String>> {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct GatewayConfigDocument {
+    #[serde(rename = "version")]
+    _version: Option<u32>,
+    #[serde(rename = "generated_at")]
+    _generated_at: Option<String>,
     process: ProcessConfigDocument,
     telnyx: TelnyxConfigDocument,
     gateway: DurableGatewayConfigDocument,
     inbound: InboundConfigDocument,
     conversation: ConversationConfigDocument,
     startup: StartupConfigDocument,
+    #[serde(rename = "voice_quality")]
+    _voice_quality: Option<toml::Value>,
+    quality_logging: QualityLoggingRuntimeConfigDocument,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct ProcessConfigDocument {
     bind: Option<SocketAddr>,
     tui: Option<bool>,
@@ -330,7 +384,7 @@ struct ProcessConfigDocument {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct TelnyxConfigDocument {
     api_base: Option<String>,
     api_key_ref: Option<String>,
@@ -341,7 +395,7 @@ struct TelnyxConfigDocument {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct DurableGatewayConfigDocument {
     webhook_url: Option<String>,
     media_url: Option<String>,
@@ -353,13 +407,13 @@ struct DurableGatewayConfigDocument {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct InboundConfigDocument {
     mode: Option<InboundModeName>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct ConversationConfigDocument {
     enabled: Option<bool>,
     final_coalescing_enabled: Option<bool>,
@@ -369,9 +423,15 @@ struct ConversationConfigDocument {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct StartupConfigDocument {
     warm_models: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct QualityLoggingRuntimeConfigDocument {
+    path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -413,11 +473,17 @@ struct SerializableGatewayState<'a> {
     inbound: SerializableInbound,
     conversation: SerializableConversation<'a>,
     startup: SerializableStartup,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quality_logging: Option<SerializableQualityLogging<'a>>,
     voice_quality: &'a VoiceQualityConfig,
 }
 
-impl<'a> From<&'a GatewayState> for SerializableGatewayState<'a> {
-    fn from(state: &'a GatewayState) -> Self {
+impl<'a> SerializableGatewayState<'a> {
+    fn from_parts(
+        state: &'a GatewayState,
+        voice_quality: &'a VoiceQualityConfig,
+        quality_log_path: Option<&'a PathBuf>,
+    ) -> Self {
         Self {
             version: 1,
             generated_at: Utc::now().to_rfc3339(),
@@ -458,7 +524,8 @@ impl<'a> From<&'a GatewayState> for SerializableGatewayState<'a> {
             startup: SerializableStartup {
                 warm_models: state.config.startup_warm_models,
             },
-            voice_quality: &state.quality.config,
+            quality_logging: quality_log_path.map(|path| SerializableQualityLogging { path }),
+            voice_quality,
         }
     }
 }
@@ -522,6 +589,11 @@ struct SerializableConversation<'a> {
 #[derive(Serialize)]
 struct SerializableStartup {
     warm_models: bool,
+}
+
+#[derive(Serialize)]
+struct SerializableQualityLogging<'a> {
+    path: &'a PathBuf,
 }
 
 #[cfg(test)]
@@ -596,5 +668,90 @@ trailing_silence_ms = 650
         assert!(dump.contains("[telnyx]"));
         assert!(dump.contains("api_key_ref = \"env:TELNYX_API_KEY\""));
         assert!(!dump.contains("restore-config"));
+    }
+
+    #[test]
+    fn gateway_config_rejects_unknown_keys() {
+        let raw = r#"
+[process]
+warm_modelz = true
+"#;
+        let error = toml::from_str::<GatewayConfigDocument>(raw)
+            .expect_err("unknown keys should not be ignored");
+        assert!(
+            error.to_string().contains("unknown field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn state_dump_round_trips_durable_gateway_config() {
+        let log_path = std::env::temp_dir().join(format!(
+            "motlie-gateway-config-roundtrip-{}-quality.jsonl",
+            std::process::id()
+        ));
+        let mut state = GatewayState::new("127.0.0.1:9091".parse().expect("valid addr"));
+        state.config.public_webhook_url =
+            Some("https://gateway.example/telnyx/webhooks".to_string());
+        state.config.public_media_url = Some("wss://gateway.example/telnyx/media".to_string());
+        state.config.selected_connection_id = Some("conn-1".to_string());
+        state.config.selected_application_name = Some("voice-app".to_string());
+        state.config.selected_phone_number = Some("+15551234567".to_string());
+        state.config.default_from_number = Some("+15557654321".to_string());
+        state.config.startup_warm_models = true;
+        state.config.conversation_enabled = true;
+        state.config.conversation_final_coalescing_enabled = true;
+        state.config.conversation_barge_in_enabled = false;
+        state.config.conversation_processor = ConversationProcessorKind::Identity;
+        state.inbound_mode = InboundMode::AutoTranscribe;
+        state.conversation_tts_backend = LiveTtsBackend::Piper;
+        state.quality.config.endpoint.trailing_silence_ms = 650;
+        state
+            .quality
+            .config
+            .set_tts_generation_mode(crate::quality::TtsGenerationMode::Buffered);
+        state.quality.config.logging.enabled = true;
+        state.quality.config.logging.queue_capacity = 4;
+        state.quality.config_id = state.quality.config.config_id();
+        let sink = QualityEventSink::start_jsonl_writer(&log_path, 4)
+            .expect("quality log writer should start");
+        state.set_quality_event_sink(sink, Some(log_path.clone()));
+
+        let dump = render_state_toml(&state);
+        assert!(dump.contains("[quality_logging]"));
+        assert!(dump.contains("path ="));
+
+        let document: GatewayConfigDocument = toml::from_str(&dump).expect("parse dumped config");
+        let voice_quality = VoiceQualityConfig::from_toml_str(&dump).expect("parse dumped quality");
+        let loaded = LoadedGatewayConfig::from_document(document, voice_quality)
+            .expect("load dumped config");
+        assert!(loaded.conversation.enabled);
+        assert!(loaded.conversation.final_coalescing_enabled);
+        assert!(!loaded.conversation.barge_in_enabled);
+        assert_eq!(
+            loaded.conversation.processor,
+            ConversationProcessorKind::Identity
+        );
+        assert_eq!(loaded.conversation.tts_backend, LiveTtsBackend::Piper);
+        assert_eq!(loaded.quality_logging.path.as_ref(), Some(&log_path));
+        assert!(loaded.voice_quality.logging.enabled);
+
+        let mut restored = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        loaded
+            .apply_to_state(&mut restored)
+            .expect("apply dumped config");
+        assert!(restored.config.conversation_enabled);
+        assert!(restored.config.conversation_final_coalescing_enabled);
+        assert!(!restored.config.conversation_barge_in_enabled);
+        assert_eq!(
+            restored.config.conversation_processor,
+            ConversationProcessorKind::Identity
+        );
+        assert_eq!(restored.conversation_tts_backend, LiveTtsBackend::Piper);
+        assert_eq!(restored.quality.config.endpoint.trailing_silence_ms, 650);
+        assert!(restored.quality.event_sink.is_enabled());
+        assert_eq!(restored.quality.log_path.as_ref(), Some(&log_path));
+
+        let _ = std::fs::remove_file(log_path);
     }
 }

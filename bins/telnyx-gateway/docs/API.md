@@ -111,7 +111,7 @@ Startup uses one declarative gateway TOML file:
 telnyx-gateway --config ./gateway.toml
 ```
 
-The file owns durable process/Telnyx/media/conversation/startup state plus full `[voice_quality.*]`. `state dump <path>` writes the same readable TOML shape. The CLI keeps narrow process overrides (`--bind`, `--tui`, `--socket`, `--artifact-root`, `--log-file`) for local launches, but `--quality-config`, `--quality-profile`, `--load`, `--turn-log-jsonl`, and `--conversation-smoke-test` are not part of the startup surface. Runtime tuning remains available through TUI/socket `quality ...` commands. Ad hoc command scripts can be replayed inside a running TUI/socket source with `source <path>`.
+The file owns durable process/Telnyx/media/conversation/startup state plus full `[voice_quality.*]`. `state dump <path>` writes the same readable TOML shape. If `[voice_quality.logging] enabled = true`, the same file must include `[quality_logging] path = ...` so restart can recreate the JSONL sink. The CLI keeps narrow process overrides (`--bind`, `--tui`, `--socket`, `--artifact-root`, `--log-file`) for local launches, but `--quality-config`, `--quality-profile`, `--load`, `--turn-log-jsonl`, and `--conversation-smoke-test` are not part of the startup surface. Runtime tuning remains available through TUI/socket `quality ...` commands. Ad hoc command scripts can be replayed inside a running TUI/socket source with `source <path>`.
 
 Minimal live-test config shape:
 
@@ -141,6 +141,9 @@ tts_backend = "kokoro-82m"
 
 [startup]
 warm_models = true
+
+[quality_logging]
+path = "./quality-events.jsonl"
 
 [voice_quality.tts]
 generation_mode = "streaming"

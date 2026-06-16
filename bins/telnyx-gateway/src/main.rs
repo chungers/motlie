@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     let state = shared_state(gateway_config.process.bind);
     {
         let mut guard = state.write().await;
-        gateway_config.apply_to_state(&mut guard);
+        gateway_config.apply_to_state(&mut guard)?;
         guard.config.bind = Some(gateway_config.process.bind);
         guard.log(
             LogLevel::Info,

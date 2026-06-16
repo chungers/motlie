@@ -1044,7 +1044,7 @@ async fn state_command(
     match command {
         StateCommand::Dump { path } => {
             let guard = context.state.read().await;
-            write_state_dump(&path, &guard).map_err(driver_anyhow)?;
+            let path = write_state_dump(&path, &guard).map_err(driver_anyhow)?;
             Ok(CommandOutput::line(format!(
                 "wrote state dump {}",
                 path.display()
@@ -1345,15 +1345,29 @@ async fn tts_command(
                 .into_iter()
                 .map(|backend| {
                     let factory = context.tts.factory(backend);
+                    let incremental = if factory.supports_incremental() {
+                        "incremental=yes"
+                    } else {
+                        "incremental=no"
+                    };
                     if let Some(reason) = factory.unavailable_reason() {
                         format!(
-                            "{} {} unavailable: {}",
+                            "{} {} unavailable incremental={}: {}",
                             backend.label(),
                             backend.model_label(),
+                            if factory.supports_incremental() {
+                                "yes"
+                            } else {
+                                "no"
+                            },
                             reason
                         )
                     } else {
-                        format!("{} {} available", backend.label(), backend.model_label())
+                        format!(
+                            "{} {} available {incremental}",
+                            backend.label(),
+                            backend.model_label()
+                        )
                     }
                 })
                 .collect(),
@@ -1382,6 +1396,8 @@ async fn tts_command(
             let backend = context.session.next_tts_backend;
             let conversation_backend = guard.conversation_tts_backend;
             let factory = context.tts.factory(backend);
+            let conversation_factory = context.tts.factory(conversation_backend);
+            let generation_mode = guard.quality.config.tts.generation_mode;
             let available = LiveTtsBackend::available()
                 .into_iter()
                 .filter(|backend| context.tts.factory(*backend).is_available())
@@ -1394,6 +1410,43 @@ async fn tts_command(
                 format!("default_model={}", LiveTtsBackend::default().model_label()),
                 format!("conversation={}", conversation_backend.label()),
                 format!("conversation_model={}", conversation_backend.model_label()),
+                format!("generation_mode={}", generation_mode.label()),
+                format!(
+                    "next_incremental={}",
+                    if factory.supports_incremental() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ),
+                format!(
+                    "next_streaming_compatible={}",
+                    if generation_mode != TtsGenerationMode::Streaming
+                        || factory.supports_incremental()
+                    {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ),
+                format!(
+                    "conversation_incremental={}",
+                    if conversation_factory.supports_incremental() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ),
+                format!(
+                    "conversation_streaming_compatible={}",
+                    if generation_mode != TtsGenerationMode::Streaming
+                        || conversation_factory.supports_incremental()
+                    {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ),
                 format!(
                     "available={}",
                     if available.is_empty() {
@@ -1422,8 +1475,22 @@ async fn tts_command(
             })
         }
         TtsCommand::Use { backend } => {
-            context.session.next_tts_backend = backend;
             let factory = context.tts.factory(backend);
+            {
+                let guard = context.state.read().await;
+                if guard.quality.config.tts.generation_mode == TtsGenerationMode::Streaming
+                    && !factory.supports_incremental()
+                {
+                    return Err(DriverError::invalid_argument(
+                        "backend",
+                        format!(
+                            "TTS backend {} does not support streaming generation; run `quality tts generation-mode buffered` first or select an incremental-capable backend",
+                            backend.label()
+                        ),
+                    ));
+                }
+            }
+            context.session.next_tts_backend = backend;
             let mut guard = context.state.write().await;
             guard.conversation_tts_backend = backend;
             guard.log(
@@ -2034,11 +2101,13 @@ async fn conversation_command(
             if enabled {
                 set_barge_in_enabled(context, false, "conversation smoke-test").await?;
             }
-            context
-                .state
-                .write()
-                .await
-                .log(LogLevel::Info, format!("conversation smoke-test {label}"));
+            {
+                let mut guard = context.state.write().await;
+                guard.config.conversation_enabled = enabled;
+                guard.config.conversation_final_coalescing_enabled =
+                    context.conversation.final_coalescing_enabled();
+                guard.log(LogLevel::Info, format!("conversation smoke-test {label}"));
+            }
             if enabled {
                 Ok(CommandOutput {
                     lines: vec![
@@ -2773,22 +2842,55 @@ async fn quality_tts_command(
         QualityTtsCommand::Status => {
             let guard = context.state.read().await;
             let tts = &guard.quality.config.tts;
+            let backend = guard.conversation_tts_backend;
+            let factory = context.tts.factory(backend);
             Ok(CommandOutput::text(format!(
                 "generation_mode={}
 chunking_enabled={}
 max_text_chunk_chars={}
 first_chunk_max_chars={}
-prebuffer_chunks={}",
+prebuffer_chunks={}
+conversation_backend={}
+conversation_incremental={}
+streaming_compatible={}",
                 tts.generation_mode.label(),
                 tts.chunking_enabled,
                 tts.max_text_chunk_chars,
                 tts.first_chunk_max_chars,
-                tts.prebuffer_chunks
+                tts.prebuffer_chunks,
+                backend.label(),
+                if factory.supports_incremental() {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if tts.generation_mode != TtsGenerationMode::Streaming
+                    || factory.supports_incremental()
+                {
+                    "yes"
+                } else {
+                    "no"
+                }
             )))
         }
         QualityTtsCommand::GenerationMode { mode } => {
-            mutate_quality_config(context, |config| {
-                Ok(config.set_tts_generation_mode(mode.into()))
+            let next_mode = TtsGenerationMode::from(mode);
+            if next_mode == TtsGenerationMode::Streaming {
+                let guard = context.state.read().await;
+                let backend = guard.conversation_tts_backend;
+                let factory = context.tts.factory(backend);
+                if !factory.supports_incremental() {
+                    return Err(DriverError::invalid_argument(
+                        "mode",
+                        format!(
+                            "conversation TTS backend {} does not support streaming generation; run `tts use` with an incremental-capable backend first",
+                            backend.label()
+                        ),
+                    ));
+                }
+            }
+            mutate_quality_config(context, move |config| {
+                Ok(config.set_tts_generation_mode(next_mode))
             })
             .await
         }
@@ -2934,6 +3036,7 @@ async fn quality_logging_command(
             )))
         }
         QualityLoggingCommand::On { path } => {
+            let path = crate::operator::script::expand_user_path(&path);
             let capacity = context
                 .state
                 .read()
@@ -3191,11 +3294,11 @@ async fn set_barge_in_enabled(
         mutate_quality_config(context, |config| Ok(config.set_barge_in_enabled(enabled))).await?;
     context.conversation.set_barge_in_enabled(enabled);
     let label = if enabled { "on" } else { "off" };
-    context
-        .state
-        .write()
-        .await
-        .log(LogLevel::Info, format!("{source} barge-in {label}"));
+    {
+        let mut guard = context.state.write().await;
+        guard.config.conversation_barge_in_enabled = enabled;
+        guard.log(LogLevel::Info, format!("{source} barge-in {label}"));
+    }
     Ok(output)
 }
 
@@ -3211,6 +3314,7 @@ async fn mutate_quality_config(
     context
         .conversation
         .set_barge_in_enabled(guard.quality.config.barge_in.enabled);
+    guard.config.conversation_barge_in_enabled = guard.quality.config.barge_in.enabled;
     emit_quality_snapshots_for_active_calls(
         &mut guard,
         "live_change",
@@ -4054,12 +4158,17 @@ fn socket_help() -> String {
 }
 
 fn expand_user_path(value: &str) -> PathBuf {
-    if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return PathBuf::from(value);
+    };
+    if value == "~" || value == "$HOME" {
+        return home;
     }
-    PathBuf::from(value)
+    value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("$HOME/"))
+        .map(|suffix| home.join(suffix))
+        .unwrap_or_else(|| PathBuf::from(value))
 }
 
 #[cfg(test)]
@@ -4077,7 +4186,11 @@ mod tests {
     use crate::operator::state::{
         shared_state, CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus,
     };
-    use crate::tts::{StaticTtsFactory, TtsRegistry, KOKORO_SAMPLE_RATE_HZ};
+    use crate::tts::{
+        IncrementalTtsSummary, OutboundIncrementalTtsStream, OutboundTtsFactory, StaticTtsFactory,
+        TtsAudio, TtsRegistry, KOKORO_SAMPLE_RATE_HZ,
+    };
+    use motlie_model::typed::IncrementalSpeechCancelToken;
     use motlie_model::TranscriptionUpdate;
     use motlie_voice::app::TranscriptEvent;
 
@@ -4243,8 +4356,8 @@ mod tests {
         assert_eq!(
             output.lines,
             vec![
-                "kokoro-82m kokoro/kokoro_82m available",
-                "piper piper/en_us_ljspeech_medium available",
+                "kokoro-82m kokoro/kokoro_82m available incremental=no",
+                "piper piper/en_us_ljspeech_medium available incremental=no",
             ]
         );
     }
@@ -5503,7 +5616,11 @@ mod tests {
     async fn quality_tts_commands_update_live_config_knobs() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.example.test", None, true);
-        let context = GatewayContext::new(state.clone(), telnyx);
+        let context = context_with_incremental_static_tts(
+            state.clone(),
+            telnyx,
+            SharedMediaRegistry::default(),
+        );
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         let mode_output = engine
@@ -5561,6 +5678,14 @@ mod tests {
             .iter()
             .any(|line| line == "first_chunk_max_chars=45"));
         assert!(status.lines.iter().any(|line| line == "prebuffer_chunks=3"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "conversation_incremental=yes"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "streaming_compatible=yes"));
 
         let guard = state.read().await;
         assert_eq!(
@@ -5716,6 +5841,10 @@ mod tests {
     #[tokio::test]
     async fn quality_state_dump_replays_exact_resolved_config() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let quality_log_path = std::env::temp_dir().join(format!(
+            "motlie-quality-state-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
         {
             let mut guard = state.write().await;
             let config = &mut guard.quality.config;
@@ -5773,6 +5902,9 @@ mod tests {
             config.targets.max_garbled_turn_rate = 0.13;
             config.targets.max_inappropriate_cancel_rate = 0.14;
             guard.quality.config_id = config.config_id();
+            let sink = QualityEventSink::start_jsonl_writer(&quality_log_path, 8_192)
+                .expect("quality JSONL writer should start");
+            guard.set_quality_event_sink(sink, Some(quality_log_path.clone()));
         }
         let expected_config = state.read().await.quality.config.clone();
         let expected_config_id = expected_config.config_id();
@@ -5794,6 +5926,67 @@ mod tests {
         assert_eq!(replay_config.voice_quality, expected_config);
         assert_eq!(replay_config.voice_quality.config_id(), expected_config_id);
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(quality_log_path);
+    }
+
+    struct IncrementalStaticTtsFactory {
+        chunk: TtsAudio,
+    }
+
+    impl IncrementalStaticTtsFactory {
+        fn with_sample_rate(samples: Vec<i16>, sample_rate_hz: u32) -> Self {
+            Self {
+                chunk: TtsAudio::new(samples, sample_rate_hz)
+                    .expect("test TTS sample rate should be non-zero"),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OutboundTtsFactory for IncrementalStaticTtsFactory {
+        async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+            Ok(vec![self.chunk.clone()])
+        }
+
+        async fn synthesize_incremental(
+            &self,
+            _text: String,
+            _cancel: IncrementalSpeechCancelToken,
+            _request_label: Option<String>,
+            _max_buffered_audio_ms: u32,
+        ) -> anyhow::Result<Box<dyn OutboundIncrementalTtsStream>> {
+            Ok(Box::new(IncrementalStaticTtsStream {
+                chunk: Some(self.chunk.clone()),
+            }))
+        }
+
+        fn supports_incremental(&self) -> bool {
+            true
+        }
+
+        fn label(&self) -> &'static str {
+            "incremental-static-test-tts"
+        }
+    }
+
+    struct IncrementalStaticTtsStream {
+        chunk: Option<TtsAudio>,
+    }
+
+    #[async_trait]
+    impl OutboundIncrementalTtsStream for IncrementalStaticTtsStream {
+        async fn next_audio_chunk(&mut self) -> anyhow::Result<Option<TtsAudio>> {
+            Ok(self.chunk.take())
+        }
+
+        async fn finish(self: Box<Self>) -> anyhow::Result<IncrementalTtsSummary> {
+            Ok(IncrementalTtsSummary {
+                chunks: 1,
+                audio_ms: 100,
+                canceled: false,
+                synthesis_completed: true,
+            })
+        }
     }
 
     fn test_asr_registry() -> SharedAsrRegistry {
@@ -5808,6 +6001,30 @@ mod tests {
     ) -> GatewayContext {
         let tts = Arc::new(TtsRegistry::new(
             Arc::new(StaticTtsFactory::with_sample_rate(
+                vec![1_000; 2_400],
+                KOKORO_SAMPLE_RATE_HZ,
+            )),
+            Arc::new(StaticTtsFactory::new(vec![1_000; 2_205])),
+        ));
+        let conversation = ConversationRuntime::new(telnyx.clone(), tts.clone(), false);
+        GatewayContext::with_services(
+            state,
+            telnyx,
+            test_asr_registry(),
+            media,
+            tts,
+            conversation,
+            LiveAsrBackend::Kroko2025,
+        )
+    }
+
+    fn context_with_incremental_static_tts(
+        state: SharedState,
+        telnyx: TelnyxClient,
+        media: SharedMediaRegistry,
+    ) -> GatewayContext {
+        let tts = Arc::new(TtsRegistry::new(
+            Arc::new(IncrementalStaticTtsFactory::with_sample_rate(
                 vec![1_000; 2_400],
                 KOKORO_SAMPLE_RATE_HZ,
             )),

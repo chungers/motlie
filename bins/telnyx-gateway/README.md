@@ -25,16 +25,15 @@ a local Unix-domain command socket:
 ```sh
 cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
 rm -f /tmp/motlie-telnyx-gateway.sock
-: > /home/dchung/telnyx-gateway-live.log
+: > "$HOME/telnyx-gateway-live.log"
 
 env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
   TELNYX_API_KEY="$TELNYX_API_KEY" \
   cargo run -p motlie-telnyx-gateway --features sherpa -- \
+    --config "$HOME/telnyx-test/gateway.toml" \
     --bind 127.0.0.1:8080 \
-    --load /home/dchung/telnyx-test/config.repl \
     --socket /tmp/motlie-telnyx-gateway.sock \
-    --log-file /home/dchung/telnyx-gateway-live.log \
-    --capture-dir /home/dchung/telnyx-test/captures
+    --log-file "$HOME/telnyx-gateway-live.log"
 ```
 
 The socket accepts one gateway REPL command per line and returns one JSON object
@@ -225,21 +224,20 @@ Start a TUI session with an agent socket:
 ```sh
 cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
 rm -f /tmp/motlie-telnyx-gateway.sock
-: > /home/dchung/telnyx-gateway-live.log
+: > "$HOME/telnyx-gateway-live.log"
 
 env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
   TELNYX_API_KEY="$TELNYX_API_KEY" \
   PIPER_ESPEAKNG_DATA_DIRECTORY="${PIPER_ESPEAKNG_DATA_DIRECTORY:-/usr/lib/x86_64-linux-gnu/espeak-ng-data}" \
   cargo run -p motlie-telnyx-gateway --features "sherpa piper" -- \
+    --config "$HOME/telnyx-test/gateway.toml" \
     --tui \
     --bind 127.0.0.1:8080 \
-    --load /home/dchung/telnyx-test/config.repl \
     --socket /tmp/motlie-telnyx-gateway.sock \
-    --log-file /home/dchung/telnyx-gateway-live.log \
-    --capture-dir /home/dchung/telnyx-test/captures
+    --log-file "$HOME/telnyx-gateway-live.log"
 ```
 
-If the replay file is not loaded or needs changes, run these in the TUI shell:
+If the gateway TOML is missing live tunnel values or needs changes, run these in the TUI shell and persist them with `state dump <path>`:
 
 ```text
 config set webhook-url https://<host>/telnyx/webhooks

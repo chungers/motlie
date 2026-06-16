@@ -1154,7 +1154,8 @@ impl GatewayState {
             return existing;
         }
 
-        let call = CallSession::pending_inbound(ids.clone(), from, to, status);
+        let mut call = CallSession::pending_inbound(ids.clone(), from, to, status);
+        call.conversation.processor = self.config.conversation_processor;
         let gateway_call_id = call.gateway_call_id.clone();
         self.call_control_index
             .insert(ids.call_control_id, gateway_call_id.clone());
@@ -1185,7 +1186,8 @@ impl GatewayState {
             return existing;
         }
 
-        let call = CallSession::outbound(ids.clone(), from, to, status);
+        let mut call = CallSession::outbound(ids.clone(), from, to, status);
+        call.conversation.processor = self.config.conversation_processor;
         let gateway_call_id = call.gateway_call_id.clone();
         self.call_control_index
             .insert(ids.call_control_id, gateway_call_id.clone());

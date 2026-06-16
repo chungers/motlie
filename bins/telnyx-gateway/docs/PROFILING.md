@@ -1192,7 +1192,7 @@ Config hashing:
 
 ## Persistence and Parity Tests
 
-State dump/load uses a readable gateway TOML state file, not replayed command lines and not an opaque hex payload. `state dump <path>` writes durable process/Telnyx/media/conversation/startup state plus the full resolved `[voice_quality.*]` config. Restart with `telnyx-gateway --config <path>`.
+State dump/load uses a readable gateway TOML state file, not replayed command lines and not an opaque hex payload. `state dump <path>` writes durable process/Telnyx/media/conversation/startup state plus the full resolved `[voice_quality.*]` config. When quality logging is enabled, the dump also includes `[quality_logging] path = ...`; startup rejects `voice_quality.logging.enabled = true` without that path because it cannot recreate the JSONL sink. Restart with `telnyx-gateway --config <path>`.
 
 Example dump shape:
 
