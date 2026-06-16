@@ -20,7 +20,9 @@ ONNX Runtime from source for the gateway.
 ### Agent-Assisted Headless Test
 
 For live tests with an agent operator, run the gateway without the TUI and expose
-a local Unix-domain command socket:
+a local Unix-domain command socket. The checked-in canonical startup config is
+[`gateway.toml`](gateway.toml); it contains the full strict TOML surface with
+placeholders and `env:` secret references only.
 
 ```sh
 cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
@@ -30,7 +32,7 @@ rm -f /tmp/motlie-telnyx-gateway.sock
 env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
   TELNYX_API_KEY="$TELNYX_API_KEY" \
   cargo run -p motlie-telnyx-gateway --features sherpa -- \
-    --config "$HOME/telnyx-test/gateway.toml" \
+    --config bins/telnyx-gateway/gateway.toml \
     --bind 127.0.0.1:8080 \
     --socket /tmp/motlie-telnyx-gateway.sock \
     --log-file "$HOME/telnyx-gateway-live.log"
@@ -219,7 +221,9 @@ Prerequisites:
   stores it elsewhere, export `PIPER_ESPEAKNG_DATA_DIRECTORY` to the directory
   that contains the eSpeak-ng data files before starting the gateway.
 
-Start a TUI session with an agent socket:
+Start a TUI session with an agent socket. The command below uses the canonical
+[`gateway.toml`](gateway.toml), which should stay parse-clean under the strict
+`--config` loader and keeps secrets as references such as `env:TELNYX_API_KEY`:
 
 ```sh
 cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
@@ -230,7 +234,7 @@ env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
   TELNYX_API_KEY="$TELNYX_API_KEY" \
   PIPER_ESPEAKNG_DATA_DIRECTORY="${PIPER_ESPEAKNG_DATA_DIRECTORY:-/usr/lib/x86_64-linux-gnu/espeak-ng-data}" \
   cargo run -p motlie-telnyx-gateway --features "sherpa piper" -- \
-    --config "$HOME/telnyx-test/gateway.toml" \
+    --config bins/telnyx-gateway/gateway.toml \
     --tui \
     --bind 127.0.0.1:8080 \
     --socket /tmp/motlie-telnyx-gateway.sock \

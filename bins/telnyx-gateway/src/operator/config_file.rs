@@ -687,6 +687,20 @@ warm_modelz = true
         );
     }
 
+    #[test]
+    fn checked_in_gateway_config_parses_strictly() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("gateway.toml");
+        let config = LoadedGatewayConfig::load(&path).expect("load checked-in gateway config");
+
+        assert_eq!(config.telnyx.api_key_ref, "env:TELNYX_API_KEY");
+        assert_eq!(
+            config.voice_quality.tts.generation_mode,
+            crate::quality::TtsGenerationMode::Streaming
+        );
+        assert!(config.quality_logging.path.is_some());
+        assert!(config.voice_quality.logging.enabled);
+    }
+
     #[tokio::test]
     async fn state_dump_round_trips_durable_gateway_config() {
         let log_path = std::env::temp_dir().join(format!(

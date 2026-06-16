@@ -1947,12 +1947,32 @@ fn ensure_string_list(
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct QualityConfigDocument {
+    #[serde(rename = "version")]
+    _version: Option<u32>,
+    #[serde(rename = "generated_at")]
+    _generated_at: Option<String>,
+    #[serde(rename = "process")]
+    _process: Option<toml::Value>,
+    #[serde(rename = "telnyx")]
+    _telnyx: Option<toml::Value>,
+    #[serde(rename = "gateway")]
+    _gateway: Option<toml::Value>,
+    #[serde(rename = "inbound")]
+    _inbound: Option<toml::Value>,
+    #[serde(rename = "conversation")]
+    _conversation: Option<toml::Value>,
+    #[serde(rename = "startup")]
+    _startup: Option<toml::Value>,
+    #[serde(rename = "quality_logging")]
+    _quality_logging: Option<toml::Value>,
     #[serde(default)]
     voice_quality: Option<QualityConfigPatch>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct QualityConfigPatch {
     pub profile: Option<QualityProfile>,
     #[serde(default)]
@@ -1982,6 +2002,7 @@ pub struct QualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SpeechQualityConfigPatch {
     pub rms_threshold: Option<f32>,
     pub peak_threshold: Option<i32>,
@@ -1989,6 +2010,7 @@ pub struct SpeechQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct EndpointQualityConfigPatch {
     pub trailing_silence_ms: Option<u64>,
     pub min_turn_words: Option<usize>,
@@ -2008,6 +2030,7 @@ pub struct EndpointQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AsrQualityConfigPatch {
     pub repeated_token_run_threshold: Option<usize>,
     pub repeated_q_run_threshold: Option<usize>,
@@ -2015,6 +2038,7 @@ pub struct AsrQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TextCallQualityConfigPatch {
     pub max_active_turns: Option<usize>,
     pub media_ready_timeout_ms: Option<u64>,
@@ -2024,6 +2048,7 @@ pub struct TextCallQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TtsQualityConfigPatch {
     pub generation_mode: Option<TtsGenerationMode>,
     pub chunking_enabled: Option<bool>,
@@ -2033,6 +2058,7 @@ pub struct TtsQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct BargeInQualityConfigPatch {
     pub enabled: Option<bool>,
     pub speech_onset_cancel_enabled: Option<bool>,
@@ -2043,6 +2069,7 @@ pub struct BargeInQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct EchoSuppressionQualityConfigPatch {
     pub enabled: Option<bool>,
     pub min_text_chars: Option<usize>,
@@ -2055,6 +2082,7 @@ pub struct EchoSuppressionQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingQualityConfigPatch {
     pub enabled: Option<bool>,
     pub queue_capacity: Option<usize>,
@@ -2064,6 +2092,7 @@ pub struct LoggingQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct QualityJudgeConfigPatch {
     pub enabled: Option<bool>,
     pub mode: Option<JudgeMode>,
@@ -2074,6 +2103,7 @@ pub struct QualityJudgeConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct QualityTargetsConfigPatch {
     pub p50_endpoint_trailing_silence_ms: Option<u64>,
     pub p95_endpoint_trailing_silence_ms: Option<u64>,
@@ -2225,6 +2255,53 @@ mod tests {
         assert_eq!(config.speech.rms_threshold, 260.0);
         assert_eq!(config.endpoint.trailing_silence_ms, 100);
         assert!(!config.logging.include_transcript_text);
+    }
+
+    #[test]
+    fn toml_rejects_unknown_voice_quality_keys() {
+        for raw in [
+            r#"
+            [voice_quality]
+            generation_mod = "streaming"
+            "#,
+            r#"
+            [voice_quality.tts]
+            prebuffer_chunk = 1
+            "#,
+            r#"
+            [voice_quality.early_response]
+            start_timng = "endpoint_candidate_only"
+            "#,
+        ] {
+            let error = VoiceQualityConfig::from_toml_str(raw)
+                .expect_err("unknown voice_quality keys should fail closed");
+            assert!(
+                error.to_string().contains("unknown field"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn toml_accepts_gateway_metadata_and_known_outer_tables() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            version = 1
+            generated_at = "2026-06-16T00:00:00Z"
+
+            [process]
+            bind = "127.0.0.1:8080"
+
+            [quality_logging]
+            path = "$HOME/telnyx-test/quality-events.jsonl"
+
+            [voice_quality.tts]
+            generation_mode = "streaming"
+            "#,
+        )
+        .expect("quality parser should accept full gateway TOML metadata");
+
+        assert_eq!(config.tts.generation_mode, TtsGenerationMode::Streaming);
     }
 
     #[test]

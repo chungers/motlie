@@ -95,7 +95,7 @@ pub enum EarlyResponseAppendMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct EarlyResponsePolicy {
     pub enabled: bool,
     pub audio_mode: EarlyResponseAudioMode,

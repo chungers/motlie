@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-16 PDT | @codex-535: Added canonical checked-in `bins/telnyx-gateway/gateway.toml` for strict startup config tuning and made nested `[voice_quality.*]` TOML fail closed on unknown keys. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Replaced split startup config with one durable `--config <gateway.toml>` file and readable TOML `state dump`; `.repl` command files remain only for interactive `source <path>` replay. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Documented the current single ASR-to-processor-to-TTS pipeline, including the optional early-response aggregation stage, committed-turn-only behavior when the aggregator is disabled, and the control-knob surface now summarized in API.md. | Feeding the Conversation Handler, Returning TTS Audio |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Made conversation processor selection per-call and static-dispatch via `ConversationProcessorKind` (`Identity` only for now); `early_response.enabled` is documented as the optional provisional-input gate into the same processor, not a second response branch. | Application Text Call Protocol and Gateway Control API, Processor Transfer Function Contract |
@@ -1048,7 +1049,7 @@ telnyx-gateway --config <gateway.toml>
 
 `state dump [path]` writes the current durable gateway state TOML and keeps running. `shutdown [dump_path]` writes the same dump, then exits cleanly after refusing new work and draining or terminating active sessions according to normal shutdown policy. If the path is omitted, `shutdown` uses `config state-path` if set; otherwise it should use a documented default such as `./telnyx-gateway.toml`.
 
-`--config <gateway.toml>` loads the TOML state before the gateway enables inbound handling or accepts Control API mutations. Invalid config fails closed with a validation error.
+`--config <gateway.toml>` loads the TOML state before the gateway enables inbound handling or accepts Control API mutations. Invalid config fails closed with a validation error, including unknown keys under nested `[voice_quality.*]` tables. The canonical checked-in template lives at `bins/telnyx-gateway/gateway.toml`; it documents each current process, Telnyx, media, conversation, quality logging, and voice-quality tuning field inline, and it uses references such as `env:TELNYX_API_KEY` rather than literal secrets.
 
 Recommended dump format:
 

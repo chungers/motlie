@@ -8,6 +8,7 @@ Current API snapshot for the Telnyx gateway operator/TUI/socket control surface.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-16 PDT | @codex-535 | Added checked-in canonical `bins/telnyx-gateway/gateway.toml` and tightened strict TOML parsing for nested `[voice_quality.*]` tables. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Replaced split startup config with one durable `--config <gateway.toml>` file. `state dump` now emits readable TOML with full `[voice_quality.*]`; `.repl` command files are only sourced interactively with `source <path>`. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Added the current ASR -> optional aggregator -> static processor -> TTS pipeline contract and the operator/config control-knob inventory. |
 
@@ -108,10 +109,10 @@ Notes:
 Startup uses one declarative gateway TOML file:
 
 ```bash
-telnyx-gateway --config ./gateway.toml
+telnyx-gateway --config bins/telnyx-gateway/gateway.toml
 ```
 
-The file owns durable process/Telnyx/media/conversation/startup state plus full `[voice_quality.*]`. `state dump <path>` writes the same readable TOML shape. If `[voice_quality.logging] enabled = true`, the same file must include `[quality_logging] path = ...` so restart can recreate the JSONL sink. The CLI keeps narrow process overrides (`--bind`, `--tui`, `--socket`, `--artifact-root`, `--log-file`) for local launches, but `--quality-config`, `--quality-profile`, `--load`, `--turn-log-jsonl`, and `--conversation-smoke-test` are not part of the startup surface. Runtime tuning remains available through TUI/socket `quality ...` commands. Ad hoc command scripts can be replayed inside a running TUI/socket source with `source <path>`.
+The file owns durable process/Telnyx/media/conversation/startup state plus full `[voice_quality.*]`. `state dump <path>` writes the same readable TOML shape. The canonical checked-in template is [`../gateway.toml`](../gateway.toml); it covers the current tuning knobs, documents each field inline, and uses secret references only. If `[voice_quality.logging] enabled = true`, the same file must include `[quality_logging] path = ...` so restart can recreate the JSONL sink. The CLI keeps narrow process overrides (`--bind`, `--tui`, `--socket`, `--artifact-root`, `--log-file`) for local launches, but `--quality-config`, `--quality-profile`, `--load`, `--turn-log-jsonl`, and `--conversation-smoke-test` are not part of the startup surface. Runtime tuning remains available through TUI/socket `quality ...` commands. Ad hoc command scripts can be replayed inside a running TUI/socket source with `source <path>`.
 
 Minimal live-test config shape:
 
