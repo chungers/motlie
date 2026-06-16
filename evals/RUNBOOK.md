@@ -64,11 +64,12 @@ artifact gate. It derives all 18 curated artifact requirements from the
 `motlie-models` registry, reports each HF source and resolved snapshot hash, and
 exits non-zero if any required artifact is absent. Use
 `cargo run -p evals --features all-curated -- artifacts sync` to populate gaps
-through the registry download path. The generated provenance document is
-[`evals/artifacts/provenance.md`](artifacts/provenance.md) and is guarded by an
-all-curated regen test. Artifact provenance policy, including downloaded vs
-derived rules and env-only token handling, is authoritative in
-[docs/PROCESS.md](docs/PROCESS.md#2-artifacts-and-provenance).
+through the same registry download and derivation machinery exposed per bundle by
+`cargo run -p motlie-models --bin motlie-models-download -- <bundle_id>`. The
+generated provenance document is [`evals/artifacts/provenance.md`](artifacts/provenance.md)
+and is guarded by an all-curated regen test. Artifact provenance policy,
+including downloaded vs derived rules and env-only token handling, is
+authoritative in [docs/PROCESS.md](docs/PROCESS.md#2-artifacts-and-provenance).
 
 ## General process (David, 2026-06-11 — the standing model for eval cycles)
 1. **All cycle work merges into the `evals/<cycle>` branch first** — framework code, per-host results PRs, fixes, the coverage-report PR. The branch is the coordination + data substrate.
