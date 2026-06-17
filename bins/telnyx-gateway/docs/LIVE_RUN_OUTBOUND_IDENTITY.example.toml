@@ -278,7 +278,7 @@ max_inappropriate_cancel_rate = 0.03
 
 - Gateway started with `--config $HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml`.
 - Operator placed the outbound call with the privacy-preserving `getpass` dial helper.
-- After the selected call connected, operator ran `conversation smoke-test on`, `conversation barge-in off`, and `conversation status`.
+- After the selected call connected, operator ran `conversation smoke-test on`, explicitly ran `conversation barge-in off` for the deterministic baseline, and ran `conversation status`.
 - Expected conversation status: `processor=identity`, `mode=auto`, `barge_in=off`, `attached=true`.
 - Caller read the identity/repeat script, waited for playback, then gave qualitative feedback.
 
@@ -317,7 +317,7 @@ Qualitative sample:
 Analysis:
 
 - Outbound smoke testing verifies Telnyx call control, selected outbound caller ID, media WebSocket setup, ASR, identity dispatch, streaming TTS, and playback.
-- The post-dial `conversation smoke-test on` step is required because an outbound call may connect before the operator has explicitly attached the identity smoke-test processor.
+- The post-dial `conversation smoke-test on` step is required because an outbound call may connect before the operator has explicitly attached the identity smoke-test processor; it preserves barge-in, so the run must set `conversation barge-in on|off` explicitly.
 - If the callee reaches voicemail, keep the record as a media-pipeline smoke test and rerun for human qualitative feedback.
 
 Next-run tuning:

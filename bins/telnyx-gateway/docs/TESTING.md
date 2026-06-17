@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-17 | @codex-535 | Clarified that smoke-test preserves barge-in and live tests must set barge-in explicitly. |
 | 2026-06-17 | @codex-535 | Added explicit inbound/outbound identity smoke-test procedures and redacted sample run records. |
 | 2026-06-17 | @codex-535 | Added the redacted live-run example config and updated the per-run config-as-record workflow. |
 | 2026-06-17 | @codex-535 | Added per-run hybrid config files: strict TOML front matter plus appended run results. |
@@ -252,7 +253,9 @@ streaming TTS, early response, model warming, quality logging, and disabled
 barge-in as listed in the default tuning profile above.
 
 After the privacy-preserving outbound `dial`, enable the identity/repeat smoke
-test processor for the selected call and re-confirm barge-in is off:
+test processor for the selected call and explicitly set the intended barge-in
+mode. `conversation smoke-test on` preserves the current barge-in setting; it
+does not reset it.
 
 ```sh
 python3 - <<'PY'
@@ -260,7 +263,7 @@ import json, socket
 
 commands = [
     "conversation smoke-test on",
-    "conversation barge-in off",
+    "conversation barge-in off",  # use "on" for an interruption stress test
     "conversation status",
 ]
 
@@ -332,7 +335,8 @@ whether it answered automatically.
 For WER-only transcription, set `conversation.enabled = false` and
 `voice_quality.early_response.audio_mode = "prepare_only"`, and label the run
 as WER-only before startup. Do not use WER-only settings when the caller expects
-audible repeat-back.
+audible repeat-back. For inbound identity runs, choose barge-in in the run config
+before startup; the smoke-test command will preserve that setting.
 
 Tell the caller exactly which script to read before they dial. Put that script
 in the local run config below the closing `+++` delimiter so the transcript can
