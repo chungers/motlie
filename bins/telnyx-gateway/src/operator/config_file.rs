@@ -693,28 +693,30 @@ warm_modelz = true
         let raw = std::fs::read_to_string(&path).expect("read checked-in gateway config");
         let config = LoadedGatewayConfig::load(&path).expect("load checked-in gateway config");
 
-        assert!(
-            !raw.contains("<telnyx-"),
-            "checked-in config should not contain Telnyx placeholders"
-        );
+        assert!(raw.contains("<telnyx-connection-id>"));
+        assert!(raw.contains("<telnyx-phone-number>"));
+        assert!(raw.contains("motlie-gateway.example.ts.net"));
         assert_eq!(config.telnyx.api_key_ref, "env:TELNYX_API_KEY");
         assert_eq!(
             config.telnyx.selected_connection_id.as_deref(),
-            Some("2972918514181997699")
+            Some("<telnyx-connection-id>")
         );
         assert_eq!(
             config.telnyx.selected_phone_number.as_deref(),
-            Some("+14159148777")
+            Some("<telnyx-phone-number>")
         );
         assert_eq!(
             config.gateway.webhook_url.as_deref(),
-            Some("https://amd-ryzen7-1.tail80aba3.ts.net/telnyx/webhooks")
+            Some("https://motlie-gateway.example.ts.net/telnyx/webhooks")
         );
         assert_eq!(
             config.gateway.media_url.as_deref(),
-            Some("wss://amd-ryzen7-1.tail80aba3.ts.net/telnyx/media")
+            Some("wss://motlie-gateway.example.ts.net/telnyx/media")
         );
-        assert_eq!(config.gateway.from_number.as_deref(), Some("+14159148777"));
+        assert_eq!(
+            config.gateway.from_number.as_deref(),
+            Some("<telnyx-phone-number>")
+        );
         assert_eq!(
             config.voice_quality.tts.generation_mode,
             crate::quality::TtsGenerationMode::Streaming

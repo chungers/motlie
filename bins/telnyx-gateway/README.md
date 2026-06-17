@@ -22,9 +22,9 @@ ONNX Runtime from source for the gateway.
 For live tests with an agent operator, run the gateway without the TUI and expose
 a local Unix-domain command socket. The checked-in canonical startup config is
 [`gateway.toml`](gateway.toml); it contains the full strict TOML surface with
-live Telnyx routing values and `env:` secret references only. For continued
-local tuning, copy the same file to `$HOME/telnyx-test/gateway.toml` and pass
-that path with `--config`.
+placeholder routing fields and `env:` secret references only. For continued
+local tuning, materialize live values in `$HOME/telnyx-test/gateway.toml` and
+pass that path with `--config`.
 
 ```sh
 cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
