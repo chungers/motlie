@@ -232,6 +232,7 @@ fn render_records_markdown(
     }
 
     out.push_str("\n## Latency Metrics\n\n");
+    out.push_str("Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streaming-benefit signal only for longer inputs. Short and medium Kokoro inputs around the current ~166-374 character segment-emission threshold may synthesize as a single segment, so proof=true there is bookkeeping; use `max_inter_chunk_gap_ms` and `underrun_count` as the breakdown signals.\n\n");
     render_latency_metrics(&mut out, records);
 
     out.push_str("\n## Model x Capability\n\n");
@@ -1313,6 +1314,9 @@ mod tests {
         assert!(markdown.contains("mean_ttfp_first_partial_ms"));
         assert!(markdown.contains("p95_ttfp_first_partial_ms"));
         assert!(markdown.contains("mean_ttfa_first_chunk_ms"));
+        assert!(markdown.contains("first_pcm_before_synth_complete"));
+        assert!(markdown.contains("max_inter_chunk_gap_ms"));
+        assert!(markdown.contains("~166-374 character"));
         assert!(markdown.contains("p95_ttfa_first_chunk_ms"));
         assert!(markdown.contains("mean_synth_complete_ms"));
         assert!(markdown.contains("p95_synth_complete_ms"));

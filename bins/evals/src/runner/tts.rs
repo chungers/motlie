@@ -530,6 +530,7 @@ where
     let mut ttfa_first_chunk_elapsed = None;
     let mut last_chunk_at = None;
     let mut buffered_audio_budget = Duration::ZERO;
+    let playback_buffer_cap = streaming_playback_buffer_cap(max_buffered_audio_ms);
     let mut inter_chunk_gap_ms = Vec::new();
     let mut underrun_count = 0_u64;
     let mut packetized_frame_count = 0_u64;
@@ -552,20 +553,22 @@ where
             let gap = now.saturating_duration_since(last);
             let gap_ms = elapsed_ms(gap);
             inter_chunk_gap_ms.push(gap_ms);
-            if gap >= buffered_audio_budget {
-                if gap > buffered_audio_budget && !buffered_audio_budget.is_zero() {
-                    underrun_count = underrun_count.saturating_add(1);
-                }
-                buffered_audio_budget = Duration::ZERO;
-            } else {
-                buffered_audio_budget -= gap;
+            let (next_budget, underrun) =
+                drain_streaming_playback_buffer(buffered_audio_budget, gap);
+            buffered_audio_budget = next_budget;
+            if underrun {
+                underrun_count = underrun_count.saturating_add(1);
             }
         }
 
         let frames = streaming_frame_count(&chunk, STREAMING_EVAL_FRAME_MS);
         packetized_frame_count = packetized_frame_count.saturating_add(frames);
-        buffered_audio_budget +=
-            Duration::from_millis(frames.saturating_mul(STREAMING_EVAL_FRAME_MS));
+        buffered_audio_budget = add_streaming_playback_frames(
+            buffered_audio_budget,
+            frames,
+            STREAMING_EVAL_FRAME_MS,
+            playback_buffer_cap,
+        );
         sample_count = sample_count.saturating_add(chunk.samples_i16.len() as u64);
         audio_duration_ms = audio_duration_ms.saturating_add(chunk.audio_ms());
         sample_rate_hz = u64::from(chunk.sample_rate_hz);
@@ -658,6 +661,29 @@ fn streaming_frame_count(chunk: &IncrementalSpeechChunk, frame_ms: u64) -> u64 {
     .max(1)
     .saturating_mul(u64::from(chunk.channels));
     (chunk.samples_i16.len() as u64).div_ceil(samples_per_frame)
+}
+
+fn streaming_playback_buffer_cap(max_buffered_audio_ms: u32) -> Duration {
+    Duration::from_millis(u64::from(max_buffered_audio_ms))
+}
+
+fn drain_streaming_playback_buffer(buffered_audio: Duration, gap: Duration) -> (Duration, bool) {
+    if gap > buffered_audio {
+        (Duration::ZERO, !buffered_audio.is_zero())
+    } else {
+        (buffered_audio - gap, false)
+    }
+}
+
+fn add_streaming_playback_frames(
+    buffered_audio: Duration,
+    frames: u64,
+    frame_ms: u64,
+    playback_buffer_cap: Duration,
+) -> Duration {
+    let added = Duration::from_millis(frames.saturating_mul(frame_ms));
+    let next = buffered_audio.saturating_add(added);
+    std::cmp::min(next, playback_buffer_cap)
 }
 
 fn tts_length_performance(
@@ -912,6 +938,26 @@ mod tests {
         assert_eq!(gaps[0].metric, "ttfa_first_chunk_ms");
         assert_eq!(gaps[0].reason, "metric_not_reported_by_backend");
         assert_eq!(gaps[0].source.as_deref(), Some("tts_runner"));
+    }
+
+    #[test]
+    fn bounded_streaming_playback_buffer_reports_underrun() {
+        let cap = streaming_playback_buffer_cap(80);
+        let buffered =
+            add_streaming_playback_frames(Duration::ZERO, 10, STREAMING_EVAL_FRAME_MS, cap);
+        assert_eq!(buffered, Duration::from_millis(80));
+
+        let (buffered, underrun) =
+            drain_streaming_playback_buffer(buffered, Duration::from_millis(120));
+        assert_eq!(buffered, Duration::ZERO);
+        assert!(underrun);
+
+        let buffered =
+            add_streaming_playback_frames(Duration::ZERO, 2, STREAMING_EVAL_FRAME_MS, cap);
+        let (buffered, underrun) =
+            drain_streaming_playback_buffer(buffered, Duration::from_millis(20));
+        assert_eq!(buffered, Duration::from_millis(20));
+        assert!(!underrun);
     }
 
     #[test]
