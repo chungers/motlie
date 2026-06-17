@@ -762,9 +762,9 @@ fn coverage_state_symbol(state: &crate::coverage::CoverageState) -> String {
 }
 
 fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
-    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | thinking_tokens_to_answer | completion_tokens | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | mean_transcription_latency_ms | p95_transcription_latency_ms | mean_ttfp_first_partial_ms | p95_ttfp_first_partial_ms | mean_synthesis_latency_ms | p95_synthesis_latency_ms | mean_ttfa_first_chunk_ms | p95_ttfa_first_chunk_ms | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
+    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | thinking_tokens_to_answer | completion_tokens | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | mean_transcription_latency_ms | p95_transcription_latency_ms | mean_ttfp_first_partial_ms | p95_ttfp_first_partial_ms | mean_synthesis_latency_ms | p95_synthesis_latency_ms | mean_ttfa_first_chunk_ms | p95_ttfa_first_chunk_ms | mean_synth_complete_ms | p95_synth_complete_ms | mean_inter_chunk_gap_ms | p95_inter_chunk_gap_ms | max_inter_chunk_gap_ms | underrun_count | streaming_frame_ms | packetized_frame_count | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
     out.push_str(
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
 
     let mut row_count = 0_u64;
@@ -781,7 +781,7 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
             continue;
         }
         out.push_str(&format!(
-            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             record.coverage.cell_id,
             record.coverage.host_slug,
             record.coverage.capability,
@@ -801,6 +801,14 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
             format_optional_f64(metrics.p95_synthesis_latency_ms),
             format_optional_f64(metrics.mean_ttfa_first_chunk_ms),
             format_optional_f64(metrics.p95_ttfa_first_chunk_ms),
+            format_optional_f64(metrics.mean_synth_complete_ms),
+            format_optional_f64(metrics.p95_synth_complete_ms),
+            format_optional_f64(metrics.mean_inter_chunk_gap_ms),
+            format_optional_f64(metrics.p95_inter_chunk_gap_ms),
+            format_optional_u64(metrics.max_inter_chunk_gap_ms),
+            format_optional_u64(metrics.underrun_count),
+            format_optional_u64(metrics.streaming_frame_ms),
+            format_optional_u64(metrics.packetized_frame_count),
             format_optional_u64(metrics.ttfp_first_partial_ms),
             format_optional_u64(metrics.ttfa_first_chunk_ms),
         ));
@@ -808,7 +816,7 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
     }
 
     if row_count == 0 {
-        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |\n");
+        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |\n");
     }
 }
 
@@ -830,6 +838,14 @@ struct LatencyMetricCells {
     p95_synthesis_latency_ms: Option<f64>,
     mean_ttfa_first_chunk_ms: Option<f64>,
     p95_ttfa_first_chunk_ms: Option<f64>,
+    mean_synth_complete_ms: Option<f64>,
+    p95_synth_complete_ms: Option<f64>,
+    mean_inter_chunk_gap_ms: Option<f64>,
+    p95_inter_chunk_gap_ms: Option<f64>,
+    max_inter_chunk_gap_ms: Option<u64>,
+    underrun_count: Option<u64>,
+    streaming_frame_ms: Option<u64>,
+    packetized_frame_count: Option<u64>,
     ttfp_first_partial_ms: Option<u64>,
     ttfa_first_chunk_ms: Option<u64>,
 }
@@ -852,6 +868,14 @@ impl LatencyMetricCells {
             || self.p95_synthesis_latency_ms.is_some()
             || self.mean_ttfa_first_chunk_ms.is_some()
             || self.p95_ttfa_first_chunk_ms.is_some()
+            || self.mean_synth_complete_ms.is_some()
+            || self.p95_synth_complete_ms.is_some()
+            || self.mean_inter_chunk_gap_ms.is_some()
+            || self.p95_inter_chunk_gap_ms.is_some()
+            || self.max_inter_chunk_gap_ms.is_some()
+            || self.underrun_count.is_some()
+            || self.streaming_frame_ms.is_some()
+            || self.packetized_frame_count.is_some()
             || self.ttfp_first_partial_ms.is_some()
             || self.ttfa_first_chunk_ms.is_some()
     }
@@ -886,6 +910,14 @@ fn latency_metric_cells(metrics: &CapabilityPerformanceMetrics) -> LatencyMetric
             p95_synthesis_latency_ms: metrics.p95_synthesis_latency_ms,
             mean_ttfa_first_chunk_ms: metrics.mean_ttfa_first_chunk_ms,
             p95_ttfa_first_chunk_ms: metrics.p95_ttfa_first_chunk_ms,
+            mean_synth_complete_ms: metrics.mean_synth_complete_ms,
+            p95_synth_complete_ms: metrics.p95_synth_complete_ms,
+            mean_inter_chunk_gap_ms: metrics.mean_inter_chunk_gap_ms,
+            p95_inter_chunk_gap_ms: metrics.p95_inter_chunk_gap_ms,
+            max_inter_chunk_gap_ms: metrics.max_inter_chunk_gap_ms,
+            underrun_count: metrics.underrun_count,
+            streaming_frame_ms: metrics.streaming_frame_ms,
+            packetized_frame_count: metrics.packetized_frame_count,
             ttfa_first_chunk_ms: metrics.ttfa_first_chunk_ms,
             ..Default::default()
         },
@@ -1260,6 +1292,14 @@ mod tests {
                 p95_synthesis_latency_ms: Some(110.0),
                 mean_ttfa_first_chunk_ms: Some(17.0),
                 p95_ttfa_first_chunk_ms: Some(22.0),
+                mean_synth_complete_ms: Some(130.0),
+                p95_synth_complete_ms: Some(150.0),
+                mean_inter_chunk_gap_ms: Some(9.0),
+                p95_inter_chunk_gap_ms: Some(15.0),
+                max_inter_chunk_gap_ms: Some(21),
+                underrun_count: Some(0),
+                streaming_frame_ms: Some(20),
+                packetized_frame_count: Some(14),
                 ..Default::default()
             });
 
@@ -1274,10 +1314,14 @@ mod tests {
         assert!(markdown.contains("p95_ttfp_first_partial_ms"));
         assert!(markdown.contains("mean_ttfa_first_chunk_ms"));
         assert!(markdown.contains("p95_ttfa_first_chunk_ms"));
+        assert!(markdown.contains("mean_synth_complete_ms"));
+        assert!(markdown.contains("p95_synth_complete_ms"));
+        assert!(markdown.contains("mean_inter_chunk_gap_ms"));
+        assert!(markdown.contains("underrun_count"));
         assert!(markdown.contains("ttfp_first_partial_ms"));
         assert!(markdown.contains("ttfa_first_chunk_ms"));
         assert!(markdown.contains("| 100.00 | 120.00 | 42.00 | 48.00 |"));
-        assert!(markdown.contains("| 90.00 | 110.00 | 17.00 | 22.00 |"));
+        assert!(markdown.contains("| 90.00 | 110.00 | 17.00 | 22.00 | 130.00 | 150.00 | 9.00 | 15.00 | 21 | 0 | 20 | 14 |"));
     }
 
     #[test]

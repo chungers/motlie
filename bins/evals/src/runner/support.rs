@@ -644,6 +644,12 @@ fn default_coverage(
     grouping_keys.insert("checkpoint_format".to_owned(), checkpoint_format.to_owned());
     grouping_keys.insert("quantization".to_owned(), coverage_quantization.to_owned());
     grouping_keys.insert("profile".to_owned(), context.profile.name.clone());
+    if context.scenario.capability() == crate::scenario::CapabilityName::Tts {
+        grouping_keys.insert(
+            "speech_mode".to_owned(),
+            tts_speech_mode_for_scenario(&context.scenario.id).to_owned(),
+        );
+    }
 
     CoverageSection {
         snapshot_id: "ad_hoc".to_owned(),
@@ -666,6 +672,13 @@ fn default_coverage(
         terminal_outcome: crate::result::TerminalOutcome::Blocked,
         reason: None,
         grouping_keys,
+    }
+}
+
+fn tts_speech_mode_for_scenario(scenario_id: &str) -> &'static str {
+    match scenario_id {
+        "tts_streaming_synthesis" => "streaming",
+        _ => "buffered",
     }
 }
 

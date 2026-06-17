@@ -28,7 +28,7 @@ Coverage is enum-keyed. The tuple `(bundle, quantization, capability, profile)` 
 
 Each tuple reconciles into exactly one of four states: `Validated`, `NotApplicable(reason)`, `BuildGap`, or `Gap`. Completeness tests are fail-closed. A missing tuple, unparsable tuple, or contradictory record is a failure. A gap must be declared with an explicit reason; silent absence is not a state.
 
-Metrics are capability-specific. LLM rows report warmup/startup, two-number TTFT, tokens/sec, and peak memory where instrumented. ASR rows report RTF, WER, and time-to-first-partial. TTS rows report RTF and time-to-first-audio. Embeddings rows report vectors/sec or an explicit gap. Tool-use rows report precision, recall, and round-trip behavior.
+Metrics are capability-specific. LLM rows report warmup/startup, two-number TTFT, tokens/sec, and peak memory where instrumented. ASR rows report RTF, WER, and time-to-first-partial. TTS rows report RTF and time-to-first-audio; streaming TTS rows additionally report first-PCM-before-complete proof, synth-complete latency, inter-chunk pacing, underrun count, and per-length corpus metrics for short-to-long input sweeps. Embeddings rows report vectors/sec or an explicit gap. Tool-use rows report precision, recall, and round-trip behavior.
 
 Two-number TTFT is required for LLM/chat-style output: first generated token and first answer token. Thinking tokens before the answer are counted separately where available.
 
@@ -64,4 +64,4 @@ Independent review means a different account and identity from the author, not m
 
 Review at the exact PR head. Before validating, fetch the branch and verify the checked-out SHA equals the PR head. Stale worktrees invalidate review evidence.
 
-Streaming requires real streaming proof. For speech, first playable PCM must be produced before independent synthesis completion. A chunked buffer emitted after full synthesis is not streaming. The #531 streaming contract is the reference point for this distinction.
+Streaming requires real streaming proof. For speech, first playable PCM must be produced before independent synthesis completion. A chunked buffer emitted after full synthesis is not streaming. The #531 streaming contract is the reference point for this distinction; the `tts_streaming_synthesis` eval owns a minimal sunny-path framing model and drives the shared Kokoro incremental library path directly.
