@@ -23,26 +23,26 @@ api_base = "https://api.telnyx.com/v2"
 api_key_ref = "env:TELNYX_API_KEY"
 # Dry-run skips Telnyx-mutating API calls while preserving local config flow.
 dry_run = false
-# Replace with the Telnyx Call Control connection/application used for testing.
-selected_connection_id = "<telnyx-connection-id>"
-# Optional human-readable application name for operator status.
-selected_application_name = "<telnyx-application-name>"
-# Replace with the selected Telnyx number in E.164 form.
-selected_phone_number = "<telnyx-phone-number>"
+# Telnyx Call Control connection/application used for live tuning.
+selected_connection_id = "2972918514181997699"
+# Optional human-readable application name for operator status; set when known.
+# selected_application_name = "motlie-live"
+# Selected Telnyx number in E.164 form. Non-secret routing config is checked in.
+selected_phone_number = "+14159148777"
 
 [gateway]
 # Public webhook URL that Telnyx calls for call-control events.
-webhook_url = "https://motlie-gateway.example.ts.net/telnyx/webhooks"
+webhook_url = "https://amd-ryzen7-1.tail80aba3.ts.net/telnyx/webhooks"
 # Public media WebSocket URL that Telnyx streams media to.
-media_url = "wss://motlie-gateway.example.ts.net/telnyx/media"
+media_url = "wss://amd-ryzen7-1.tail80aba3.ts.net/telnyx/media"
 # Known-good telephony media path; use `L16` + `16000` for ASR A/B runs.
 media_codec = "PCMU"
 # Sample rate paired with the selected codec.
 media_sample_rate_hz = 8000
 # Capture root for raw media, decoded WAV, ASR input WAV, and transcripts.
 capture_dir = "$HOME/telnyx-test/captures"
-# Default outbound caller ID; replace with the selected Telnyx number.
-from_number = "<telnyx-phone-number>"
+# Default outbound caller ID; use the selected Telnyx number.
+from_number = "+14159148777"
 # Default destination for `state dump` / shutdown dumps.
 state_path = "$HOME/telnyx-test/gateway.toml"
 

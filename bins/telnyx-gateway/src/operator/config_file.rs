@@ -690,9 +690,31 @@ warm_modelz = true
     #[test]
     fn checked_in_gateway_config_parses_strictly() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("gateway.toml");
+        let raw = std::fs::read_to_string(&path).expect("read checked-in gateway config");
         let config = LoadedGatewayConfig::load(&path).expect("load checked-in gateway config");
 
+        assert!(
+            !raw.contains("<telnyx-"),
+            "checked-in config should not contain Telnyx placeholders"
+        );
         assert_eq!(config.telnyx.api_key_ref, "env:TELNYX_API_KEY");
+        assert_eq!(
+            config.telnyx.selected_connection_id.as_deref(),
+            Some("2972918514181997699")
+        );
+        assert_eq!(
+            config.telnyx.selected_phone_number.as_deref(),
+            Some("+14159148777")
+        );
+        assert_eq!(
+            config.gateway.webhook_url.as_deref(),
+            Some("https://amd-ryzen7-1.tail80aba3.ts.net/telnyx/webhooks")
+        );
+        assert_eq!(
+            config.gateway.media_url.as_deref(),
+            Some("wss://amd-ryzen7-1.tail80aba3.ts.net/telnyx/media")
+        );
+        assert_eq!(config.gateway.from_number.as_deref(), Some("+14159148777"));
         assert_eq!(
             config.voice_quality.tts.generation_mode,
             crate::quality::TtsGenerationMode::Streaming
