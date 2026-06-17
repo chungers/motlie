@@ -8,13 +8,13 @@
 //! runtime evidence must agree, and any disagreement is a flagged finding
 //! (`Finding`) that fails the fail-closed completeness check.
 //!
-//! Speech sub-dimension (#531, WIRED): `CellKey.speech_mode` carries the
+//! Speech sub-dimension (#531/#539, WIRED): `CellKey.speech_mode` carries the
 //! capability-conditional `SpeechGeneration::{Buffered, Streaming}` (present iff
 //! `capability == Speech`; DESIGN §G), so buffered vs streaming are distinct
-//! cells. Streaming eval is out of scope this iteration: streaming cells are
-//! *synthesized* as declared `Gap(StreamingEvalOutOfScope)` (accounted, never
-//! silently absent) for bundles advertising streaming, while no streaming eval
-//! runs. `applicability` is unaffected (accelerator support is
+//! cells. Streaming TTS is now an in-scope eval scenario; missing streaming
+//! cells are synthesized as ordinary `Gap(None)` entries for bundles advertising
+//! streaming, while `tts_streaming_synthesis` records validate the Streaming
+//! tuple. `applicability` is unaffected (accelerator support is
 //! speech-mode-independent).
 
 use std::collections::BTreeMap;
@@ -52,8 +52,9 @@ pub enum CoverageState {
 /// `Reason` that drives `NotApplicable`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GapReason {
-    /// The cell is a declared dimension value whose eval is out of scope for this
-    /// iteration (e.g. streaming TTS, #531) — declared, not run, not silent.
+    /// Historical reason used while streaming TTS was declared but not yet run
+    /// (#531). New #539 streaming cells are in scope and therefore use
+    /// `Gap(None)` when absent.
     StreamingEvalOutOfScope,
 }
 
@@ -191,6 +192,13 @@ fn capability_from_eval(token: &str) -> Option<CapabilityKind> {
     }
 }
 
+fn speech_generation_from_scenario(scenario_id: &str) -> SpeechGeneration {
+    match scenario_id {
+        "tts_streaming_synthesis" => SpeechGeneration::Streaming,
+        _ => SpeechGeneration::Buffered,
+    }
+}
+
 fn backend_from_token(token: &str) -> Option<BackendKind> {
     match token {
         "mistralrs" => Some(BackendKind::MistralRs),
@@ -226,10 +234,10 @@ pub fn parse_cell(
     let backend = backend_from_token(&coverage.backend)
         .ok_or_else(|| TupleParseError::UnknownBackend(coverage.backend.clone()))?;
 
-    // Speech sub-dimension: today only buffered TTS is run, so a recorded Speech
-    // cell is Buffered (streaming has no records — it is synthesized as a declared
-    // out-of-scope Gap in `reconcile_records`). Non-Speech cells carry no mode.
-    let speech_mode = (capability == CapabilityKind::Speech).then_some(SpeechGeneration::Buffered);
+    // Speech sub-dimension: the scenario id selects the closed
+    // SpeechGeneration enum value. Non-Speech cells carry no mode.
+    let speech_mode = (capability == CapabilityKind::Speech)
+        .then(|| speech_generation_from_scenario(&coverage.scenario_id));
     let key = CellKey {
         bundle_id: coverage.bundle_id.clone(),
         quant,
@@ -324,11 +332,11 @@ fn bundle_advertises_streaming(bundle_id: &str) -> bool {
     matches!(bundle_id, "kokoro_82m")
 }
 
-/// Account for the declared-but-out-of-scope Streaming sub-dimension: for every
-/// covered Buffered Speech cell whose bundle advertises streaming, emit the
-/// matching Streaming cell as a `Gap(StreamingEvalOutOfScope)`. Streaming is
-/// therefore declared and visible (honest coverage), never silently absent —
-/// while no streaming eval is executed this iteration (David).
+/// Account for the declared Streaming sub-dimension: for every covered Buffered
+/// Speech cell whose bundle advertises streaming, emit the matching Streaming
+/// cell when no `tts_streaming_synthesis` record exists. Streaming is now in
+/// scope (#539), so absence is an ordinary unscheduled Gap, not an out-of-scope
+/// reason.
 fn synthesize_streaming_cells(report: &mut ReconcileReport) {
     let buffered_keys: Vec<CellKey> = report
         .states
@@ -347,7 +355,7 @@ fn synthesize_streaming_cells(report: &mut ReconcileReport) {
         report
             .states
             .entry(streaming)
-            .or_insert(CoverageState::Gap(Some(GapReason::StreamingEvalOutOfScope)));
+            .or_insert(CoverageState::Gap(None));
     }
 }
 
@@ -846,10 +854,11 @@ mod tests {
     }
 
     #[test]
-    fn streaming_cells_are_declared_out_of_scope_gaps() {
-        // #531: kokoro_82m advertises Buffered + Streaming. Buffered cells stay as
-        // recorded; streaming cells are synthesized as declared out-of-scope Gaps
-        // (accounted, never silently absent), and they introduce no findings.
+    fn streaming_cells_are_in_scope_and_validate_when_recorded() {
+        // #531/#539: kokoro_82m advertises Buffered + Streaming. Buffered cells
+        // stay as recorded; streaming cells are in scope and validate when the
+        // tts_streaming_synthesis scenario has a passing record. Missing
+        // streaming profiles remain explicit ordinary Gaps, never silent.
         let records = committed_records();
         let report = reconcile_records(&records);
 
@@ -864,8 +873,14 @@ mod tests {
         assert!(!streaming.is_empty(), "streaming cells must be declared");
         assert!(streaming.iter().all(|(_, state)| matches!(
             state,
-            CoverageState::Gap(Some(GapReason::StreamingEvalOutOfScope))
+            CoverageState::Validated | CoverageState::Gap(None)
         )));
+        assert!(
+            streaming
+                .iter()
+                .any(|(_, state)| matches!(state, CoverageState::Validated)),
+            "committed #539 streaming scenario result must validate at least one Kokoro streaming cell"
+        );
 
         // A matching Buffered cell exists for each synthesized streaming cell.
         for (streaming_key, _) in &streaming {
@@ -883,8 +898,8 @@ mod tests {
         assert!(index
             .iter()
             .any(|e| e.speech_mode.as_deref() == Some("streaming")
-                && e.state == "gap"
-                && e.reason.as_deref() == Some("streaming_eval_out_of_scope")));
+                && e.state == "validated"
+                && e.reason.is_none()));
         assert!(index
             .iter()
             .any(|e| e.speech_mode.as_deref() == Some("buffered")));

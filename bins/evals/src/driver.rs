@@ -1046,6 +1046,12 @@ fn coverage_for_cell(
     );
     grouping_keys.insert("quantization".to_owned(), quantization.clone());
     grouping_keys.insert("profile".to_owned(), profile.to_owned());
+    if cell.capability == CapabilityName::Tts {
+        grouping_keys.insert(
+            "speech_mode".to_owned(),
+            tts_speech_mode_for_scenario(&cell.scenario).to_owned(),
+        );
+    }
 
     Ok(CoverageSection {
         snapshot_id: snapshot.id.clone(),
@@ -1069,6 +1075,13 @@ fn coverage_for_cell(
         reason,
         grouping_keys,
     })
+}
+
+fn tts_speech_mode_for_scenario(scenario_id: &str) -> &'static str {
+    match scenario_id {
+        "tts_streaming_synthesis" => "streaming",
+        _ => "buffered",
+    }
 }
 
 fn write_run_manifest(
@@ -2152,6 +2165,21 @@ unauthorized access to model cache"#,
         write_file(&root.join(
             "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/voices/af_bella.bin",
         ));
+        write_file(
+            &root.join("models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/model.onnx"),
+        );
+        write_file(
+            &root.join("models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/voices.bin"),
+        );
+        write_file(
+            &root.join("models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/tokens.txt"),
+        );
+        write_file(&root.join(
+            "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/espeak-ng-data/phondata",
+        ));
+        write_file(&root.join(
+            "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/espeak-ng-data/phontab",
+        ));
 
         let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
             .expect("curated snapshot should parse");
@@ -2159,6 +2187,7 @@ unauthorized access to model cache"#,
             "whisper_base_en__asr_short_transcription__smoke__ggml_default",
             "moonshine_streaming_en__asr_short_transcription__smoke__hf_default",
             "kokoro_82m__tts_synthesis_smoke__smoke__onnx_default",
+            "kokoro_82m__tts_streaming_synthesis__smoke__onnx_default",
             "qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0",
         ] {
             let cell = snapshot

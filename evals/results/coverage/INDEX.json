@@ -586,8 +586,8 @@
     "speech_mode": "streaming",
     "profile": "dgx-spark",
     "accelerator": "cuda",
-    "state": "gap",
-    "reason": "streaming_eval_out_of_scope"
+    "state": "validated",
+    "reason": null
   },
   {
     "bundle_id": "kokoro_82m",
@@ -597,7 +597,7 @@
     "profile": "local-cpu-aarch64",
     "accelerator": "cpu",
     "state": "gap",
-    "reason": "streaming_eval_out_of_scope"
+    "reason": null
   },
   {
     "bundle_id": "kokoro_82m",
@@ -607,7 +607,7 @@
     "profile": "local-cpu-x86_64",
     "accelerator": "cpu",
     "state": "gap",
-    "reason": "streaming_eval_out_of_scope"
+    "reason": null
   },
   {
     "bundle_id": "moonshine_streaming_en",

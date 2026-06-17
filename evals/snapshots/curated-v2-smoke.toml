@@ -925,6 +925,28 @@ max_wall_time_secs = 900
 cpu_depth_allowed = ["smoke"]
 
 [[cells]]
+id = "kokoro_82m__tts_streaming_synthesis__smoke__onnx_default"
+bundle_id = "kokoro_82m"
+scenario = "tts_streaming_synthesis"
+capability = "tts"
+depth = "smoke"
+model_family = "kokoro"
+checkpoint_format = "onnx"
+quantization = "default"
+backend = "ort"
+features = ["model-kokoro-82m"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"dgx-spark" = ["cuda", "kokoro-cuda"]
+"cuda-workstation" = ["cuda", "kokoro-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["model_quantized.onnx", "tokenizer.json", "af_bella.bin", "model.onnx", "voices.bin", "tokens.txt", "phondata", "phontab"]
+[cells.budgets]
+max_wall_time_secs = 900
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
 id = "qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0"
 bundle_id = "qwen3_tts_cpp_0_6b"
 scenario = "tts_synthesis_smoke"

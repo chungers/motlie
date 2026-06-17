@@ -329,11 +329,24 @@ pub struct TtsScenario {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TtsInput {
     pub text: String,
+    #[serde(default)]
+    pub corpus: Vec<TtsCorpusItem>,
+    #[serde(default)]
+    pub synthesis_mode: TtsSynthesisMode,
     pub speaking_rate: Option<f32>,
+    #[serde(default)]
+    pub max_buffered_audio_ms: Option<u32>,
     #[serde(default = "default_perf_iterations")]
     pub iterations: u64,
     #[serde(default = "default_audio_warmup_iterations")]
     pub warmup_iterations: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TtsCorpusItem {
+    pub id: String,
+    pub label: Option<String>,
+    pub text: String,
 }
 
 impl TtsInput {
@@ -347,10 +360,20 @@ impl TtsInput {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TtsSynthesisMode {
+    #[default]
+    Buffered,
+    Streaming,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TtsAssertions {
     pub min_audio_duration_ms: Option<u64>,
     pub min_sample_count: Option<u64>,
+    #[serde(default)]
+    pub require_streaming_proof: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -770,6 +793,27 @@ capture_request_latency = true
             ScenarioKind::Tts(tts) => {
                 assert_eq!(tts.assertions.min_sample_count, Some(1));
                 assert_eq!(tts.input.text, "Hello from Motlie.");
+                assert_eq!(tts.input.synthesis_mode, TtsSynthesisMode::Buffered);
+                assert_eq!(tts.input.iterations, 3);
+                assert_eq!(tts.input.warmup_iterations, 1);
+            }
+            other => panic!("expected TTS scenario, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_tts_streaming_scenario_shape() {
+        let scenario = load_scenario(&repo_eval_root(), "tts_streaming_synthesis").unwrap();
+
+        assert_eq!(scenario.capability(), CapabilityName::Tts);
+        match scenario.kind {
+            ScenarioKind::Tts(tts) => {
+                assert_eq!(tts.input.synthesis_mode, TtsSynthesisMode::Streaming);
+                assert_eq!(tts.input.max_buffered_audio_ms, Some(80));
+                assert_eq!(tts.input.corpus.len(), 4);
+                assert_eq!(tts.input.corpus[0].id, "short_phrase");
+                assert_eq!(tts.input.corpus[3].id, "long_passage");
+                assert!(tts.assertions.require_streaming_proof);
                 assert_eq!(tts.input.iterations, 3);
                 assert_eq!(tts.input.warmup_iterations, 1);
             }
