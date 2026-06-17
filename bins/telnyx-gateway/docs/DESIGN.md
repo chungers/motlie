@@ -1057,12 +1057,12 @@ Recommended dump format:
 ```text
 # motlie telnyx-gateway state v1
 # generated_at 2026-05-30T18:35:00Z
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
 config set from-number <caller-phone-number>
 config set state-path ./telnyx-gateway.toml
 telnyx app use <connection-id>
-telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+telnyx app webhook set https://<public-host>/telnyx/webhooks
 telnyx number use <called-phone-number>
 telnyx number bind <called-phone-number> <connection-id>
 inbound subscription upsert sub_01HZ... --phone-number <called-phone-number> --callback-url https://agent.example.com/motlie/inbound-offers --priority 100 --secret-ref env:MOTLIE_APP_CALLBACK_SECRET
@@ -1102,10 +1102,10 @@ Replay commands should be idempotent wherever possible. In particular, dump outp
 
 ```text
 status
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
 telnyx app create motlie-local
-telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+telnyx app webhook set https://<public-host>/telnyx/webhooks
 telnyx number bind +15551234567 <connection-id>
 inbound enable --manual
 calls
@@ -3882,7 +3882,7 @@ Tailscale Funnel is the default documented v1 option because it fits private-hos
 
 Current documented behavior from Tailscale:
 
-- Funnel exposes a local service on a public `https://<node>.<tailnet>.ts.net` URL
+- Funnel exposes a local service on a public `https://<public-host>` URL
 - it requires MagicDNS, HTTPS certificates, and Funnel permission in the tailnet
 - it only supports public HTTPS exposure on ports `443`, `8443`, and `10000`
 
@@ -3890,8 +3890,8 @@ Recommended v1 Funnel workflow:
 
 1. run the gateway locally on the private host
 2. expose it with `tailscale funnel`
-3. use the resulting `https://<node>.<tailnet>.ts.net` URL for Telnyx webhooks
-4. use the matching `wss://<node>.<tailnet>.ts.net/...` URL for Telnyx media streaming
+3. use the resulting `https://<public-host>` URL for Telnyx webhooks
+4. use the matching `wss://<public-host>/...` URL for Telnyx media streaming
 
 ### Option 2: ngrok
 
@@ -3935,8 +3935,8 @@ telnyx-gateway \
 Then use either the TUI REPL or a local socket client to send the same command text:
 
 ```text
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
 config set state-path ./telnyx-gateway.toml
 ```
 
@@ -4006,9 +4006,9 @@ This returns the application `id`, which is also the `connection_id` used for ou
 With Tailscale Funnel, use your public Funnel hostname:
 
 ```text
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
-telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
+telnyx app webhook set https://<public-host>/telnyx/webhooks
 ```
 
 #### 5. Assign the phone number to the application from an operator command source
@@ -4072,9 +4072,9 @@ tailscale funnel 8080
 Use the Funnel hostname assigned to this node:
 
 ```text
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
-telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
+telnyx app webhook set https://<public-host>/telnyx/webhooks
 ```
 
 ### First Call Test

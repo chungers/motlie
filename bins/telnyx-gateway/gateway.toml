@@ -32,9 +32,9 @@ selected_phone_number = "<telnyx-phone-number>"
 
 [gateway]
 # Public webhook URL that Telnyx calls for call-control events.
-webhook_url = "https://motlie-gateway.example.ts.net/telnyx/webhooks"
+webhook_url = "https://<public-host>/telnyx/webhooks"
 # Public media WebSocket URL that Telnyx streams media to.
-media_url = "wss://motlie-gateway.example.ts.net/telnyx/media"
+media_url = "wss://<public-host>/telnyx/media"
 # Known-good telephony media path; use `L16` + `16000` for ASR A/B runs.
 media_codec = "PCMU"
 # Sample rate paired with the selected codec.

@@ -695,7 +695,7 @@ warm_modelz = true
 
         assert!(raw.contains("<telnyx-connection-id>"));
         assert!(raw.contains("<telnyx-phone-number>"));
-        assert!(raw.contains("motlie-gateway.example.ts.net"));
+        assert!(raw.contains("<public-host>"));
         assert_eq!(config.telnyx.api_key_ref, "env:TELNYX_API_KEY");
         assert_eq!(
             config.telnyx.selected_connection_id.as_deref(),
@@ -707,11 +707,11 @@ warm_modelz = true
         );
         assert_eq!(
             config.gateway.webhook_url.as_deref(),
-            Some("https://motlie-gateway.example.ts.net/telnyx/webhooks")
+            Some("https://<public-host>/telnyx/webhooks")
         );
         assert_eq!(
             config.gateway.media_url.as_deref(),
-            Some("wss://motlie-gateway.example.ts.net/telnyx/media")
+            Some("wss://<public-host>/telnyx/media")
         );
         assert_eq!(
             config.gateway.from_number.as_deref(),
