@@ -835,6 +835,71 @@ Mentioning generation_mod here is fine because this is not config.
         assert!(config.voice_quality.logging.enabled);
     }
 
+    #[test]
+    fn docs_live_run_example_config_parses_strictly() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/LIVE_RUN_CONFIG.example.toml");
+        let raw = std::fs::read_to_string(&path).expect("read docs live-run example config");
+        let config = LoadedGatewayConfig::load(&path).expect("load docs live-run example config");
+
+        assert!(raw.starts_with("+++\n"));
+        assert!(raw.contains("<telnyx-connection-id>"));
+        assert!(raw.contains("<telnyx-phone-number>"));
+        assert!(raw.contains("<public-host>"));
+        assert!(raw.contains("## Run Results"));
+        assert_eq!(config.telnyx.api_base, DEFAULT_TELNYX_API_BASE);
+        assert_eq!(config.telnyx.api_key_ref, "env:TELNYX_API_KEY");
+        assert_eq!(
+            config.telnyx.selected_connection_id.as_deref(),
+            Some("<telnyx-connection-id>")
+        );
+        assert_eq!(
+            config.telnyx.selected_phone_number.as_deref(),
+            Some("<telnyx-phone-number>")
+        );
+        assert_eq!(
+            config.gateway.webhook_url.as_deref(),
+            Some("https://<public-host>/telnyx/webhooks")
+        );
+        assert_eq!(
+            config.gateway.media_url.as_deref(),
+            Some("wss://<public-host>/telnyx/media")
+        );
+        assert_eq!(
+            config.gateway.from_number.as_deref(),
+            Some("<telnyx-phone-number>")
+        );
+        assert!(config.process.log_file.is_some());
+        assert!(config.gateway.capture_dir.is_some());
+        assert!(config.gateway.state_path.is_some());
+        assert!(config.quality_logging.path.is_some());
+        assert_eq!(config.inbound.mode, InboundMode::Manual);
+        assert!(config.conversation.enabled);
+        assert!(config.conversation.final_coalescing_enabled);
+        assert!(!config.conversation.barge_in_enabled);
+        assert_eq!(config.conversation.tts_backend, LiveTtsBackend::Kokoro82m);
+        assert!(config.startup.warm_models);
+        assert_eq!(
+            config.voice_quality.tts.generation_mode,
+            crate::quality::TtsGenerationMode::Streaming
+        );
+        assert!(config.voice_quality.tts.chunking_enabled);
+        assert_eq!(config.voice_quality.tts.max_text_chunk_chars, 70);
+        assert_eq!(config.voice_quality.tts.first_chunk_max_chars, 40);
+        assert_eq!(config.voice_quality.tts.prebuffer_chunks, 1);
+        assert!(config.voice_quality.early_response.enabled);
+        assert_eq!(config.voice_quality.early_response.debounce_ms, 180);
+        assert_eq!(
+            config
+                .voice_quality
+                .early_response
+                .max_updates_per_utterance,
+            1
+        );
+        assert!(!config.voice_quality.barge_in.enabled);
+        assert!(config.voice_quality.echo_suppression.enabled);
+        assert!(config.voice_quality.logging.enabled);
+    }
+
     #[tokio::test]
     async fn state_dump_round_trips_durable_gateway_config() {
         let log_path = std::env::temp_dir().join(format!(

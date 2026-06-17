@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-17 | @codex-535 | Added the redacted live-run example config and updated the per-run config-as-record workflow. |
 | 2026-06-17 | @codex-535 | Added per-run hybrid config files: strict TOML front matter plus appended run results. |
 | 2026-06-17 | @codex-535 | Added the WER passage and noted that identity-repeat TTS can confound ASR-only WER. |
 | 2026-06-17 | @codex-535 | Added live-run findings: enable identity/repeat after dial and treat voicemail as an invalid human-quality sample. |
@@ -11,16 +12,14 @@
 
 ## Purpose
 
-This playbook is for short human-in-the-loop Telnyx gateway checks against the real
-phone network. Use it to verify streaming ASR, streaming TTS, early response,
-endpointing, echo suppression, and audio quality from a bounded live run.
+This playbook is for short human-in-the-loop Telnyx gateway checks against the
+real phone network. Use it to verify streaming ASR, streaming TTS, early
+response, endpointing, echo suppression, and audio quality from a bounded live
+run.
 
-Never commit human phone numbers, live Telnyx connection IDs, live public hosts,
-or live routing URLs. Keep those only in the local operator config, normally:
-
-```sh
-/home/dchung/telnyx-test/gateway.toml
-```
+Never commit human phone numbers, live Telnyx connection IDs, application IDs,
+tailnet hosts, public live hosts, or live routing URLs. Keep live routing values
+only in local operator config files under `$HOME/telnyx-test`.
 
 ## Preconditions
 
@@ -31,54 +30,45 @@ or live routing URLs. Keep those only in the local operator config, normally:
 cargo build -p motlie-telnyx-gateway --features "sherpa piper kokoro"
 ```
 
-- Start the gateway from the local TOML config, not from a checked-in `.repl`
-  script:
+- Source the local Telnyx secret environment. Do not put secrets in TOML:
 
 ```sh
 set -a
-. /home/dchung/telnyx-test/telnyx.env
+. "$HOME/telnyx-test/telnyx.env"
 set +a
-cargo run -p motlie-telnyx-gateway --features "sherpa piper kokoro" -- \
-  --config /home/dchung/telnyx-test/gateway.toml
 ```
-
-The local config should set:
-
-- `conversation.processor = "identity"`
-- `conversation.barge_in_enabled = false`
-- `conversation.tts_backend = "kokoro-82m"`
-- `startup.warm_models = true`
-- `voice_quality.tts.generation_mode = "streaming"`
-- `voice_quality.tts.chunking_enabled = true`
-- `voice_quality.tts.prebuffer_chunks = 1`
-- `voice_quality.early_response.enabled = true`
-- `voice_quality.early_response.boundary = "none"`
-- `voice_quality.early_response.start_timing = "while_speaking"`
-- `voice_quality.early_response.debounce_ms = 0`
-- `voice_quality.barge_in.enabled = false`
-- `voice_quality.logging.enabled = true`
 
 ## Per-Run Config
 
-For each live test, create a fresh run directory and copy the local gateway
-config into that directory as the run config:
+Every live run gets a fresh, traceable config file. That same file is both the
+startup config and the run record after results are appended.
 
-```sh
-mkdir -p /home/dchung/telnyx-test/runs/<run-id>
-cp /home/dchung/telnyx-test/gateway.toml \
-  /home/dchung/telnyx-test/runs/<run-id>/config.toml
+Use this naming pattern:
+
+```text
+$HOME/telnyx-test/runs/<YYYYMMDD-HHMMSS>-<hypothesis>-vN/<YYYYMMDD-HHMMSS>-<hypothesis>-vN.toml
 ```
 
-Tune that `config.toml` for the run before startup, then launch the gateway with
-that exact file:
+Create the run config from the committed redacted example:
 
 ```sh
-cargo run -p motlie-telnyx-gateway --features "sherpa piper kokoro" -- \
-  --config /home/dchung/telnyx-test/runs/<run-id>/config.toml
+RUN_ID="$(date +%Y%m%d-%H%M%S)-clause-coalesce-v1"
+RUN_DIR="$HOME/telnyx-test/runs/$RUN_ID"
+mkdir -p "$RUN_DIR"
+cp bins/telnyx-gateway/docs/LIVE_RUN_CONFIG.example.toml "$RUN_DIR/$RUN_ID.toml"
 ```
 
-Recommended hybrid format uses TOML front matter and appends the run report
-below the closing delimiter:
+Edit only the local copy. Replace `<run-id>` and the live-routing placeholders:
+
+- `<telnyx-connection-id>`
+- `<telnyx-application-name>` if the field is enabled
+- `<telnyx-phone-number>`
+- `<public-host>`
+
+Keep `api_key_ref = "env:TELNYX_API_KEY"`. Never write a literal API key into
+the config.
+
+The committed example uses TOML front matter:
 
 ```toml
 +++
@@ -98,20 +88,17 @@ prebuffer_chunks = 1
 
 [voice_quality.early_response]
 enabled = true
-boundary = "none"
+boundary = "clause"
 start_timing = "while_speaking"
-debounce_ms = 0
+debounce_ms = 180
+max_updates_per_utterance = 1
 
 [voice_quality.barge_in]
 enabled = false
-
-[voice_quality.logging]
-enabled = true
 +++
 
 ## Run Results
 
-- Callee: <redacted-callee>
 - Verdict: pending
 ```
 
@@ -122,9 +109,47 @@ startup parse. Plain `.toml` files without front matter still parse as regular
 standalone gateway configs, but appended run reports require the explicit
 `+++` front-matter wrapper.
 
+Before starting the gateway, say exactly which file will be used for startup and
+for result recording.
+
+## Startup
+
+Start the gateway with the per-run config file, not a checked-in `.repl` script
+or a shared global config:
+
+```sh
+cargo run -p motlie-telnyx-gateway --features "sherpa piper kokoro" -- \
+  --config "$HOME/telnyx-test/runs/<run-id>/<run-id>.toml"
+```
+
+The current default live identity/repeat tuning profile is:
+
+- `conversation.final_coalescing_enabled = true`
+- `conversation.processor = "identity"`
+- `conversation.barge_in_enabled = false`
+- `conversation.tts_backend = "kokoro-82m"`
+- `startup.warm_models = true`
+- `voice_quality.tts.generation_mode = "streaming"`
+- `voice_quality.tts.chunking_enabled = true`
+- `voice_quality.tts.first_chunk_max_chars = 40`
+- `voice_quality.tts.prebuffer_chunks = 1`
+- `voice_quality.early_response.enabled = true`
+- `voice_quality.early_response.boundary = "clause"`
+- `voice_quality.early_response.start_timing = "while_speaking"`
+- `voice_quality.early_response.debounce_ms = 180`
+- `voice_quality.early_response.max_updates_per_utterance = 1`
+- `voice_quality.barge_in.enabled = false`
+- `voice_quality.echo_suppression.enabled = true`
+- `voice_quality.logging.enabled = true`
+
+Recent live-run finding: the clause/coalescing profile reduced repeated
+identity fragments. Do not assume early-response is active just because the
+config enables it; verify accepted/rejected provisional-response quality events.
+
 ## Readiness Check
 
-Use the operator socket to confirm the active settings before a call:
+Use targeted operator commands to confirm settings before a call. Avoid broad
+status output when it includes live routing values; redact before sharing.
 
 ```sh
 python3 - <<'PY'
@@ -148,22 +173,56 @@ for command in commands:
 PY
 ```
 
-Expected mode checks:
+Expected checks:
 
 - ASR next/default is `kroko-2025`.
 - TTS backend is `kokoro-82m`.
 - TTS `generation_mode=streaming`.
-- Early response is enabled with `boundary=none`.
+- Early response is enabled with `boundary=clause`.
 - Early response `start_timing=while_speaking`.
+- Early response `debounce_ms=180`.
+- Early response `max_updates_per_utterance=1`.
 - Conversation barge-in is off.
 - Warm reports ASR and TTS ready.
+
+## Caller Script
+
+Give the caller the relevant script before dialing. For ASR WER runs, use the
+WER passage. For identity/repeat quality runs, use this script:
+
+```text
+This is David testing Motlie live streaming voice.
+
+I am going to speak in one continuous turn so we can observe whether the gateway starts responding early, whether it overlaps me, and whether the transcript keeps enough context.
+
+The quick brown fox walked past the live gateway while I was still speaking, and I want the system to repeat this as soon as it can without waiting for a long silence.
+
+Now I am going to stop for a natural endpoint.
+
+Qualitative feedback: the response felt [too early / about right / too late]. The audio sounded [clear / clipped / distorted / echoey]. The biggest issue I noticed was [describe it].
+```
+
+## WER Passage
+
+For ASR word-error-rate checks, ask the caller to read the passage exactly. If
+the purpose is pure ASR WER, prefer a transcription-only run, set
+`voice_quality.early_response.audio_mode = "prepare_only"`, or keep identity TTS
+detached/muted after the WER passage starts. Identity-repeat TTS can leak back
+into ASR and make the transcript harder to score.
+
+```text
+Start WER test. The museum opened before sunrise because the city expected heavy rain and slow traffic. Seven engineers carried blue notebooks, fragile microphones, and a small wooden clock into the quiet control room. Please record every word in this sentence, including numbers like forty two and seventeen, without adding extra phrases. The quick brown fox watched a bright red kite drift above the old stone bridge. End WER test.
+```
+
+When scoring, compute one strict WER that includes any extra preface words, and
+one trimmed WER that starts at `Start WER test` and ends at `End WER test`.
 
 ## Privacy-Preserving Dial
 
 Do not paste a human destination number into chat, issue comments, commit
-messages, docs, or shell commands captured by an agent transcript. If the agent
-cannot place the call without storing the number, the human operator should run
-the dial locally:
+messages, docs, or commands captured by an agent transcript. If the agent cannot
+place the call without storing the number, the human operator should run the dial
+locally:
 
 ```sh
 python3 - <<'PY'
@@ -211,44 +270,15 @@ Expected checks:
 - `barge_in: off`
 - `attached: true`
 
-## Caller Script
-
-Give the caller this script before dialing:
-
-```text
-This is David testing Motlie live streaming voice.
-
-I am going to speak in one continuous turn so we can observe whether the gateway starts responding early, whether it overlaps me, and whether the transcript keeps enough context.
-
-The quick brown fox walked past the live gateway while I was still speaking, and I want the system to repeat this as soon as it can without waiting for a long silence.
-
-Now I am going to stop for a natural endpoint.
-
-Qualitative feedback: the response felt [too early / about right / too late]. The audio sounded [clear / clipped / distorted / echoey]. The biggest issue I noticed was [describe it].
-```
-
-## WER Passage
-
-For ASR word-error-rate checks, ask the caller to read the passage exactly. If
-the purpose is pure ASR WER, prefer a transcription-only run or keep TTS silent;
-identity-repeat TTS can leak back into ASR and make the transcript harder to
-score.
-
-```text
-Start WER test. The museum opened before sunrise because the city expected heavy rain and slow traffic. Seven engineers carried blue notebooks, fragile microphones, and a small wooden clock into the quiet control room. Please record every word in this sentence, including numbers like forty two and seventeen, without adding extra phrases. The quick brown fox watched a bright red kite drift above the old stone bridge. End WER test.
-```
-
-When scoring, compute one strict WER that includes any extra preface words, and
-one trimmed WER that starts at `Start WER test` and ends at `End WER test`.
-
 ## Log Monitoring
 
-Monitor both the gateway log and quality event stream during the run:
+Monitor the run-scoped gateway log and quality stream from the same per-run
+config:
 
 ```sh
 tail -n 20 -F \
-  /home/dchung/telnyx-gateway-live.log \
-  /home/dchung/telnyx-test/quality-events.jsonl
+  "$HOME/telnyx-test/runs/<run-id>/<run-id>.log" \
+  "$HOME/telnyx-test/runs/<run-id>/<run-id>-quality.jsonl"
 ```
 
 After the call, retrieve the selected call transcript through the socket:
@@ -258,6 +288,7 @@ python3 - <<'PY'
 import json, socket
 
 commands = ["calls", "call show"]
+
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect("/tmp/motlie-telnyx-gateway.sock")
 reader = sock.makefile("rb")
@@ -268,13 +299,13 @@ for command in commands:
 PY
 ```
 
-Redact phone numbers, live public hosts, connection IDs, and any unrelated
+Redact phone numbers, live public hosts, connection IDs, call IDs, and unrelated
 personal data before copying logs into issues or PR comments.
 
 Append the quantitative metrics, qualitative caller feedback, WER score when
-used, and proposed tuning changes to the same per-run `config.toml` below the
-closing `+++` delimiter. That file is the run record; keep it local unless every
-live routing value and personal datum has been redacted.
+used, bugs/gaps, and proposed tuning changes to the same per-run TOML file below
+the closing `+++` delimiter. That file is the run record; keep it local unless
+every live routing value and personal datum has been redacted.
 
 If the call reaches voicemail, classify the run as a media-pipeline smoke test,
 not a valid human qualitative sample. The run can still measure dial setup,
@@ -289,8 +320,8 @@ Quantitative:
 - Call setup: outbound dial time, media start time, and hangup reason.
 - ASR: first partial latency, final latency, final text quality, and endpoint
   timing.
-- Early response: first provisional trigger, accepted/rejected provisional
-  updates, and whether generation started before final ASR.
+- Early response: accepted and rejected provisional decisions, first
+  provisional trigger, and whether generation started before final ASR.
 - TTS: first audio latency, chunk/prebuffer behavior, playback completion, and
   dropped or canceled audio.
 - Echo suppression: whether playback leakage created false ASR partials or

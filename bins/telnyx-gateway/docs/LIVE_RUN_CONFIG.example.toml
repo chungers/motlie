@@ -1,0 +1,354 @@
++++
+# Redacted Motlie Telnyx live-run config/record example.
+# @codex-535 2026-06-17 PDT -- Copy this file to
+# $HOME/telnyx-test/runs/<run-id>/<run-id>.toml, replace placeholders locally,
+# run telnyx-gateway with --config pointing at that copied file, then append
+# results below the closing +++ delimiter. Never commit the local copy after
+# replacing placeholders with live routing values.
+
+# Canonical Motlie Telnyx gateway startup config.
+# @codex-535 2026-06-16 PDT -- Keep this file parse-clean under the strict
+# `telnyx-gateway --config` loader; use secret references, never literal keys.
+
+version = 1
+
+[process]
+# HTTP/WebSocket bind address for local gateway traffic.
+bind = "127.0.0.1:8080"
+# Start the interactive TUI. Headless agent-driven runs usually keep this false.
+tui = false
+# Optional Unix-domain command socket for local operator/agent control.
+socket = "/tmp/motlie-telnyx-gateway.sock"
+# Shared ASR/TTS artifact root. `$HOME` and `~` are expanded by the loader.
+artifact_root = "$HOME/artifacts/hf-cache"
+# Structured process log target for live tuning sessions.
+log_file = "$HOME/telnyx-test/runs/<run-id>/<run-id>.log"
+
+[telnyx]
+# Telnyx API base; override only for mocks or future Telnyx environments.
+api_base = "https://api.telnyx.com/v2"
+# Secret reference only. The loader resolves `env:TELNYX_API_KEY` at runtime.
+api_key_ref = "env:TELNYX_API_KEY"
+# Dry-run skips Telnyx-mutating API calls while preserving local config flow.
+dry_run = false
+# Telnyx Call Control connection/application used for live tuning.
+selected_connection_id = "<telnyx-connection-id>"
+# Optional human-readable application name for operator status; set when known.
+# selected_application_name = "motlie-live"
+# Selected Telnyx number in E.164 form. Keep placeholders in committed examples.
+selected_phone_number = "<telnyx-phone-number>"
+
+[gateway]
+# Public webhook URL that Telnyx calls for call-control events.
+webhook_url = "https://<public-host>/telnyx/webhooks"
+# Public media WebSocket URL that Telnyx streams media to.
+media_url = "wss://<public-host>/telnyx/media"
+# Known-good telephony media path; use `L16` + `16000` for ASR A/B runs.
+media_codec = "PCMU"
+# Sample rate paired with the selected codec.
+media_sample_rate_hz = 8000
+# Capture root for raw media, decoded WAV, ASR input WAV, and transcripts.
+capture_dir = "$HOME/telnyx-test/runs/<run-id>/captures"
+# Default outbound caller ID; use the selected Telnyx number.
+from_number = "<telnyx-phone-number>"
+# Default destination for `state dump` / shutdown dumps.
+state_path = "$HOME/telnyx-test/runs/<run-id>/<run-id>-state.toml"
+
+[inbound]
+# Safe default: wait for explicit `answer`; use `auto-transcribe` only for trusted tests.
+mode = "manual"
+
+[conversation]
+# Gateway-local conversation processor enablement for new calls.
+enabled = true
+# Coalesce/debounce committed finals before processor dispatch when enabled.
+final_coalescing_enabled = true
+# Startup bridge for the runtime barge-in owner under `[voice_quality.barge_in]`.
+barge_in_enabled = false
+# Static dispatch boundary. `identity` is the current checked-in processor.
+processor = "identity"
+# Conversation/manual TTS backend. Streaming mode below requires an incremental backend.
+tts_backend = "kokoro-82m"
+
+[startup]
+# Warm selected ASR/TTS models at process startup for live identity calls.
+warm_models = true
+
+[quality_logging]
+# Durable JSONL sink path used when `[voice_quality.logging] enabled = true`.
+path = "$HOME/telnyx-test/runs/<run-id>/<run-id>-quality.jsonl"
+
+[voice_quality]
+# Baseline profile applied first; explicit tables below override individual knobs.
+profile = "balanced"
+
+[voice_quality.speech]
+# RMS energy gate for caller speech detection.
+rms_threshold = 220.0
+# Peak amplitude gate for caller speech detection.
+peak_threshold = 1100
+# Quiet gap before speech-onset barge-in may fire.
+onset_min_silence_ms = 180
+
+[voice_quality.endpoint]
+# Final endpoint trailing silence window.
+trailing_silence_ms = 750
+# Minimum final-turn word count before committed dispatch.
+min_turn_words = 2
+# Minimum final-turn character count before committed dispatch.
+min_turn_chars = 6
+# Merge window for adjacent ASR finals from one spoken thought.
+merge_window_ms = 450
+# Hold window for structurally incomplete final fragments.
+final_settle_ms = 900
+# Punctuation suffixes that indicate a fragment should continue.
+final_settle_trailing_punctuation = [",", ":", ";"]
+# Leading words that commonly start a dependent fragment.
+final_settle_lead_words = ["although", "because", "whereas", "while", "when", "if", "unless", "since", "before", "after", "though"]
+# Tail words that commonly make a fragment incomplete.
+final_settle_tail_words = ["a", "an", "also", "the", "and", "or", "but", "if", "then", "than", "because", "so", "to", "of", "for", "with", "without", "in", "on", "at", "by", "from", "as", "is", "are", "was", "were", "be", "being", "been", "this", "that", "these", "those", "my", "your", "our", "their", "his", "her", "its"]
+# Dangling suffixes that should hold for continuation.
+final_settle_dangling_suffixes = ["'", "-"]
+# Tail words that may hold conversation dispatch while prior playback is active.
+conversation_tail_words = ["a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "did", "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might", "must", "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were", "where", "will", "with", "would"]
+# Max hold for incomplete conversation tails.
+conversation_incomplete_tail_hold_ms = 1800
+# Native ASR confidence threshold below which incomplete tails may hold.
+conversation_low_confidence_threshold_percent = 45
+# Poll cadence while waiting for active playback before dispatch.
+conversation_playback_hold_poll_ms = 50
+# Hard cap for committed turn words.
+max_turn_words = 80
+# Hard cap for committed turn duration.
+max_turn_duration_ms = 12000
+
+[voice_quality.asr]
+# Repeated-token run length treated as hallucination/suppression.
+repeated_token_run_threshold = 16
+# Repeated `Q` run length treated as hallucination/suppression.
+repeated_q_run_threshold = 8
+# Extra ASR flush padding after local endpoint.
+finish_pad_ms = 320
+
+[voice_quality.text_call]
+# Maximum outstanding caller turns per text-call session.
+max_active_turns = 32
+# Time to wait for appserver media readiness.
+media_ready_timeout_ms = 20000
+# Time to wait for playback completion before text-call timeout.
+playback_wait_timeout_ms = 180000
+# Newer responses supersede stale older responses when true.
+latest_response_wins = true
+# Appserver callback timeout for outbound HTTP calls.
+callback_timeout_ms = 5000
+
+[voice_quality.tts]
+# `streaming` requires an incremental-capable backend such as Kokoro.
+generation_mode = "streaming"
+# Split long replies into text chunks before synthesis.
+chunking_enabled = true
+# Maximum characters in later TTS chunks.
+max_text_chunk_chars = 70
+# Maximum characters in the first TTS chunk; `0` disables the special first limit.
+first_chunk_max_chars = 40
+# Buffered-mode prebuffer chunks before playback starts.
+prebuffer_chunks = 1
+
+[voice_quality.early_response]
+# Provisional early-response stage; committed finals still flow when false.
+enabled = true
+# `speak_provisionally` plays provisional TTS; `prepare_only` suppresses provisional audio.
+audio_mode = "speak_provisionally"
+# Minimum provisional text characters before policy can fire.
+min_text_chars = 18
+# Minimum provisional text tokens before policy can fire.
+min_text_tokens = 4
+# Required boundary before provisional response: `none`, `clause`, or `sentence`.
+boundary = "clause"
+# Minimum ASR confidence required for provisional response.
+min_confidence = 0.70
+# Minimum partial stability required for provisional response.
+min_stability = 0.80
+# Missing configured confidence/stability signals fail conservative.
+missing_signal_policy = "conservative"
+# Speech states allowed to start provisional response.
+allowed_start_speech_states = ["speaking", "endpoint_candidate"]
+# Speech states allowed to update provisional response.
+allowed_update_speech_states = ["endpoint_candidate", "finalizing"]
+# Debounce between provisional updates.
+debounce_ms = 180
+# Maximum provisional updates per utterance.
+max_updates_per_utterance = 1
+# `while_speaking` is aggressive; `endpoint_candidate_only` is conservative.
+start_timing = "while_speaking"
+# Append is allowed only for explicit prefix-monotonic backend policy.
+append_mode = "replace_only"
+# Hard-capped leakage window for provisional TTS.
+provisional_max_prebuffer_frames = 1
+
+[voice_quality.barge_in]
+# Enable interruption/cancellation of active TTS from caller speech.
+enabled = false
+# Cancel on frame-level speech onset when policy allows it.
+speech_onset_cancel_enabled = false
+# `defer_to_partial` waits for partial ASR confirmation during playback.
+onset_during_playback = "defer_to_partial"
+# Cancel on meaningful partial ASR overlap.
+partial_asr_cancel_enabled = false
+# Cancel on final ASR overlap.
+final_asr_cancel_enabled = false
+# Time allowed for media clear/mark handling.
+clear_timeout_ms = 1000
+
+[voice_quality.echo_suppression]
+# Suppress transcripts that match active assistant TTS, except same-source provisional audio.
+enabled = true
+# Minimum normalized text length for echo matching.
+min_text_chars = 8
+# Tail window after playback completion for echo matching.
+tail_window_ms = 2500
+# Token coverage threshold for short echo candidates.
+short_token_coverage_percent = 66
+# Longest common token run threshold for short echo candidates.
+short_longest_token_run = 2
+# Token count where long-candidate thresholds apply.
+long_min_tokens = 4
+# Token coverage threshold for long echo candidates.
+long_token_coverage_percent = 60
+# Longest common token run threshold for long echo candidates.
+long_longest_token_run = 3
+
+[voice_quality.logging]
+# Enables JSONL quality events at `[quality_logging].path`.
+enabled = true
+# Bounded async event queue capacity.
+queue_capacity = 65536
+# Per-frame sampling ratio for high-volume media events.
+per_frame_sample_rate = 0.0
+# Keep transcript text out of quality logs by default.
+include_transcript_text = false
+# Metrics-only redaction preserves counts/hashes without plaintext.
+redaction_mode = "metrics-only"
+
+[voice_quality.quality_judge]
+# Optional quality judge worker.
+enabled = false
+# `offline` records/report-only batches; `live-sample` samples during live operation.
+mode = "offline"
+# Sampling ratio for judge jobs.
+sample_rate = 0.0
+# Judge model label or selector.
+model = "default"
+# Batch size for judge processing.
+batch_size = 20
+# Per-batch judge timeout.
+timeout_ms = 30000
+
+[voice_quality.targets]
+# Target p50 endpoint trailing silence for profiling.
+p50_endpoint_trailing_silence_ms = 900
+# Target p95 endpoint trailing silence for profiling.
+p95_endpoint_trailing_silence_ms = 1300
+# Target p50 turn-to-playback latency.
+p50_turn_to_playback_started_ms = 1200
+# Target p95 turn-to-playback latency.
+p95_turn_to_playback_started_ms = 2500
+# Maximum tolerated incomplete-turn rate.
+max_incomplete_turn_rate = 0.05
+# Maximum tolerated overmerge rate.
+max_overmerged_turn_rate = 0.05
+# Maximum tolerated garbled-turn rate.
+max_garbled_turn_rate = 0.03
+# Maximum tolerated inappropriate-cancel rate.
+max_inappropriate_cancel_rate = 0.03
++++
+
+## Run Metadata
+
+- Run ID: <run-id>
+- Created: 2026-06-17 12:39:22 PDT
+- Created by: @codex-535
+- Config and result record: $HOME/telnyx-test/runs/<run-id>/<run-id>.toml
+- Source config: $HOME/telnyx-test/gateway.toml
+- Gateway log: $HOME/telnyx-test/runs/<run-id>/<run-id>.log
+- Quality events: $HOME/telnyx-test/runs/<run-id>/<run-id>-quality.jsonl
+- Capture dir: $HOME/telnyx-test/runs/<run-id>/captures
+- Hypothesis: clause-gated early response plus final coalescing should reduce repeated/stale identity-repeat turns while keeping first audio faster than final-only dispatch.
+- Privacy: this committed example uses placeholders only; replace them only in the local copied run file.
+
+## Tuning Snapshot
+
+- streaming ASR/TTS enabled through gateway startup config and Kokoro streaming TTS
+- early response: clause boundary, 180 ms debounce, one provisional update per utterance
+- TTS first chunk limit: requested 32 chars, runtime clamp range is 0 or 40..500, using 40 chars for this run
+- identity/repeat processor with final coalescing enabled
+- barge-in disabled at conversation and voice-quality levels
+- echo suppression enabled with 2500 ms tail window
+
+## Run Results
+
+### 2026-06-17 12:56 PDT, @codex-535
+
+Status: completed. The call ended normally by callee hangup.
+
+Config and record file used for both startup and analysis:
+`$HOME/telnyx-test/runs/<run-id>/<run-id>.toml`
+
+Artifacts:
+
+- Gateway log: `$HOME/telnyx-test/runs/<run-id>/<run-id>.log`
+- Quality events: `$HOME/telnyx-test/runs/<run-id>/<run-id>-quality.jsonl`
+- Captures: `$HOME/telnyx-test/runs/<run-id>/captures/`
+
+Quantitative summary:
+
+- Quality events: 416.
+- Caller turns: 16; raw ASR finals: 16.
+- Playback: 13 attempted, 12 completed, 1 operator-canceled, 0 failed, 0 dropped quality events.
+- Endpoint wait span: n=25, min=716 ms, p50=740 ms, p95=742 ms, max=932 ms.
+- TTS request-to-first-audio: n=13, min=973 ms, p50=1841 ms, p95=3304 ms, max=4531 ms.
+- Turn finalize-to-first-audio: n=13, min=1425 ms, p50=3764 ms, p95=13459 ms, max=16956 ms.
+- Conversation final debounce: n=13, min=451 ms, p50=1832 ms, p95=10982 ms, max=14211 ms.
+- Inbound media: 9476 packets, 0 lost, 0 reordered, p50 jitter 2 ms, p95 jitter 15 ms, max jitter 445 ms.
+- Outbound pacing: 3001 frames, p50 inter-frame gap 19 ms, p95 22 ms, max 79 ms, 0 underruns.
+- Telnyx call quality from hangup webhook: MOS 4.49; inbound skip packets 12; outbound skip packets 0.
+
+WER passage result:
+
+- Reference words: 64.
+- Hypothesis words: 62.
+- WER: 15.62%.
+- Errors: 4 substitutions, 4 deletions, 2 insertions.
+- Main errors: inserted leading "yep" and duplicate "before"; `slow` -> `s`; missing `traffic`; `carried` -> `carry`; missing `control room`; `record` -> `require`; missing `phrases`; `quick` -> `correct`.
+
+Qualitative caller feedback captured from transcript:
+
+- "It's generally much, much better than the last run."
+- "There's not a lot of the repeated fragments now."
+- "What you repeated is much more in line with what I was reading."
+- "Overall it's much better."
+- "There are still a couple of endpointing awkwardness here and there."
+- Caller also asked whether barge-in was enabled; for this run it was off in both `[conversation]` and `[voice_quality.barge_in]`.
+
+Behavioral observations:
+
+- The clause/coalescing profile noticeably reduced repeated-fragment churn relative to the prior aggressive run.
+- Early-response pipeline started, but no provisional early-response quality events were emitted. This run's improvement appears to come from final coalescing, final settle, and disabled barge-in rather than from provisional early TTS.
+- Identity-repeat still queued assistant playback for qualitative feedback turns. This is expected for the identity processor, but it makes WER and subjective feedback harder to isolate.
+- No transport loss was observed. Audio transport looked healthy; the main remaining issues are turn segmentation, endpoint timing, and TTS latency.
+- Final debounce produced long-tail waits while playback was active. This protects against overlap, but it can make later replies feel delayed.
+
+Bugs or gaps identified:
+
+- `first_chunk_max_chars=32` was requested initially but clamped to 40 because runtime allows `0` or `40..500`; the front matter was updated to 40 to match runtime.
+- Early-response rejection/decision visibility is too thin: the log only showed pipeline start, not why provisional responses did not fire.
+- For WER-only passes, identity-repeat should be detached or muted after the WER passage starts; otherwise assistant echo/repeats contaminate caller feedback.
+- The protocol should explicitly send the reading script before dialing; this run started with caller confusion because the script was sent late.
+
+Recommended next config:
+
+- Keep: `boundary = "clause"`, `debounce_ms = 180`, `max_updates_per_utterance = 1`, barge-in off, final coalescing on.
+- Add a WER-only phase with conversation detached or `audio_mode = "prepare_only"` to measure ASR without identity-repeat feedback.
+- For conversational identity-repeat phase, consider `allowed_start_speech_states = ["endpoint_candidate"]` if we want fewer overlaps, or keep `while_speaking` only after provisional decision logging is added.
+- Consider reducing `conversation_incomplete_tail_hold_ms` from 1800 to 1200 only after confirming it does not reintroduce fragment repeats.
+- Add explicit early-response decision events for rejected partials, including boundary/confidence/stability/start-timing reasons.
