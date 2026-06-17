@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-17 | @codex-535 | Added explicit inbound/outbound identity smoke-test procedures and redacted sample run records. |
 | 2026-06-17 | @codex-535 | Added the redacted live-run example config and updated the per-run config-as-record workflow. |
 | 2026-06-17 | @codex-535 | Added per-run hybrid config files: strict TOML front matter plus appended run results. |
 | 2026-06-17 | @codex-535 | Added the WER passage and noted that identity-repeat TTS can confound ASR-only WER. |
@@ -49,7 +50,11 @@ Use this naming pattern:
 $HOME/telnyx-test/runs/<YYYYMMDD-HHMMSS>-<hypothesis>-vN/<YYYYMMDD-HHMMSS>-<hypothesis>-vN.toml
 ```
 
-Create the run config from the committed redacted example:
+Create the run config from a committed redacted example. Use the generic template for new hypotheses, or start from the direction-specific identity smoke-test samples when they match the run:
+
+- `bins/telnyx-gateway/docs/LIVE_RUN_CONFIG.example.toml`
+- `bins/telnyx-gateway/docs/LIVE_RUN_INBOUND_IDENTITY.example.toml`
+- `bins/telnyx-gateway/docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml`
 
 ```sh
 RUN_ID="$(date +%Y%m%d-%H%M%S)-clause-coalesce-v1"
@@ -237,11 +242,17 @@ print(json.dumps(json.loads(reader.readline()), indent=2))
 PY
 ```
 
-Inbound tests are also acceptable when the caller already knows the configured
-Telnyx number. Do not write that number into committed artifacts.
+## Outbound Identity Smoke-Test Runs
 
-After an outbound `dial`, enable the identity/repeat test processor for the
-selected call and re-confirm barge-in is off:
+Use outbound identity smoke tests when the operator needs the gateway to place
+the call. `docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml` is the committed
+redacted sample for this path. Start from a new per-run config and complete the
+Startup and Readiness Check sections before dialing. The run config must enable the identity processor,
+streaming TTS, early response, model warming, quality logging, and disabled
+barge-in as listed in the default tuning profile above.
+
+After the privacy-preserving outbound `dial`, enable the identity/repeat smoke
+test processor for the selected call and re-confirm barge-in is off:
 
 ```sh
 python3 - <<'PY'
@@ -269,6 +280,76 @@ Expected checks:
 - `mode: auto`
 - `barge_in: off`
 - `attached: true`
+
+Use the identity/repeat caller script unless the run is explicitly WER-only.
+After hangup, append the same timing, quality, transcript, WER if applicable,
+qualitative feedback, and next-run tuning analysis described below to the run
+config.
+
+Inbound tests are the preferred path when the caller can dial the configured
+Telnyx number. Do not write that number into committed artifacts.
+
+## Inbound Dial-In Runs
+
+Use inbound dial-in runs for privacy-preserving human tests. The default inbound
+live test is audible identity/repeat: the caller should hear the gateway repeat
+what it transcribed. WER-only transcription is a separate explicit variant.
+
+Create a new per-run config from the latest stable local run record,
+`docs/LIVE_RUN_INBOUND_IDENTITY.example.toml`, or
+`docs/LIVE_RUN_CONFIG.example.toml`, then make these run-specific edits in the
+local copy only:
+
+```toml
+[inbound]
+mode = "manual"
+
+[conversation]
+enabled = true
+final_coalescing_enabled = true
+barge_in_enabled = false
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[voice_quality.early_response]
+enabled = true
+audio_mode = "speak_provisionally"
+boundary = "clause"
+start_timing = "while_speaking"
+debounce_ms = 180
+max_updates_per_utterance = 1
+
+[voice_quality.barge_in]
+enabled = false
+```
+
+The stable inbound path is manual-answer: start the gateway, ask the caller to
+dial the configured Telnyx number, watch `calls`, then run `answer` when the
+waiting inbound call appears. Do not rely on `auto-transcribe` for a live sample
+unless that path is the explicit subject of the test and the result will record
+whether it answered automatically.
+
+For WER-only transcription, set `conversation.enabled = false` and
+`voice_quality.early_response.audio_mode = "prepare_only"`, and label the run
+as WER-only before startup. Do not use WER-only settings when the caller expects
+audible repeat-back.
+
+Tell the caller exactly which script to read before they dial. Put that script
+in the local run config below the closing `+++` delimiter so the transcript can
+be scored for WER later. If the run is testing repeat-loop risk, the caller must
+read the passage once, stay silent until playback finishes, and give feedback
+only after the operator says the repeat phase is complete.
+
+During the call, monitor the run-scoped log and quality JSONL. After hangup,
+append to the same run config:
+
+- call setup and answer timing
+- ASR first-partial, final, endpoint, and WER metrics
+- identity/repeat playback count and whether playback was still active at hangup
+- media quality and transport counters
+- qualitative caller feedback, if any
+- bugs or protocol gaps observed
+- proposed next-run config knobs and code fixes
 
 ## Log Monitoring
 
