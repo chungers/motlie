@@ -88,6 +88,77 @@ pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
     }
 }
 
+const INCREMENTAL_TOKENS_FILE: &str = "tokens.txt";
+
+pub(crate) fn prepare_downloaded_artifacts(downloaded: &mut Vec<PathBuf>) -> Result<(), String> {
+    let tokenizer_json = downloaded
+        .iter()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(TOKENIZER_FILE))
+        .cloned()
+        .ok_or_else(|| format!("downloaded Kokoro bundle did not include `{TOKENIZER_FILE}`"))?;
+    let parent = tokenizer_json.parent().ok_or_else(|| {
+        format!(
+            "downloaded Kokoro tokenizer path `{}` has no parent",
+            tokenizer_json.display()
+        )
+    })?;
+    let tokens_path = parent.join(INCREMENTAL_TOKENS_FILE);
+    let tokenizer = std::fs::read_to_string(&tokenizer_json).map_err(|err| {
+        format!(
+            "failed to read Kokoro tokenizer `{}`: {err}",
+            tokenizer_json.display()
+        )
+    })?;
+    let tokens = tokens_txt_from_tokenizer_json(&tokenizer)?;
+    let needs_write = std::fs::read_to_string(&tokens_path)
+        .map(|existing| existing != tokens)
+        .unwrap_or(true);
+    if needs_write {
+        std::fs::write(&tokens_path, tokens).map_err(|err| {
+            format!(
+                "failed to write Kokoro incremental `{}`: {err}",
+                tokens_path.display()
+            )
+        })?;
+    }
+    if !downloaded.iter().any(|path| path == &tokens_path) {
+        downloaded.push(tokens_path);
+    }
+    Ok(())
+}
+
+fn tokens_txt_from_tokenizer_json(tokenizer_json: &str) -> Result<String, String> {
+    let root: serde_json::Value = serde_json::from_str(tokenizer_json)
+        .map_err(|err| format!("failed to parse Kokoro tokenizer JSON: {err}"))?;
+    let vocab = root
+        .get("model")
+        .and_then(|model| model.get("vocab"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "Kokoro tokenizer JSON missing object at model.vocab".to_string())?;
+    let mut entries = Vec::with_capacity(vocab.len());
+    for (token, id) in vocab {
+        if token.contains('\n') || token.contains('\r') {
+            return Err("Kokoro tokenizer token contains a newline".to_string());
+        }
+        let id = id
+            .as_u64()
+            .ok_or_else(|| format!("Kokoro tokenizer id for token `{token}` is not an integer"))?;
+        entries.push((id, token.as_str()));
+    }
+    entries.sort_by_key(|(id, _)| *id);
+    if entries.is_empty() {
+        return Err("Kokoro tokenizer model.vocab is empty".to_string());
+    }
+    let mut output = String::new();
+    for (id, token) in entries {
+        output.push_str(token);
+        output.push(' ');
+        output.push_str(&id.to_string());
+        output.push('\n');
+    }
+    Ok(output)
+}
+
 pub fn typed_bundle() -> KokoroSpeechBundle {
     KokoroSpeechBundle::new(KokoroSpeechSpec::kokoro_82m())
 }
@@ -200,6 +271,46 @@ mod tests {
         assert!(artifacts.includes("model.onnx"));
         assert!(artifacts.includes("voices.bin"));
         assert!(artifacts.includes("tokens.txt"));
+    }
+
+    #[test]
+    fn tokenizer_json_generates_sherpa_tokens_txt() {
+        let raw = r#"{
+            "model": {
+                "vocab": {
+                    "b": 2,
+                    " ": 1,
+                    "\u0283": 3,
+                    "a": 0
+                }
+            }
+        }"#;
+
+        let tokens = tokens_txt_from_tokenizer_json(raw).expect("tokens should generate");
+        let esh = char::from_u32(0x0283).expect("esh char should exist");
+
+        assert_eq!(tokens, format!("a 0\n  1\nb 2\n{} 3\n", esh));
+    }
+
+    #[test]
+    fn prepare_downloaded_artifacts_rewrites_kokoro_tokens_file() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let tokenizer = root.join(TOKENIZER_FILE);
+        let tokens = root.join(INCREMENTAL_TOKENS_FILE);
+        std::fs::write(&tokenizer, r#"{"model":{"vocab":{"z":2," ":1,"a":0}}}"#)
+            .expect("tokenizer should be writable");
+        std::fs::write(&tokens, "<pad> 0\n").expect("old tokens should be writable");
+        let mut downloaded = vec![tokenizer.clone(), tokens.clone()];
+
+        prepare_downloaded_artifacts(&mut downloaded).expect("tokens should be prepared");
+
+        assert_eq!(
+            std::fs::read_to_string(&tokens).expect("tokens should be readable"),
+            "a 0\n  1\nz 2\n"
+        );
+        assert!(downloaded.iter().any(|path| path == &tokens));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

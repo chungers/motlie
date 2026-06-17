@@ -16,15 +16,15 @@ use motlie_model::{
     StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_espeak_ng::text_to_phonemes;
-use motlie_model_ort::{OrtExecutionTarget, build_session_with_target};
+use motlie_model_ort::{build_session_with_target, OrtExecutionTarget};
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
 use crate::common::{
-    KokoroArtifactPaths, KokoroArtifactSpec, RuntimeMetricState, configure_artifact_policy,
-    lock_metrics, observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, KokoroArtifactPaths, KokoroArtifactSpec, RuntimeMetricState,
 };
 use crate::incremental::{self, KokoroIncrementalRuntime, KokoroIncrementalSpeechStream};
 

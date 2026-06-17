@@ -60,7 +60,7 @@
 | 2026-05-30 | @codex-358-research | Added explicit Control API work for app-server call discovery and per-call attachment: `GET /api/v1/calls`, `GET /api/v1/calls/{call_id}`, and call attachments that bind a registered webhook subscription to one call's events/transcripts. |
 | 2026-05-30 | @codex-358-research | Refined the TUI work items around a right-side call roster plus selected-call detail pane; inbound calls create highlighted pending/waiting rows, preserve selection when another call is active, and expose transcript/status/action hints for the selected call. |
 | 2026-05-30 | @codex-358-research | Switched operator examples to assume Tailscale Funnel public URLs by default; ngrok remains only an alternate tunnel option. |
-| 2026-05-30 | @codex-358-research | Added replayable state persistence: `state dump [path]`, `shutdown [dump_path]`, and startup `--load <dump_path>` rehydrate durable Telnyx/app-server configuration by replaying idempotent gateway commands. |
+| 2026-05-30 | @codex-358-research | Added replayable state persistence: `state dump [path]`, `shutdown [dump_path]`, and startup `--config <gateway.toml>` rehydrate durable Telnyx/app-server configuration by replaying idempotent gateway commands. |
 | 2026-05-30 | @codex-358-research | Clarified application webhook delivery: gateway events are outbound HTTP `POST` requests to registered app-server URLs, acknowledged by `2xx`, retried on failure, and separate from app-server Control API calls back into the gateway. |
 | 2026-05-30 | @codex-358-research | Added the external automation surface: gateway-emitted application webhooks plus an authenticated Gateway Control API for programmatic inbound answer/transcription and outbound dial/say TTS service flows. |
 | 2026-05-30 | @codex-358-research | Reframed `bins/telnyx-gateway` as an operator-driven TUI/REPL app: it starts an idle listener, uses `motlie-driver` commands for Telnyx app/number setup, surfaces pending inbound calls in the right call roster/detail area, and only answers after explicit operator or inbound-mode selection. |
@@ -125,7 +125,7 @@ Extend the existing provider-neutral voice layer and add the Telnyx-specific dep
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Crate Hierarchy and API Surfaces`
 - [ ] Add TUI view models for `CallRosterItem`, selected-call detail, unread event counts, and selection state derived from `SessionRegistry`.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Crate Hierarchy and API Surfaces`
-- [ ] Add startup flags `--tui` and `--socket <path>`; allow either, both, or neither when the process relies only on `--load` and/or authenticated HTTP Control API, and route both live local input sources through one serialized command dispatcher when both are enabled.
+- [ ] Add startup `--config <gateway.toml>` plus optional `--tui` and `--socket <path>` overrides; allow either, both, or neither when the process relies only on durable config and/or authenticated HTTP Control API, and route both live local input sources through one serialized command dispatcher when both are enabled.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Gateway Configuration Requirement`
 - [ ] Retarget the existing external-integration scaffolding for M4: keep `api/auth.rs` and read-only `api/calls.rs`, replace app-webhook subscription work with `api/inbound_subscriptions.rs`, add `api/outbound_calls.rs`, and add `text_calls/{subscriber_registry.rs,offers.rs,websocket.rs,turns.rs}` for the callback/text-stream protocol.
   DESIGN reference: `Application Text Call Protocol and Gateway Control API`, `Crate Hierarchy and API Surfaces`
@@ -359,9 +359,9 @@ Wire call-control operations for inbound and outbound calls.
 
 ### 6.4 - Replayable gateway state
 
-- [ ] Add startup `--load <dump_path>` support that replays a gateway command dump before enabling inbound handling or accepting live TUI, socket, or Control API mutations.
+- [ ] Add startup `--config <gateway.toml>` support that loads durable gateway state before enabling inbound handling or accepting live TUI, socket, or Control API mutations.
   DESIGN reference: `Replayable State Dumps`, `Gateway Configuration Requirement`
-- [ ] Implement replayable dump generation as command text, not an opaque binary snapshot.
+- [ ] Implement readable TOML dump generation, not opaque payloads or command replay scripts.
   DESIGN reference: `Replayable State Dumps`
 - [ ] Include durable state in dumps: public webhook/media URLs, selected Telnyx app/connection, selected/bound phone number, default from number, inbound mode, inbound text-call subscriptions keyed by phone number, callback secret references, token metadata or token hash references, and selected ASR/TTS model names when configured through the operator command surface.
   DESIGN reference: `Replayable State Dumps`
@@ -540,7 +540,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Outbound Call Handler Design`
 - [ ] Add outbound `motlie-driver` commands for `dial <phone-or-sip-uri> [--from <+e164>]`, `speak [call-id] <text...>`, `speak cancel [call-id]`, `hangup [call-id]`, `status [call-id]`, `tts list`, `tts status`, and `tts use piper`.
   DESIGN reference: `Driver REPL Dialer Surface`
-- [ ] Route every M2 command through the shared command engine used by TUI, socket, and `--load` replay; source-local selected call and source-local command session state must remain isolated between TUI and each socket connection.
+- [ ] Route every M2 command through the shared command engine used by TUI, socket, and `--config` load; source-local selected call and source-local command session state must remain isolated between TUI and each socket connection.
   DESIGN reference: `Driver REPL Dialer Surface`, `Operator REPL and TUI Control Surface`
 - [ ] Add selected-call detail text input/composer for outbound TTS; submitting it must call the same `OutboundSpeechController::speak()` path as `speak [call-id] <text...>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Driver REPL Dialer Surface`
@@ -680,7 +680,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Telnyx Agent Daemon` / `Validation Scope`
 - [ ] Add tmux bridge tests using `motlie-tmux` monitor/history or a fake `HistoryHandle`: inbound `caller.turn` becomes activity-aware queued `KeySequence` input, active targets queue with backoff and flush when idle, idle targets send immediately, default delayed trailing Enter is sent once, disabled trailing Enter is honored, marker-delimited reply extraction returns exactly one `agent.turn`, wrapped prompt echoes do not become `agent.turn` text, duplicate scrape/activity logic is not introduced in the daemon, and missing marker/delivery timeouts fail the turn without hanging the daemon.
   DESIGN reference: `Telnyx Agent Daemon` / `Input to Tmux`, `Telnyx Agent Daemon` / `Output from Tmux`
-- [ ] Add persistence tests that dump state, restart with `--load <dump_path>`, and assert the replayed gateway state matches durable Telnyx/app-server configuration without resurrecting active calls or media sessions.
+- [ ] Add persistence tests that dump state, restart with `--config <gateway.toml>`, and assert the loaded gateway state matches durable Telnyx/app-server configuration without resurrecting active calls or media sessions.
   DESIGN reference: `Replayable State Dumps`, `Gateway Configuration Requirement`
 - [ ] Add secret-safety tests that generated dumps contain secret references or hashes, not raw Telnyx API keys, application callback HMAC secrets, bearer tokens, or unredacted phone values.
   DESIGN reference: `Replayable State Dumps`
@@ -698,7 +698,7 @@ Make each milestone reviewable and runnable independently before combining them.
   TUI and headless command sequence for app creation/selection,
   phone-number binding,
   inbound enablement,
-  `state dump`, `shutdown [dump_path]`, and `--load <dump_path>`,
+  `state dump`, `shutdown [dump_path]`, and `--config <gateway.toml>`,
   chosen ASR/TTS bundles.
   DESIGN reference: `Overview`, `Operator REPL and TUI Control Surface`, `Replayable State Dumps`, `Open Concerns`
 - [ ] Add one milestone 1 inbound transcription example configuration for Sherpa ASR to `StdoutTranscriptSink`.
@@ -785,7 +785,7 @@ This phase implements the `PROFILING.md` M6 foundation gaps needed for live tuni
   PROFILING reference: `Text-Call and App-Agent Spans`, `TTS and Playback Spans`.
 - [x] Use nonblocking `try_send` for media-to-text-call `caller.turn` delivery; full app WebSocket queues fail the turn explicitly instead of awaiting on the media/ASR finalization path.
   PROFILING reference: `Text-Call and App-Agent Spans`, `Acceptance Criteria`.
-- [x] Align live setter/help clamp ranges with `VoiceQualityConfig::validate_resolved()` and add replay clamp-edge round-trip coverage so `quality restore-config` preserves `config_id`.
+- [x] Align live setter/help clamp ranges with `VoiceQualityConfig::validate_resolved()` and add replay clamp-edge round-trip coverage so TOML state dump/load preserves `config_id`.
   PROFILING reference: `Gateway-Owned VoiceQualityConfig Knobs`, `Coherent Config Framework`.
 - [ ] Defer `libs/agent` Channel adoption and streamed `agent.turn.partial` + `SpeechConflictPolicy::Append` to #428 per David scope ruling; do not silently defer either item in PR review replies.
   PROFILING reference: `Future Streaming-Agent Contract Notes`.

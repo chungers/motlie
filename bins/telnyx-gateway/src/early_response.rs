@@ -1,7 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -9,6 +8,9 @@ use futures_util::{stream, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::conversation::{
+    ConversationProcessorInput, ConversationProcessorKind, ConversationProcessorOutput,
+};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::SharedState;
 use crate::speech::{self, AppendSpeechHandle, SpeechConflictPolicy, SpeechQueueRequest};
@@ -19,7 +21,6 @@ use tokio::sync::{mpsc, Notify};
 
 const EARLY_RESPONSE_INPUT_CAPACITY: usize = 8;
 const EARLY_RESPONSE_EVENT_CAPACITY: usize = 32;
-const PROVISIONAL_PREBUFFER_FRAME_CAP: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +57,36 @@ pub enum EarlyResponseStartTiming {
     WhileSpeaking,
 }
 
+fn start_states_for_timing(timing: EarlyResponseStartTiming) -> Vec<CallerSpeechState> {
+    match timing {
+        EarlyResponseStartTiming::EndpointCandidateOnly => {
+            vec![CallerSpeechState::EndpointCandidate]
+        }
+        EarlyResponseStartTiming::WhileSpeaking => {
+            vec![
+                CallerSpeechState::Speaking,
+                CallerSpeechState::EndpointCandidate,
+            ]
+        }
+    }
+}
+
+fn update_states_for_timing(timing: EarlyResponseStartTiming) -> Vec<CallerSpeechState> {
+    match timing {
+        EarlyResponseStartTiming::EndpointCandidateOnly => {
+            vec![
+                CallerSpeechState::EndpointCandidate,
+                CallerSpeechState::Finalizing,
+            ]
+        }
+        EarlyResponseStartTiming::WhileSpeaking => vec![
+            CallerSpeechState::Speaking,
+            CallerSpeechState::EndpointCandidate,
+            CallerSpeechState::Finalizing,
+        ],
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EarlyResponseAppendMode {
@@ -64,7 +95,7 @@ pub enum EarlyResponseAppendMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct EarlyResponsePolicy {
     pub enabled: bool,
     pub audio_mode: EarlyResponseAudioMode,
@@ -85,6 +116,7 @@ pub struct EarlyResponsePolicy {
 
 impl Default for EarlyResponsePolicy {
     fn default() -> Self {
+        let start_timing = EarlyResponseStartTiming::WhileSpeaking;
         Self {
             enabled: false,
             audio_mode: EarlyResponseAudioMode::SpeakProvisionally,
@@ -94,14 +126,11 @@ impl Default for EarlyResponsePolicy {
             min_confidence: Some(0.70),
             min_stability: Some(0.80),
             missing_signal_policy: MissingSignalPolicy::Conservative,
-            allowed_start_speech_states: vec![CallerSpeechState::EndpointCandidate],
-            allowed_update_speech_states: vec![
-                CallerSpeechState::EndpointCandidate,
-                CallerSpeechState::Finalizing,
-            ],
+            allowed_start_speech_states: start_states_for_timing(start_timing),
+            allowed_update_speech_states: update_states_for_timing(start_timing),
             debounce_ms: 120,
             max_updates_per_utterance: 3,
-            start_timing: EarlyResponseStartTiming::EndpointCandidateOnly,
+            start_timing,
             append_mode: EarlyResponseAppendMode::ReplaceOnly,
             provisional_max_prebuffer_frames: 1,
         }
@@ -121,6 +150,20 @@ impl EarlyResponsePolicy {
             max_updates_per_utterance: 8,
             ..Self::default()
         }
+    }
+
+    pub fn set_start_timing(&mut self, timing: EarlyResponseStartTiming) {
+        self.start_timing = timing;
+        self.allowed_start_speech_states = start_states_for_timing(timing);
+        self.allowed_update_speech_states = update_states_for_timing(timing);
+    }
+
+    fn allows_start_speech_state(&self, state: CallerSpeechState) -> bool {
+        self.allowed_start_speech_states.contains(&state)
+    }
+
+    fn allows_update_speech_state(&self, state: CallerSpeechState) -> bool {
+        self.allowed_update_speech_states.contains(&state)
     }
 }
 
@@ -291,82 +334,6 @@ pub struct NoopEarlyResponseCancelSink;
 
 impl EarlyResponsePriorityCancelSink for NoopEarlyResponseCancelSink {
     fn cancel_provisional(&self, _key: ProvisionalPlaybackKey, _reason: EarlyResponseCancelReason) {
-    }
-}
-
-pub type EarlyResponseEventStream = Pin<Box<dyn Stream<Item = EarlyResponseEvent> + Send>>;
-pub type EarlyResponseIntentStream = Pin<Box<dyn Stream<Item = EarlyResponseIntent> + Send>>;
-
-pub trait EarlyResponseProcessor: Send {
-    fn process(&mut self, events: EarlyResponseEventStream) -> EarlyResponseIntentStream;
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct IdentityEarlyResponseProcessor;
-
-impl EarlyResponseProcessor for IdentityEarlyResponseProcessor {
-    fn process(&mut self, events: EarlyResponseEventStream) -> EarlyResponseIntentStream {
-        Box::pin(events.filter_map(|event| async move { identity_passthrough(event) }))
-    }
-}
-
-pub fn identity_passthrough(event: EarlyResponseEvent) -> Option<EarlyResponseIntent> {
-    match event {
-        EarlyResponseEvent::Started {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            ..
-        } => Some(EarlyResponseIntent::Speak {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace: AppendOrReplace::Replace,
-        }),
-        EarlyResponseEvent::Updated {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace,
-        } => Some(EarlyResponseIntent::Speak {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace,
-        }),
-        EarlyResponseEvent::Canceled {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            reason,
-        } => Some(EarlyResponseIntent::Cancel {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            reason,
-        }),
-        EarlyResponseEvent::Committed {
-            provisional_turn_id,
-            call_id,
-            generation,
-            turn_id,
-            ..
-        } => Some(EarlyResponseIntent::Commit {
-            provisional_turn_id,
-            call_id,
-            generation,
-            turn_id,
-        }),
     }
 }
 
@@ -625,7 +592,7 @@ pub struct EarlyResponsePipelineServices {
     pub tts: SharedTtsRegistry,
     pub text_calls: SharedTextCallRegistry,
     pub tts_backend: LiveTtsBackend,
-    pub processor: Box<dyn EarlyResponseProcessor + Send>,
+    pub processor: ConversationProcessorKind,
 }
 
 pub fn spawn_early_response_pipeline(
@@ -642,8 +609,11 @@ pub fn spawn_early_response_pipeline(
         media_registry: services.media_registry.clone(),
     };
 
-    let mut processor = services.processor;
-    let mut intents = processor.process(Box::pin(receiver_stream(event_rx)));
+    let audio_mode = policy.audio_mode;
+    let provisional_max_prebuffer_frames = policy.provisional_max_prebuffer_frames;
+    let processor = services.processor;
+    let processor_inputs = receiver_stream(event_rx).map(ConversationProcessorInput::EarlyResponse);
+    let outputs = processor.process_stream(processor_inputs);
     let intent_services = EarlyResponseIntentServices {
         state: services.state.clone(),
         media_registry: services.media_registry.clone(),
@@ -651,11 +621,27 @@ pub fn spawn_early_response_pipeline(
         tts_backend: services.tts_backend,
         text_calls: services.text_calls.clone(),
         registry: registry.clone(),
+        audio_mode,
+        provisional_max_prebuffer_frames,
     };
     tokio::spawn(async move {
-        while let Some(intent) = intents.next().await {
-            if let Err(error) = handle_early_response_intent(&intent_services, intent).await {
-                tracing::warn!(error = %error, "early_response.intent.failed");
+        futures_util::pin_mut!(outputs);
+        while let Some(output) = outputs.next().await {
+            match output {
+                ConversationProcessorOutput::EarlyResponse(intent) => {
+                    if let Err(error) = handle_early_response_intent(&intent_services, intent).await
+                    {
+                        tracing::warn!(error = %error, "early_response.intent.failed");
+                    }
+                }
+                ConversationProcessorOutput::Command(_) => {
+                    tracing::warn!(
+                        "early_response.processor.command_output_ignored_for_provisional_turn"
+                    );
+                }
+                ConversationProcessorOutput::Error(error) => {
+                    tracing::warn!(error, "early_response.processor.failed");
+                }
             }
         }
     });
@@ -719,6 +705,8 @@ struct EarlyResponseIntentServices {
     tts_backend: LiveTtsBackend,
     text_calls: SharedTextCallRegistry,
     registry: ProvisionalPlaybackRegistry,
+    audio_mode: EarlyResponseAudioMode,
+    provisional_max_prebuffer_frames: usize,
 }
 
 async fn handle_early_response_intent(
@@ -739,6 +727,16 @@ async fn handle_early_response_intent(
                     .registry
                     .is_current(&call_id, &provisional_turn_id, generation)
             {
+                return Ok(());
+            }
+            if services.audio_mode == EarlyResponseAudioMode::PrepareOnly {
+                tracing::debug!(
+                    gateway_call_id = call_id.as_str(),
+                    utterance_id = utterance_id.as_str(),
+                    provisional_turn_id = provisional_turn_id.as_str(),
+                    generation,
+                    "early_response.provisional.speech_suppressed_prepare_only"
+                );
                 return Ok(());
             }
             match append_or_replace {
@@ -830,7 +828,9 @@ async fn start_provisional_speech(
             latest_turn_finalized_at: None,
             turn_id: Some(provisional_turn_id.clone()),
             coalesced_turn_ids: Vec::new(),
-            prebuffer_chunks_override: Some(PROVISIONAL_PREBUFFER_FRAME_CAP),
+            source_asr_session_ids: Vec::new(),
+            source_utterance_ids: vec![utterance_id.clone()],
+            prebuffer_chunks_override: Some(services.provisional_max_prebuffer_frames),
         },
         vec![text],
     )
@@ -1197,20 +1197,10 @@ where
                 })
                 .unwrap_or_default();
         }
-        if active.is_none()
-            && !self
-                .policy
-                .allowed_start_speech_states
-                .contains(&partial.speech_state)
-        {
+        if active.is_none() && !self.policy.allows_start_speech_state(partial.speech_state) {
             return Vec::new();
         }
-        if active.is_some()
-            && !self
-                .policy
-                .allowed_update_speech_states
-                .contains(&partial.speech_state)
-        {
+        if active.is_some() && !self.policy.allows_update_speech_state(partial.speech_state) {
             return active
                 .map(|active| {
                     self.cancel_active(
@@ -1628,6 +1618,10 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
+    use crate::media::SharedMediaRegistry;
+    use crate::operator::state::shared_state;
+    use crate::text_calls::SharedTextCallRegistry;
+    use crate::tts::{unavailable_registry, LiveTtsBackend};
 
     #[derive(Clone, Default)]
     struct RecordingCancelSink {
@@ -1695,6 +1689,106 @@ mod tests {
                 speech_state: CallerSpeechState::EndpointCandidate,
             }]
         );
+    }
+
+    #[test]
+    fn clause_boundary_rejects_unpunctuated_partial() {
+        let mut aggregator =
+            EarlyResponseAggregator::new(enabled_policy(), NoopEarlyResponseCancelSink);
+
+        assert!(aggregator
+            .handle_input(EarlyResponseInput::Partial(partial(
+                "I need a tow truck",
+                7,
+                100
+            )))
+            .is_empty());
+    }
+
+    #[test]
+    fn none_boundary_can_start_from_unpunctuated_partial() {
+        let mut policy = enabled_policy();
+        policy.boundary = BoundaryRequirement::None;
+        let mut aggregator = EarlyResponseAggregator::new(policy, NoopEarlyResponseCancelSink);
+
+        assert!(matches!(
+            aggregator
+                .handle_input(EarlyResponseInput::Partial(partial("I need a tow truck", 7, 100)))
+                .as_slice(),
+            [EarlyResponseEvent::Started { text, .. }] if text == "I need a tow truck"
+        ));
+    }
+
+    #[tokio::test]
+    async fn prepare_only_suppresses_provisional_gateway_tts() {
+        let registry = ProvisionalPlaybackRegistry::default();
+        registry.observe_event(&EarlyResponseEvent::Started {
+            provisional_turn_id: "pt-1".to_string(),
+            call_id: "call-1".to_string(),
+            utterance_id: "utt-1".to_string(),
+            generation: 1,
+            text: "hello".to_string(),
+            confidence: Some(0.9),
+            stability: Some(0.9),
+            speech_state: CallerSpeechState::EndpointCandidate,
+        });
+        let services = EarlyResponseIntentServices {
+            state: shared_state("127.0.0.1:0".parse().expect("valid addr")),
+            media_registry: SharedMediaRegistry::default(),
+            tts: unavailable_registry(),
+            tts_backend: LiveTtsBackend::Piper,
+            text_calls: SharedTextCallRegistry::default(),
+            registry: registry.clone(),
+            audio_mode: EarlyResponseAudioMode::PrepareOnly,
+            provisional_max_prebuffer_frames: 1,
+        };
+
+        handle_early_response_intent(
+            &services,
+            EarlyResponseIntent::Speak {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 1,
+                text: "hello".to_string(),
+                append_or_replace: AppendOrReplace::Replace,
+            },
+        )
+        .await
+        .expect("prepare-only suppresses provisional speech");
+
+        assert!(registry.promote_for_append("call-1", "pt-1", 1).is_none());
+    }
+
+    #[test]
+    fn default_policy_can_start_while_caller_is_speaking() {
+        let mut speaking = partial("I need a tow truck.", 7, 100);
+        speaking.speech_state = CallerSpeechState::Speaking;
+        let mut aggregator =
+            EarlyResponseAggregator::new(enabled_policy(), NoopEarlyResponseCancelSink);
+
+        assert!(matches!(
+            aggregator
+                .handle_input(EarlyResponseInput::Partial(speaking))
+                .as_slice(),
+            [EarlyResponseEvent::Started {
+                speech_state: CallerSpeechState::Speaking,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn endpoint_candidate_only_timing_does_not_start_on_speaking_partial() {
+        let mut policy = enabled_policy();
+        policy.set_start_timing(EarlyResponseStartTiming::EndpointCandidateOnly);
+        let mut speaking = partial("I need a tow truck.", 7, 100);
+        speaking.speech_state = CallerSpeechState::Speaking;
+        let mut aggregator = EarlyResponseAggregator::new(policy, NoopEarlyResponseCancelSink);
+
+        assert!(aggregator
+            .handle_input(EarlyResponseInput::Partial(speaking))
+            .is_empty());
     }
 
     #[test]
@@ -2080,31 +2174,5 @@ mod tests {
             events[1],
             EarlyResponseEvent::Updated { generation: 2, .. }
         ));
-    }
-
-    #[test]
-    fn identity_passthrough_repeats_accepted_transcript_fragment_without_prefix() {
-        let event = EarlyResponseEvent::Started {
-            provisional_turn_id: "pt-1".to_string(),
-            call_id: "call-1".to_string(),
-            utterance_id: "utt-1".to_string(),
-            generation: 1,
-            text: "I need a tow truck.".to_string(),
-            confidence: Some(0.9),
-            stability: Some(0.8),
-            speech_state: CallerSpeechState::EndpointCandidate,
-        };
-
-        assert_eq!(
-            identity_passthrough(event),
-            Some(EarlyResponseIntent::Speak {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                utterance_id: "utt-1".to_string(),
-                generation: 1,
-                text: "I need a tow truck.".to_string(),
-                append_or_replace: AppendOrReplace::Replace,
-            })
-        );
     }
 }

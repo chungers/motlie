@@ -6,14 +6,19 @@ use anyhow::bail;
 use anyhow::Context;
 use async_trait::async_trait;
 use clap::ValueEnum;
-#[cfg(feature = "kokoro")]
-use motlie_model::typed::BufferedSpeechSynthesizer;
 #[cfg(any(feature = "kokoro", feature = "piper"))]
 use motlie_model::typed::SynthesisRequest;
+#[cfg(feature = "kokoro")]
+use motlie_model::typed::{
+    BufferedSpeechSynthesizer, IncrementalSpeechStream, IncrementalSpeechSynthesizer,
+};
+use motlie_model::typed::{
+    IncrementalSpeechCancelToken, IncrementalSpeechControls, IncrementalSpeechRequestLabel,
+};
 #[cfg(feature = "piper")]
 use motlie_model::typed::{SpeechStream, SpeechSynthesizer};
 #[cfg(any(feature = "kokoro", feature = "piper"))]
-use motlie_model::{ArtifactPolicy, ModelError, StartOptions};
+use motlie_model::{ArtifactPolicy, StartOptions};
 #[cfg(any(feature = "kokoro", feature = "piper"))]
 use std::path::{Path, PathBuf};
 #[cfg(any(feature = "kokoro", feature = "piper"))]
@@ -30,6 +35,21 @@ const TTS_WARMUP_TEXT: &str = "Ready.";
 pub struct TtsAudio {
     samples_i16: Vec<i16>,
     sample_rate_hz: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IncrementalTtsSummary {
+    pub chunks: u64,
+    pub audio_ms: u64,
+    pub canceled: bool,
+    pub synthesis_completed: bool,
+}
+
+#[async_trait]
+pub trait OutboundIncrementalTtsStream: Send {
+    async fn next_audio_chunk(&mut self) -> anyhow::Result<Option<TtsAudio>>;
+
+    async fn finish(self: Box<Self>) -> anyhow::Result<IncrementalTtsSummary>;
 }
 
 impl TtsAudio {
@@ -128,8 +148,35 @@ impl FromStr for LiveTtsBackend {
 pub trait OutboundTtsFactory: Send + Sync {
     async fn synthesize_chunks(&self, text: String) -> anyhow::Result<Vec<TtsAudio>>;
 
+    async fn synthesize_incremental(
+        &self,
+        _text: String,
+        _cancel: IncrementalSpeechCancelToken,
+        _request_label: Option<String>,
+        _max_buffered_audio_ms: u32,
+    ) -> anyhow::Result<Box<dyn OutboundIncrementalTtsStream>> {
+        bail!(
+            "TTS backend {} does not support streaming generation",
+            self.label()
+        )
+    }
+
     async fn warm(&self) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    async fn warm_streaming(&self) -> anyhow::Result<()> {
+        let cancel = IncrementalSpeechCancelToken::new();
+        let mut stream = self
+            .synthesize_incremental("Ready.".to_string(), cancel, Some("warm".to_string()), 80)
+            .await?;
+        while stream.next_audio_chunk().await?.is_some() {}
+        let _ = stream.finish().await?;
+        Ok(())
+    }
+
+    fn supports_incremental(&self) -> bool {
+        false
     }
 
     fn label(&self) -> &'static str;
@@ -177,6 +224,10 @@ impl TtsRegistry {
     pub async fn warm(&self, backend: LiveTtsBackend) -> anyhow::Result<()> {
         self.factory(backend).warm().await
     }
+
+    pub async fn warm_streaming(&self, backend: LiveTtsBackend) -> anyhow::Result<()> {
+        self.factory(backend).warm_streaming().await
+    }
 }
 
 pub struct UnavailableTtsFactory {
@@ -216,16 +267,14 @@ impl OutboundTtsFactory for UnavailableTtsFactory {
 #[cfg(feature = "kokoro")]
 pub struct KokoroTtsFactory {
     artifact_root: PathBuf,
-    allow_download: bool,
     handle: Mutex<Option<Arc<motlie_model_kokoro::KokoroHandle>>>,
 }
 
 #[cfg(feature = "kokoro")]
 impl KokoroTtsFactory {
-    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+    pub fn new(artifact_root: PathBuf) -> Self {
         Self {
             artifact_root,
-            allow_download,
             handle: Mutex::new(None),
         }
     }
@@ -236,7 +285,7 @@ impl KokoroTtsFactory {
             return Ok(Arc::clone(handle));
         }
 
-        let handle = Arc::new(start_kokoro(&self.artifact_root, self.allow_download).await?);
+        let handle = Arc::new(start_kokoro(&self.artifact_root).await?);
         *guard = Some(Arc::clone(&handle));
         Ok(handle)
     }
@@ -269,24 +318,96 @@ impl OutboundTtsFactory for KokoroTtsFactory {
         )?])
     }
 
+    async fn synthesize_incremental(
+        &self,
+        text: String,
+        cancel: IncrementalSpeechCancelToken,
+        request_label: Option<String>,
+        max_buffered_audio_ms: u32,
+    ) -> anyhow::Result<Box<dyn OutboundIncrementalTtsStream>> {
+        let handle = self.handle().await?;
+        let controls = IncrementalSpeechControls {
+            cancel,
+            request_label: request_label.map(IncrementalSpeechRequestLabel::new),
+            max_buffered_audio_ms,
+        };
+        let stream = handle
+            .synthesize_incremental(
+                SynthesisRequest {
+                    text,
+                    params: Default::default(),
+                },
+                controls,
+            )
+            .await
+            .context("open Kokoro-82M incremental speech stream")?;
+        Ok(Box::new(KokoroOutboundIncrementalTtsStream { stream }))
+    }
+
+    fn supports_incremental(&self) -> bool {
+        true
+    }
+
     fn label(&self) -> &'static str {
         "kokoro/kokoro_82m"
+    }
+}
+
+#[cfg(feature = "kokoro")]
+struct KokoroOutboundIncrementalTtsStream {
+    stream: motlie_model_kokoro::KokoroMeteredIncrementalSpeechStream,
+}
+
+#[cfg(feature = "kokoro")]
+#[async_trait]
+impl OutboundIncrementalTtsStream for KokoroOutboundIncrementalTtsStream {
+    async fn next_audio_chunk(&mut self) -> anyhow::Result<Option<TtsAudio>> {
+        let Some(chunk) = self
+            .stream
+            .next_audio_chunk()
+            .await
+            .context("read Kokoro-82M incremental speech chunk")?
+        else {
+            return Ok(None);
+        };
+        if chunk.channels != 1 {
+            bail!(
+                "Kokoro-82M incremental speech emitted {} channels; expected mono",
+                chunk.channels
+            );
+        }
+        Ok(Some(TtsAudio::new(
+            chunk.samples_i16,
+            chunk.sample_rate_hz,
+        )?))
+    }
+
+    async fn finish(self: Box<Self>) -> anyhow::Result<IncrementalTtsSummary> {
+        let summary = self
+            .stream
+            .finish()
+            .await
+            .context("finish Kokoro-82M incremental speech stream")?;
+        Ok(IncrementalTtsSummary {
+            chunks: summary.chunks,
+            audio_ms: summary.audio_ms,
+            canceled: summary.canceled,
+            synthesis_completed: summary.synthesis_completed,
+        })
     }
 }
 
 #[cfg(feature = "piper")]
 pub struct PiperTtsFactory {
     artifact_root: PathBuf,
-    allow_download: bool,
     handle: Mutex<Option<Arc<motlie_model_piper::PiperHandle>>>,
 }
 
 #[cfg(feature = "piper")]
 impl PiperTtsFactory {
-    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+    pub fn new(artifact_root: PathBuf) -> Self {
         Self {
             artifact_root,
-            allow_download,
             handle: Mutex::new(None),
         }
     }
@@ -303,7 +424,7 @@ impl PiperTtsFactory {
             return Ok(Arc::clone(handle));
         }
 
-        let handle = Arc::new(start_piper(&self.artifact_root, self.allow_download).await?);
+        let handle = Arc::new(start_piper(&self.artifact_root).await?);
         *guard = Some(Arc::clone(&handle));
         Ok(handle)
     }
@@ -631,81 +752,19 @@ pub fn unavailable_registry() -> SharedTtsRegistry {
 }
 
 #[cfg(feature = "kokoro")]
-async fn start_kokoro(
-    artifact_root: &Path,
-    allow_download: bool,
-) -> anyhow::Result<motlie_model_kokoro::KokoroHandle> {
-    match motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root)).await {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = "kokoro/kokoro_82m",
-                "downloading Kokoro-82M artifacts"
-            );
-            download_kokoro_artifact(artifact_root)?;
-            motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root))
-                .await
-                .map_err(anyhow::Error::from)
-                .context("start Kokoro-82M after downloading artifacts")
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail_missing_artifacts("kokoro/kokoro_82m", artifact_root)
-        }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Kokoro-82M TTS"),
-    }
-}
-
-#[cfg(feature = "kokoro")]
-fn download_kokoro_artifact(artifact_root: &Path) -> anyhow::Result<()> {
-    let catalog = motlie_models::Catalog::with_defaults();
-    let bundle_id = motlie_models::tts::kokoro_82m::descriptor().id;
-    motlie_models::download_bundle_artifacts(&catalog, &bundle_id, artifact_root)
-        .map(|_| ())
+async fn start_kokoro(artifact_root: &Path) -> anyhow::Result<motlie_model_kokoro::KokoroHandle> {
+    motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root))
+        .await
         .map_err(anyhow::Error::from)
-        .context("download Kokoro-82M artifacts")
+        .context("start Kokoro-82M TTS")
 }
 
 #[cfg(feature = "piper")]
-async fn start_piper(
-    artifact_root: &Path,
-    allow_download: bool,
-) -> anyhow::Result<motlie_model_piper::PiperHandle> {
-    match motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(local_only_options(
-        artifact_root,
-    ))
-    .await
-    {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = "piper/en_us_ljspeech_medium",
-                "downloading Piper artifacts"
-            );
-            download_piper_artifact(artifact_root)?;
-            motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(local_only_options(
-                artifact_root,
-            ))
-            .await
-            .map_err(anyhow::Error::from)
-            .context("start Piper after downloading artifacts")
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail_missing_artifacts("piper/en_us_ljspeech_medium", artifact_root)
-        }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Piper TTS"),
-    }
-}
-
-#[cfg(feature = "piper")]
-fn download_piper_artifact(artifact_root: &Path) -> anyhow::Result<()> {
-    let catalog = motlie_models::Catalog::with_defaults();
-    let model = motlie_models::TtsModels::PiperEnUsLjspeechMedium;
-    motlie_models::download_bundle_artifacts(&catalog, &model.bundle_id(), artifact_root)
-        .map(|_| ())
+async fn start_piper(artifact_root: &Path) -> anyhow::Result<motlie_model_piper::PiperHandle> {
+    motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(local_only_options(artifact_root))
+        .await
         .map_err(anyhow::Error::from)
-        .context("download Piper artifacts")
+        .context("start Piper TTS")
 }
 
 #[cfg(any(feature = "kokoro", feature = "piper"))]
@@ -716,26 +775,6 @@ fn local_only_options(artifact_root: &Path) -> StartOptions {
         }),
         ..Default::default()
     }
-}
-
-#[cfg(any(feature = "kokoro", feature = "piper"))]
-fn missing_local_artifacts(error: &ModelError) -> bool {
-    match error {
-        ModelError::InvalidConfiguration(message) => {
-            message.contains(motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX)
-        }
-        _ => false,
-    }
-}
-
-#[cfg(any(feature = "kokoro", feature = "piper"))]
-fn bail_missing_artifacts<T>(label: &str, artifact_root: &Path) -> anyhow::Result<T> {
-    bail!(
-        "{} missing for {} under '{}'; rerun without --no-asr-download or preinstall artifacts",
-        motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX,
-        label,
-        artifact_root.display()
-    )
 }
 
 #[cfg(test)]

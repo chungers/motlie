@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod config_file;
 pub mod mux;
 pub mod persistence;
 pub mod script;

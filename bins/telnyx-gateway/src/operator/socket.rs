@@ -475,7 +475,7 @@ mod tests {
         assert!(listener.starts_with("127.0.0.1:"));
         assert!(!listener.contains("Some("));
         assert_eq!(
-            response["data"]["fields"]["conversation_handler"],
+            response["data"]["fields"]["conversation_processor_state"],
             "disabled"
         );
         assert_eq!(response["data"]["fields"]["conversation_barge_in"], "on");

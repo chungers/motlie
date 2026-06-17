@@ -105,6 +105,11 @@ pub enum ModelsError {
         filename: String,
         message: String,
     },
+    #[error("failed to prepare artifacts for bundle `{bundle_id}`: {message}")]
+    ArtifactPreparation {
+        bundle_id: BundleId,
+        message: String,
+    },
     #[error("unknown embedding model selector `{selector}`")]
     UnknownEmbeddingModel { selector: String },
     #[error("unknown ASR model selector `{selector}`")]
@@ -995,7 +1000,7 @@ pub fn download_bundle_artifacts_with_options(
             bundle_id: bundle_id.clone(),
         })?;
 
-    let downloaded = download_checkpoint_artifacts_with_options(
+    let mut downloaded = download_checkpoint_artifacts_with_options(
         &ModelCheckpoint {
             format: artifacts.format,
             source: artifacts.source.clone(),
@@ -1005,11 +1010,38 @@ pub fn download_bundle_artifacts_with_options(
         artifact_root,
         options,
     )?;
+    prepare_downloaded_bundle_artifacts(descriptor, &mut downloaded)?;
+    downloaded.sort();
 
     Ok(ArtifactDownloadSummary {
         bundle_id: bundle_id.clone(),
         downloaded,
     })
+}
+
+#[cfg(feature = "model-kokoro-82m")]
+fn prepare_downloaded_bundle_artifacts(
+    descriptor: &BundleDescriptor,
+    downloaded: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if descriptor.id.as_str() == "kokoro_82m" {
+        tts::kokoro_82m::prepare_downloaded_artifacts(downloaded).map_err(|message| {
+            ModelsError::ArtifactPreparation {
+                bundle_id: descriptor.id.clone(),
+                message,
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "model-kokoro-82m"))]
+fn prepare_downloaded_bundle_artifacts(
+    _descriptor: &BundleDescriptor,
+    _downloaded: &mut [PathBuf],
+) -> Result<()> {
+    Ok(())
 }
 
 fn download_checkpoint_artifacts_with_options(

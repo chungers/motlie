@@ -6,6 +6,13 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-16 PDT | @codex-535: Scrubbed live routing from checked-in `gateway.toml`; future live runs should load local materialized TOML at startup while keeping `source` for ad hoc interactive replay. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
+| 2026-06-16 PDT | @codex-535: Added canonical checked-in `bins/telnyx-gateway/gateway.toml` for strict startup config tuning and made nested `[voice_quality.*]` TOML fail closed on unknown keys. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
+| 2026-06-15 PDT | @codex-m6-ds-rv: Replaced split startup config with one durable `--config <gateway.toml>` file and readable TOML `state dump`; `.repl` command files remain only for interactive `source <path>` replay. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
+| 2026-06-15 PDT | @codex-m6-ds-rv: Documented the current single ASR-to-processor-to-TTS pipeline, including the optional early-response aggregation stage, committed-turn-only behavior when the aggregator is disabled, and the control-knob surface now summarized in API.md. | Feeding the Conversation Handler, Returning TTS Audio |
+| 2026-06-15 PDT | @codex-m6-ds-rv: Made conversation processor selection per-call and static-dispatch via `ConversationProcessorKind` (`Identity` only for now); `early_response.enabled` is documented as the optional provisional-input gate into the same processor, not a second response branch. | Application Text Call Protocol and Gateway Control API, Processor Transfer Function Contract |
+| 2026-06-15 PDT | @codex-m6-ds-rv: Consolidated buffered final-turn and streaming early-response handling under one `ConversationProcessor` contract; the identity/repeat exemplar now repeats text exactly without an `I heard:` prefix and is no longer a separate processor path. | Application Text Call Protocol and Gateway Control API, Processor Transfer Function Contract |
+| 2026-06-15 PDT | @codex-m6-ds-rv: Corrected the live early-response default to start from stable `speaking` partials, keeping `endpoint_candidate_only` as an explicit conservative knob, and documented the matching state lists. | Application Text Call Protocol and Gateway Control API |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Expanded #529 implementation from helper-only to live opt-in early-response wiring: bounded media-to-pipeline queue, stream processor transfer function, provisional cancel/TTS adapter, early-turn protocol negotiation, and smoke identity coverage. | Application Text Call Protocol and Gateway Control API, Cancellation and Reconciliation, Testing Scope for PLAN |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Staged the first #529 implementation slice: gateway-local early-response aggregator/identity processor contracts plus smoke/repeat tests that cover both buffered final input and streaming provisional fragment output. | Application Text Call Protocol and Gateway Control API, Testing Scope for PLAN |
 | 2026-06-15 UTC | @527-design: Revised #527 after David's PR requirement to make the early-response pipeline test-case-agnostic: ASR to pluggable transfer-function processor to TTS, with smoke/repeat only as the identity pass-through validation instance and no smoke-specific protocol assumptions. | Application Text Call Protocol and Gateway Control API, Alternatives Considered, Testing Scope for PLAN |
@@ -14,7 +21,7 @@
 | 2026-06-12 PDT | @codex-366-impl: Resolved #488 generality review by moving final-settle fragment classifiers and conversation final-coalescing hold knobs behind `VoiceQualityConfig.endpoint` while preserving live-tuned defaults; `bins/telnyx-agent` now opts into `motlie.telnyx.text.partials.v1` so advisory partials are reachable in live calls. | Milestone 5: Conversational Realism Latency Improvements, Conversation Handler Contract, Application Text Call Protocol and Gateway Control API |
 | 2026-06-12 PDT | @codex-366-impl: Addressed #481 and David's stability ruling by keeping opt-in `caller.partial.stability` as a gateway-estimated stream-convergence/churn signal only, documenting that it is for preparation/routing/debounce decisions and must never be treated as truth, model confidence, calibrated probability, final response input, or combined with `confidence`. | Application Text Call Protocol and Gateway Control API, Telnyx Interaction Quality Design |
 | 2026-06-11 PDT | @codex-366-impl: Generalized handler-local final coalescing for conversation handlers: `endpoint.merge_window_ms` now drives a 350 ms committed-turn debounce, while `tts.first_chunk_max_chars` defaults to 40 for lower first-audio latency. | Milestone 5: Conversational Realism Latency Improvements, Conversation Handler Contract, Telnyx Interaction Quality Design |
-| 2026-06-11 PDT | @codex-366-impl: Calibrated generic final-settle endpointing for structurally incomplete ASR finals: `endpoint.final_settle_ms` defaults to 800 ms and briefly holds dangling-tail or lead-word final fragments before `caller.turn` / `ConversationHandler` dispatch, then merges with the next final or flushes on timeout/stream end. | Milestone 5: Conversational Realism Latency Improvements, Telnyx Interaction Quality Design |
+| 2026-06-11 PDT | @codex-366-impl: Calibrated generic final-settle endpointing for structurally incomplete ASR finals: `endpoint.final_settle_ms` defaults to 800 ms and briefly holds dangling-tail or lead-word final fragments before `caller.turn` / `ConversationProcessor` dispatch, then merges with the next final or flushes on timeout/stream end. | Milestone 5: Conversational Realism Latency Improvements, Telnyx Interaction Quality Design |
 | 2026-06-11 PDT | @codex-366-impl: Retuned generic balanced endpointing defaults after live-call last-word truncation: endpoint trailing silence is now 900 ms and ASR finish pad is now 320 ms, both live-adjustable for the next ASR session rather than smoke-test-specific logic. | Milestone 5: Conversational Realism Latency Improvements, Telnyx Interaction Quality Design |
 | 2026-06-11 PDT | @codex-366-impl: Pulled in PR #484's backend-native ASR confidence carrier for PR #464 call recovery; handler-local final coalescing can use low-confidence non-terminal tails as an additional bounded hold signal while keeping any gateway stability signal separate from model-native confidence. | Milestone 5: Conversational Realism Latency Improvements, Application Text Call Protocol and Gateway Control API |
 | 2026-06-11 PDT | @codex-366-impl: Added PR #464 live call recovery: conversation final transcript coalescing uses the handler-local merge window, can keep merging while prior playback is active, and outbound pacing rollups split true underrun, append starvation, post-mark wait, and first-frame idle gaps. | Milestone 5: Conversational Realism Latency Improvements, Telnyx Interaction Quality Design |
@@ -529,7 +536,7 @@ For Telnyx, `provider_call_id` maps to `call_control_id`, `provider_session_id` 
 
 ### Milestone 2: Outbound Dialer and TTS
 
-The second milestone is outbound call control plus TTS from the shared operator command engine. The TUI shell, selected-call detail composer, startup `--load` replay, and Unix-domain socket all dispatch the same typed commands with source-local selected call and model state:
+The second milestone is outbound call control plus TTS from the shared operator command engine. The TUI shell, selected-call detail composer, startup `--config` load, and Unix-domain socket all dispatch the same typed commands with source-local selected call and model state:
 
 ```text
 motlie-driver command source (TUI or socket)
@@ -631,18 +638,18 @@ Recommended composition rule:
 - conversation handlers emit provider-neutral commands such as `Say { text }`, `Call(CallAction::Hangup)`, `Call(CallAction::Transfer { ... })`, or `Noop`
 - `bins/telnyx-gateway` maps those commands to Telnyx call-control and outbound media operations
 
-Implementation note (@codex-366-impl, 2026-06-06 13:40 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. `answer` for inbound calls, outbound `dial`, and plain `conversation attach [call]` attach in auto/approved mode by default, but the built-in echo reply handler is disabled by default so normal live sessions are transcription-only after attach. Operators must start with `--conversation-smoke-test` or run `conversation smoke-test on` from the TUI/socket to enable the `I heard: ...` smoke-test loop. Operators can run `conversation disapprove [call]` mid-call to cancel active conversation TTS through the M2 clear/cancel path and leave the call in transcription-only mode. Manual mode remains available through `conversation mode manual [call]`; it records the assistant proposal in the selected-call chat state, and `conversation approve [call]` / `conversation say [call]` speaks the pending proposal through that command source's selected TTS backend when a non-smoke handler proposes a response. Auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with the gateway default live TTS backend, currently `kokoro-82m` with Piper fallback; it intentionally does not use source-local `tts use` because media-triggered turns are not associated with a command source. Barge-in defaults to drop-and-regenerate for normal conversation handlers: meaningful partial ASR events and frame-level speech-onset detection for attached calls trigger the drop/cancel path when playback is active, while final ASR events still drive regeneration through the handler. Because the built-in smoke-test handler repeats caller text deterministically, `--conversation-smoke-test` and `conversation smoke-test on` turn barge-in off so echo validation is not cut by partial/final/speech-onset interruption. The media path now applies the endpoint final-settle policy before any live text or conversation dispatch: `endpoint.final_settle_ms` controls the bounded hold window, and `endpoint.final_settle_trailing_punctuation`, `endpoint.final_settle_lead_words`, `endpoint.final_settle_tail_words`, and `endpoint.final_settle_dangling_suffixes` classify structurally incomplete fragments. Those fragments are held briefly, merged with the next final if one arrives, or flushed on timeout/stream end. Conversation handlers with final coalescing enabled use `endpoint.merge_window_ms` as a handler-local committed-turn debounce (default 350 ms), can continue holding while active playback is present, and can extend a bounded hold using `endpoint.conversation_tail_words`, `endpoint.conversation_incomplete_tail_hold_ms`, and `endpoint.conversation_low_confidence_threshold_percent`; this does not merge live M4 `caller.turn` events. After PR #484, backend-native `TranscriptSegment.confidence` is preserved through latest-partial final repair and can explain low-confidence tails in logs, but it is not treated as calibrated endpoint stability. Operators can explicitly run `conversation barge-in on` when they are testing interruption behavior. If another final turn arrives while TTS is already active and barge-in is off, the generated assistant text is retained as a proposal instead of interrupting playback. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
+Implementation note (@codex-366-impl, 2026-06-06 13:40 PDT): the first M3 implementation keeps `ConversationHandler` provider-neutral and gateway-local. The Telnyx media socket forwards only unsuppressed final transcript events for calls whose conversation state is attached. `answer` for inbound calls, outbound `dial`, and plain `conversation attach [call]` attach in auto/approved mode by default, but the built-in identity/repeat processor is disabled by default so normal live sessions are transcription-only after attach. Operators run `conversation smoke-test on` from the TUI/socket or a interactive `source` file to enable the identity/repeat smoke-test loop. Operators can run `conversation disapprove [call]` mid-call to cancel active conversation TTS through the M2 clear/cancel path and leave the call in transcription-only mode. Manual mode remains available through `conversation mode manual [call]`; it records the assistant proposal in the selected-call chat state, and `conversation approve [call]` / `conversation say [call]` speaks the pending proposal through that command source's selected TTS backend when a non-smoke processor proposes a response. Auto mode routes `ConversationCommand::Say` to the extracted M2 `speech::queue_speech` path with the gateway default live TTS backend, currently `kokoro-82m` with Piper fallback; it intentionally does not use source-local `tts use` because media-triggered turns are not associated with a command source. Barge-in defaults to drop-and-regenerate for normal conversation processors: meaningful partial ASR events and frame-level speech-onset detection for attached calls trigger the drop/cancel path when playback is active, while final ASR events still drive regeneration through the processor. Because the built-in identity/repeat processor repeats caller text deterministically, `conversation smoke-test on` turns barge-in off so echo validation is not cut by partial/final/speech-onset interruption. The media path now applies the endpoint final-settle policy before any live text or conversation dispatch: `endpoint.final_settle_ms` controls the bounded hold window, and `endpoint.final_settle_trailing_punctuation`, `endpoint.final_settle_lead_words`, `endpoint.final_settle_tail_words`, and `endpoint.final_settle_dangling_suffixes` classify structurally incomplete fragments. Those fragments are held briefly, merged with the next final if one arrives, or flushed on timeout/stream end. Conversation processors with final coalescing enabled use `endpoint.merge_window_ms` as a processor-local committed-turn debounce (default 350 ms), can continue holding while active playback is present, and can extend a bounded hold using `endpoint.conversation_tail_words`, `endpoint.conversation_incomplete_tail_hold_ms`, and `endpoint.conversation_low_confidence_threshold_percent`; this does not merge live M4 `caller.turn` events. After PR #484, backend-native `TranscriptSegment.confidence` is preserved through latest-partial final repair and can explain low-confidence tails in logs, but it is not treated as calibrated endpoint stability. Operators can explicitly run `conversation barge-in on` when they are testing interruption behavior. If another final turn arrives while TTS is already active and barge-in is off, the generated assistant text is retained as a proposal instead of interrupting playback. `CallAction::Hangup` maps to Telnyx hangup; future call actions fail closed and record conversation failure state until implemented.
 
 ### Milestone 5: Conversational Realism Latency Improvements (#402)
 
-M5 is a post-M3 hardening slice for live turn feel, not a replacement for the `ConversationHandler` contract. The expanded scope in PR #417 keeps response generation turn-based on final transcript events, while reducing the time spent waiting for endpointing and first outbound audio:
+M5 is a post-M3 hardening slice for live turn feel, not a replacement for the `ConversationProcessor` contract. The expanded scope in PR #417 keeps response generation turn-based on final transcript events, while reducing the time spent waiting for endpointing and first outbound audio:
 
 - local ASR endpoint finalization finishes the active ASR session after the replay-sized trailing-silence pad, so final transcripts do not depend on a later utterance
-- `endpoint.final_settle_ms` adds a small, bounded media-path settle window for structurally incomplete ASR finals before `caller.turn` / `ConversationHandler` dispatch; `endpoint.final_settle_*` policy lists/suffixes decide which fragments are holdable, and if a continuation final arrives it is merged, otherwise the pending final flushes on timeout or stream end
+- `endpoint.final_settle_ms` adds a small, bounded media-path settle window for structurally incomplete ASR finals before `caller.turn` / `ConversationProcessor` dispatch; `endpoint.final_settle_*` policy lists/suffixes decide which fragments are holdable, and if a continuation final arrives it is merged, otherwise the pending final flushes on timeout or stream end
 - barge-in can be triggered by meaningful partial ASR or by frame-level speech onset while conversation playback is active; speech onset fires on initial speech or resumed speech after at least 120 ms of low energy; both reuse the same M2 cancel/clear path and remain gated by attached conversation state plus `conversation barge-in on|off`
-- final transcripts still drive handler invocation and regenerated `ConversationCommand::Say`; speech-onset barge-in only interrupts active playback
+- final transcripts still drive processor invocation and regenerated `ConversationCommand::Say`; speech-onset barge-in only interrupts active playback
 - outbound TTS is queued per synthesized text chunk instead of after the whole utterance is synthesized; backend audio chunks inside one text chunk are concatenated before resampling/packetization so Piper-style short backend chunks do not reset the resampler every 40 ms
-- the design remains compatible with future agent-human bidirectional ASR/TTS text streams because interruption policy is gateway-local and handler turn semantics stay explicit
+- the design remains compatible with future agent-human bidirectional ASR/TTS text streams because interruption policy is gateway-local and processor turn semantics stay explicit
 
 Coordination note (@codex-366-impl, 2026-06-07 23:08 PDT): M5 exposes the media-safe primitive M4 needs for more conversational app-agent text streams: callers can keep the existing reject-on-overlap behavior or opt into cancel-and-replace when enqueueing outbound speech. Cancel-and-replace requests the same Telnyx `clear` path, drops queued old audio before the next frames are sent, returns the replaced playback id to the caller, and keeps stale clear/mark acknowledgements from demoting a newer active playback. M4 text-call protocol should treat stale or superseded `agent.turn` messages as normal conversation outcomes, not socket/protocol errors, and should include a terminal playback status such as `completed`, `canceled`, `failed`, or `superseded` in `playback.finished`.
 
@@ -742,10 +749,10 @@ The gateway should expose the same `motlie-driver` command family through startu
 
 - `--tui` enables the local terminal UI with a left REPL pane and right call roster/detail area
 - `--socket <path>` enables a Unix-domain command socket for headless local agent/tooling control
-- `--load <dump_path>` replays durable configuration commands during startup before live command sources are accepted
+- `--config <gateway.toml>` loads durable startup state before live command sources are accepted
 - the authenticated HTTP Control API remains the remote application-server control surface for inbound subscriber registration, blocking outbound text-call dial, and optional call state reads
 
-`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still locally agent-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--load` and/or the authenticated HTTP Control API for subscriber configuration and outbound appserver requests.
+`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still locally agent-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--config` and/or the authenticated HTTP Control API for subscriber configuration and outbound appserver requests.
 
 The Unix-domain socket is the preferred interface for local agent tooling. It should be sufficient for an agent to configure the gateway, poll call/event state, answer or hang up calls, dial outbound calls, and send `say` text without using the remote appserver text-call protocol. The HTTP Control API remains a separate authenticated integration surface for inbound subscriber registration and outbound appserver dial requests.
 
@@ -1027,35 +1034,35 @@ conversation say [call]
 conversation mode <manual|auto>
 ```
 
-These belong after milestone 1 and milestone 2 are independently useful. `answer`, `dial`, and `conversation attach` wire selected media final transcript events to `ConversationHandler` in auto mode by default; they should not change the Telnyx media or model contracts. Built-in echo replies are test-only and require `--conversation-smoke-test` or `conversation smoke-test on`. Conversation barge-in defaults on for normal conversation sessions and can be triggered by meaningful partial ASR, final overlap checks, or frame-level speech onset. The smoke-test echo loop is the exception: `--conversation-smoke-test` and `conversation smoke-test on` set barge-in off from either the TUI or socket so active repeat playback can finish; operators can turn it back on explicitly when validating interruption behavior. `conversation disapprove` cancels active conversation TTS and detaches the handler so the call remains transcription-only. Manual proposals are spoken only after `conversation approve` / `conversation say`.
+These belong after milestone 1 and milestone 2 are independently useful. `answer`, `dial`, and `conversation attach` wire selected media final transcript events to `ConversationProcessor` in auto mode by default; they should not change the Telnyx media or model contracts. Built-in identity/repeat replies are test-only and require `conversation smoke-test on` from the TUI/socket or a interactive `source` file. Conversation barge-in defaults on for normal conversation sessions and can be triggered by meaningful partial ASR, final overlap checks, or frame-level speech onset. The smoke-test identity/repeat loop is the exception: `conversation smoke-test on` sets barge-in off from either the TUI, socket, or replayed load file so active repeat playback can finish; operators can turn it back on explicitly when validating interruption behavior. `conversation disapprove` cancels active conversation TTS and detaches the processor so the call remains transcription-only. Manual proposals are spoken only after `conversation approve` / `conversation say`.
 
 ### Replayable State Dumps
 
-The gateway should persist durable configuration as a replayable command script, not as an opaque binary snapshot. This makes restart behavior auditable, editable, and compatible with the same `motlie-driver` command dispatcher used by the TUI, socket, and Control API surfaces.
+The gateway should persist durable configuration as readable TOML, not as an opaque binary snapshot and not as replayed command text. This makes restart behavior auditable, editable, and independent from source-local TUI/socket command state.
 
 Supported entry points:
 
 ```text
 state dump [path]
 shutdown [dump_path]
-telnyx-gateway --load <dump_path>
+telnyx-gateway --config <gateway.toml>
 ```
 
-`state dump [path]` writes the current durable gateway state and keeps running. `shutdown [dump_path]` writes the same dump, then exits cleanly after refusing new work and draining or terminating active sessions according to normal shutdown policy. If the path is omitted, `shutdown` uses `config state-path` if set; otherwise it should use a documented default such as `./telnyx-gateway.state.repl`.
+`state dump [path]` writes the current durable gateway state TOML and keeps running. `shutdown [dump_path]` writes the same dump, then exits cleanly after refusing new work and draining or terminating active sessions according to normal shutdown policy. If the path is omitted, `shutdown` uses `config state-path` if set; otherwise it should use a documented default such as `./telnyx-gateway.toml`.
 
-`--load <dump_path>` replays the command file during startup before the gateway enables inbound handling or accepts Control API mutations. Replay should be deterministic and should fail closed: if a command fails, the gateway should report the failing line, leave inbound mode disabled, and require operator action.
+`--config <gateway.toml>` loads the TOML state before the gateway enables inbound handling or accepts Control API mutations. Invalid config fails closed with a validation error, including unknown keys under nested `[voice_quality.*]` tables. The canonical checked-in config lives at `bins/telnyx-gateway/gateway.toml`; it documents each current process, Telnyx, media, conversation, quality logging, and voice-quality tuning field inline, keeps routing fields as placeholders, and uses references such as `env:TELNYX_API_KEY` rather than literal secrets.
 
 Recommended dump format:
 
 ```text
 # motlie telnyx-gateway state v1
 # generated_at 2026-05-30T18:35:00Z
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
 config set from-number <caller-phone-number>
-config set state-path ./telnyx-gateway.state.repl
+config set state-path ./telnyx-gateway.toml
 telnyx app use <connection-id>
-telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+telnyx app webhook set https://<public-host>/telnyx/webhooks
 telnyx number use <called-phone-number>
 telnyx number bind <called-phone-number> <connection-id>
 inbound subscription upsert sub_01HZ... --phone-number <called-phone-number> --callback-url https://agent.example.com/motlie/inbound-offers --priority 100 --secret-ref env:MOTLIE_APP_CALLBACK_SECRET
@@ -1095,10 +1102,10 @@ Replay commands should be idempotent wherever possible. In particular, dump outp
 
 ```text
 status
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
 telnyx app create motlie-local
-telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+telnyx app webhook set https://<public-host>/telnyx/webhooks
 telnyx number bind +15551234567 <connection-id>
 inbound enable --manual
 calls
@@ -1194,7 +1201,7 @@ Rules:
 - allow multiple subscribers for one phone number
 - require idempotency for create/update so agent daemons can re-register on restart
 - do not emit call transcript text through this registration API
-- keep subscriber state durable enough for `state dump` / `--load` replay
+- keep subscriber state durable enough for `state dump` / `--config` load
 
 ### Inbound Offer Protocol
 
@@ -1484,7 +1491,7 @@ The following rules are normative for #527 and supersede any shorthand wording i
 
 - Realtime placement: the live early-response adapter runs off the single Telnyx media-socket loop in its own task. The media/ASR producer uses non-blocking `try_send` into a bounded input queue with capacity `8` per call; it never awaits processor, WebSocket, TTS, logging, disk, or network I/O.
 - Input backpressure: partial inputs are coalesced by `(call_id, utterance_id)` and drop/replace the oldest pending partial when full. `CommitBoundary`, `CancelProvisional`, and call teardown are never dropped; if the normal queue is full they use the priority control lane.
-- Output backpressure: slow processors or protocol adapters may coalesce/drop stale `Updated` events for superseded generations, but must not drop `Started`, `Committed`, or `Canceled`. Dropped updates increment a quality counter.
+- Output backpressure: slow processors or protocol adapters may coalesce/drop stale `Updated` events for superseded generations, but must not drop `Started`, `Committed`, or `Canceled`. Dropped partial inputs are logged today; a structured aggregate counter is a profiling/reporting follow-up.
 - Cancellation priority: a FIFO `Stream<EarlyResponseEvent>` is not the safety mechanism. Every replacement, mismatch, stale generation, policy disablement, barge-in, hangup, or coalesced sibling cancellation calls an out-of-band priority cancel sink straight into speech/media state before or alongside the lifecycle event.
 - Playback keying: provisional speech is keyed by `(provisional_turn_id, generation)`, never by `provisional_turn_id` alone. Agent output must echo the generation it is answering; stale generations are rejected without TTS.
 - JIT playback cap: provisional audio uses just-in-time packetization and may keep at most `provisional_max_prebuffer_frames = 1` unsent 20 ms media frame beyond the frame currently being sent. Normal `tts.prebuffer_chunks` is ignored or clamped for provisional playback. Already-sent network frames remain unrecallable and must be measured.
@@ -1495,88 +1502,90 @@ The following rules are normative for #527 and supersede any shorthand wording i
 
 #### Processor Transfer Function Contract
 
-The early-response pipeline is test-case-agnostic:
+The live conversation pipeline uses one response-generation processor per call. Processor selection is call state, not a runtime-global handler and not an early-response mode switch:
 
 ```text
-ASR partial/final stream -> aggregate_early_resp_partials -> processor transfer function -> provisional TTS adapter
+ASR partial stream --[if early_response.enabled]--> aggregate_early_resp_partials -> ConversationProcessorKind -> provisional TTS adapter
+ASR final/settled turn -------------------------------------------------------> ConversationProcessorKind -> committed TTS path
 ```
 
-In signal-processing terms, the processor is a pluggable transfer function over the early-response stream:
+`early_response.enabled` gates only the optional provisional-input stage. When it is off, the same per-call processor still receives committed final turns. When it is on, the aggregator feeds provisional `EarlyResponseEvent` inputs into that same processor before the final turn boundary. This keeps the pipeline staged and configurable without a smoke-only branch, separate identity path, or duplicate content policy.
 
-```text
-T: Stream<EarlyResponseEvent> -> Stream<EarlyResponseIntent>
-```
-
-`T` is the only stage that chooses response content. It may be an identity pass-through, a router, retrieval pipeline, streaming LLM, rules engine, or any other agent. It may emit no output, emit one response, stream revisions, buffer until commit, or cancel its own work. Those choices do not change the provisional-turn protocol, cancellation semantics, commit semantics, policy gates, backpressure rules, or TTS generation keying.
-
-Smoke/repeat is the degenerate validation instance of the same interface: the identity pass-through transfer function. It repeats accepted transcript chunks as response intents with gain 1 and minimal processing delay so the pipeline latency floor can be measured. It is not a special protocol mode, ASR branch, TTS branch, response prefix, or lifecycle rule.
-
-A desired API shape:
+The implemented gateway API shape is static-dispatch through an enum. `Identity` is the only variant today; future processors are added as enum variants, not as `dyn` handlers:
 
 ```rust
-pub trait EarlyResponseProcessor<S>
-where
-    S: Stream<Item = EarlyResponseEvent>,
-{
-    type Output: Stream<Item = EarlyResponseIntent>;
-
-    fn process(&mut self, events: S) -> Self::Output;
+pub enum ConversationProcessorKind {
+    Identity,
 }
 
-pub enum EarlyResponseIntent {
-    Speak {
-        provisional_turn_id: String,
-        call_id: String,
-        utterance_id: String,
-        generation: u64,
-        text: String,
-        append_or_replace: AppendOrReplace,
-    },
-    Cancel {
-        provisional_turn_id: String,
-        call_id: String,
-        utterance_id: String,
-        generation: u64,
-        reason: EarlyResponseCancelReason,
-    },
-    Commit {
-        provisional_turn_id: String,
-        call_id: String,
-        generation: u64,
-        turn_id: String,
-    },
+impl ConversationProcessorKind {
+    pub fn label(self) -> &'static str;
+
+    pub fn process_input(
+        self,
+        input: ConversationProcessorInput,
+    ) -> Option<ConversationProcessorOutput>;
+
+    pub fn process_stream<S>(
+        self,
+        inputs: S,
+    ) -> impl Stream<Item = ConversationProcessorOutput> + Send
+    where
+        S: Stream<Item = ConversationProcessorInput> + Send;
+}
+
+pub enum ConversationProcessorInput {
+    EarlyResponse(EarlyResponseEvent),
+    CommittedTurn(ConversationCommittedTurn),
+}
+
+pub struct ConversationCommittedTurn {
+    pub call_id: String,
+    pub turn_id: Option<String>,
+    pub text: String,
+    pub event: TranscriptEvent,
+}
+
+pub enum ConversationProcessorOutput {
+    EarlyResponse(EarlyResponseIntent),
+    Command(ConversationCommand),
+    Error(String),
 }
 ```
 
-The identity pass-through processor is intentionally small and boring:
+Processor selection lives on `ConversationState` and defaults to `ConversationProcessorKind::Identity` for every call. Operators can set it per call with:
+
+```text
+conversation processor identity [call-id]
+```
+
+`EarlyResponse` output is valid for provisional early-response inputs. `Command` output is valid for committed turns and feeds the normal conversation state machine (`auto`, `manual`, approve/disapprove, barge-in, and playback status). `Error` is conversation-scoped: it records failed state without failing the media path. A processor that has no response for a committed turn should return `ConversationCommand::Noop` or emit no output; the gateway treats no committed-turn output as `Noop`.
+
+The identity/repeat processor is the exemplar implementation of this contract. It has no prefix and no hidden smoke-test content policy:
 
 ```rust
-fn identity_passthrough(event: EarlyResponseEvent) -> Option<EarlyResponseIntent> {
-    match event {
-        EarlyResponseEvent::Started { provisional_turn_id, call_id, utterance_id, generation, text, .. } => {
-            Some(EarlyResponseIntent::Speak {
-                provisional_turn_id,
-                call_id,
-                utterance_id,
-                generation,
-                text,
-                append_or_replace: AppendOrReplace::Replace,
-            })
-        }
-        EarlyResponseEvent::Updated { provisional_turn_id, call_id, utterance_id, generation, text, append_or_replace } => {
-            Some(EarlyResponseIntent::Speak { provisional_turn_id, call_id, utterance_id, generation, text, append_or_replace })
-        }
-        EarlyResponseEvent::Canceled { provisional_turn_id, call_id, utterance_id, generation, reason } => {
-            Some(EarlyResponseIntent::Cancel { provisional_turn_id, call_id, utterance_id, generation, reason })
-        }
-        EarlyResponseEvent::Committed { provisional_turn_id, call_id, generation, turn_id, .. } => {
-            Some(EarlyResponseIntent::Commit { provisional_turn_id, call_id, generation, turn_id })
+impl IdentityRepeatConversationProcessor {
+    fn process_input(self, input: ConversationProcessorInput) -> Option<ConversationProcessorOutput> {
+        match input {
+            ConversationProcessorInput::EarlyResponse(event) => {
+                repeat_early_response(event).map(ConversationProcessorOutput::EarlyResponse)
+            }
+            ConversationProcessorInput::CommittedTurn(turn) => {
+                let text = turn.text.trim().to_string();
+                if text.is_empty() {
+                    Some(ConversationProcessorOutput::Command(ConversationCommand::Noop))
+                } else {
+                    Some(ConversationProcessorOutput::Command(ConversationCommand::Say { text }))
+                }
+            }
         }
     }
 }
 ```
 
-A routing/retrieval/LLM processor uses the same `EarlyResponseIntent` output and the same generation echo requirements. If it is slower or more conservative, it can buffer, revise, or emit no `Speak` intent until `Committed`; no gateway contract changes are required.
+For `EarlyResponseEvent::Started` and `Updated`, identity/repeat emits `EarlyResponseIntent::Speak` with the accepted text from the aggregator. For `Canceled`, it emits `Cancel`; for `Committed`, it emits `Commit`. For `CommittedTurn`, it emits `Say { text }` with the exact trimmed caller text. This makes the smoke test a validation profile over the same processor interface, not a special ASR branch, TTS branch, response prefix, or lifecycle rule.
+
+A routing/retrieval/LLM processor will use the same input and output enums and the same generation echo requirements when added as a new `ConversationProcessorKind` variant. If it is slower or more conservative, it can buffer, revise, or emit no provisional `Speak` intent until `Committed`; no gateway contract changes are required.
 
 #### Rust API Design
 
@@ -1710,7 +1719,7 @@ pub enum EarlyResponseAppendMode {
 }
 ```
 
-`SpeakProvisionally` is the full early-audio path. `PrepareOnly` is an optional conservative mode that starts routing/retrieval/LLM/TTS warmup early while holding outbound audio until commit; it does not replace the full early-audio design. `EndpointCandidateOnly` is the safer start-timing default. `WhileSpeaking` requires explicit opt-in, `CallerSpeechState::Speaking` in `allowed_start_speech_states`, a satisfied boundary gate, and all configured confidence/stability gates present and passing.
+`SpeakProvisionally` is the full early-audio path. `PrepareOnly` is an optional conservative mode that still emits provisional events to processors/protocol adapters but suppresses provisional gateway TTS; committed-turn processing remains responsible for any final audio after endpointing. `EndpointCandidateOnly` is the safer conservative start-timing choice. The current live-test default is `WhileSpeaking`, which requires `CallerSpeechState::Speaking` in `allowed_start_speech_states`, a satisfied boundary gate, and all configured confidence/stability gates present and passing.
 
 Missing safety signals fail conservative. If `min_confidence` is configured and a partial has `confidence=None`, that partial cannot start `SpeakProvisionally`; if `min_stability` is configured and `stability=None`, it also cannot start. `MissingSignalPolicy::Conservative` may still allow preparation without audio, or defer start until `endpoint_candidate` with a strict boundary and the configured signals present. The aggregator must not synthesize confidence or stability when a backend or prior partial did not provide it.
 
@@ -1835,7 +1844,7 @@ allowed_start_speech_states = ["endpoint_candidate"]
 allowed_update_speech_states = ["endpoint_candidate", "finalizing"]
 debounce_ms = 120
 max_updates_per_utterance = 3
-start_timing = "endpoint_candidate_only"
+start_timing = "while_speaking"
 append_mode = "replace_only"
 provisional_max_prebuffer_frames = 1
 ```
@@ -1851,11 +1860,11 @@ early_response.boundary=clause
 early_response.min_confidence=0.70
 early_response.min_stability=0.80
 early_response.missing_signal_policy=conservative
-early_response.allowed_start_speech_states=endpoint_candidate
-early_response.allowed_update_speech_states=endpoint_candidate,finalizing
+early_response.allowed_start_speech_states=speaking,endpoint_candidate
+early_response.allowed_update_speech_states=speaking,endpoint_candidate,finalizing
 early_response.debounce_ms=120
 early_response.max_updates_per_utterance=3
-early_response.start_timing=endpoint_candidate_only
+early_response.start_timing=while_speaking
 early_response.append_mode=replace_only
 early_response.provisional_max_prebuffer_frames=1
 ```
@@ -1941,7 +1950,7 @@ The compatibility check should be conservative and explainable in PLAN. A normal
 
 #### Observability
 
-Implementation should add normalized records for provisional lifecycle and TTS attribution. These are additive to #523:
+Implementation should add normalized records for provisional lifecycle and TTS attribution. The current implementation emits provisional lifecycle tracing and text-call forwarding records, but the normalized records below remain the target profiling surface and are additive to #523:
 
 - `text_call.early_turn.started`
 - `text_call.early_turn.updated`
@@ -1963,7 +1972,7 @@ Required join keys are `gateway_call_id`, `asr_session_id` when available, `proc
 Detailed test cases belong in a future PLAN, but the DESIGN requires coverage of these components:
 
 - `aggregate_early_resp_partials` as a deterministic stream transformer with a fake priority cancel sink.
-- `EarlyResponseProcessor` transfer functions as pluggable stream processors that receive the same event contract regardless of identity pass-through, routing, retrieval, or LLM behavior.
+- `ConversationProcessor` transfer functions as pluggable stream processors that receive the same event contract regardless of identity/repeat, routing, retrieval, or LLM behavior.
 - Off-loop bounded input/output queues, drop-oldest partial coalescing, and non-blocking ASR/media producer behavior under full queues.
 - Policy validation, clamping, config snapshot, replay restore, and `quality status` rendering.
 - Conservative missing-signal gates for no-confidence/no-stability backends.
@@ -2377,7 +2386,7 @@ bins/telnyx-gateway/src/
 - `motlie-driver` command registration and execution
 - optional left REPL pane plus right call roster/detail TUI state, rendering, and command/status routing
 - Unix-domain command socket serving, client session tracking, and command-source mux routing
-- replayable command dump generation and startup `--load` replay
+- replayable command dump generation and startup `--config` load
 - Gateway Control API routing and authentication
 - inbound text-call subscription storage keyed by phone number
 - outbound blocking dial request handling and callback offer setup
@@ -3412,17 +3421,65 @@ This isolates Telnyx transport quirks from the ASR contract.
 
 ### Feeding the Conversation Handler
 
-The gateway should not bake dialog policy into the Telnyx crate. Instead:
+The current gateway-local conversation path has one processor contract and one speech queue contract. The optional early-response stage is an ASR-partial aggregation stage in front of the same processor; it is not a separate response branch and must not contain smoke-test-specific dialog policy. The identity/repeat processor is the exemplar implementation and repeats accepted caller text exactly, without an `I heard:` prefix.
 
-- ASR partials and finals are converted into transcript text events
-- transcript events are delivered to an injected `TranscriptSink`
-- simple sinks log or forward transcripts without TTS
-- a conversation sink forwards selected transcript events to a `ConversationHandler`
-- the handler reads and mutates `ConversationContext`
-- the handler returns provider-neutral conversation commands
-- the gateway maps `ConversationCommand::Say` to TTS and `ConversationCommand::Call` to call-control actions
+End-to-end flow with early response enabled:
 
-This is the cleanest seam for integrating Motlie-specific agent logic later.
+```text
+Telnyx media
+  -> decode / resample / speech gate
+  -> streaming ASR session
+  -> ASR partials
+  -> aggregate_early_resp_partials(policy)
+  -> ConversationProcessorKind::process_stream(EarlyResponse(event))
+  -> EarlyResponseIntent::{StartOrUpdate, Cancel, Commit}
+  -> SpeechQueueRequest(source_label = "early response")
+  -> TTS generation mode: buffered or streaming
+  -> packetized 20 ms outbound media frames
+```
+
+End-to-end flow with early response disabled:
+
+```text
+Telnyx media
+  -> decode / resample / speech gate
+  -> streaming ASR session
+  -> local endpoint / ASR finish / final-settle
+  -> ConversationProcessorKind::process_stream(CommittedTurn(turn))
+  -> ConversationCommand::Say { text }
+  -> SpeechQueueRequest(source_label = "conversation say")
+  -> TTS generation mode: buffered or streaming
+  -> packetized 20 ms outbound media frames
+```
+
+The processor input contract is intentionally two-shaped because provisional ASR hypotheses and committed turns have different safety semantics:
+
+```rust
+pub enum ConversationProcessorInput {
+    EarlyResponse(EarlyResponseEvent),
+    CommittedTurn(ConversationCommittedTurn),
+}
+
+pub enum ConversationProcessorOutput {
+    EarlyResponse(EarlyResponseIntent),
+    Command(ConversationCommand),
+    Error(String),
+}
+
+pub enum ConversationProcessorKind {
+    Identity,
+}
+```
+
+Contract rules:
+
+- `ConversationProcessorKind` is per-call static dispatch. New processors are added as enum variants rather than `Box<dyn ...>` dynamic dispatch.
+- `early_response.enabled=false` removes the partial aggregation stage. The processor then sees only `CommittedTurn` after endpointing/final-settle. It does not see partial text, confidence/stability, provisional turn IDs, or provisional cancel/commit events.
+- `early_response.enabled=true` feeds accepted partials through `aggregate_early_resp_partials` before the processor. Commit/cancel reconciliation remains pipeline-level and processor-agnostic.
+- Buffered and streaming TTS are downstream execution modes selected inside the speech queue from `tts.generation_mode`; they are not separate conversation pipelines.
+- Barge-in and stale-generation cancellation are gateway responsibilities around the processor output. A processor may emit text or intent, but it must not own Telnyx media clear semantics.
+
+The concrete operator/API surface for selecting processors, enabling the aggregator, and tuning ASR/endpoint/TTS/barge-in behavior is documented in [API.md](API.md).
 
 ### Returning TTS Audio
 
@@ -3825,7 +3882,7 @@ Tailscale Funnel is the default documented v1 option because it fits private-hos
 
 Current documented behavior from Tailscale:
 
-- Funnel exposes a local service on a public `https://<node>.<tailnet>.ts.net` URL
+- Funnel exposes a local service on a public `https://<public-host>` URL
 - it requires MagicDNS, HTTPS certificates, and Funnel permission in the tailnet
 - it only supports public HTTPS exposure on ports `443`, `8443`, and `10000`
 
@@ -3833,8 +3890,8 @@ Recommended v1 Funnel workflow:
 
 1. run the gateway locally on the private host
 2. expose it with `tailscale funnel`
-3. use the resulting `https://<node>.<tailnet>.ts.net` URL for Telnyx webhooks
-4. use the matching `wss://<node>.<tailnet>.ts.net/...` URL for Telnyx media streaming
+3. use the resulting `https://<public-host>` URL for Telnyx webhooks
+4. use the matching `wss://<public-host>/...` URL for Telnyx media streaming
 
 ### Option 2: ngrok
 
@@ -3856,37 +3913,31 @@ Recommended fallback ngrok workflow:
 
 ### Gateway Configuration Requirement
 
-The gateway binary should accept a `--listen` flag for the local bind address, a `--load <dump_path>` flag for replaying durable gateway state, a `--tui` flag for the local TUI, and a `--socket <path>` flag for a Unix-domain operator command socket. The external public URLs can be provided either as startup flags or through any configured operator command source after a tunnel starts, and then persisted with `state dump` or `shutdown <dump_path>`.
+The gateway binary should accept `--config <gateway.toml>` for durable state, optional local process overrides such as `--bind`, `--tui`, and `--socket <path>`, and a Unix-domain operator command socket for live control. The external public URLs live in the TOML and can also be changed through any configured operator command source after a tunnel starts, then persisted with `state dump` or `shutdown <dump_path>`.
 
 Example shape:
 
 ```text
 telnyx-gateway \
-  --listen 127.0.0.1:8080 \
-  --media-path /telnyx/media \
-  --webhook-path /telnyx/webhooks \
+  --config ./telnyx-gateway.toml \
   --tui \
-  --socket /tmp/motlie-telnyx-gateway.sock \
-  --load ./telnyx-gateway.state.repl
+  --socket /tmp/motlie-telnyx-gateway.sock
 ```
 
 For headless operation, omit `--tui` and keep `--socket`:
 
 ```text
 telnyx-gateway \
-  --listen 127.0.0.1:8080 \
-  --media-path /telnyx/media \
-  --webhook-path /telnyx/webhooks \
-  --socket /run/motlie/telnyx-gateway.sock \
-  --load ./telnyx-gateway.state.repl
+  --config ./telnyx-gateway.toml \
+  --socket /run/motlie/telnyx-gateway.sock
 ```
 
 Then use either the TUI REPL or a local socket client to send the same command text:
 
 ```text
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
-config set state-path ./telnyx-gateway.state.repl
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
+config set state-path ./telnyx-gateway.toml
 ```
 
 This matters because the process may listen on `127.0.0.1:8080` while Telnyx needs the externally reachable tunnel URL, not the private bind address.
@@ -3898,8 +3949,8 @@ This matters because the process may listen on `127.0.0.1:8080` while Telnyx nee
 3. use the TUI REPL or local command socket to set the public URLs
 4. use the TUI REPL or local command socket to create/select the Telnyx application and bind the phone number
 5. run `inbound enable --manual`, then make or receive calls
-6. exit with `shutdown ./telnyx-gateway.state.repl`
-7. restart later with `telnyx-gateway --load ./telnyx-gateway.state.repl ...`
+6. exit with `shutdown ./telnyx-gateway.toml`
+7. restart later with `telnyx-gateway --config ./telnyx-gateway.toml ...`
 
 ## Getting Started: Local Deployment
 
@@ -3955,9 +4006,9 @@ This returns the application `id`, which is also the `connection_id` used for ou
 With Tailscale Funnel, use your public Funnel hostname:
 
 ```text
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
-telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
+telnyx app webhook set https://<public-host>/telnyx/webhooks
 ```
 
 #### 5. Assign the phone number to the application from an operator command source
@@ -3980,38 +4031,35 @@ The right status area should show the Telnyx API request status and the currentl
 cargo build --release -p telnyx-gateway
 ```
 
-#### 7. Download model artifacts
+#### 7. Preload model artifacts
 
-Download the artifacts for the models you want to run.
+Preload artifacts for the ASR and TTS models before starting `telnyx-gateway`. The gateway is local-only for model loading: it may fail loudly when required artifacts are absent, but it must not download model files at runtime.
 
 Recommended v1 defaults:
 
-- Piper voice model
-- `sherpa-onnx` Zipformer2 streaming model
+- Sherpa ONNX Zipformer streaming ASR artifacts
+- Kokoro-82M or Piper TTS artifacts, including Kokoro incremental files when `tts.generation_mode=streaming`
 
-#### 8. Start the gateway with model paths and listen address
+By convention, preload shared operator artifacts under `~/artifacts/hf-cache`. The gateway defaults to `$HOME/artifacts/hf-cache` unless `--artifact-root <path>` or `MOTLIE_VOICE_ARTIFACT_ROOT` overrides it.
+
+#### 8. Start the gateway with artifact root and listen address
 
 ```bash
 ./target/release/telnyx-gateway \
-  --listen 127.0.0.1:8080 \
-  --webhook-path /telnyx/webhooks \
-  --media-path /telnyx/media \
+  --config ./telnyx-gateway.toml \
   --tui \
   --socket /tmp/motlie-telnyx-gateway.sock \
-  --load ./telnyx-gateway.state.repl \
-  --telnyx-api-key "$TELNYX_API_KEY" \
-  --asr-model sherpa-onnx \
-  --tts-model piper
+  --artifact-root "$HOME/artifacts/hf-cache"
 ```
 
-The exact model configuration flags can evolve, but the binary should always separate:
+The exact operator commands can evolve, but the binary should always separate:
 
 - local listen address
 - externally reachable webhook and media URLs
-- injected ASR/TTS backend choice
+- preloaded model artifact root and injected ASR/TTS backend choice
 - operator input mode: `--tui`, `--socket <path>`, both, or neither when only HTTP subscriber/dial APIs and loaded configuration are desired
 - Telnyx application/number selection, which can be driven from any configured operator command source
-- optional replayable state file loaded with `--load`
+- optional durable state TOML loaded with `--config`
 
 #### 9. Start Tailscale Funnel
 
@@ -4024,9 +4072,9 @@ tailscale funnel 8080
 Use the Funnel hostname assigned to this node:
 
 ```text
-config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
-config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
-telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set webhook-url https://<public-host>/telnyx/webhooks
+config set media-url wss://<public-host>/telnyx/media
+telnyx app webhook set https://<public-host>/telnyx/webhooks
 ```
 
 ### First Call Test

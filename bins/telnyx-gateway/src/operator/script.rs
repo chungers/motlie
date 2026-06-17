@@ -92,7 +92,7 @@ pub fn parse_repl_file_command(line: &str) -> anyhow::Result<Option<PathBuf>> {
     let Some(command) = argv.first() else {
         return Ok(None);
     };
-    if command != "source" && command != "load" {
+    if command != "source" {
         return Ok(None);
     }
     if argv.len() != 2 {
@@ -109,10 +109,11 @@ pub fn expand_user_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
 
-    if raw == "~" {
+    if raw == "~" || raw == "$HOME" {
         return home;
     }
     raw.strip_prefix("~/")
+        .or_else(|| raw.strip_prefix("$HOME/"))
         .map(|suffix| home.join(suffix))
         .unwrap_or_else(|| path.to_path_buf())
 }
@@ -124,18 +125,24 @@ mod tests {
     use crate::operator::state::shared_state;
 
     #[test]
-    fn parse_repl_file_command_accepts_source_and_load() {
+    fn parse_repl_file_command_accepts_source_only() {
         assert_eq!(
             parse_repl_file_command("source ~/telnyx/config.repl").expect("parse source command"),
             Some(PathBuf::from("~/telnyx/config.repl"))
         );
-        assert_eq!(
-            parse_repl_file_command("load /tmp/config.repl").expect("parse load command"),
-            Some(PathBuf::from("/tmp/config.repl"))
-        );
+        assert!(parse_repl_file_command("load /tmp/config.repl")
+            .expect("parse load command")
+            .is_none());
         assert!(parse_repl_file_command("status")
             .expect("parse status command")
             .is_none());
+    }
+
+    #[test]
+    fn expand_user_path_accepts_home_env_prefix() {
+        let expanded = expand_user_path(Path::new("$HOME/artifacts/hf-cache"));
+        assert!(expanded.ends_with("artifacts/hf-cache"));
+        assert!(!expanded.to_string_lossy().contains("$HOME"));
     }
 
     #[tokio::test]

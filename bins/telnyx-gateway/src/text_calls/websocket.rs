@@ -1362,6 +1362,8 @@ async fn queue_append_agent_speech_with_media_wait(
                 latest_turn_finalized_at: turn_finalized_at,
                 turn_id: turn_id.clone(),
                 coalesced_turn_ids: turn_id.iter().cloned().collect(),
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
             },
             initial_chunks.clone(),
@@ -1421,6 +1423,8 @@ async fn queue_agent_speech_with_media_wait(
                 latest_turn_finalized_at: turn_finalized_at,
                 turn_id: turn_id.clone(),
                 coalesced_turn_ids: turn_id.iter().cloned().collect(),
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
             },
         )

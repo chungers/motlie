@@ -6,7 +6,11 @@ use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegis
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
-use crate::conversation::{default_conversation_handler, ConversationRuntime};
+use crate::conversation::{ConversationProcessorKind, ConversationRuntime};
+use crate::early_response::{
+    BoundaryRequirement, EarlyResponseAppendMode, EarlyResponseAudioMode, EarlyResponseStartTiming,
+    MissingSignalPolicy,
+};
 use crate::media::SharedMediaRegistry;
 #[cfg(test)]
 use crate::media::{OutboundMediaCommand, SpeechCancelToken};
@@ -17,7 +21,8 @@ use crate::operator::state::{
     InboundMode, LogLevel, SharedState,
 };
 use crate::quality::{
-    OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, VoiceQualityConfig,
+    OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, TtsGenerationMode,
+    VoiceQualityConfig,
 };
 use crate::speech;
 use crate::text_calls::{SharedTextCallRegistry, TextCallStreamServices};
@@ -44,12 +49,7 @@ impl GatewayContext {
         let echo = Arc::new(EchoAsrFactory);
         let asr = Arc::new(AsrRegistry::new(echo.clone(), echo));
         let tts = unavailable_registry();
-        let conversation = ConversationRuntime::new(
-            telnyx.clone(),
-            tts.clone(),
-            default_conversation_handler(),
-            false,
-        );
+        let conversation = ConversationRuntime::new(telnyx.clone(), tts.clone(), false);
         Self::with_services(
             state,
             telnyx,
@@ -378,6 +378,19 @@ pub enum ConversationModeArg {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConversationProcessorArg {
+    Identity,
+}
+
+impl From<ConversationProcessorArg> for ConversationProcessorKind {
+    fn from(processor: ConversationProcessorArg) -> Self {
+        match processor {
+            ConversationProcessorArg::Identity => Self::Identity,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ConversationSmokeTestArg {
     On,
     Off,
@@ -429,6 +442,11 @@ pub enum ConversationCommand {
     BargeIn {
         #[arg(value_enum)]
         state: Option<ConversationBargeInArg>,
+    },
+    Processor {
+        #[arg(value_enum)]
+        processor: ConversationProcessorArg,
+        call: Option<String>,
     },
     Attach {
         call: Option<String>,
@@ -510,10 +528,6 @@ pub enum LogCommand {
 #[derive(Debug, Subcommand)]
 pub enum QualityCommand {
     Status,
-    #[command(hide = true)]
-    RestoreConfig {
-        encoded: String,
-    },
     Profile {
         profile: QualityProfileArg,
     },
@@ -536,6 +550,10 @@ pub enum QualityCommand {
     Tts {
         #[command(subcommand)]
         command: QualityTtsCommand,
+    },
+    EarlyResponse {
+        #[command(subcommand)]
+        command: QualityEarlyResponseCommand,
     },
     Logging {
         #[command(subcommand)]
@@ -583,6 +601,53 @@ pub enum OnOffArg {
 impl OnOffArg {
     fn enabled(self) -> bool {
         matches!(self, Self::On)
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TtsGenerationModeArg {
+    Buffered,
+    Streaming,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum EarlyResponseStartTimingArg {
+    EndpointCandidateOnly,
+    WhileSpeaking,
+}
+
+impl From<EarlyResponseStartTimingArg> for EarlyResponseStartTiming {
+    fn from(value: EarlyResponseStartTimingArg) -> Self {
+        match value {
+            EarlyResponseStartTimingArg::EndpointCandidateOnly => Self::EndpointCandidateOnly,
+            EarlyResponseStartTimingArg::WhileSpeaking => Self::WhileSpeaking,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum EarlyResponseBoundaryArg {
+    None,
+    Clause,
+    Sentence,
+}
+
+impl From<EarlyResponseBoundaryArg> for BoundaryRequirement {
+    fn from(value: EarlyResponseBoundaryArg) -> Self {
+        match value {
+            EarlyResponseBoundaryArg::None => Self::None,
+            EarlyResponseBoundaryArg::Clause => Self::Clause,
+            EarlyResponseBoundaryArg::Sentence => Self::Sentence,
+        }
+    }
+}
+
+impl From<TtsGenerationModeArg> for TtsGenerationMode {
+    fn from(value: TtsGenerationModeArg) -> Self {
+        match value {
+            TtsGenerationModeArg::Buffered => Self::Buffered,
+            TtsGenerationModeArg::Streaming => Self::Streaming,
+        }
     }
 }
 
@@ -664,10 +729,20 @@ pub enum QualityTextCallCommand {
 #[derive(Debug, Subcommand)]
 pub enum QualityTtsCommand {
     Status,
+    GenerationMode { mode: TtsGenerationModeArg },
     Chunking { state: OnOffArg },
     MaxTextChunkChars { n: usize },
     FirstChunkMaxChars { n: usize },
     PrebufferChunks { n: usize },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QualityEarlyResponseCommand {
+    Status,
+    On,
+    Off,
+    Boundary { boundary: EarlyResponseBoundaryArg },
+    StartTiming { timing: EarlyResponseStartTimingArg },
 }
 
 #[derive(Debug, Subcommand)]
@@ -799,8 +874,8 @@ async fn status(context: &GatewayContext, target: Option<String>) -> DriverResul
             LiveAsrBackend::default().model_label()
         ),
         format!(
-            "conversation-handler: {}",
-            context.conversation.handler_label()
+            "conversation-processor-state: {}",
+            context.conversation.processor_label()
         ),
         format!(
             "conversation-tts: {} ({}) {}",
@@ -969,7 +1044,7 @@ async fn state_command(
     match command {
         StateCommand::Dump { path } => {
             let guard = context.state.read().await;
-            write_state_dump(&path, &guard).map_err(driver_anyhow)?;
+            let path = write_state_dump(&path, &guard).map_err(driver_anyhow)?;
             Ok(CommandOutput::line(format!(
                 "wrote state dump {}",
                 path.display()
@@ -1270,15 +1345,29 @@ async fn tts_command(
                 .into_iter()
                 .map(|backend| {
                     let factory = context.tts.factory(backend);
+                    let incremental = if factory.supports_incremental() {
+                        "incremental=yes"
+                    } else {
+                        "incremental=no"
+                    };
                     if let Some(reason) = factory.unavailable_reason() {
                         format!(
-                            "{} {} unavailable: {}",
+                            "{} {} unavailable incremental={}: {}",
                             backend.label(),
                             backend.model_label(),
+                            if factory.supports_incremental() {
+                                "yes"
+                            } else {
+                                "no"
+                            },
                             reason
                         )
                     } else {
-                        format!("{} {} available", backend.label(), backend.model_label())
+                        format!(
+                            "{} {} available {incremental}",
+                            backend.label(),
+                            backend.model_label()
+                        )
                     }
                 })
                 .collect(),
@@ -1307,6 +1396,8 @@ async fn tts_command(
             let backend = context.session.next_tts_backend;
             let conversation_backend = guard.conversation_tts_backend;
             let factory = context.tts.factory(backend);
+            let conversation_factory = context.tts.factory(conversation_backend);
+            let generation_mode = guard.quality.config.tts.generation_mode;
             let available = LiveTtsBackend::available()
                 .into_iter()
                 .filter(|backend| context.tts.factory(*backend).is_available())
@@ -1319,6 +1410,43 @@ async fn tts_command(
                 format!("default_model={}", LiveTtsBackend::default().model_label()),
                 format!("conversation={}", conversation_backend.label()),
                 format!("conversation_model={}", conversation_backend.model_label()),
+                format!("generation_mode={}", generation_mode.label()),
+                format!(
+                    "next_incremental={}",
+                    if factory.supports_incremental() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ),
+                format!(
+                    "next_streaming_compatible={}",
+                    if generation_mode != TtsGenerationMode::Streaming
+                        || factory.supports_incremental()
+                    {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ),
+                format!(
+                    "conversation_incremental={}",
+                    if conversation_factory.supports_incremental() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ),
+                format!(
+                    "conversation_streaming_compatible={}",
+                    if generation_mode != TtsGenerationMode::Streaming
+                        || conversation_factory.supports_incremental()
+                    {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ),
                 format!(
                     "available={}",
                     if available.is_empty() {
@@ -1347,8 +1475,22 @@ async fn tts_command(
             })
         }
         TtsCommand::Use { backend } => {
-            context.session.next_tts_backend = backend;
             let factory = context.tts.factory(backend);
+            {
+                let guard = context.state.read().await;
+                if guard.quality.config.tts.generation_mode == TtsGenerationMode::Streaming
+                    && !factory.supports_incremental()
+                {
+                    return Err(DriverError::invalid_argument(
+                        "backend",
+                        format!(
+                            "TTS backend {} does not support streaming generation; run `quality tts generation-mode buffered` first or select an incremental-capable backend",
+                            backend.label()
+                        ),
+                    ));
+                }
+            }
+            context.session.next_tts_backend = backend;
             let mut guard = context.state.write().await;
             guard.conversation_tts_backend = backend;
             guard.log(
@@ -1445,8 +1587,20 @@ async fn warm_asr_model(context: &mut GatewayContext) -> String {
 
 async fn warm_tts_model(context: &mut GatewayContext) -> String {
     let backend = context.session.next_tts_backend;
+    let generation_mode = context
+        .state
+        .read()
+        .await
+        .quality
+        .config
+        .tts
+        .generation_mode;
     let started = Instant::now();
-    match context.tts.warm(backend).await {
+    let warm_result = match generation_mode {
+        TtsGenerationMode::Buffered => context.tts.warm(backend).await,
+        TtsGenerationMode::Streaming => context.tts.warm_streaming(backend).await,
+    };
+    match warm_result {
         Ok(()) => {
             let elapsed_ms = elapsed_ms(started);
             let mut guard = context.state.write().await;
@@ -1459,15 +1613,17 @@ async fn warm_tts_model(context: &mut GatewayContext) -> String {
             guard.log(
                 LogLevel::Info,
                 format!(
-                    "warmed TTS backend {} ({}) in {elapsed_ms}ms",
+                    "warmed TTS backend {} ({}) mode={} in {elapsed_ms}ms",
                     backend.label(),
-                    backend.model_label()
+                    backend.model_label(),
+                    generation_mode.label()
                 ),
             );
             format!(
-                "warm tts={} model={} status=ready elapsed_ms={elapsed_ms}",
+                "warm tts={} model={} mode={} status=ready elapsed_ms={elapsed_ms}",
                 backend.label(),
-                backend.model_label()
+                backend.model_label(),
+                generation_mode.label()
             )
         }
         Err(error) => {
@@ -1475,15 +1631,17 @@ async fn warm_tts_model(context: &mut GatewayContext) -> String {
             context.state.write().await.log(
                 LogLevel::Warn,
                 format!(
-                    "failed to warm TTS backend {} ({}): {message}",
+                    "failed to warm TTS backend {} ({}) mode={}: {message}",
                     backend.label(),
-                    backend.model_label()
+                    backend.model_label(),
+                    generation_mode.label()
                 ),
             );
             format!(
-                "warm tts={} model={} status=failed error={message}",
+                "warm tts={} model={} mode={} status=failed error={message}",
                 backend.label(),
-                backend.model_label()
+                backend.model_label(),
+                generation_mode.label()
             )
         }
     }
@@ -1540,7 +1698,7 @@ async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<Comm
         lines: vec![
             format!("dial requested for {gateway_call_id}"),
             format!("selected call: {gateway_call_id}"),
-            "conversation attached in auto mode; smoke-test echo replies require:".to_string(),
+            "conversation attached in auto mode; smoke-test identity/repeat replies require:".to_string(),
             "  conversation smoke-test on".to_string(),
             format!("manual TTS smoke test: speak {gateway_call_id} <text to say>"),
             "use `status` or `call show` to inspect TTS playback; use `speak cancel` to clear active speech".to_string(),
@@ -1930,7 +2088,7 @@ async fn conversation_command(
             Ok(CommandOutput {
                 lines: conversation_status_lines(
                     call,
-                    context.conversation.handler_label(),
+                    context.conversation.processor_label(),
                     quality_barge_in_label(&guard),
                 ),
                 effects: Vec::new(),
@@ -1938,16 +2096,18 @@ async fn conversation_command(
         }
         ConversationCommand::SmokeTest { state } => {
             let enabled = state.enabled();
-            context.conversation.set_smoke_test_enabled(enabled);
+            context.conversation.set_processor_enabled(enabled);
             let label = if enabled { "on" } else { "off" };
             if enabled {
                 set_barge_in_enabled(context, false, "conversation smoke-test").await?;
             }
-            context
-                .state
-                .write()
-                .await
-                .log(LogLevel::Info, format!("conversation smoke-test {label}"));
+            {
+                let mut guard = context.state.write().await;
+                guard.config.conversation_enabled = enabled;
+                guard.config.conversation_final_coalescing_enabled =
+                    context.conversation.final_coalescing_enabled();
+                guard.log(LogLevel::Info, format!("conversation smoke-test {label}"));
+            }
             if enabled {
                 Ok(CommandOutput {
                     lines: vec![
@@ -1970,6 +2130,27 @@ async fn conversation_command(
             Ok(CommandOutput::line(format!(
                 "conversation barge-in: {}",
                 quality_barge_in_label(&guard)
+            )))
+        }
+        ConversationCommand::Processor { processor, call } => {
+            let processor = ConversationProcessorKind::from(processor);
+            let mut guard = context.state.write().await;
+            let id = resolve_call_id(
+                &guard,
+                call.as_deref(),
+                context.session.selected_call.as_deref(),
+            )?;
+            if !guard.calls.contains_key(&id) {
+                return Err(DriverError::NotFound {
+                    kind: "call",
+                    name: id,
+                });
+            }
+            guard.set_conversation_processor(&id, processor);
+            context.session.selected_call = Some(id.clone());
+            Ok(CommandOutput::line(format!(
+                "conversation processor for {id}: {}",
+                processor.label()
             )))
         }
         ConversationCommand::Attach { call } => {
@@ -2162,7 +2343,7 @@ async fn approve_conversation_proposal(
 
 fn conversation_status_lines(
     call: &crate::operator::state::CallSession,
-    handler_label: &str,
+    processor_label: &str,
     barge_in_label: &str,
 ) -> Vec<String> {
     let conversation = &call.conversation;
@@ -2171,7 +2352,8 @@ fn conversation_status_lines(
         format!("conversation: {}", conversation.status_label()),
         format!("attached: {}", conversation.attached),
         format!("mode: {}", conversation.mode.label()),
-        format!("handler: {handler_label}"),
+        format!("processor: {}", conversation.processor.label()),
+        format!("processor_state: {processor_label}"),
         format!("barge_in: {barge_in_label}"),
         format!("status: {}", conversation.status.label()),
         format!(
@@ -2199,9 +2381,10 @@ fn conversation_status_lines(
 fn call_conversation_status(call: &crate::operator::state::CallSession) -> String {
     let conversation = &call.conversation;
     let mut status = format!(
-        "{} mode={} attached={}",
+        "{} mode={} processor={} attached={}",
         conversation.status_label(),
         conversation.mode.label(),
+        conversation.processor.label(),
         conversation.attached
     );
     if let Some(playback) = &conversation.last_playback_id {
@@ -2343,7 +2526,6 @@ async fn quality_command(
 ) -> DriverResult<CommandOutput> {
     match command {
         QualityCommand::Status => quality_status(context).await,
-        QualityCommand::RestoreConfig { encoded } => restore_quality_config(context, encoded).await,
         QualityCommand::Profile { profile } => {
             mutate_quality_config(context, |config| Ok(config.set_profile(profile.into()))).await
         }
@@ -2352,6 +2534,9 @@ async fn quality_command(
         QualityCommand::Asr { command } => quality_asr_command(context, command).await,
         QualityCommand::TextCall { command } => quality_text_call_command(context, command).await,
         QualityCommand::Tts { command } => quality_tts_command(context, command).await,
+        QualityCommand::EarlyResponse { command } => {
+            quality_early_response_command(context, command).await
+        }
         QualityCommand::Logging { command } => quality_logging_command(context, command).await,
         QualityCommand::Judge { command } => quality_judge_command(context, command).await,
         QualityCommand::BargeIn { command } => quality_barge_in_command(context, command).await,
@@ -2411,6 +2596,10 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             quality.config.text_call.max_active_turns
         ),
         format!(
+            "tts.generation_mode={}",
+            quality.config.tts.generation_mode.label()
+        ),
+        format!(
             "tts.chunking_enabled={}",
             quality.config.tts.chunking_enabled
         ),
@@ -2425,6 +2614,10 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
         format!(
             "tts.prebuffer_chunks={}",
             quality.config.tts.prebuffer_chunks
+        ),
+        format!(
+            "early_response.enabled={}",
+            quality.config.early_response.enabled
         ),
         format!(
             "barge_in.onset_during_playback={}",
@@ -2649,16 +2842,57 @@ async fn quality_tts_command(
         QualityTtsCommand::Status => {
             let guard = context.state.read().await;
             let tts = &guard.quality.config.tts;
+            let backend = guard.conversation_tts_backend;
+            let factory = context.tts.factory(backend);
             Ok(CommandOutput::text(format!(
-                "chunking_enabled={}
+                "generation_mode={}
+chunking_enabled={}
 max_text_chunk_chars={}
 first_chunk_max_chars={}
-prebuffer_chunks={}",
+prebuffer_chunks={}
+conversation_backend={}
+conversation_incremental={}
+streaming_compatible={}",
+                tts.generation_mode.label(),
                 tts.chunking_enabled,
                 tts.max_text_chunk_chars,
                 tts.first_chunk_max_chars,
-                tts.prebuffer_chunks
+                tts.prebuffer_chunks,
+                backend.label(),
+                if factory.supports_incremental() {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if tts.generation_mode != TtsGenerationMode::Streaming
+                    || factory.supports_incremental()
+                {
+                    "yes"
+                } else {
+                    "no"
+                }
             )))
+        }
+        QualityTtsCommand::GenerationMode { mode } => {
+            let next_mode = TtsGenerationMode::from(mode);
+            if next_mode == TtsGenerationMode::Streaming {
+                let guard = context.state.read().await;
+                let backend = guard.conversation_tts_backend;
+                let factory = context.tts.factory(backend);
+                if !factory.supports_incremental() {
+                    return Err(DriverError::invalid_argument(
+                        "mode",
+                        format!(
+                            "conversation TTS backend {} does not support streaming generation; run `tts use` with an incremental-capable backend first",
+                            backend.label()
+                        ),
+                    ));
+                }
+            }
+            mutate_quality_config(context, move |config| {
+                Ok(config.set_tts_generation_mode(next_mode))
+            })
+            .await
         }
         QualityTtsCommand::Chunking { state } => {
             mutate_quality_config(context, |config| {
@@ -2679,6 +2913,100 @@ prebuffer_chunks={}",
         }
         QualityTtsCommand::PrebufferChunks { n } => {
             mutate_quality_config(context, |config| Ok(config.set_tts_prebuffer_chunks(n))).await
+        }
+    }
+}
+
+fn early_response_audio_mode_label(value: EarlyResponseAudioMode) -> &'static str {
+    match value {
+        EarlyResponseAudioMode::SpeakProvisionally => "speak_provisionally",
+        EarlyResponseAudioMode::PrepareOnly => "prepare_only",
+    }
+}
+
+fn early_response_boundary_label(value: BoundaryRequirement) -> &'static str {
+    match value {
+        BoundaryRequirement::None => "none",
+        BoundaryRequirement::Clause => "clause",
+        BoundaryRequirement::Sentence => "sentence",
+    }
+}
+
+fn early_response_missing_signal_label(value: MissingSignalPolicy) -> &'static str {
+    match value {
+        MissingSignalPolicy::Conservative => "conservative",
+    }
+}
+
+fn early_response_start_timing_label(value: EarlyResponseStartTiming) -> &'static str {
+    match value {
+        EarlyResponseStartTiming::EndpointCandidateOnly => "endpoint_candidate_only",
+        EarlyResponseStartTiming::WhileSpeaking => "while_speaking",
+    }
+}
+
+fn early_response_append_mode_label(value: EarlyResponseAppendMode) -> &'static str {
+    match value {
+        EarlyResponseAppendMode::ReplaceOnly => "replace_only",
+        EarlyResponseAppendMode::PrefixMonotonicBackend => "prefix_monotonic_backend",
+    }
+}
+
+fn optional_score_label(value: Option<f32>) -> String {
+    value
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "none".to_string())
+}
+
+async fn quality_early_response_command(
+    context: &mut GatewayContext,
+    command: QualityEarlyResponseCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        QualityEarlyResponseCommand::Status => {
+            let guard = context.state.read().await;
+            let early = &guard.quality.config.early_response;
+            Ok(CommandOutput::text(format!(
+                "enabled={}\naudio_mode={}\nboundary={}\nmin_text_chars={}\nmin_text_tokens={}\nmin_confidence={}\nmin_stability={}\nmissing_signal_policy={}\ndebounce_ms={}\nmax_updates_per_utterance={}\nstart_timing={}\nappend_mode={}\nprovisional_max_prebuffer_frames={}",
+                early.enabled,
+                early_response_audio_mode_label(early.audio_mode),
+                early_response_boundary_label(early.boundary),
+                early.min_text_chars,
+                early.min_text_tokens,
+                optional_score_label(early.min_confidence),
+                optional_score_label(early.min_stability),
+                early_response_missing_signal_label(early.missing_signal_policy),
+                early.debounce_ms,
+                early.max_updates_per_utterance,
+                early_response_start_timing_label(early.start_timing),
+                early_response_append_mode_label(early.append_mode),
+                early.provisional_max_prebuffer_frames
+            )))
+        }
+        QualityEarlyResponseCommand::On => {
+            mutate_quality_config(
+                context,
+                |config| Ok(config.set_early_response_enabled(true)),
+            )
+            .await
+        }
+        QualityEarlyResponseCommand::Off => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_early_response_enabled(false))
+            })
+            .await
+        }
+        QualityEarlyResponseCommand::Boundary { boundary } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_early_response_boundary(boundary.into()))
+            })
+            .await
+        }
+        QualityEarlyResponseCommand::StartTiming { timing } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_early_response_start_timing(timing.into()))
+            })
+            .await
         }
     }
 }
@@ -2708,6 +3036,7 @@ async fn quality_logging_command(
             )))
         }
         QualityLoggingCommand::On { path } => {
+            let path = crate::operator::script::expand_user_path(&path);
             let capacity = context
                 .state
                 .read()
@@ -2956,28 +3285,6 @@ long_longest_token_run={}",
     }
 }
 
-async fn restore_quality_config(
-    context: &mut GatewayContext,
-    encoded: String,
-) -> DriverResult<CommandOutput> {
-    let config = VoiceQualityConfig::from_replay_hex(&encoded)
-        .map_err(|error| DriverError::invalid_argument("encoded", format!("{error:#}")))?;
-    context
-        .conversation
-        .set_barge_in_enabled(config.barge_in.enabled);
-    let mut guard = context.state.write().await;
-    guard.set_quality_config(config);
-    if !guard.quality.config.logging.enabled {
-        guard.set_quality_event_sink(QualityEventSink::disabled(), None);
-    }
-    emit_quality_snapshots_for_active_calls(&mut guard, "restore_config", "restored", None);
-    guard.log(LogLevel::Info, "quality config restored");
-    Ok(CommandOutput::line(format!(
-        "quality restored config_id={}",
-        guard.quality.config_id
-    )))
-}
-
 async fn set_barge_in_enabled(
     context: &mut GatewayContext,
     enabled: bool,
@@ -2987,11 +3294,11 @@ async fn set_barge_in_enabled(
         mutate_quality_config(context, |config| Ok(config.set_barge_in_enabled(enabled))).await?;
     context.conversation.set_barge_in_enabled(enabled);
     let label = if enabled { "on" } else { "off" };
-    context
-        .state
-        .write()
-        .await
-        .log(LogLevel::Info, format!("{source} barge-in {label}"));
+    {
+        let mut guard = context.state.write().await;
+        guard.config.conversation_barge_in_enabled = enabled;
+        guard.log(LogLevel::Info, format!("{source} barge-in {label}"));
+    }
     Ok(output)
 }
 
@@ -3007,6 +3314,7 @@ async fn mutate_quality_config(
     context
         .conversation
         .set_barge_in_enabled(guard.quality.config.barge_in.enabled);
+    guard.config.conversation_barge_in_enabled = guard.quality.config.barge_in.enabled;
     emit_quality_snapshots_for_active_calls(
         &mut guard,
         "live_change",
@@ -3195,12 +3503,12 @@ fn gateway_root_help() -> String {
         "Run `help conversation` for M3 call flows and `help socket` for agent protocol details.",
         "",
         "Core:",
-        "  status                         Show listener, Telnyx, ASR, media, conversation handler, and calls",
+        "  status                         Show listener, Telnyx, ASR, media, conversation processor, and calls",
         "  listener status                Show the local HTTP/WebSocket bind address",
         "  config show                    Show replayable gateway config values",
         "  config set <key> <value>       Set webhook-url, media-url, codec, capture dir, etc.",
-        "  load <path>                    Replay a .repl command file; comments and blanks are ignored",
-        "  source <path>                  Alias for load",
+        "  state dump <path>              Export durable gateway config plus full resolved quality config",
+        "  source <path>                  Replay a .repl command file in this TUI/socket source",
         "  quit [dump_path]               Optionally dump replay commands, then stop the gateway",
         "",
         "Telnyx setup:",
@@ -3235,9 +3543,10 @@ fn gateway_root_help() -> String {
         "  dial <+e164> [--from +e164]    Place an outbound call; auto-attach conversation",
         "  speak [call-id] <text...>      Queue debug TTS; disabled while a text-call stream is attached",
         "  speak cancel [call-id]         Clear active TTS; allowed as an emergency control",
-        "  conversation status [call-id]  Show attachment, mode, handler, and latest turns",
-        "  conversation smoke-test on|off Enable or disable test-only echo replies",
+        "  conversation status [call-id]  Show attachment, mode, processor, and latest turns",
+        "  conversation smoke-test on|off Enable or disable test-only identity/repeat replies",
         "  conversation barge-in on|off|status Enable or disable transcript-triggered TTS clear",
+        "  conversation processor identity [call-id] Set per-call conversation processor",
         "  conversation disapprove [call-id] Stop TTS and detach conversation",
         "  reject [call-id]",
         "  hangup [call-id]",
@@ -3248,7 +3557,7 @@ fn gateway_root_help() -> String {
         "  quality endpoint trailing-silence-ms <ms>",
         "",
         "Testing:",
-        "  conversation smoke-test on    Enable test-only echo reply handler for M3 smoke tests",
+        "  conversation smoke-test on    Enable test-only identity/repeat processor for M3 smoke tests",
         "  test dial-transcribe <+e164> [--from +e164]",
         "",
         "Helpful topics:",
@@ -3289,10 +3598,14 @@ fn quality_help() -> String {
         "quality text-call latest-response-wins on|off  bool default=true applies=new_turn",
         "quality text-call callback-timeout-ms <ms>     range=100..60000 default=5000ms applies=new_turn",
         "quality tts status",
+        "quality tts generation-mode buffered|streaming default=buffered applies=new_playback_request",
         "quality tts chunking on|off                    bool default=true applies=new_playback_request",
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
+        "quality early-response status|on|off",
+        "quality early-response boundary <none|clause|sentence> default=clause applies=new_call",
+        "quality early-response start-timing <endpoint-candidate-only|while-speaking>",
         "quality logging on <path>",
         "quality logging off",
         "quality logging include-transcript-text on|off bool default=false applies=immediate sensitive_opt_in",
@@ -3315,6 +3628,7 @@ fn quality_help() -> String {
         "",
         "M6 quality commands use the existing line-oriented operator dispatcher.",
         "Transcript text remains disabled unless explicitly enabled.",
+        "Use `state dump <path>` to export readable gateway TOML with full voice_quality config.",
         "Operator TUI Up/Down recalls submitted commands through motlie-driver HistoryBuffer.",
     ]
     .join("\n")
@@ -3335,7 +3649,7 @@ fn status_help() -> String {
         "  media codec/sample rate",
         "  capture directory",
         "  TTS backend",
-        "  conversation handler mode",
+        "  conversation processor state",
         "  call count",
         "",
         "Example:",
@@ -3428,11 +3742,13 @@ fn state_help() -> String {
     [
         "state dump <path>",
         "",
-        "Write replayable commands for the current gateway configuration.",
-        "Use `load <path>` or start with `--load <path>` to rehydrate a later session.",
+        "Write readable gateway state TOML for durable startup configuration.",
+        "The dump includes selected durable Telnyx/media/TTS/inbound settings and full",
+        "resolved [voice_quality.*] config. It excludes transient call state.",
+        "Restart with `telnyx-gateway --config <path>` to rehydrate a later session.",
         "",
         "Example:",
-        "  state dump ~/telnyx-test/config.repl",
+        "  state dump ~/telnyx-test/gateway.toml",
     ]
     .join("\n")
 }
@@ -3449,21 +3765,19 @@ fn quit_help() -> String {
         "",
         "Examples:",
         "  quit",
-        "  quit ~/telnyx-test/config.repl",
+        "  quit ~/telnyx-test/gateway.toml",
     ]
     .join("\n")
 }
 
 fn load_help() -> String {
     [
-        "load <path>",
         "source <path>",
         "",
         "Replay commands from a .repl file in the current TUI or socket source.",
         "Blank lines and lines beginning with # are ignored. `~` and `~/...` are expanded.",
         "",
         "Examples:",
-        "  load ~/telnyx-test/config.repl",
         "  source /tmp/telnyx.repl",
     ]
     .join("\n")
@@ -3592,22 +3906,22 @@ fn conversation_help() -> String {
     [
         "conversation commands",
         "",
-        "Attach or detach the selected call from the gateway-local conversation handler.",
+        "Attach or detach the selected call from the gateway-local conversation processor.",
         "The TUI and command socket share this command path.",
         "",
         "Default live behavior:",
         "  answer auto-attaches inbound calls in auto mode.",
         "  dial auto-attaches outbound calls in auto mode.",
-        "  The built-in handler is disabled by default; attached calls transcribe",
+        "  The built-in identity/repeat processor is disabled by default; attached calls transcribe",
         "  and record user turns without speaking.",
-        "  Use `conversation smoke-test on` or startup `--conversation-smoke-test`",
-        "  only when intentionally testing the echo/repeat TTS loop.",
+        "  Use `conversation smoke-test on` only when intentionally testing the echo/repeat TTS loop.",
         "",
         "Usage:",
         "  conversation help",
         "  conversation status [call-id]",
         "  conversation smoke-test <on|off>",
         "  conversation barge-in [on|off|status]",
+        "  conversation processor identity [call-id]",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
         "  conversation disapprove [call-id]",
@@ -3674,8 +3988,8 @@ fn call_control_help() -> String {
         "",
         "Control a call. If call-id is omitted, the command uses this source's selected call",
         "or the single waiting inbound call when that is unambiguous.",
-        "Answering attaches conversation in auto mode; the handler stays disabled unless",
-        "`conversation smoke-test on` or startup `--conversation-smoke-test` is used.",
+        "Answering attaches conversation in auto mode; the processor stays disabled unless",
+        "`conversation smoke-test on` is used.",
         "",
         "Examples:",
         "  answer",
@@ -3695,12 +4009,12 @@ fn outbound_help() -> String {
         "",
         "Place an outbound call over the existing bidirectional Telnyx media WebSocket.",
         "`dial` selects the new call and auto-attaches conversation in auto mode. The",
-        "built-in conversation handler remains disabled by default, so normal live calls",
-        "transcribe without echo replies. `speak` is manual, non-blocking, and cancellable;",
+        "built-in conversation processor remains disabled by default, so normal live calls",
+        "transcribe without automatic replies. `speak` is manual, non-blocking, and cancellable;",
         "`speak cancel` sends Telnyx clear and drops local queued outbound audio.",
         "",
         "Conversation smoke test:",
-        "  conversation smoke-test on enables the test-only `I heard: ...` reply loop.",
+        "  conversation smoke-test on enables the test-only identity/repeat reply loop.",
         "  conversation smoke-test off returns attached calls to transcription-only behavior.",
         "",
         "Prerequisites:",
@@ -3777,7 +4091,6 @@ fn socket_help() -> String {
         "Start with:",
         "  telnyx-gateway --socket /tmp/telnyx-gateway.sock",
         "  telnyx-gateway --tui --socket /tmp/telnyx-gateway.sock",
-        "  telnyx-gateway --conversation-smoke-test --socket /tmp/telnyx-gateway.sock",
         "",
         "Protocol:",
         "  Send one command line terminated by newline.",
@@ -3829,6 +4142,7 @@ fn socket_help() -> String {
         "    conversation attach|detach [call-id]",
         "    conversation smoke-test on|off",
         "    conversation barge-in [on|off|status]",
+        "    conversation processor identity [call-id]",
         "    conversation approve [call-id]",
         "    conversation disapprove [call-id]",
         "    hangup [call-id]",
@@ -3838,18 +4152,23 @@ fn socket_help() -> String {
         "  `tts use` changes the source's next manual speak backend and the gateway-wide",
         "  conversation reply backend, because media-triggered turns are not associated",
         "  with one TUI/socket command source.",
-        "  The smoke-test handler mode and barge-in mode are also gateway-wide.",
+        "  The smoke-test processor mode and barge-in mode are also gateway-wide.",
     ]
     .join("\n")
 }
 
 fn expand_user_path(value: &str) -> PathBuf {
-    if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return PathBuf::from(value);
+    };
+    if value == "~" || value == "$HOME" {
+        return home;
     }
-    PathBuf::from(value)
+    value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("$HOME/"))
+        .map(|suffix| home.join(suffix))
+        .unwrap_or_else(|| PathBuf::from(value))
 }
 
 #[cfg(test)]
@@ -3867,7 +4186,11 @@ mod tests {
     use crate::operator::state::{
         shared_state, CallStatus, GatewayState, MediaMetadata, TelnyxIds, TtsPlaybackStatus,
     };
-    use crate::tts::{StaticTtsFactory, TtsRegistry, KOKORO_SAMPLE_RATE_HZ};
+    use crate::tts::{
+        IncrementalTtsSummary, OutboundIncrementalTtsStream, OutboundTtsFactory, StaticTtsFactory,
+        TtsAudio, TtsRegistry, KOKORO_SAMPLE_RATE_HZ,
+    };
+    use motlie_model::typed::IncrementalSpeechCancelToken;
     use motlie_model::TranscriptionUpdate;
     use motlie_voice::app::TranscriptEvent;
 
@@ -3966,12 +4289,12 @@ mod tests {
         let rendered = output.lines.join("\n");
 
         assert!(rendered.contains("TUI shell and each agent socket connection"));
-        assert!(rendered.contains("load <path>"));
+        assert!(rendered.contains("source <path>"));
         assert!(rendered.contains("quit [dump_path]"));
         assert!(rendered.contains("tts list"));
         assert!(rendered.contains("tts use kokoro-82m|piper"));
         assert!(rendered.contains("conversation status [call-id]"));
-        assert!(rendered.contains("test-only echo reply handler"));
+        assert!(rendered.contains("test-only identity/repeat processor"));
         assert!(rendered.contains("help socket"));
     }
 
@@ -4011,7 +4334,9 @@ mod tests {
         assert!(outbound.contains("conversation smoke-test on"));
         assert!(socket.contains("Receive one JSON object"));
         assert!(socket.contains("Agent workflows"));
-        assert!(socket.contains("smoke-test handler mode and barge-in mode are also gateway-wide"));
+        assert!(
+            socket.contains("smoke-test processor mode and barge-in mode are also gateway-wide")
+        );
         assert!(conversation.contains("Default live behavior"));
         assert!(conversation_alias.contains("Default live behavior"));
         assert!(conversation.contains("Normal inbound TUI/socket flow"));
@@ -4031,8 +4356,8 @@ mod tests {
         assert_eq!(
             output.lines,
             vec![
-                "kokoro-82m kokoro/kokoro_82m available",
-                "piper piper/en_us_ljspeech_medium available",
+                "kokoro-82m kokoro/kokoro_82m available incremental=no",
+                "piper piper/en_us_ljspeech_medium available incremental=no",
             ]
         );
     }
@@ -4135,7 +4460,7 @@ mod tests {
         engine
             .run_line("conversation smoke-test on")
             .await
-            .expect("enable smoke handler");
+            .expect("enable smoke processor");
         engine
             .run_line(&format!("call use {call_id}"))
             .await
@@ -4183,8 +4508,9 @@ mod tests {
         assert_eq!(output.lines.len(), 2);
         assert!(output.lines[0]
             .starts_with("warm asr=kroko-2025 model=sherpa-zipformer-en-kroko-2025-08-06 status=ready elapsed_ms="));
-        assert!(output.lines[1]
-            .starts_with("warm tts=kokoro-82m model=kokoro/kokoro_82m status=ready elapsed_ms="));
+        assert!(output.lines[1].starts_with(
+            "warm tts=kokoro-82m model=kokoro/kokoro_82m mode=buffered status=ready elapsed_ms="
+        ));
         let guard = state.read().await;
         assert!(guard
             .model_warmups
@@ -4466,11 +4792,8 @@ mod tests {
             .expect("dial should create dry-run outbound call");
 
         assert!(output.lines[0].starts_with("dial requested for gwc_"));
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line
-                == "conversation attached in auto mode; smoke-test echo replies require:"));
+        assert!(output.lines.iter().any(|line| line
+            == "conversation attached in auto mode; smoke-test identity/repeat replies require:"));
         assert!(output
             .lines
             .iter()
@@ -4718,7 +5041,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_smoke_test_command_toggles_echo_handler() {
+    async fn conversation_processor_command_sets_per_call_processor_without_enabling_replies() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let output = engine
+            .run_line("conversation processor identity")
+            .await
+            .expect("set processor");
+
+        assert_eq!(
+            output.lines,
+            vec![format!("conversation processor for {call_id}: identity")]
+        );
+        let status = engine
+            .run_line("conversation status")
+            .await
+            .expect("conversation status");
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "processor: identity"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "processor_state: disabled"));
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&call_id).expect("call exists");
+        assert_eq!(
+            call.conversation.processor,
+            ConversationProcessorKind::Identity
+        );
+        assert!(!call.conversation.attached);
+    }
+
+    #[tokio::test]
+    async fn conversation_smoke_test_command_toggles_identity_repeat_processor() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
         let context = GatewayContext::new(state.clone(), telnyx);
@@ -4728,7 +5097,7 @@ mod tests {
         assert!(status
             .lines
             .iter()
-            .any(|line| line == "conversation-handler: disabled"));
+            .any(|line| line == "conversation-processor-state: disabled"));
 
         let enabled = engine
             .run_line("conversation smoke-test on")
@@ -4738,7 +5107,8 @@ mod tests {
             enabled.lines,
             vec!["conversation smoke-test: on", "conversation barge-in: off"]
         );
-        assert!(engine.context().conversation.smoke_test_enabled());
+        assert!(engine.context().conversation.processor_enabled());
+        assert!(!engine.context().conversation.final_coalescing_enabled());
         assert!(!engine.context().conversation.barge_in_enabled());
         assert!(!state.read().await.quality.config.barge_in.enabled);
 
@@ -4747,7 +5117,7 @@ mod tests {
             .await
             .expect("disable smoke test");
         assert_eq!(disabled.lines, vec!["conversation smoke-test: off"]);
-        assert!(!engine.context().conversation.smoke_test_enabled());
+        assert!(!engine.context().conversation.processor_enabled());
     }
 
     #[tokio::test]
@@ -5113,6 +5483,10 @@ mod tests {
             .lines
             .iter()
             .any(|line| line == "echo_suppression.tail_window_ms=2000"));
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "early_response.enabled=false"));
     }
 
     #[tokio::test]
@@ -5242,8 +5616,20 @@ mod tests {
     async fn quality_tts_commands_update_live_config_knobs() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.example.test", None, true);
-        let context = GatewayContext::new(state.clone(), telnyx);
+        let context = context_with_incremental_static_tts(
+            state.clone(),
+            telnyx,
+            SharedMediaRegistry::default(),
+        );
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let mode_output = engine
+            .run_line("quality tts generation-mode streaming")
+            .await
+            .expect("set TTS generation mode");
+        assert!(mode_output.lines[0].contains("key=tts.generation_mode"));
+        assert!(mode_output.lines[0].contains("value=streaming"));
+        assert!(mode_output.lines[0].contains("applies=new_playback_request"));
 
         let chunk_output = engine
             .run_line("quality tts max-text-chunk-chars 10")
@@ -5282,17 +5668,102 @@ mod tests {
         assert!(status
             .lines
             .iter()
+            .any(|line| line == "generation_mode=streaming"));
+        assert!(status
+            .lines
+            .iter()
             .any(|line| line == "max_text_chunk_chars=40"));
         assert!(status
             .lines
             .iter()
             .any(|line| line == "first_chunk_max_chars=45"));
         assert!(status.lines.iter().any(|line| line == "prebuffer_chunks=3"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "conversation_incremental=yes"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "streaming_compatible=yes"));
 
         let guard = state.read().await;
+        assert_eq!(
+            guard.quality.config.tts.generation_mode,
+            TtsGenerationMode::Streaming
+        );
         assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
         assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
         assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
+    }
+
+    #[tokio::test]
+    async fn quality_early_response_commands_update_live_config_knob() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.example.test", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let enabled = engine
+            .run_line("quality early-response on")
+            .await
+            .expect("enable early response");
+        assert!(enabled.lines[0].contains("key=early_response.enabled"));
+        assert!(enabled.lines[0].contains("value=true"));
+        assert!(enabled.lines[0].contains("applies=new_call"));
+
+        let status = engine
+            .run_line("quality early-response status")
+            .await
+            .expect("early response status");
+        assert!(status.lines.iter().any(|line| line == "enabled=true"));
+        assert!(status.lines.iter().any(|line| line == "boundary=clause"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "start_timing=while_speaking"));
+        assert!(status
+            .lines
+            .iter()
+            .any(|line| line == "provisional_max_prebuffer_frames=1"));
+        assert!(state.read().await.quality.config.early_response.enabled);
+
+        let boundary = engine
+            .run_line("quality early-response boundary none")
+            .await
+            .expect("set early response boundary");
+        assert!(boundary.lines[0].contains("key=early_response.boundary"));
+        assert!(boundary.lines[0].contains("value=none"));
+        assert!(boundary.lines[0].contains("applies=new_call"));
+        assert_eq!(
+            state.read().await.quality.config.early_response.boundary,
+            BoundaryRequirement::None
+        );
+
+        let timing = engine
+            .run_line("quality early-response start-timing endpoint-candidate-only")
+            .await
+            .expect("set early response start timing");
+        assert!(timing.lines[0].contains("key=early_response.start_timing"));
+        assert!(timing.lines[0].contains("value=endpoint_candidate_only"));
+        assert!(timing.lines[0].contains("applies=new_call"));
+        assert_eq!(
+            state
+                .read()
+                .await
+                .quality
+                .config
+                .early_response
+                .start_timing,
+            EarlyResponseStartTiming::EndpointCandidateOnly
+        );
+
+        let disabled = engine
+            .run_line("quality early-response off")
+            .await
+            .expect("disable early response");
+        assert!(disabled.lines[0].contains("value=false"));
+        assert!(!state.read().await.quality.config.early_response.enabled);
     }
 
     #[tokio::test]
@@ -5370,6 +5841,10 @@ mod tests {
     #[tokio::test]
     async fn quality_state_dump_replays_exact_resolved_config() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let quality_log_path = std::env::temp_dir().join(format!(
+            "motlie-quality-state-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
         {
             let mut guard = state.write().await;
             let config = &mut guard.quality.config;
@@ -5395,6 +5870,7 @@ mod tests {
             config.set_text_call_playback_wait_timeout_ms(54_321);
             config.set_text_call_latest_response_wins(false);
             config.set_text_call_callback_timeout_ms(1_234);
+            config.set_tts_generation_mode(TtsGenerationMode::Streaming);
             config.set_tts_max_text_chunk_chars(88);
             config.set_tts_first_chunk_max_chars(44);
             config.set_tts_prebuffer_chunks(4);
@@ -5426,6 +5902,9 @@ mod tests {
             config.targets.max_garbled_turn_rate = 0.13;
             config.targets.max_inappropriate_cancel_rate = 0.14;
             guard.quality.config_id = config.config_id();
+            let sink = QualityEventSink::start_jsonl_writer(&quality_log_path, 8_192)
+                .expect("quality JSONL writer should start");
+            guard.set_quality_event_sink(sink, Some(quality_log_path.clone()));
         }
         let expected_config = state.read().await.quality.config.clone();
         let expected_config_id = expected_config.config_id();
@@ -5433,27 +5912,81 @@ mod tests {
             let guard = state.read().await;
             crate::operator::persistence::render_state_dump(&guard)
         };
-        assert!(dump.contains("quality restore-config "));
+        assert!(dump.contains("[voice_quality]"));
+        assert!(!dump.contains("restore-config"));
 
         let path = std::env::temp_dir().join(format!(
-            "motlie-quality-state-{}.repl",
+            "motlie-quality-state-{}.toml",
             uuid::Uuid::new_v4()
         ));
         std::fs::write(&path, dump).expect("write quality state dump");
 
-        let replay_state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
-        let replay_telnyx = TelnyxClient::new("https://api.example.test", None, true);
-        let replay_context = GatewayContext::new(replay_state.clone(), replay_telnyx);
-        let mut replay_engine =
-            CommandEngine::<GatewayContext, GatewayCommand>::new(replay_context);
-        crate::operator::script::run_repl_file(&mut replay_engine, &path)
-            .await
-            .expect("replay quality state dump");
-
-        let replay_guard = replay_state.read().await;
-        assert_eq!(replay_guard.quality.config, expected_config);
-        assert_eq!(replay_guard.quality.config_id, expected_config_id);
+        let replay_config = crate::operator::config_file::LoadedGatewayConfig::load(&path)
+            .expect("load quality state dump");
+        assert_eq!(replay_config.voice_quality, expected_config);
+        assert_eq!(replay_config.voice_quality.config_id(), expected_config_id);
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(quality_log_path);
+    }
+
+    struct IncrementalStaticTtsFactory {
+        chunk: TtsAudio,
+    }
+
+    impl IncrementalStaticTtsFactory {
+        fn with_sample_rate(samples: Vec<i16>, sample_rate_hz: u32) -> Self {
+            Self {
+                chunk: TtsAudio::new(samples, sample_rate_hz)
+                    .expect("test TTS sample rate should be non-zero"),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OutboundTtsFactory for IncrementalStaticTtsFactory {
+        async fn synthesize_chunks(&self, _text: String) -> anyhow::Result<Vec<TtsAudio>> {
+            Ok(vec![self.chunk.clone()])
+        }
+
+        async fn synthesize_incremental(
+            &self,
+            _text: String,
+            _cancel: IncrementalSpeechCancelToken,
+            _request_label: Option<String>,
+            _max_buffered_audio_ms: u32,
+        ) -> anyhow::Result<Box<dyn OutboundIncrementalTtsStream>> {
+            Ok(Box::new(IncrementalStaticTtsStream {
+                chunk: Some(self.chunk.clone()),
+            }))
+        }
+
+        fn supports_incremental(&self) -> bool {
+            true
+        }
+
+        fn label(&self) -> &'static str {
+            "incremental-static-test-tts"
+        }
+    }
+
+    struct IncrementalStaticTtsStream {
+        chunk: Option<TtsAudio>,
+    }
+
+    #[async_trait]
+    impl OutboundIncrementalTtsStream for IncrementalStaticTtsStream {
+        async fn next_audio_chunk(&mut self) -> anyhow::Result<Option<TtsAudio>> {
+            Ok(self.chunk.take())
+        }
+
+        async fn finish(self: Box<Self>) -> anyhow::Result<IncrementalTtsSummary> {
+            Ok(IncrementalTtsSummary {
+                chunks: 1,
+                audio_ms: 100,
+                canceled: false,
+                synthesis_completed: true,
+            })
+        }
     }
 
     fn test_asr_registry() -> SharedAsrRegistry {
@@ -5473,12 +6006,31 @@ mod tests {
             )),
             Arc::new(StaticTtsFactory::new(vec![1_000; 2_205])),
         ));
-        let conversation = ConversationRuntime::new(
-            telnyx.clone(),
-            tts.clone(),
-            default_conversation_handler(),
-            false,
-        );
+        let conversation = ConversationRuntime::new(telnyx.clone(), tts.clone(), false);
+        GatewayContext::with_services(
+            state,
+            telnyx,
+            test_asr_registry(),
+            media,
+            tts,
+            conversation,
+            LiveAsrBackend::Kroko2025,
+        )
+    }
+
+    fn context_with_incremental_static_tts(
+        state: SharedState,
+        telnyx: TelnyxClient,
+        media: SharedMediaRegistry,
+    ) -> GatewayContext {
+        let tts = Arc::new(TtsRegistry::new(
+            Arc::new(IncrementalStaticTtsFactory::with_sample_rate(
+                vec![1_000; 2_400],
+                KOKORO_SAMPLE_RATE_HZ,
+            )),
+            Arc::new(StaticTtsFactory::new(vec![1_000; 2_205])),
+        ));
+        let conversation = ConversationRuntime::new(telnyx.clone(), tts.clone(), false);
         GatewayContext::with_services(
             state,
             telnyx,
