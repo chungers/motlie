@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-17 | @codex-535 | Added per-run hybrid config files: strict TOML front matter plus appended run results. |
 | 2026-06-17 | @codex-535 | Added the WER passage and noted that identity-repeat TTS can confound ASR-only WER. |
 | 2026-06-17 | @codex-535 | Added live-run findings: enable identity/repeat after dial and treat voicemail as an invalid human-quality sample. |
 | 2026-06-17 | @codex-535 | Documented the privacy-preserving live-call protocol for config-driven streaming ASR/TTS tests. |
@@ -56,6 +57,70 @@ The local config should set:
 - `voice_quality.early_response.debounce_ms = 0`
 - `voice_quality.barge_in.enabled = false`
 - `voice_quality.logging.enabled = true`
+
+## Per-Run Config
+
+For each live test, create a fresh run directory and copy the local gateway
+config into that directory as the run config:
+
+```sh
+mkdir -p /home/dchung/telnyx-test/runs/<run-id>
+cp /home/dchung/telnyx-test/gateway.toml \
+  /home/dchung/telnyx-test/runs/<run-id>/config.toml
+```
+
+Tune that `config.toml` for the run before startup, then launch the gateway with
+that exact file:
+
+```sh
+cargo run -p motlie-telnyx-gateway --features "sherpa piper kokoro" -- \
+  --config /home/dchung/telnyx-test/runs/<run-id>/config.toml
+```
+
+Recommended hybrid format uses TOML front matter and appends the run report
+below the closing delimiter:
+
+```toml
++++
+[conversation]
+enabled = true
+barge_in_enabled = false
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[startup]
+warm_models = true
+
+[voice_quality.tts]
+generation_mode = "streaming"
+chunking_enabled = true
+prebuffer_chunks = 1
+
+[voice_quality.early_response]
+enabled = true
+boundary = "none"
+start_timing = "while_speaking"
+debounce_ms = 0
+
+[voice_quality.barge_in]
+enabled = false
+
+[voice_quality.logging]
+enabled = true
++++
+
+## Run Results
+
+- Callee: <redacted-callee>
+- Verdict: pending
+```
+
+The gateway uses the `gray_matter` TOML front-matter parser for hybrid run
+files, then feeds only that TOML block into the strict gateway config loader.
+The TOML section remains strict: unknown config or `voice_quality` keys fail the
+startup parse. Plain `.toml` files without front matter still parse as regular
+standalone gateway configs, but appended run reports require the explicit
+`+++` front-matter wrapper.
 
 ## Readiness Check
 
@@ -205,6 +270,11 @@ PY
 
 Redact phone numbers, live public hosts, connection IDs, and any unrelated
 personal data before copying logs into issues or PR comments.
+
+Append the quantitative metrics, qualitative caller feedback, WER score when
+used, and proposed tuning changes to the same per-run `config.toml` below the
+closing `+++` delimiter. That file is the run record; keep it local unless every
+live routing value and personal datum has been redacted.
 
 If the call reaches voicemail, classify the run as a media-pipeline smoke test,
 not a valid human qualitative sample. The run can still measure dial setup,
