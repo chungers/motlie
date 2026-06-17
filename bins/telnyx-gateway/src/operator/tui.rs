@@ -652,7 +652,8 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             quality.echo_suppression.long_longest_token_run
         )),
         Line::from(format!(
-            "tts: chunking={} max_chars={} first={} prebuf={} backend={} warm={} conversation_backend={}",
+            "tts: mode={} chunking={} max_chars={} first={} prebuf={} backend={} warm={} conversation_backend={}",
+            quality.tts.generation_mode.label(),
             quality.tts.chunking_enabled,
             quality.tts.max_text_chunk_chars,
             quality.tts.first_chunk_max_chars,
@@ -660,6 +661,15 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             tts_backend.label(),
             tts_warm,
             conversation_tts_backend.label()
+        )),
+        Line::from(format!(
+            "early: enabled={} boundary={:?} min_chars={} debounce={}ms updates={} prebuf_frames={}",
+            quality.early_response.enabled,
+            quality.early_response.boundary,
+            quality.early_response.min_text_chars,
+            quality.early_response.debounce_ms,
+            quality.early_response.max_updates_per_utterance,
+            quality.early_response.provisional_max_prebuffer_frames
         )),
         Line::from(format!(
             "text-call: max={} media_ready={}ms playback_wait={}ms callback={}ms latest_wins={}",

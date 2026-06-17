@@ -137,11 +137,12 @@ pub async fn post_outbound_call(
     )
     .await;
 
-    let (call_url, emit_partials) = match decision {
+    let (call_url, emit_partials, emit_early_turns) = match decision {
         CallbackDecision::Accept {
             call_url,
             emit_partials,
-        } => (call_url, emit_partials),
+            emit_early_turns,
+        } => (call_url, emit_partials, emit_early_turns),
         CallbackDecision::Decline => {
             let _ = hangup_outbound(&services, &gateway_call_id).await;
             return Err(ApiError::conflict(
@@ -162,6 +163,7 @@ pub async fn post_outbound_call(
             call_url,
             direction: TextCallDirection::Outbound,
             emit_partials,
+            emit_early_turns,
         },
     )
     .await
@@ -267,7 +269,7 @@ mod tests {
     use super::*;
     use crate::adapter::{AsrRegistry, UnavailableAsrFactory};
     use crate::call_control::TelnyxClient;
-    use crate::conversation::{default_conversation_handler, ConversationRuntime};
+    use crate::conversation::ConversationRuntime;
     use crate::media::SharedMediaRegistry;
     use crate::operator::state::{shared_state, CallStatus};
     use crate::serve::AppServices;
@@ -347,12 +349,7 @@ mod tests {
         let tts = unavailable_registry();
         let unavailable_asr = Arc::new(UnavailableAsrFactory::new("ASR unavailable in API test"));
         let asr = Arc::new(AsrRegistry::new(unavailable_asr.clone(), unavailable_asr));
-        let conversation = ConversationRuntime::new(
-            telnyx.clone(),
-            tts.clone(),
-            default_conversation_handler(),
-            false,
-        );
+        let conversation = ConversationRuntime::new(telnyx.clone(), tts.clone(), false);
         AppServices {
             state,
             telnyx,

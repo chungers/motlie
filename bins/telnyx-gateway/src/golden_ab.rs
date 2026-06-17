@@ -22,7 +22,7 @@ use crate::tts::OutboundTtsFactory;
 #[cfg(any(feature = "kokoro", feature = "qwen3-tts-cpp"))]
 use motlie_model::typed::{BufferedSpeechSynthesizer, SynthesisRequest};
 #[cfg(any(feature = "kokoro", feature = "qwen3-tts-cpp"))]
-use motlie_model::{ArtifactPolicy, ModelError, SpeechParams, StartOptions};
+use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 
 const SOURCE_SAMPLE_RATE_HZ: u32 = 16_000;
 const SOURCE_CHANNELS: u16 = 1;
@@ -188,13 +188,12 @@ pub struct TtsGoldenAbSummaryReport {
 pub async fn generate_tts_wavs(
     args: &GoldenTtsArgs,
     artifact_root: PathBuf,
-    allow_download: bool,
 ) -> anyhow::Result<GoldenTtsReport> {
     let manifest = load_manifest(&args.manifest)?;
     std::fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("create golden TTS output dir {}", args.output_dir.display()))?;
 
-    let handle = start_qwen3_tts(&artifact_root, allow_download).await?;
+    let handle = start_qwen3_tts(&artifact_root).await?;
     let mut reports = Vec::new();
     let mut generated = 0usize;
     let mut skipped = 0usize;
@@ -260,7 +259,6 @@ pub async fn generate_tts_wavs(
 pub async fn generate_tts_wavs(
     _args: &GoldenTtsArgs,
     _artifact_root: PathBuf,
-    _allow_download: bool,
 ) -> anyhow::Result<GoldenTtsReport> {
     bail!("golden-tts requires rebuilding telnyx-gateway with --features qwen3-tts-cpp or --features golden-ab")
 }
@@ -360,7 +358,6 @@ pub async fn run_tts_golden_ab(
     args: &TtsGoldenAbArgs,
     asr_backend: ReplayBackend,
     artifact_root: PathBuf,
-    allow_download: bool,
 ) -> anyhow::Result<TtsGoldenAbReport> {
     if args.chunk_ms == 0 {
         bail!("--chunk-ms must be greater than zero");
@@ -376,7 +373,7 @@ pub async fn run_tts_golden_ab(
 
     let engines = args.selected_engines();
     let codecs = args.selected_codecs();
-    let mut runner = TtsGoldenRunner::new(artifact_root, allow_download);
+    let mut runner = TtsGoldenRunner::new(artifact_root);
     let mut entries = Vec::new();
     let mut failures = Vec::new();
 
@@ -524,8 +521,6 @@ struct TtsGoldenSynthesis {
 struct TtsGoldenRunner {
     #[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
     artifact_root: PathBuf,
-    #[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
-    allow_download: bool,
     #[cfg(feature = "piper")]
     piper: Option<std::sync::Arc<crate::tts::PiperTtsFactory>>,
     #[cfg(feature = "kokoro")]
@@ -535,14 +530,12 @@ struct TtsGoldenRunner {
 }
 
 impl TtsGoldenRunner {
-    fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+    fn new(artifact_root: PathBuf) -> Self {
         #[cfg(not(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp")))]
-        let _ = (artifact_root, allow_download);
+        let _ = artifact_root;
         Self {
             #[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
             artifact_root,
-            #[cfg(any(feature = "piper", feature = "kokoro", feature = "qwen3-tts-cpp"))]
-            allow_download,
             #[cfg(feature = "piper")]
             piper: None,
             #[cfg(feature = "kokoro")]
@@ -575,7 +568,6 @@ impl TtsGoldenRunner {
         if self.piper.is_none() {
             self.piper = Some(std::sync::Arc::new(crate::tts::PiperTtsFactory::new(
                 self.artifact_root.clone(),
-                self.allow_download,
             )));
         }
         let piper = self
@@ -618,7 +610,7 @@ impl TtsGoldenRunner {
         source_wav: PathBuf,
     ) -> anyhow::Result<TtsGoldenSynthesis> {
         if self.kokoro.is_none() {
-            self.kokoro = Some(start_kokoro_tts(&self.artifact_root, self.allow_download).await?);
+            self.kokoro = Some(start_kokoro_tts(&self.artifact_root).await?);
         }
         let handle = self
             .kokoro
@@ -659,7 +651,7 @@ impl TtsGoldenRunner {
         source_wav: PathBuf,
     ) -> anyhow::Result<TtsGoldenSynthesis> {
         if self.qwen3.is_none() {
-            self.qwen3 = Some(start_qwen3_tts(&self.artifact_root, self.allow_download).await?);
+            self.qwen3 = Some(start_qwen3_tts(&self.artifact_root).await?);
         }
         let handle = self
             .qwen3
@@ -1102,61 +1094,21 @@ fn average_u64(total: u64, count: usize) -> f64 {
 #[cfg(feature = "kokoro")]
 async fn start_kokoro_tts(
     artifact_root: &Path,
-    allow_download: bool,
 ) -> anyhow::Result<motlie_model_kokoro::KokoroHandle> {
-    match motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root)).await {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = "kokoro-82m",
-                "downloading Kokoro-82M artifacts"
-            );
-            download_kokoro_artifacts(artifact_root)?;
-            motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root))
-                .await
-                .map_err(anyhow::Error::from)
-                .context("start Kokoro-82M after downloading artifacts")
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail!(
-                "{} missing for kokoro-82m under '{}'; rerun without --no-asr-download or preinstall artifacts",
-                motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX,
-                artifact_root.display()
-            )
-        }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Kokoro-82M"),
-    }
+    motlie_models::tts::kokoro_82m::start_typed(local_only_options(artifact_root))
+        .await
+        .map_err(anyhow::Error::from)
+        .context("start Kokoro-82M; preload model artifacts before running telnyx-gateway")
 }
 
 #[cfg(feature = "qwen3-tts-cpp")]
 async fn start_qwen3_tts(
     artifact_root: &Path,
-    allow_download: bool,
 ) -> anyhow::Result<motlie_model_qwen3_tts_cpp::Qwen3TtsCppHandle> {
-    match motlie_models::tts::qwen3_tts_cpp_0_6b::start_typed(local_only_options(artifact_root)).await {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = "qwen3-tts-cpp-0.6b",
-                "downloading Qwen3-TTS artifacts"
-            );
-            download_qwen3_tts_artifacts(artifact_root)?;
-            motlie_models::tts::qwen3_tts_cpp_0_6b::start_typed(local_only_options(artifact_root))
-                .await
-                .map_err(anyhow::Error::from)
-                .context("start Qwen3-TTS after downloading artifacts")
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail!(
-                "{} missing for qwen3-tts-cpp-0.6b under '{}'; rerun without --no-asr-download or preinstall artifacts",
-                motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX,
-                artifact_root.display()
-            )
-        }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Qwen3-TTS"),
-    }
+    motlie_models::tts::qwen3_tts_cpp::start_typed(local_only_options(artifact_root))
+        .await
+        .map_err(anyhow::Error::from)
+        .context("start Qwen3-TTS; preload model artifacts before running telnyx-gateway")
 }
 
 #[cfg(any(feature = "kokoro", feature = "qwen3-tts-cpp"))]
@@ -1167,36 +1119,6 @@ fn local_only_options(artifact_root: &Path) -> StartOptions {
         }),
         ..Default::default()
     }
-}
-
-#[cfg(any(feature = "kokoro", feature = "qwen3-tts-cpp"))]
-fn missing_local_artifacts(error: &ModelError) -> bool {
-    match error {
-        ModelError::InvalidConfiguration(message) => {
-            message.contains(motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX)
-        }
-        _ => false,
-    }
-}
-
-#[cfg(feature = "kokoro")]
-fn download_kokoro_artifacts(artifact_root: &Path) -> anyhow::Result<()> {
-    let catalog = motlie_models::Catalog::with_defaults();
-    let bundle_id = motlie_models::tts::kokoro_82m::descriptor().id;
-    motlie_models::download_bundle_artifacts(&catalog, &bundle_id, artifact_root)
-        .map(|_| ())
-        .map_err(anyhow::Error::from)
-        .context("download Kokoro-82M artifacts")
-}
-
-#[cfg(feature = "qwen3-tts-cpp")]
-fn download_qwen3_tts_artifacts(artifact_root: &Path) -> anyhow::Result<()> {
-    let catalog = motlie_models::Catalog::with_defaults();
-    let bundle_id = motlie_models::tts::qwen3_tts_cpp_0_6b::descriptor().id;
-    motlie_models::download_bundle_artifacts(&catalog, &bundle_id, artifact_root)
-        .map(|_| ())
-        .map_err(anyhow::Error::from)
-        .context("download Qwen3-TTS artifacts")
 }
 
 #[cfg(test)]

@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::early_response::{BoundaryRequirement, EarlyResponsePolicy, EarlyResponseStartTiming};
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QualityProfile {
@@ -101,6 +103,7 @@ pub enum JudgeMode {
 #[serde(rename_all = "snake_case")]
 pub enum ApplyBoundary {
     Immediate,
+    NewCall,
     NextAsrSession,
     NewTextCallSession,
     NewTurn,
@@ -114,6 +117,7 @@ impl ApplyBoundary {
     pub fn label(self) -> &'static str {
         match self {
             Self::Immediate => "immediate",
+            Self::NewCall => "new_call",
             Self::NextAsrSession => "next_asr_session",
             Self::NewTextCallSession => "new_text_call_session",
             Self::NewTurn => "new_turn",
@@ -376,8 +380,27 @@ impl TextCallQualityConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TtsGenerationMode {
+    #[default]
+    Buffered,
+    Streaming,
+}
+
+impl TtsGenerationMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Buffered => "buffered",
+            Self::Streaming => "streaming",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TtsQualityConfig {
+    #[serde(default)]
+    pub generation_mode: TtsGenerationMode,
     pub chunking_enabled: bool,
     pub max_text_chunk_chars: usize,
     pub first_chunk_max_chars: usize,
@@ -387,6 +410,7 @@ pub struct TtsQualityConfig {
 impl Default for TtsQualityConfig {
     fn default() -> Self {
         Self {
+            generation_mode: TtsGenerationMode::Buffered,
             chunking_enabled: true,
             max_text_chunk_chars: 90,
             first_chunk_max_chars: 40,
@@ -542,6 +566,8 @@ pub struct VoiceQualityConfig {
     pub asr: AsrQualityConfig,
     pub text_call: TextCallQualityConfig,
     pub tts: TtsQualityConfig,
+    #[serde(default)]
+    pub early_response: EarlyResponsePolicy,
     pub barge_in: BargeInQualityConfig,
     #[serde(default)]
     pub echo_suppression: EchoSuppressionQualityConfig,
@@ -574,6 +600,7 @@ impl VoiceQualityConfig {
             asr: AsrQualityConfig::default(),
             text_call: TextCallQualityConfig::default(),
             tts: TtsQualityConfig::default(),
+            early_response: EarlyResponsePolicy::default(),
             barge_in: BargeInQualityConfig::default(),
             echo_suppression: EchoSuppressionQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
@@ -584,6 +611,9 @@ impl VoiceQualityConfig {
             QualityProfile::Fast => {
                 config.endpoint.trailing_silence_ms = 550;
                 config.endpoint.final_settle_ms = 350;
+                config.endpoint.merge_window_ms = 120;
+                config.endpoint.conversation_incomplete_tail_hold_ms = 700;
+                config.endpoint.conversation_playback_hold_poll_ms = 50;
                 config.asr.finish_pad_ms = 80;
             }
             QualityProfile::Balanced => {}
@@ -607,18 +637,6 @@ impl VoiceQualityConfig {
         let encoded = serde_json::to_vec(self).expect("voice quality config serializes");
         let digest = Sha256::digest(encoded);
         format!("cfg_{}", hex::encode(digest))
-    }
-
-    pub fn to_replay_hex(&self) -> String {
-        hex::encode(serde_json::to_vec(self).expect("voice quality config serializes"))
-    }
-
-    pub fn from_replay_hex(encoded: &str) -> Result<Self> {
-        let bytes = hex::decode(encoded.trim()).context("decode replay quality config hex")?;
-        let config: Self =
-            serde_json::from_slice(&bytes).context("decode replay quality config json")?;
-        config.validate_resolved()?;
-        Ok(config)
     }
 
     pub fn validate_resolved(&self) -> Result<()> {
@@ -782,6 +800,42 @@ impl VoiceQualityConfig {
             )?;
         }
         ensure_usize("tts.prebuffer_chunks", self.tts.prebuffer_chunks, 1, 64)?;
+        ensure_usize(
+            "early_response.min_text_chars",
+            self.early_response.min_text_chars,
+            1,
+            500,
+        )?;
+        ensure_usize(
+            "early_response.min_text_tokens",
+            self.early_response.min_text_tokens,
+            1,
+            100,
+        )?;
+        if let Some(value) = self.early_response.min_confidence {
+            ensure_f32("early_response.min_confidence", value, 0.0, 1.0)?;
+        }
+        if let Some(value) = self.early_response.min_stability {
+            ensure_f32("early_response.min_stability", value, 0.0, 1.0)?;
+        }
+        ensure_u64(
+            "early_response.debounce_ms",
+            self.early_response.debounce_ms,
+            0,
+            5_000,
+        )?;
+        ensure_usize(
+            "early_response.max_updates_per_utterance",
+            self.early_response.max_updates_per_utterance,
+            0,
+            128,
+        )?;
+        ensure_usize(
+            "early_response.provisional_max_prebuffer_frames",
+            self.early_response.provisional_max_prebuffer_frames,
+            1,
+            1,
+        )?;
         ensure_u64(
             "barge_in.clear_timeout_ms",
             self.barge_in.clear_timeout_ms,
@@ -1009,6 +1063,9 @@ impl VoiceQualityConfig {
             }
         }
         if let Some(tts) = patch.tts {
+            if let Some(value) = tts.generation_mode {
+                self.set_tts_generation_mode(value);
+            }
             if let Some(value) = tts.chunking_enabled {
                 self.set_tts_chunking_enabled(value);
             }
@@ -1021,6 +1078,9 @@ impl VoiceQualityConfig {
             if let Some(value) = tts.prebuffer_chunks {
                 self.set_tts_prebuffer_chunks(value);
             }
+        }
+        if let Some(early_response) = patch.early_response {
+            self.early_response = early_response;
         }
         if let Some(barge_in) = patch.barge_in {
             if let Some(value) = barge_in.enabled {
@@ -1400,6 +1460,16 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_tts_generation_mode(&mut self, value: TtsGenerationMode) -> QualityMutationOutcome {
+        self.tts.generation_mode = value;
+        self.outcome(
+            "tts.generation_mode",
+            value.label(),
+            ApplyBoundary::NewPlaybackRequest,
+            false,
+        )
+    }
+
     pub fn set_tts_max_text_chunk_chars(&mut self, value: usize) -> QualityMutationOutcome {
         let clamped = clamp_usize(value, 40, 500);
         self.tts.max_text_chunk_chars = clamped.value;
@@ -1437,6 +1507,49 @@ impl VoiceQualityConfig {
             clamped.value,
             ApplyBoundary::NewPlaybackRequest,
             clamped.clamped,
+        )
+    }
+
+    pub fn set_early_response_enabled(&mut self, value: bool) -> QualityMutationOutcome {
+        self.early_response.enabled = value;
+        self.outcome(
+            "early_response.enabled",
+            value,
+            ApplyBoundary::NewCall,
+            false,
+        )
+    }
+
+    pub fn set_early_response_start_timing(
+        &mut self,
+        value: EarlyResponseStartTiming,
+    ) -> QualityMutationOutcome {
+        self.early_response.set_start_timing(value);
+        self.outcome(
+            "early_response.start_timing",
+            match value {
+                EarlyResponseStartTiming::EndpointCandidateOnly => "endpoint_candidate_only",
+                EarlyResponseStartTiming::WhileSpeaking => "while_speaking",
+            },
+            ApplyBoundary::NewCall,
+            false,
+        )
+    }
+
+    pub fn set_early_response_boundary(
+        &mut self,
+        value: BoundaryRequirement,
+    ) -> QualityMutationOutcome {
+        self.early_response.boundary = value;
+        self.outcome(
+            "early_response.boundary",
+            match value {
+                BoundaryRequirement::None => "none",
+                BoundaryRequirement::Clause => "clause",
+                BoundaryRequirement::Sentence => "sentence",
+            },
+            ApplyBoundary::NewCall,
+            false,
         )
     }
 
@@ -1834,12 +1947,32 @@ fn ensure_string_list(
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct QualityConfigDocument {
+    #[serde(rename = "version")]
+    _version: Option<u32>,
+    #[serde(rename = "generated_at")]
+    _generated_at: Option<String>,
+    #[serde(rename = "process")]
+    _process: Option<toml::Value>,
+    #[serde(rename = "telnyx")]
+    _telnyx: Option<toml::Value>,
+    #[serde(rename = "gateway")]
+    _gateway: Option<toml::Value>,
+    #[serde(rename = "inbound")]
+    _inbound: Option<toml::Value>,
+    #[serde(rename = "conversation")]
+    _conversation: Option<toml::Value>,
+    #[serde(rename = "startup")]
+    _startup: Option<toml::Value>,
+    #[serde(rename = "quality_logging")]
+    _quality_logging: Option<toml::Value>,
     #[serde(default)]
     voice_quality: Option<QualityConfigPatch>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct QualityConfigPatch {
     pub profile: Option<QualityProfile>,
     #[serde(default)]
@@ -1852,6 +1985,8 @@ pub struct QualityConfigPatch {
     pub text_call: Option<TextCallQualityConfigPatch>,
     #[serde(default)]
     pub tts: Option<TtsQualityConfigPatch>,
+    #[serde(default)]
+    pub early_response: Option<EarlyResponsePolicy>,
     #[serde(default)]
     pub barge_in: Option<BargeInQualityConfigPatch>,
     #[serde(default)]
@@ -1867,6 +2002,7 @@ pub struct QualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SpeechQualityConfigPatch {
     pub rms_threshold: Option<f32>,
     pub peak_threshold: Option<i32>,
@@ -1874,6 +2010,7 @@ pub struct SpeechQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct EndpointQualityConfigPatch {
     pub trailing_silence_ms: Option<u64>,
     pub min_turn_words: Option<usize>,
@@ -1893,6 +2030,7 @@ pub struct EndpointQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AsrQualityConfigPatch {
     pub repeated_token_run_threshold: Option<usize>,
     pub repeated_q_run_threshold: Option<usize>,
@@ -1900,6 +2038,7 @@ pub struct AsrQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TextCallQualityConfigPatch {
     pub max_active_turns: Option<usize>,
     pub media_ready_timeout_ms: Option<u64>,
@@ -1909,7 +2048,9 @@ pub struct TextCallQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TtsQualityConfigPatch {
+    pub generation_mode: Option<TtsGenerationMode>,
     pub chunking_enabled: Option<bool>,
     pub max_text_chunk_chars: Option<usize>,
     pub first_chunk_max_chars: Option<usize>,
@@ -1917,6 +2058,7 @@ pub struct TtsQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct BargeInQualityConfigPatch {
     pub enabled: Option<bool>,
     pub speech_onset_cancel_enabled: Option<bool>,
@@ -1927,6 +2069,7 @@ pub struct BargeInQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct EchoSuppressionQualityConfigPatch {
     pub enabled: Option<bool>,
     pub min_text_chars: Option<usize>,
@@ -1939,6 +2082,7 @@ pub struct EchoSuppressionQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingQualityConfigPatch {
     pub enabled: Option<bool>,
     pub queue_capacity: Option<usize>,
@@ -1948,6 +2092,7 @@ pub struct LoggingQualityConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct QualityJudgeConfigPatch {
     pub enabled: Option<bool>,
     pub mode: Option<JudgeMode>,
@@ -1958,6 +2103,7 @@ pub struct QualityJudgeConfigPatch {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct QualityTargetsConfigPatch {
     pub p50_endpoint_trailing_silence_ms: Option<u64>,
     pub p95_endpoint_trailing_silence_ms: Option<u64>,
@@ -2001,62 +2147,6 @@ mod tests {
         let left = VoiceQualityConfig::default();
         let right = VoiceQualityConfig::for_profile(QualityProfile::Balanced);
         assert_eq!(left.config_id(), right.config_id());
-    }
-
-    #[test]
-    fn replay_hex_round_trips_full_resolved_config() {
-        let mut config = VoiceQualityConfig::for_profile(QualityProfile::Noisy);
-        config.set_asr_repeated_token_run_threshold(63);
-        config.set_text_call_media_ready_timeout_ms(12_345);
-        config.set_text_call_playback_wait_timeout_ms(54_321);
-        config.set_text_call_callback_timeout_ms(1_234);
-        config.set_barge_in_enabled(false);
-        config.barge_in.partial_asr_cancel_enabled = false;
-        config.set_logging_enabled(true);
-        config.set_logging_queue_capacity(7_777);
-        config.set_quality_judge_enabled(true);
-        config.set_quality_judge_batch_size(17);
-        config.targets.max_garbled_turn_rate = 0.2;
-
-        let restored = VoiceQualityConfig::from_replay_hex(&config.to_replay_hex())
-            .expect("replay hex restores");
-
-        assert_eq!(restored, config);
-        assert_eq!(restored.config_id(), config.config_id());
-    }
-
-    #[test]
-    fn replay_hex_round_trips_live_clamp_edges() {
-        let mut config = VoiceQualityConfig::default();
-        config
-            .set_speech_rms_threshold(f32::MAX)
-            .expect("finite RMS clamps");
-        config.set_speech_peak_threshold(i32::MAX);
-        config.set_speech_onset_min_silence_ms(u64::MAX);
-        config.set_endpoint_trailing_silence_ms(u64::MAX);
-
-        assert_eq!(config.speech.rms_threshold, 20_000.0);
-        assert_eq!(config.speech.peak_threshold, 32_767);
-        assert_eq!(config.speech.onset_min_silence_ms, 2_000);
-        assert_eq!(config.endpoint.trailing_silence_ms, 5_000);
-
-        let restored = VoiceQualityConfig::from_replay_hex(&config.to_replay_hex())
-            .expect("clamp-edge replay config restores");
-
-        assert_eq!(restored, config);
-        assert_eq!(restored.config_id(), config.config_id());
-    }
-
-    #[test]
-    fn replay_hex_rejects_out_of_domain_config() {
-        let mut config = VoiceQualityConfig::default();
-        config.text_call.max_active_turns = 0;
-        let encoded = config.to_replay_hex();
-
-        let error = VoiceQualityConfig::from_replay_hex(&encoded)
-            .expect_err("invalid replay config should be rejected");
-
-        assert!(error.to_string().contains("text_call.max_active_turns"));
     }
 
     #[test]
@@ -2122,6 +2212,20 @@ mod tests {
     }
 
     #[test]
+    fn early_response_provisional_prebuffer_rejects_values_above_hard_cap() {
+        let mut config = VoiceQualityConfig::default();
+        config.early_response.provisional_max_prebuffer_frames = 2;
+
+        let error = config
+            .validate_resolved()
+            .expect_err("provisional prebuffer must stay at the one-frame cap");
+
+        assert!(error
+            .to_string()
+            .contains("early_response.provisional_max_prebuffer_frames"));
+    }
+
+    #[test]
     fn rejects_non_finite_float_knobs() {
         let mut config = VoiceQualityConfig::default();
         let error = config
@@ -2151,6 +2255,53 @@ mod tests {
         assert_eq!(config.speech.rms_threshold, 260.0);
         assert_eq!(config.endpoint.trailing_silence_ms, 100);
         assert!(!config.logging.include_transcript_text);
+    }
+
+    #[test]
+    fn toml_rejects_unknown_voice_quality_keys() {
+        for raw in [
+            r#"
+            [voice_quality]
+            generation_mod = "streaming"
+            "#,
+            r#"
+            [voice_quality.tts]
+            prebuffer_chunk = 1
+            "#,
+            r#"
+            [voice_quality.early_response]
+            start_timng = "endpoint_candidate_only"
+            "#,
+        ] {
+            let error = VoiceQualityConfig::from_toml_str(raw)
+                .expect_err("unknown voice_quality keys should fail closed");
+            assert!(
+                error.to_string().contains("unknown field"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn toml_accepts_gateway_metadata_and_known_outer_tables() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            version = 1
+            generated_at = "2026-06-16T00:00:00Z"
+
+            [process]
+            bind = "127.0.0.1:8080"
+
+            [quality_logging]
+            path = "$HOME/telnyx-test/quality-events.jsonl"
+
+            [voice_quality.tts]
+            generation_mode = "streaming"
+            "#,
+        )
+        .expect("quality parser should accept full gateway TOML metadata");
+
+        assert_eq!(config.tts.generation_mode, TtsGenerationMode::Streaming);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::call_control::TelnyxClient;
+use crate::early_response::{AppendOrReplace, EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::SharedMediaRegistry;
 use crate::operator::state::{CallStatus, LogLevel, SharedState, TtsPlaybackStatus};
 use crate::quality::TextCallQualityConfig;
@@ -22,7 +23,8 @@ use crate::tts::{SharedTtsRegistry, StreamingSpeechTextPacker};
 use super::offers::validate_call_url;
 use super::turns::{
     AgentTextFrame, CallerSpeechState, DebugTextStreamFrame, GatewayTextFrame,
-    PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
+    PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_EARLY_TURNS_EXTENSION,
+    TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
@@ -284,6 +286,17 @@ impl SharedTextCallRegistry {
         gateway_call_id: impl Into<String>,
         emit_partials: bool,
     ) -> mpsc::Receiver<GatewayTextFrame> {
+        self.insert_test_session_with_options(gateway_call_id, emit_partials, false)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_test_session_with_options(
+        &self,
+        gateway_call_id: impl Into<String>,
+        emit_partials: bool,
+        emit_early_turns: bool,
+    ) -> mpsc::Receiver<GatewayTextFrame> {
         let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let handle = TextCallSessionHandle {
             tx,
@@ -292,6 +305,7 @@ impl SharedTextCallRegistry {
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             emit_partials,
+            emit_early_turns,
         };
         self.claim(gateway_call_id.into(), handle)
             .await
@@ -349,6 +363,123 @@ impl SharedTextCallRegistry {
             stability: Self::normalized_score(stability),
             speech_state,
             reply_allowed: false,
+        })?;
+        Ok(true)
+    }
+
+    pub async fn send_early_response_event(
+        &self,
+        gateway_call_id: &str,
+        event: EarlyResponseEvent,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        if !handle.emit_early_turns {
+            return Ok(false);
+        }
+        match event {
+            EarlyResponseEvent::Started {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                text,
+                confidence,
+                stability,
+                speech_state,
+                ..
+            } => handle.try_send(GatewayTextFrame::CallerTurnProvisional {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                sequence: handle.next_sequence(),
+                text,
+                confidence: Self::normalized_score(confidence),
+                stability: Self::normalized_score(stability),
+                speech_state,
+                reply_allowed: true,
+            })?,
+            EarlyResponseEvent::Updated {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                text,
+                append_or_replace,
+                ..
+            } => handle.try_send(GatewayTextFrame::CallerTurnProvisionalUpdate {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                sequence: handle.next_sequence(),
+                text,
+                append_or_replace: append_or_replace_label(append_or_replace).to_string(),
+            })?,
+            EarlyResponseEvent::Canceled {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                reason,
+                ..
+            } => handle.try_send(GatewayTextFrame::CallerTurnProvisionalCancel {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                sequence: handle.next_sequence(),
+                reason: early_cancel_reason_label(reason).to_string(),
+            })?,
+            EarlyResponseEvent::Committed {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                turn_id,
+                coalesced_utterance_ids,
+                final_text,
+                ..
+            } => handle.try_send(GatewayTextFrame::CallerTurnProvisionalCommit {
+                provisional_turn_id,
+                turn_id,
+                utterance_id,
+                coalesced_utterance_ids,
+                generation,
+                sequence: handle.next_sequence(),
+                final_text,
+            })?,
+        }
+        Ok(true)
+    }
+
+    pub async fn send_early_response_playback_started(
+        &self,
+        gateway_call_id: &str,
+        provisional_turn_id: String,
+        generation: u64,
+        playback_id: String,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        if !handle.emit_early_turns {
+            return Ok(false);
+        }
+        handle.try_send(GatewayTextFrame::ProvisionalPlaybackStarted {
+            provisional_turn_id,
+            generation,
+            playback_id,
+            sequence: handle.next_sequence(),
         })?;
         Ok(true)
     }
@@ -467,6 +598,7 @@ struct TextCallSessionHandle {
     append_turns: Arc<Mutex<BTreeMap<String, AgentAppendTurn>>>,
     config: TextCallSessionConfig,
     emit_partials: bool,
+    emit_early_turns: bool,
 }
 
 impl TextCallSessionHandle {
@@ -508,6 +640,7 @@ pub struct TextCallSetup {
     pub call_url: String,
     pub direction: TextCallDirection,
     pub emit_partials: bool,
+    pub emit_early_turns: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -515,11 +648,13 @@ pub struct DebugTextCallSetup {
     pub gateway_call_id: String,
     pub direction: TextCallDirection,
     pub emit_partials: bool,
+    pub emit_early_turns: bool,
 }
 
 fn text_call_session_handle(
     session_config: TextCallSessionConfig,
     emit_partials: bool,
+    emit_early_turns: bool,
 ) -> (TextCallSessionHandle, mpsc::Receiver<GatewayTextFrame>) {
     let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
     let handle = TextCallSessionHandle {
@@ -531,6 +666,7 @@ fn text_call_session_handle(
         append_turns: Arc::new(Mutex::new(BTreeMap::new())),
         config: session_config,
         emit_partials,
+        emit_early_turns,
     };
     (handle, rx)
 }
@@ -554,7 +690,8 @@ pub async fn connect_application_stream(
         let guard = services.state.read().await;
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
-    let (handle, rx) = text_call_session_handle(session_config, setup.emit_partials);
+    let (handle, rx) =
+        text_call_session_handle(session_config, setup.emit_partials, setup.emit_early_turns);
     let owner = services
         .registry
         .claim(setup.gateway_call_id.clone(), handle.clone())
@@ -594,7 +731,8 @@ where
         let guard = services.state.read().await;
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
-    let (handle, rx) = text_call_session_handle(session_config, setup.emit_partials);
+    let (handle, rx) =
+        text_call_session_handle(session_config, setup.emit_partials, setup.emit_early_turns);
     let owner = services
         .registry
         .claim(setup.gateway_call_id.clone(), handle.clone())
@@ -641,6 +779,11 @@ where
                 .emit_partials
                 .then(|| TEXT_CALL_PARTIALS_EXTENSION.to_string())
                 .into_iter()
+                .chain(
+                    handle
+                        .emit_early_turns
+                        .then(|| TEXT_CALL_EARLY_TURNS_EXTENSION.to_string()),
+                )
                 .collect(),
         ),
     )
@@ -933,6 +1076,15 @@ async fn handle_agent_message(
                 queued.playback_id.clone(),
             );
         }
+        AgentTextFrame::AgentTurnProvisionalPartial { .. }
+        | AgentTextFrame::AgentTurnProvisional { .. } => {
+            send_error_frame(
+                handle,
+                "unsupported_provisional_agent_turn",
+                "agent provisional turn frames are reserved for early-response processors",
+            )
+            .await?;
+        }
         AgentTextFrame::AgentClose { reason } => {
             handle
                 .send(GatewayTextFrame::SessionEnd {
@@ -1210,6 +1362,9 @@ async fn queue_append_agent_speech_with_media_wait(
                 latest_turn_finalized_at: turn_finalized_at,
                 turn_id: turn_id.clone(),
                 coalesced_turn_ids: turn_id.iter().cloned().collect(),
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
+                prebuffer_chunks_override: None,
             },
             initial_chunks.clone(),
         )
@@ -1268,6 +1423,9 @@ async fn queue_agent_speech_with_media_wait(
                 latest_turn_finalized_at: turn_finalized_at,
                 turn_id: turn_id.clone(),
                 coalesced_turn_ids: turn_id.iter().cloned().collect(),
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
+                prebuffer_chunks_override: None,
             },
         )
         .await
@@ -1396,7 +1554,32 @@ fn playback_finished_status(status: TtsPlaybackStatus) -> Option<PlaybackFinishe
     }
 }
 
-pub async fn hangup_gateway_call(
+pub fn append_or_replace_label(value: AppendOrReplace) -> &'static str {
+    match value {
+        AppendOrReplace::Append => "append",
+        AppendOrReplace::Replace => "replace",
+    }
+}
+
+fn early_cancel_reason_label(reason: EarlyResponseCancelReason) -> &'static str {
+    match reason {
+        EarlyResponseCancelReason::AsrCorrection => "asr_correction",
+        EarlyResponseCancelReason::FinalTranscriptMismatch => "final_transcript_mismatch",
+        EarlyResponseCancelReason::SupersededByNewGeneration => "superseded_by_new_generation",
+        EarlyResponseCancelReason::PolicyDisabled => "policy_disabled",
+        EarlyResponseCancelReason::PolicyNoLongerSatisfied => "policy_no_longer_satisfied",
+        EarlyResponseCancelReason::MaxUpdatesExceeded => "max_updates_exceeded",
+        EarlyResponseCancelReason::CallerBargeIn => "caller_barge_in",
+        EarlyResponseCancelReason::ProcessorRejected => "processor_rejected",
+        EarlyResponseCancelReason::TtsCanceled => "tts_canceled",
+        EarlyResponseCancelReason::StaleGeneration => "stale_generation",
+        EarlyResponseCancelReason::CoalescedIntoFinalTurn => "coalesced_into_final_turn",
+        EarlyResponseCancelReason::SessionEnded => "session_ended",
+        EarlyResponseCancelReason::Hangup => "hangup",
+    }
+}
+
+pub(crate) async fn hangup_gateway_call(
     services: &TextCallStreamServices,
     gateway_call_id: &str,
     reason: &str,
@@ -1574,6 +1757,59 @@ mod tests {
                 && text == "hello wor"
                 && (confidence - 0.84).abs() < f32::EPSILON
                 && (stability - 0.61).abs() < f32::EPSILON
+        ));
+    }
+
+    #[tokio::test]
+    async fn early_response_events_require_opted_in_session() {
+        let registry = SharedTextCallRegistry::default();
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let handle = test_handle(tx);
+        registry
+            .claim("call-default".to_string(), handle)
+            .await
+            .expect("default session should attach");
+        let event = EarlyResponseEvent::Started {
+            provisional_turn_id: "pt-1".to_string(),
+            call_id: "call-default".to_string(),
+            utterance_id: "utt-1".to_string(),
+            generation: 1,
+            text: "I need a tow truck.".to_string(),
+            confidence: Some(0.91),
+            stability: Some(0.86),
+            speech_state: CallerSpeechState::EndpointCandidate,
+        };
+        let emitted = registry
+            .send_early_response_event("call-default", event.clone())
+            .await
+            .expect("default early response send should not fail");
+        assert!(!emitted);
+        assert!(rx.try_recv().is_err());
+
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.emit_early_turns = true;
+        registry
+            .claim("call-early".to_string(), handle)
+            .await
+            .expect("early-turn session should attach");
+        let emitted = registry
+            .send_early_response_event("call-early", event)
+            .await
+            .expect("early response send should succeed");
+        assert!(emitted);
+        assert!(matches!(
+            rx.recv().await,
+            Some(GatewayTextFrame::CallerTurnProvisional {
+                provisional_turn_id,
+                utterance_id,
+                generation: 1,
+                text,
+                speech_state: CallerSpeechState::EndpointCandidate,
+                ..
+            }) if provisional_turn_id == "pt-1"
+                && utterance_id == "utt-1"
+                && text == "I need a tow truck."
         ));
     }
 
@@ -2038,6 +2274,7 @@ mod tests {
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             emit_partials: false,
+            emit_early_turns: false,
         }
     }
 }

@@ -1,18 +1,17 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context};
-use async_trait::async_trait;
-use motlie_voice::app::{
-    CallContext, CallIds, ConversationCommand, ConversationHandler, TranscriptEvent, VoiceAppError,
-};
+use futures_util::{stream, Stream, StreamExt};
+use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 use motlie_voice::telephony::CallAction;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
+use crate::early_response::{AppendOrReplace, EarlyResponseEvent, EarlyResponseIntent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
     CallStatus, ConversationMode, LogLevel, QualitySpanEmission, SharedState,
@@ -26,14 +25,74 @@ use crate::tts::SharedTtsRegistry;
 
 const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
 
-pub type SharedConversationHandler = Arc<dyn ConversationHandler>;
+/// Events that may drive a conversation processor.
+#[derive(Clone, Debug)]
+pub enum ConversationProcessorInput {
+    /// Provisional ASR-derived event before the final committed turn boundary.
+    EarlyResponse(EarlyResponseEvent),
+    /// Final, post-settle conversation turn.
+    CommittedTurn(ConversationCommittedTurn),
+}
+
+/// Final turn data sent to buffered processors after endpoint settle/coalescing.
+#[derive(Clone, Debug)]
+pub struct ConversationCommittedTurn {
+    pub call_id: String,
+    pub turn_id: Option<String>,
+    pub text: String,
+    pub event: TranscriptEvent,
+}
+
+/// Processor output accepted by the gateway.
+pub enum ConversationProcessorOutput {
+    /// Provisional speech/cancel/commit intent for the early-response pipeline.
+    EarlyResponse(EarlyResponseIntent),
+    /// Committed-turn command for normal conversation state.
+    Command(ConversationCommand),
+    /// Conversation-scoped failure. This records failed state without failing the media path.
+    Error(String),
+}
+
+/// Static processor selection for a call.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConversationProcessorKind {
+    /// Repeat accepted caller text exactly for both committed and provisional paths.
+    #[default]
+    Identity,
+}
+
+impl ConversationProcessorKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+        }
+    }
+
+    pub fn process_input(
+        self,
+        input: ConversationProcessorInput,
+    ) -> Option<ConversationProcessorOutput> {
+        match self {
+            Self::Identity => IdentityRepeatConversationProcessor.process_input(input),
+        }
+    }
+
+    pub fn process_stream<S>(
+        self,
+        inputs: S,
+    ) -> impl Stream<Item = ConversationProcessorOutput> + Send
+    where
+        S: Stream<Item = ConversationProcessorInput> + Send,
+    {
+        inputs.filter_map(move |input| async move { self.process_input(input) })
+    }
+}
 
 #[derive(Clone)]
 pub struct ConversationRuntime {
     telnyx: TelnyxClient,
     tts: SharedTtsRegistry,
-    handler: SharedConversationHandler,
-    handler_enabled: Arc<AtomicBool>,
+    processor_enabled: Arc<AtomicBool>,
     final_coalescing_enabled: Arc<AtomicBool>,
     barge_in_enabled: Arc<AtomicBool>,
     pending_conversation_finals: Arc<Mutex<HashMap<String, PendingConversationFinal>>>,
@@ -41,27 +100,20 @@ pub struct ConversationRuntime {
 }
 
 impl ConversationRuntime {
-    pub fn new(
-        telnyx: TelnyxClient,
-        tts: SharedTtsRegistry,
-        handler: SharedConversationHandler,
-        smoke_test_enabled: bool,
-    ) -> Self {
-        Self::new_with_handler_options(telnyx, tts, handler, smoke_test_enabled, false)
+    pub fn new(telnyx: TelnyxClient, tts: SharedTtsRegistry, processor_enabled: bool) -> Self {
+        Self::new_with_processor_options(telnyx, tts, processor_enabled, false)
     }
 
-    pub fn new_with_handler_options(
+    pub fn new_with_processor_options(
         telnyx: TelnyxClient,
         tts: SharedTtsRegistry,
-        handler: SharedConversationHandler,
-        handler_enabled: bool,
+        processor_enabled: bool,
         final_coalescing_enabled: bool,
     ) -> Self {
         Self {
             telnyx,
             tts,
-            handler,
-            handler_enabled: Arc::new(AtomicBool::new(handler_enabled)),
+            processor_enabled: Arc::new(AtomicBool::new(processor_enabled)),
             final_coalescing_enabled: Arc::new(AtomicBool::new(final_coalescing_enabled)),
             barge_in_enabled: Arc::new(AtomicBool::new(true)),
             pending_conversation_finals: Arc::new(Mutex::new(HashMap::new())),
@@ -69,22 +121,12 @@ impl ConversationRuntime {
         }
     }
 
-    pub fn handler_enabled(&self) -> bool {
-        self.handler_enabled.load(Ordering::SeqCst)
+    pub fn processor_enabled(&self) -> bool {
+        self.processor_enabled.load(Ordering::SeqCst)
     }
 
-    pub fn set_handler_enabled(&self, enabled: bool) {
-        self.handler_enabled.store(enabled, Ordering::SeqCst);
-    }
-
-    pub fn smoke_test_enabled(&self) -> bool {
-        self.handler_enabled()
-    }
-
-    pub fn set_smoke_test_enabled(&self, enabled: bool) {
-        self.set_handler_enabled(enabled);
-        self.final_coalescing_enabled
-            .store(enabled, Ordering::SeqCst);
+    pub fn set_processor_enabled(&self, enabled: bool) {
+        self.processor_enabled.store(enabled, Ordering::SeqCst);
     }
 
     pub fn final_coalescing_enabled(&self) -> bool {
@@ -107,14 +149,18 @@ impl ConversationRuntime {
         }
     }
 
-    pub fn handler_label(&self) -> &'static str {
-        if !self.handler_enabled() {
+    pub fn processor_label(&self) -> &'static str {
+        if !self.processor_enabled() {
             "disabled"
         } else if self.final_coalescing_enabled() {
             "smoke-test"
         } else {
-            "handler"
+            "processor"
         }
+    }
+
+    pub fn tts_registry(&self) -> SharedTtsRegistry {
+        self.tts.clone()
     }
 }
 
@@ -145,30 +191,95 @@ struct ConversationTurnContext {
     coalesced_turn_ids: Vec<String>,
 }
 
-pub fn default_conversation_handler() -> SharedConversationHandler {
-    Arc::new(SmokeTestConversationHandler)
+/// Minimal processor used for smoke tests and identity/repeat live validation.
+///
+/// It repeats committed turns exactly and passes provisional early-response text through
+/// without adding a response prefix.
+#[derive(Clone, Debug, Default)]
+pub struct IdentityRepeatConversationProcessor;
+
+impl IdentityRepeatConversationProcessor {
+    fn process_input(
+        self,
+        input: ConversationProcessorInput,
+    ) -> Option<ConversationProcessorOutput> {
+        match input {
+            ConversationProcessorInput::EarlyResponse(event) => {
+                repeat_early_response(event).map(ConversationProcessorOutput::EarlyResponse)
+            }
+            ConversationProcessorInput::CommittedTurn(turn) => {
+                let text = turn.text.trim().to_string();
+                if text.is_empty() {
+                    Some(ConversationProcessorOutput::Command(
+                        ConversationCommand::Noop,
+                    ))
+                } else {
+                    Some(ConversationProcessorOutput::Command(
+                        ConversationCommand::Say { text },
+                    ))
+                }
+            }
+        }
+    }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct SmokeTestConversationHandler;
-
-#[async_trait]
-impl ConversationHandler for SmokeTestConversationHandler {
-    async fn on_transcript(
-        &self,
-        event: TranscriptEvent,
-        _context: &mut CallContext,
-    ) -> Result<ConversationCommand, VoiceAppError> {
-        if !event.is_final() {
-            return Ok(ConversationCommand::Noop);
-        }
-        let text = event.text().trim();
-        if text.is_empty() {
-            return Ok(ConversationCommand::Noop);
-        }
-        Ok(ConversationCommand::Say {
-            text: format!("I heard: {text}"),
-        })
+fn repeat_early_response(event: EarlyResponseEvent) -> Option<EarlyResponseIntent> {
+    match event {
+        EarlyResponseEvent::Started {
+            provisional_turn_id,
+            call_id,
+            utterance_id,
+            generation,
+            text,
+            ..
+        } => Some(EarlyResponseIntent::Speak {
+            provisional_turn_id,
+            call_id,
+            utterance_id,
+            generation,
+            text,
+            append_or_replace: AppendOrReplace::Replace,
+        }),
+        EarlyResponseEvent::Updated {
+            provisional_turn_id,
+            call_id,
+            utterance_id,
+            generation,
+            text,
+            append_or_replace,
+        } => Some(EarlyResponseIntent::Speak {
+            provisional_turn_id,
+            call_id,
+            utterance_id,
+            generation,
+            text,
+            append_or_replace,
+        }),
+        EarlyResponseEvent::Canceled {
+            provisional_turn_id,
+            call_id,
+            utterance_id,
+            generation,
+            reason,
+        } => Some(EarlyResponseIntent::Cancel {
+            provisional_turn_id,
+            call_id,
+            utterance_id,
+            generation,
+            reason,
+        }),
+        EarlyResponseEvent::Committed {
+            provisional_turn_id,
+            call_id,
+            generation,
+            turn_id,
+            ..
+        } => Some(EarlyResponseIntent::Commit {
+            provisional_turn_id,
+            call_id,
+            generation,
+            turn_id,
+        }),
     }
 }
 
@@ -244,18 +355,18 @@ pub async fn handle_transcript_event_with_turn(
         .await?;
     }
 
-    if !runtime.handler_enabled() {
+    if !runtime.processor_enabled() {
         state
             .write()
             .await
-            .record_conversation_user_turn(gateway_call_id, transcript_text);
+            .record_conversation_user_turn(gateway_call_id, transcript_text.clone());
         state
             .write()
             .await
             .record_conversation_idle(gateway_call_id);
         tracing::debug!(
             gateway_call_id,
-            "conversation.handler.disabled_for_final_transcript"
+            "conversation.processor.disabled_for_final_transcript"
         );
         return Ok(());
     }
@@ -263,7 +374,7 @@ pub async fn handle_transcript_event_with_turn(
     let event = event_with_trimmed_text(event, transcript_text);
     let quality_config = snapshot.quality_config.clone();
     if snapshot.endpoint_merge_window_ms == 0 || !runtime.final_coalescing_enabled() {
-        return dispatch_final_transcript_to_handler(
+        return dispatch_final_transcript_to_processor(
             state,
             media_registry,
             runtime,
@@ -352,7 +463,7 @@ async fn schedule_conversation_final(
         let mut delay = debounce;
         loop {
             sleep(delay).await;
-            if !runtime.handler_enabled() {
+            if !runtime.processor_enabled() {
                 let _ = take_ready_conversation_final(&runtime, &gateway_call_id, generation).await;
                 return;
             }
@@ -410,7 +521,7 @@ async fn schedule_conversation_final(
             };
             emit_conversation_final_debounce_span(&state, &gateway_call_id, &pending, debounce)
                 .await;
-            if let Err(error) = dispatch_final_transcript_to_handler(
+            if let Err(error) = dispatch_final_transcript_to_processor(
                 &state,
                 &media_registry,
                 &runtime,
@@ -559,7 +670,7 @@ async fn emit_conversation_final_debounce_span(
     );
 }
 
-async fn dispatch_final_transcript_to_handler(
+async fn dispatch_final_transcript_to_processor(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
@@ -568,7 +679,7 @@ async fn dispatch_final_transcript_to_handler(
     quality_config: Option<&VoiceQualityConfig>,
     turn_context: ConversationTurnContext,
 ) -> anyhow::Result<()> {
-    if !runtime.handler_enabled() {
+    if !runtime.processor_enabled() {
         return Ok(());
     }
     let transcript_text = event.text().trim().to_string();
@@ -584,35 +695,68 @@ async fn dispatch_final_transcript_to_handler(
     state
         .write()
         .await
-        .record_conversation_user_turn(gateway_call_id, transcript_text);
+        .record_conversation_user_turn(gateway_call_id, transcript_text.clone());
 
-    let mut context = snapshot.context;
-    let command = match runtime.handler.on_transcript(event, &mut context).await {
-        Ok(command) => command,
-        Err(error) => {
-            let error = format!("{error:#}");
-            state
-                .write()
-                .await
-                .record_conversation_failed(gateway_call_id, error.clone());
-            tracing::warn!(gateway_call_id, error, "conversation.handler.failed");
-            return Ok(());
-        }
+    let processor_input = ConversationProcessorInput::CommittedTurn(ConversationCommittedTurn {
+        call_id: gateway_call_id.to_string(),
+        turn_id: turn_context.turn_id.clone(),
+        text: transcript_text,
+        event,
+    });
+    let outputs = snapshot
+        .processor
+        .process_stream(stream::iter(vec![processor_input]));
+    futures_util::pin_mut!(outputs);
+    let target = ConversationCommandTarget {
+        mode: snapshot.mode,
+        call_control_id: snapshot.call_control_id,
+        barge_in: snapshot.barge_in,
     };
-    apply_conversation_command_with_timing(
-        state,
-        media_registry,
-        runtime,
-        gateway_call_id,
-        ConversationCommandTarget {
-            mode: snapshot.mode,
-            call_control_id: snapshot.call_control_id,
-            barge_in: snapshot.barge_in,
-        },
-        command,
-        turn_context,
-    )
-    .await
+    let mut saw_command = false;
+    while let Some(output) = outputs.next().await {
+        match output {
+            ConversationProcessorOutput::Command(command) => {
+                saw_command = true;
+                apply_conversation_command_with_timing(
+                    state,
+                    media_registry,
+                    runtime,
+                    gateway_call_id,
+                    target.clone(),
+                    command,
+                    turn_context.clone(),
+                )
+                .await?;
+            }
+            ConversationProcessorOutput::EarlyResponse(_) => {
+                tracing::warn!(
+                    gateway_call_id,
+                    "conversation.processor.early_response_output_ignored_for_committed_turn"
+                );
+            }
+            ConversationProcessorOutput::Error(error) => {
+                state
+                    .write()
+                    .await
+                    .record_conversation_failed(gateway_call_id, error.clone());
+                tracing::warn!(gateway_call_id, error, "conversation.processor.failed");
+                return Ok(());
+            }
+        }
+    }
+    if !saw_command {
+        apply_conversation_command_with_timing(
+            state,
+            media_registry,
+            runtime,
+            gateway_call_id,
+            target,
+            ConversationCommand::Noop,
+            turn_context,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub async fn handle_speech_onset(
@@ -762,13 +906,13 @@ async fn cancel_active_speech_for_barge_in(
 struct ConversationSnapshot {
     attached: bool,
     mode: ConversationMode,
+    processor: ConversationProcessorKind,
     call_control_id: String,
     barge_in: BargeInQualityConfig,
     config_id: String,
     redaction_mode: RedactionMode,
     endpoint_merge_window_ms: u64,
     quality_config: VoiceQualityConfig,
-    context: CallContext,
 }
 
 #[derive(Clone, Debug)]
@@ -785,15 +929,6 @@ async fn conversation_snapshot(
 ) -> Option<ConversationSnapshot> {
     let guard = state.read().await;
     let call = guard.calls.get(gateway_call_id)?;
-    let mut custom_state = BTreeMap::new();
-    custom_state.insert("gateway_call_id".to_string(), call.gateway_call_id.clone());
-    custom_state.insert(
-        "conversation_mode".to_string(),
-        call.conversation.mode.label().to_string(),
-    );
-    if let Some(text) = &call.conversation.last_assistant_text {
-        custom_state.insert("last_assistant_text".to_string(), text.clone());
-    }
     let effective_quality = quality_config
         .cloned()
         .unwrap_or_else(|| guard.quality.config.clone());
@@ -804,20 +939,13 @@ async fn conversation_snapshot(
     Some(ConversationSnapshot {
         attached: call.conversation.attached,
         mode: call.conversation.mode,
+        processor: call.conversation.processor,
         call_control_id: call.ids.call_control_id.clone(),
         barge_in,
         config_id,
         redaction_mode,
         endpoint_merge_window_ms,
         quality_config: effective_quality,
-        context: CallContext {
-            ids: Some(CallIds {
-                provider_call_id: call.ids.call_control_id.clone(),
-                provider_session_id: call.ids.call_session_id.clone(),
-                media_stream_id: call.ids.stream_id.clone(),
-            }),
-            custom_state,
-        },
     })
 }
 
@@ -1099,6 +1227,9 @@ async fn queue_conversation_speech(
             latest_turn_finalized_at: turn_context.latest_finalized_at,
             turn_id: turn_context.turn_id,
             coalesced_turn_ids: turn_context.coalesced_turn_ids,
+            source_asr_session_ids: Vec::new(),
+            source_utterance_ids: Vec::new(),
+            prebuffer_chunks_override: None,
         },
     )
     .await
@@ -1175,17 +1306,18 @@ async fn record_conversation_failed_unless_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::early_response::{EarlyResponseEvent, EarlyResponseIntent};
     use crate::media::SpeechCancelToken;
     use crate::operator::state::{shared_state, CallStatus, ConversationStatus, TelnyxIds};
     use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
+    use async_trait::async_trait;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
     fn test_runtime() -> ConversationRuntime {
-        ConversationRuntime::new_with_handler_options(
+        ConversationRuntime::new_with_processor_options(
             TelnyxClient::new("https://api.example.test", None, true),
             crate::tts::unavailable_registry(),
-            default_conversation_handler(),
             true,
             true,
         )
@@ -1196,10 +1328,9 @@ mod tests {
             Arc::new(StaticTtsFactory),
             Arc::new(StaticTtsFactory),
         ));
-        ConversationRuntime::new_with_handler_options(
+        ConversationRuntime::new_with_processor_options(
             TelnyxClient::new("https://api.example.test", None, true),
             tts,
-            default_conversation_handler(),
             true,
             true,
         )
@@ -1219,45 +1350,6 @@ mod tests {
 
         fn label(&self) -> &'static str {
             "static-test-tts"
-        }
-    }
-
-    fn failing_runtime() -> ConversationRuntime {
-        ConversationRuntime::new(
-            TelnyxClient::new("https://api.example.test", None, true),
-            crate::tts::unavailable_registry(),
-            Arc::new(FailingConversationHandler),
-            true,
-        )
-    }
-
-    #[derive(Clone, Debug)]
-    struct PrefixConversationHandler;
-
-    #[async_trait]
-    impl ConversationHandler for PrefixConversationHandler {
-        async fn on_transcript(
-            &self,
-            event: TranscriptEvent,
-            _context: &mut CallContext,
-        ) -> Result<ConversationCommand, VoiceAppError> {
-            Ok(ConversationCommand::Say {
-                text: format!("agent: {}", event.text()),
-            })
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct FailingConversationHandler;
-
-    #[async_trait]
-    impl ConversationHandler for FailingConversationHandler {
-        async fn on_transcript(
-            &self,
-            _event: TranscriptEvent,
-            _context: &mut CallContext,
-        ) -> Result<ConversationCommand, VoiceAppError> {
-            Err(VoiceAppError::new("model unavailable"))
         }
     }
 
@@ -1302,42 +1394,145 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn smoke_test_handler_turns_final_transcript_into_say() {
-        let handler = SmokeTestConversationHandler;
-        let mut context = CallContext {
-            ids: None,
-            custom_state: BTreeMap::new(),
-        };
-        let command = handler
-            .on_transcript(
-                TranscriptEvent::Final {
-                    text: "hello".to_string(),
-                    update: motlie_model::TranscriptionUpdate::default(),
-                },
-                &mut context,
-            )
-            .await
-            .expect("smoke-test handler should accept final transcript");
-
-        match command {
-            ConversationCommand::Say { text } => assert_eq!(text, "I heard: hello"),
-            _ => panic!("expected say command"),
+    async fn process_committed_turn(text: &str) -> Option<ConversationCommand> {
+        let input = ConversationProcessorInput::CommittedTurn(ConversationCommittedTurn {
+            call_id: "call-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            text: text.to_string(),
+            event: TranscriptEvent::Final {
+                text: text.to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+        });
+        match ConversationProcessorKind::Identity.process_input(input) {
+            Some(ConversationProcessorOutput::Command(command)) => Some(command),
+            Some(_other) => panic!("unexpected processor output"),
+            None => None,
         }
     }
 
     #[tokio::test]
-    async fn generic_handler_dispatches_without_final_coalescing() {
+    async fn identity_repeat_processor_turns_committed_transcript_into_plain_say() {
+        let command = process_committed_turn("hello")
+            .await
+            .expect("identity processor should emit a command");
+
+        match command {
+            ConversationCommand::Say { text } => assert_eq!(text, "hello"),
+            _ => panic!("expected say command"),
+        }
+    }
+
+    async fn process_early_response_event(
+        event: EarlyResponseEvent,
+    ) -> Option<EarlyResponseIntent> {
+        let input = ConversationProcessorInput::EarlyResponse(event);
+        match ConversationProcessorKind::Identity.process_input(input) {
+            Some(ConversationProcessorOutput::EarlyResponse(intent)) => Some(intent),
+            Some(_other) => panic!("unexpected processor output"),
+            None => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_repeat_processor_repeats_early_response_start_as_identity_fragment() {
+        let intent = process_early_response_event(EarlyResponseEvent::Started {
+            provisional_turn_id: "pt-1".to_string(),
+            call_id: "call-1".to_string(),
+            utterance_id: "utt-1".to_string(),
+            generation: 1,
+            text: "I need a tow truck.".to_string(),
+            confidence: Some(0.91),
+            stability: Some(0.86),
+            speech_state: crate::text_calls::turns::CallerSpeechState::EndpointCandidate,
+        })
+        .await;
+
+        assert_eq!(
+            intent,
+            Some(EarlyResponseIntent::Speak {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 1,
+                text: "I need a tow truck.".to_string(),
+                append_or_replace: crate::early_response::AppendOrReplace::Replace,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_repeat_processor_preserves_early_response_update_cancel_and_commit() {
+        assert_eq!(
+            process_early_response_event(EarlyResponseEvent::Updated {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                text: "I need a tow truck in Oakland.".to_string(),
+                append_or_replace: crate::early_response::AppendOrReplace::Replace,
+            })
+            .await,
+            Some(EarlyResponseIntent::Speak {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                text: "I need a tow truck in Oakland.".to_string(),
+                append_or_replace: crate::early_response::AppendOrReplace::Replace,
+            })
+        );
+        assert_eq!(
+            process_early_response_event(EarlyResponseEvent::Canceled {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                reason: crate::early_response::EarlyResponseCancelReason::AsrCorrection,
+            })
+            .await,
+            Some(EarlyResponseIntent::Cancel {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                reason: crate::early_response::EarlyResponseCancelReason::AsrCorrection,
+            })
+        );
+        assert_eq!(
+            process_early_response_event(EarlyResponseEvent::Committed {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                utterance_id: "utt-1".to_string(),
+                generation: 2,
+                turn_id: "turn-1".to_string(),
+                coalesced_turn_ids: Vec::new(),
+                coalesced_utterance_ids: vec!["utt-1".to_string()],
+                member_final_text: "I need a tow truck in Oakland.".to_string(),
+                final_text: "I need a tow truck in Oakland.".to_string(),
+                role: crate::early_response::EarlyResponseCommitRole::PrimaryPlayback,
+            })
+            .await,
+            Some(EarlyResponseIntent::Commit {
+                provisional_turn_id: "pt-1".to_string(),
+                call_id: "call-1".to_string(),
+                generation: 2,
+                turn_id: "turn-1".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_processor_dispatches_without_final_coalescing() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
-        let runtime = ConversationRuntime::new_with_handler_options(
+        let runtime = ConversationRuntime::new_with_processor_options(
             TelnyxClient::new("https://api.example.test", None, true),
             crate::tts::unavailable_registry(),
-            Arc::new(PrefixConversationHandler),
             true,
             false,
         );
-        assert_eq!(runtime.handler_label(), "handler");
+        assert_eq!(runtime.processor_label(), "processor");
 
         handle_transcript_event(
             &state,
@@ -1351,7 +1546,7 @@ mod tests {
             None,
         )
         .await
-        .expect("generic handler should dispatch immediately");
+        .expect("identity processor should dispatch immediately");
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
@@ -1359,24 +1554,23 @@ mod tests {
         assert_eq!(call.conversation.last_user_text.as_deref(), Some("hello"));
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
-            Some("agent: hello")
+            Some("hello")
         );
     }
 
     #[tokio::test]
-    async fn generic_handler_can_coalesce_adjacent_final_fragments() {
+    async fn identity_processor_can_coalesce_adjacent_final_fragments() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
-        let runtime = ConversationRuntime::new_with_handler_options(
+        let runtime = ConversationRuntime::new_with_processor_options(
             TelnyxClient::new("https://api.example.test", None, true),
             crate::tts::unavailable_registry(),
-            Arc::new(PrefixConversationHandler),
             true,
             true,
         );
         let media_registry = SharedMediaRegistry::default();
 
-        for text in ["this should merge", "into one handler turn."] {
+        for text in ["this should merge", "into one processor turn."] {
             handle_transcript_event(
                 &state,
                 &media_registry,
@@ -1389,7 +1583,7 @@ mod tests {
                 None,
             )
             .await
-            .expect("generic coalescing handler should accept final fragment");
+            .expect("identity coalescing processor should accept final fragment");
         }
         wait_for_conversation_final().await;
 
@@ -1398,31 +1592,19 @@ mod tests {
         assert_eq!(call.conversation.status, ConversationStatus::Proposed);
         assert_eq!(
             call.conversation.last_user_text.as_deref(),
-            Some("this should merge into one handler turn.")
+            Some("this should merge into one processor turn.")
         );
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
-            Some("agent: this should merge into one handler turn.")
+            Some("this should merge into one processor turn.")
         );
     }
 
     #[tokio::test]
-    async fn smoke_test_handler_ignores_partial_transcript() {
-        let handler = SmokeTestConversationHandler;
-        let mut context = CallContext {
-            ids: None,
-            custom_state: BTreeMap::new(),
-        };
-        let command = handler
-            .on_transcript(
-                TranscriptEvent::Partial {
-                    text: "hello".to_string(),
-                    update: motlie_model::TranscriptionUpdate::default(),
-                },
-                &mut context,
-            )
+    async fn identity_repeat_processor_empty_committed_turn_is_noop() {
+        let command = process_committed_turn("   ")
             .await
-            .expect("smoke-test handler should accept partial transcript");
+            .expect("identity processor should emit a command");
 
         match command {
             ConversationCommand::Noop => {}
@@ -1431,13 +1613,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_runtime_records_user_turn_without_invoking_handler() {
+    async fn disabled_runtime_records_user_turn_without_invoking_processor() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
         let runtime = ConversationRuntime::new(
             TelnyxClient::new("https://api.example.test", None, true),
             crate::tts::unavailable_registry(),
-            Arc::new(FailingConversationHandler),
             false,
         );
 
@@ -1453,7 +1634,7 @@ mod tests {
             None,
         )
         .await
-        .expect("disabled handler should not fail media");
+        .expect("disabled processor should not fail media");
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
@@ -1730,7 +1911,7 @@ mod tests {
         );
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
-            Some("I heard: You're still missing some end points always seems to be the last word that's missing")
+            Some("You're still missing some end points always seems to be the last word that's missing")
         );
     }
 
@@ -1793,7 +1974,7 @@ mod tests {
         assert_eq!(call.conversation.last_user_text.as_deref(), Some("second"));
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
-            Some("I heard: second")
+            Some("second")
         );
         assert!(call.conversation.last_error.is_none());
     }
@@ -1884,9 +2065,7 @@ mod tests {
         );
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
-            Some(
-                "I heard: Yeah, this is not the last fragment or frame didn't come through still."
-            )
+            Some("Yeah, this is not the last fragment or frame didn't come through still.")
         );
     }
 
@@ -1967,7 +2146,7 @@ mod tests {
         );
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
-            Some("I heard: Endpointing is still a problem, isn' it?")
+            Some("Endpointing is still a problem, isn' it?")
         );
     }
 
@@ -2029,7 +2208,7 @@ mod tests {
         );
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
-            Some("I heard: The endpoint sounded glitchy today.")
+            Some("The endpoint sounded glitchy today.")
         );
     }
 
@@ -2079,7 +2258,7 @@ mod tests {
             None,
         )
         .await
-        .expect("final should still regenerate through handler");
+        .expect("final should still regenerate through processor");
         wait_for_conversation_final().await;
 
         assert!(cancel.is_canceled());
@@ -2092,7 +2271,7 @@ mod tests {
         );
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
-            Some("I heard: hello there")
+            Some("hello there")
         );
     }
 
@@ -2130,38 +2309,6 @@ mod tests {
         assert_eq!(call.status, CallStatus::Ended);
         assert_ne!(call.conversation.status, ConversationStatus::Failed);
         assert!(call.conversation.last_error.is_none());
-    }
-
-    #[tokio::test]
-    async fn handler_error_marks_conversation_failed_without_failing_media() {
-        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
-        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
-        let runtime = failing_runtime();
-
-        handle_transcript_event(
-            &state,
-            &SharedMediaRegistry::default(),
-            &runtime,
-            &gateway_call_id,
-            TranscriptEvent::Final {
-                text: "hello".to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            },
-            None,
-        )
-        .await
-        .expect("handler error should remain conversation-scoped");
-        wait_for_conversation_final().await;
-
-        let guard = state.read().await;
-        let call = guard.calls.get(&gateway_call_id).expect("call exists");
-        assert_eq!(call.status, CallStatus::MediaStarted);
-        assert!(call.last_error.is_none());
-        assert_eq!(call.conversation.status, ConversationStatus::Failed);
-        assert_eq!(
-            call.conversation.last_error.as_deref(),
-            Some("model unavailable")
-        );
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
+use crate::conversation::ConversationProcessorKind;
 use crate::quality::{
     ActiveAsrQualitySession, CallerTurnEventMetadata, QualityEvent, QualityEventContext,
     QualityEventSink, RedactionMode, VoiceQualityConfig,
@@ -90,15 +91,27 @@ impl QualityRuntimeState {
 #[derive(Clone, Debug, Default)]
 pub struct GatewayConfig {
     pub bind: Option<SocketAddr>,
+    pub tui: bool,
+    pub socket: Option<PathBuf>,
+    pub artifact_root: Option<PathBuf>,
+    pub log_file: Option<PathBuf>,
     pub public_webhook_url: Option<String>,
     pub public_media_url: Option<String>,
     pub telnyx_media: TelnyxMediaConfig,
     pub capture_dir: Option<PathBuf>,
+    pub telnyx_api_base: String,
+    pub telnyx_api_key_ref: Option<String>,
+    pub dry_run_telnyx: bool,
     pub selected_connection_id: Option<String>,
     pub selected_application_name: Option<String>,
     pub selected_phone_number: Option<String>,
     pub default_from_number: Option<String>,
     pub state_path: Option<PathBuf>,
+    pub conversation_enabled: bool,
+    pub conversation_final_coalescing_enabled: bool,
+    pub conversation_barge_in_enabled: bool,
+    pub conversation_processor: ConversationProcessorKind,
+    pub startup_warm_models: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -208,6 +221,8 @@ pub struct TtsPlaybackState {
     pub backend: LiveTtsBackend,
     pub text_preview: String,
     pub echo_signature: String,
+    pub source_asr_session_ids: Vec<String>,
+    pub source_utterance_ids: Vec<String>,
     pub frames_queued: usize,
     pub frames_sent: usize,
     pub underrun_ticks: usize,
@@ -222,6 +237,8 @@ pub struct TtsPlaybackState {
 pub struct QualityPlaybackLinkage {
     pub turn_id: Option<String>,
     pub coalesced_turn_ids: Vec<String>,
+    pub source_asr_session_ids: Vec<String>,
+    pub source_utterance_ids: Vec<String>,
     pub source_label: String,
 }
 
@@ -230,6 +247,8 @@ struct QualityPlaybackRecord {
     playback_id: String,
     turn_id: Option<String>,
     source_turn_ids: Vec<String>,
+    source_asr_session_ids: Vec<String>,
+    source_utterance_ids: Vec<String>,
     tts_backend: LiveTtsBackend,
     source_label: String,
     first_audio_sent: bool,
@@ -286,6 +305,8 @@ impl QualityTurnReportState {
             playback_id: playback_id.clone(),
             turn_id: linkage.turn_id,
             source_turn_ids,
+            source_asr_session_ids: linkage.source_asr_session_ids,
+            source_utterance_ids: linkage.source_utterance_ids,
             tts_backend,
             source_label: linkage.source_label,
             first_audio_sent: false,
@@ -442,6 +463,7 @@ pub struct ConversationLine {
 pub struct ConversationState {
     pub attached: bool,
     pub mode: ConversationMode,
+    pub processor: ConversationProcessorKind,
     pub status: ConversationStatus,
     pub lines: Vec<ConversationLine>,
     pub last_user_text: Option<String>,
@@ -456,6 +478,7 @@ impl Default for ConversationState {
         Self {
             attached: false,
             mode: ConversationMode::Manual,
+            processor: ConversationProcessorKind::default(),
             status: ConversationStatus::Idle,
             lines: Vec::new(),
             last_user_text: None,
@@ -707,6 +730,10 @@ impl GatewayState {
             config: GatewayConfig {
                 bind: Some(bind),
                 telnyx_media: TelnyxMediaConfig::default(),
+                telnyx_api_base: "https://api.telnyx.com/v2".to_string(),
+                telnyx_api_key_ref: Some("env:TELNYX_API_KEY".to_string()),
+                conversation_barge_in_enabled: true,
+                conversation_processor: ConversationProcessorKind::Identity,
                 ..GatewayConfig::default()
             },
             inbound_mode: InboundMode::Disabled,
@@ -934,6 +961,45 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
+    pub fn emit_quality_transcript_suppressed(
+        &mut self,
+        gateway_call_id: &str,
+        session: Option<&ActiveAsrQualitySession>,
+        transcript_kind: &'static str,
+        suppression_reason: &'static str,
+        text: &str,
+        extra: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let (context, include_transcript_text) = if let Some(session) = session {
+            (
+                self.quality_event_context_with_config_and_redaction(
+                    Some(gateway_call_id.to_string()),
+                    session.config_id.clone(),
+                    session.redaction_mode,
+                ),
+                session.include_transcript_text,
+            )
+        } else {
+            (
+                self.quality_event_context(Some(gateway_call_id.to_string())),
+                self.quality.config.logging.include_transcript_text,
+            )
+        };
+        let event = QualityEvent::transcript_suppressed(
+            context,
+            session,
+            transcript_kind,
+            suppression_reason,
+            text,
+            include_transcript_text,
+            extra,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
     pub fn emit_quality_span_finished(&mut self, gateway_call_id: &str, span: QualitySpanEmission) {
         if !self.quality.event_sink.is_enabled() {
             return;
@@ -1096,7 +1162,8 @@ impl GatewayState {
             return existing;
         }
 
-        let call = CallSession::pending_inbound(ids.clone(), from, to, status);
+        let mut call = CallSession::pending_inbound(ids.clone(), from, to, status);
+        call.conversation.processor = self.config.conversation_processor;
         let gateway_call_id = call.gateway_call_id.clone();
         self.call_control_index
             .insert(ids.call_control_id, gateway_call_id.clone());
@@ -1127,7 +1194,8 @@ impl GatewayState {
             return existing;
         }
 
-        let call = CallSession::outbound(ids.clone(), from, to, status);
+        let mut call = CallSession::outbound(ids.clone(), from, to, status);
+        call.conversation.processor = self.config.conversation_processor;
         let gateway_call_id = call.gateway_call_id.clone();
         self.call_control_index
             .insert(ids.call_control_id, gateway_call_id.clone());
@@ -1289,6 +1357,18 @@ impl GatewayState {
         }
     }
 
+    pub fn set_conversation_processor(
+        &mut self,
+        gateway_call_id: &str,
+        processor: ConversationProcessorKind,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.processor = processor;
+            call.conversation.updated_at = Utc::now();
+            call.push_timeline(format!("conversation processor -> {}", processor.label()));
+        }
+    }
+
     pub fn record_conversation_user_turn(&mut self, gateway_call_id: &str, text: String) {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.conversation.last_user_text = Some(text.clone());
@@ -1400,6 +1480,8 @@ impl GatewayState {
                 backend,
                 text_preview: preview_text(text),
                 echo_signature: speech_echo_signature(text),
+                source_asr_session_ids: linkage.source_asr_session_ids.clone(),
+                source_utterance_ids: linkage.source_utterance_ids.clone(),
                 frames_queued: 0,
                 frames_sent: 0,
                 underrun_ticks: 0,
@@ -1736,6 +1818,8 @@ fn playback_link_payload(
         "source_turn_ids": record.source_turn_ids,
         "coalesced_turn_ids": record.source_turn_ids,
         "coalesced_turn_count": record.source_turn_ids.len(),
+        "source_asr_session_ids": record.source_asr_session_ids,
+        "source_utterance_ids": record.source_utterance_ids,
         "tts_backend": record.tts_backend.label(),
         "source_label": record.source_label,
         "first_audio_sent": record.first_audio_sent,
@@ -1872,6 +1956,8 @@ mod tests {
             QualityPlaybackLinkage {
                 turn_id: Some("turn_selected".to_string()),
                 coalesced_turn_ids: vec!["turn_selected".to_string(), "turn_next".to_string()],
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
                 source_label: "test".to_string(),
             },
             Some("tts_replaced"),

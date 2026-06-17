@@ -2,6 +2,7 @@
 
 ## Changelog
 
+- 2026-06-15 PDT, @codex-m6-ds-rv -- Documented that Kokoro streaming warmup expects the curated `motlie-models-download kokoro_82m` flow to generate Sherpa-compatible `tokens.txt` from `tokenizer.json`; the gateway still never downloads or repairs artifacts at runtime.
 - 2026-06-06 16:19 PDT, @codex-381-impl -- Added the reversed TTS quality A/B harness runbook for issue #381, covering Piper baseline, Kokoro-82M, Qwen3-TTS, codec round-trip scoring, objective audio signals, and M3.5 live-path interpretation.
 - 2026-06-06 22:11 PDT, @codex-381-impl -- Updated Kokoro-82M from an external-command experiment to a curated in-repo ONNX backend that shares the workspace static ONNX Runtime link path.
 - 2026-06-06 22:50 PDT, @codex-381-impl -- Made Qwen3-TTS an explicit opt-in golden-ab lane after DGX review found a single runaway sample could generate hundreds of seconds of audio and retain high RSS; default bakeoff is now Piper + Kokoro only.
@@ -33,11 +34,10 @@ Kokoro-82M is a curated in-repo ONNX backend. It uses the workspace `ort`/`ort-s
 
 ## Commands
 
-Run a one-sample smoke against Piper with echo ASR to verify the runner shape without model downloads:
+Run a one-sample smoke against Piper with echo ASR after preloading model artifacts:
 
 ```bash
 cargo run -p motlie-telnyx-gateway --features piper -- \
-  --no-asr-download \
   tts-golden-ab bins/telnyx-gateway/corpus/qwen3-call-center-golden.json \
   --engine piper \
   --asr-backend echo \
@@ -47,7 +47,7 @@ cargo run -p motlie-telnyx-gateway --features piper -- \
   --output-json /tmp/motlie-tts-golden-ab-smoke.json
 ```
 
-Run the full default matrix when Piper, Sherpa, and Kokoro artifacts are available:
+Run the full default matrix after Piper, Sherpa, and Kokoro artifacts are preloaded:
 
 ```bash
 cargo run -p motlie-telnyx-gateway --features golden-ab -- \
@@ -85,7 +85,7 @@ cargo run -p motlie-telnyx-gateway --features sherpa -- \
   --output-json /tmp/motlie-tts-golden-ab-kokoro.json
 ```
 
-Kokoro artifacts resolve through the normal model artifact policy. The curated bundle expects `onnx/model_quantized.onnx`, `tokenizer.json`, and `voices/af_bella.bin` from `onnx-community/Kokoro-82M-v1.0-ONNX`.
+Kokoro artifacts must be preloaded before running this gateway command; the gateway does not download model artifacts. The curated bundle expects `onnx/model_quantized.onnx`, `tokenizer.json`, and `voices/af_bella.bin` from `onnx-community/Kokoro-82M-v1.0-ONNX`. For streaming mode, run the curated `motlie-models-download kokoro_82m` flow so `tokens.txt` is generated from Kokoro `tokenizer.json` in the snapshot before warmup.
 
 ## Output Layout
 

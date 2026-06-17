@@ -5,4 +5,7 @@ mod incremental;
 pub mod speech;
 
 pub use incremental::KokoroIncrementalSpeechStream;
-pub use speech::{KokoroHandle, KokoroSpeechAdapter, KokoroSpeechBundle, KokoroSpeechSpec};
+pub use speech::{
+    KokoroHandle, KokoroMeteredIncrementalSpeechStream, KokoroSpeechAdapter, KokoroSpeechBundle,
+    KokoroSpeechSpec,
+};

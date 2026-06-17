@@ -27,8 +27,8 @@ use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
 use crate::common::{
-    KokoroArtifactPaths, KokoroArtifactSpec, RuntimeMetricState, configure_artifact_policy,
-    lock_metrics, observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, KokoroArtifactPaths, KokoroArtifactSpec, RuntimeMetricState,
 };
 use crate::incremental::{self, KokoroIncrementalRuntime, KokoroIncrementalSpeechStream};
 
