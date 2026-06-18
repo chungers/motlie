@@ -5710,18 +5710,27 @@ mod tests {
         let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
-        engine
+        let media_ready = engine
             .run_line("quality text-call media-ready-timeout-ms 2345")
             .await
             .expect("set media-ready timeout");
-        engine
+        assert!(media_ready.lines[0].contains("key=text_call.media_ready_timeout_ms"));
+        assert!(media_ready.lines[0].contains("applies=new_text_call_session"));
+
+        let playback_wait = engine
             .run_line("quality text-call playback-wait-timeout-ms 3456")
             .await
             .expect("set playback-wait timeout");
-        engine
+        assert!(playback_wait.lines[0].contains("key=text_call.playback_wait_timeout_ms"));
+        assert!(playback_wait.lines[0].contains("applies=new_text_call_session"));
+
+        let latest = engine
             .run_line("quality text-call latest-response-wins off")
             .await
             .expect("set latest policy");
+        assert!(latest.lines[0].contains("key=text_call.latest_response_wins"));
+        assert!(latest.lines[0].contains("applies=new_text_call_session"));
+
         engine
             .run_line("quality text-call callback-timeout-ms 4567")
             .await

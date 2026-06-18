@@ -41,6 +41,11 @@ pub enum ConversationProcessorKind {
     #[default]
     Identity,
     /// External app/telnyx-agent text stream attached through the text-call protocol.
+    ///
+    /// This is adapter-backed: inbound caller turns are delivered by the text-call
+    /// websocket registry, and agent frames are handled by `processors::external_text`.
+    /// Local `process_input` intentionally returns no output so the media/ASR
+    /// processor dispatcher does not synthesize a competing response.
     ExternalTextStream,
 }
 
@@ -58,6 +63,8 @@ impl ConversationProcessorKind {
     ) -> Option<ConversationProcessorOutput> {
         match self {
             Self::Identity => identity::IdentityRepeatConversationProcessor.process_input(input),
+            // Adapter-backed processor: websocket-owned external text streams
+            // handle agent frames and queue speech in `processors::external_text`.
             Self::ExternalTextStream => None,
         }
     }
