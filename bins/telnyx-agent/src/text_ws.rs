@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use motlie_agent::voice::telnyx::text::{
     AgentTextFrame, CallerSpeechState, GatewayTextFrame, PlaybackFinishedStatus,
 };
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -10,8 +11,32 @@ use tokio::task::JoinHandle;
 
 use crate::tmux_bridge::{BridgeAbortToken, BridgeTurnEvent, TmuxBridge};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BridgeTurnTarget {
+    Committed {
+        turn_id: String,
+    },
+    Provisional {
+        provisional_turn_id: String,
+        generation: u64,
+    },
+}
+
+impl BridgeTurnTarget {
+    fn bridge_turn_id(&self) -> &str {
+        match self {
+            Self::Committed { turn_id } => turn_id,
+            Self::Provisional {
+                provisional_turn_id,
+                ..
+            } => provisional_turn_id,
+        }
+    }
+}
+
 struct ActiveBridgeTurn {
-    turn_id: String,
+    key: String,
+    target: BridgeTurnTarget,
     abort: BridgeAbortToken,
     task: JoinHandle<()>,
 }
@@ -118,6 +143,7 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
     });
     let mut active: Option<ActiveBridgeTurn> = None;
     let mut partial_context = PartialAdvisoryContext::default();
+    let mut committed_provisionals = BTreeMap::<String, String>::new();
 
     while let Some(message) = read.next().await {
         match message {
@@ -146,11 +172,18 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                                 "telnyx_agent.text_ws.caller_partial_summary"
                             );
                         }
+                        if committed_provisionals.remove(&turn_id).is_some() {
+                            tracing::debug!(
+                                turn_id,
+                                "telnyx_agent.text_ws.committed_turn_already_answering_from_provisional"
+                            );
+                            continue;
+                        }
                         cancel_active_turn(&mut active);
                         active = Some(spawn_bridge_turn(
                             bridge.clone(),
                             agent_tx.clone(),
-                            turn_id,
+                            BridgeTurnTarget::Committed { turn_id },
                             text,
                         ));
                     }
@@ -192,11 +225,49 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                             "telnyx_agent.text_ws.caller_partial_advisory"
                         );
                     }
+                    Ok(GatewayTextFrame::CallerTurnProvisional {
+                        provisional_turn_id,
+                        generation,
+                        text,
+                        reply_allowed,
+                        ..
+                    }) => {
+                        if reply_allowed {
+                            cancel_active_turn(&mut active);
+                            active = Some(spawn_bridge_turn(
+                                bridge.clone(),
+                                agent_tx.clone(),
+                                BridgeTurnTarget::Provisional {
+                                    provisional_turn_id,
+                                    generation,
+                                },
+                                text,
+                            ));
+                        }
+                    }
+                    Ok(GatewayTextFrame::CallerTurnProvisionalUpdate { .. }) => {}
+                    Ok(GatewayTextFrame::CallerTurnProvisionalCancel {
+                        provisional_turn_id,
+                        generation,
+                        ..
+                    }) => {
+                        cancel_matching_provisional_turn(
+                            &mut active,
+                            &provisional_turn_id,
+                            generation,
+                        );
+                    }
+                    Ok(GatewayTextFrame::CallerTurnProvisionalCommit {
+                        provisional_turn_id,
+                        turn_id,
+                        generation,
+                        ..
+                    }) => {
+                        if active_provisional_matches(&active, &provisional_turn_id, generation) {
+                            committed_provisionals.insert(turn_id, provisional_turn_id);
+                        }
+                    }
                     Ok(GatewayTextFrame::SessionStart { .. })
-                    | Ok(GatewayTextFrame::CallerTurnProvisional { .. })
-                    | Ok(GatewayTextFrame::CallerTurnProvisionalUpdate { .. })
-                    | Ok(GatewayTextFrame::CallerTurnProvisionalCancel { .. })
-                    | Ok(GatewayTextFrame::CallerTurnProvisionalCommit { .. })
                     | Ok(GatewayTextFrame::ProvisionalPlaybackStarted { .. })
                     | Ok(GatewayTextFrame::PlaybackStarted { .. })
                     | Ok(GatewayTextFrame::PlaybackFinished { .. })
@@ -221,12 +292,14 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
 fn spawn_bridge_turn(
     bridge: TmuxBridge,
     agent_tx: mpsc::Sender<AgentTextFrame>,
-    turn_id: String,
+    target: BridgeTurnTarget,
     text: String,
 ) -> ActiveBridgeTurn {
     let abort = BridgeAbortToken::default();
     let task_abort = abort.clone();
-    let task_turn_id = turn_id.clone();
+    let key = target.bridge_turn_id().to_string();
+    let task_target = target.clone();
+    let task_turn_id = key.clone();
     let task = tokio::spawn(async move {
         let (event_tx, mut event_rx) = mpsc::channel(32);
         let bridge_fut =
@@ -247,17 +320,10 @@ fn spawn_bridge_turn(
                 event = event_rx.recv() => {
                     match event {
                         Some(BridgeTurnEvent::Partial(text)) => {
-                            let _ = agent_tx.send(AgentTextFrame::AgentTurnPartial {
-                                turn_id: task_turn_id.clone(),
-                                text,
-                                append: true,
-                            }).await;
+                            let _ = agent_tx.send(agent_partial_frame(&task_target, text)).await;
                         }
                         Some(BridgeTurnEvent::Final(text)) => {
-                            let _ = agent_tx.send(AgentTextFrame::AgentTurn {
-                                turn_id: task_turn_id.clone(),
-                                text,
-                            }).await;
+                            let _ = agent_tx.send(agent_final_frame(&task_target, text)).await;
                         }
                         None => {}
                     }
@@ -266,16 +332,79 @@ fn spawn_bridge_turn(
         }
     });
     ActiveBridgeTurn {
-        turn_id,
+        key,
+        target,
         abort,
         task,
     }
 }
 
+fn agent_partial_frame(target: &BridgeTurnTarget, text: String) -> AgentTextFrame {
+    match target {
+        BridgeTurnTarget::Committed { turn_id } => AgentTextFrame::AgentTurnPartial {
+            turn_id: turn_id.clone(),
+            text,
+            append: true,
+        },
+        BridgeTurnTarget::Provisional {
+            provisional_turn_id,
+            generation,
+        } => AgentTextFrame::AgentTurnProvisionalPartial {
+            provisional_turn_id: provisional_turn_id.clone(),
+            generation: *generation,
+            text,
+            append: true,
+        },
+    }
+}
+
+fn agent_final_frame(target: &BridgeTurnTarget, text: String) -> AgentTextFrame {
+    match target {
+        BridgeTurnTarget::Committed { turn_id } => AgentTextFrame::AgentTurn {
+            turn_id: turn_id.clone(),
+            text,
+        },
+        BridgeTurnTarget::Provisional {
+            provisional_turn_id,
+            generation,
+        } => AgentTextFrame::AgentTurnProvisional {
+            provisional_turn_id: provisional_turn_id.clone(),
+            generation: *generation,
+            text,
+        },
+    }
+}
+
 fn cancel_matching_turn(active: &mut Option<ActiveBridgeTurn>, turn_id: &str) {
-    if active.as_ref().is_some_and(|turn| turn.turn_id == turn_id) {
+    if active.as_ref().is_some_and(|turn| turn.key == turn_id) {
         cancel_active_turn(active);
     }
+}
+
+fn cancel_matching_provisional_turn(
+    active: &mut Option<ActiveBridgeTurn>,
+    provisional_turn_id: &str,
+    generation: u64,
+) {
+    if active_provisional_matches(active, provisional_turn_id, generation) {
+        cancel_active_turn(active);
+    }
+}
+
+fn active_provisional_matches(
+    active: &Option<ActiveBridgeTurn>,
+    provisional_turn_id: &str,
+    generation: u64,
+) -> bool {
+    active.as_ref().is_some_and(|turn| {
+        matches!(
+            &turn.target,
+            BridgeTurnTarget::Provisional {
+                provisional_turn_id: active_id,
+                generation: active_generation,
+            } if active_id == provisional_turn_id && *active_generation == generation
+        )
+    })
 }
 
 fn cancel_active_turn(active: &mut Option<ActiveBridgeTurn>) {
@@ -369,6 +498,50 @@ mod tests {
         assert_eq!(summary.max_stability, None);
     }
 
+    #[test]
+    fn bridge_turn_target_maps_events_to_committed_or_provisional_frames() {
+        let committed = BridgeTurnTarget::Committed {
+            turn_id: "turn-test".to_string(),
+        };
+        assert_eq!(
+            agent_partial_frame(&committed, "partial".to_string()),
+            AgentTextFrame::AgentTurnPartial {
+                turn_id: "turn-test".to_string(),
+                text: "partial".to_string(),
+                append: true,
+            }
+        );
+        assert_eq!(
+            agent_final_frame(&committed, "final".to_string()),
+            AgentTextFrame::AgentTurn {
+                turn_id: "turn-test".to_string(),
+                text: "final".to_string(),
+            }
+        );
+
+        let provisional = BridgeTurnTarget::Provisional {
+            provisional_turn_id: "pt-test".to_string(),
+            generation: 5,
+        };
+        assert_eq!(
+            agent_partial_frame(&provisional, "partial".to_string()),
+            AgentTextFrame::AgentTurnProvisionalPartial {
+                provisional_turn_id: "pt-test".to_string(),
+                generation: 5,
+                text: "partial".to_string(),
+                append: true,
+            }
+        );
+        assert_eq!(
+            agent_final_frame(&provisional, "final".to_string()),
+            AgentTextFrame::AgentTurnProvisional {
+                provisional_turn_id: "pt-test".to_string(),
+                generation: 5,
+                text: "final".to_string(),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn cancel_active_turn_signals_abort_before_hard_abort() {
         let abort = BridgeAbortToken::default();
@@ -380,7 +553,10 @@ mod tests {
             time::sleep(Duration::from_secs(5)).await;
         });
         let mut active = Some(ActiveBridgeTurn {
-            turn_id: "turn-test".to_string(),
+            key: "turn-test".to_string(),
+            target: BridgeTurnTarget::Committed {
+                turn_id: "turn-test".to_string(),
+            },
             abort,
             task,
         });

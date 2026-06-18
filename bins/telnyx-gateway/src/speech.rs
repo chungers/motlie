@@ -11,6 +11,7 @@ use crate::media::{
 };
 use crate::operator::state::{
     CallStatus, LogLevel, QualityPlaybackLinkage, QualitySpanEmission, SharedState,
+    SpeechOutputConfig,
 };
 use crate::quality::{RedactionMode, TtsGenerationMode};
 use crate::tts::{
@@ -45,6 +46,7 @@ pub struct SpeechQueueRequest {
     pub source_asr_session_ids: Vec<String>,
     pub source_utterance_ids: Vec<String>,
     pub prebuffer_chunks_override: Option<usize>,
+    pub speech_output: Option<SpeechOutputConfig>,
 }
 
 struct SpeechJobConfigSnapshot {
@@ -62,6 +64,7 @@ impl SpeechJobConfigSnapshot {
     async fn read(
         state: &SharedState,
         gateway_call_id: &str,
+        speech_output: Option<SpeechOutputConfig>,
         prebuffer_chunks_override: Option<usize>,
     ) -> anyhow::Result<Self> {
         let guard = state.read().await;
@@ -72,16 +75,21 @@ impl SpeechJobConfigSnapshot {
         if call.ids.stream_id.is_none() {
             bail!("media stream is not ready for call {gateway_call_id}");
         }
+        let output = speech_output.unwrap_or_else(|| {
+            SpeechOutputConfig::from_quality(
+                guard.conversation_tts_backend,
+                &guard.quality.config.tts,
+            )
+        });
         Ok(Self {
             media: guard.config.telnyx_media,
             quality_config_id: guard.quality.config_id.clone(),
             quality_redaction_mode: guard.quality.config.logging.redaction_mode,
-            tts_generation_mode: guard.quality.config.tts.generation_mode,
-            tts_chunking_enabled: guard.quality.config.tts.chunking_enabled,
-            tts_max_text_chunk_chars: guard.quality.config.tts.max_text_chunk_chars,
-            tts_first_chunk_max_chars: guard.quality.config.tts.first_chunk_max_chars,
-            tts_prebuffer_chunks: prebuffer_chunks_override
-                .unwrap_or(guard.quality.config.tts.prebuffer_chunks),
+            tts_generation_mode: output.tts_generation_mode,
+            tts_chunking_enabled: output.tts_chunking_enabled,
+            tts_max_text_chunk_chars: output.tts_max_text_chunk_chars,
+            tts_first_chunk_max_chars: output.tts_first_chunk_max_chars,
+            tts_prebuffer_chunks: prebuffer_chunks_override.unwrap_or(output.tts_prebuffer_chunks),
         })
     }
 }
@@ -221,6 +229,7 @@ pub async fn queue_speech(
             source_asr_session_ids: Vec::new(),
             source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
+            speech_output: None,
         },
     )
     .await
@@ -245,12 +254,18 @@ pub async fn queue_speech_with_request(
         source_asr_session_ids,
         source_utterance_ids,
         prebuffer_chunks_override,
+        speech_output,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
     let cancel = SpeechCancelToken::default();
-    let snapshot =
-        SpeechJobConfigSnapshot::read(state, &gateway_call_id, prebuffer_chunks_override).await?;
+    let snapshot = SpeechJobConfigSnapshot::read(
+        state,
+        &gateway_call_id,
+        speech_output,
+        prebuffer_chunks_override,
+    )
+    .await?;
     ensure_generation_mode_supported(tts, tts_backend, snapshot.tts_generation_mode)?;
     let (media_handle, replaced_playback_id) = match conflict_policy {
         SpeechConflictPolicy::Reject => (
@@ -353,12 +368,18 @@ pub async fn queue_append_speech_with_request(
         source_asr_session_ids,
         source_utterance_ids,
         prebuffer_chunks_override,
+        speech_output,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
     let cancel = SpeechCancelToken::default();
-    let snapshot =
-        SpeechJobConfigSnapshot::read(state, &gateway_call_id, prebuffer_chunks_override).await?;
+    let snapshot = SpeechJobConfigSnapshot::read(
+        state,
+        &gateway_call_id,
+        speech_output,
+        prebuffer_chunks_override,
+    )
+    .await?;
     ensure_generation_mode_supported(tts, tts_backend, snapshot.tts_generation_mode)?;
     let (media_handle, replaced_playback_id) = match conflict_policy {
         SpeechConflictPolicy::Reject | SpeechConflictPolicy::Append => (
@@ -2956,6 +2977,7 @@ mod tests {
                 source_asr_session_ids: Vec::new(),
                 source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
+                speech_output: None,
             },
         )
         .await
@@ -3066,6 +3088,7 @@ mod tests {
                 source_asr_session_ids: Vec::new(),
                 source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
+                speech_output: None,
             },
         )
         .await

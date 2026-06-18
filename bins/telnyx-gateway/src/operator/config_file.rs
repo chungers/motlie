@@ -288,7 +288,12 @@ impl ConversationConfig {
         let defaults = Self::default();
         let processor = match document.processor.as_deref().unwrap_or("identity") {
             "identity" => ConversationProcessorKind::Identity,
-            other => bail!("unsupported conversation processor {other}; expected identity"),
+            "external_text_stream" | "external-text-stream" => {
+                ConversationProcessorKind::ExternalTextStream
+            }
+            other => bail!(
+                "unsupported conversation processor {other}; expected identity or external_text_stream"
+            ),
         };
         let tts_backend = document
             .tts_backend

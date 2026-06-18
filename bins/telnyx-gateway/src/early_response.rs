@@ -10,13 +10,14 @@ use sha2::{Digest, Sha256};
 
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::SharedState;
+use crate::operator::state::SpeechOutputConfig;
 use crate::processors::{
     ConversationProcessorInput, ConversationProcessorKind, ConversationProcessorOutput,
 };
 use crate::speech::{self, AppendSpeechHandle, SpeechConflictPolicy, SpeechQueueRequest};
 use crate::text_calls::turns::CallerSpeechState;
 use crate::text_calls::SharedTextCallRegistry;
-use crate::tts::{LiveTtsBackend, SharedTtsRegistry};
+use crate::tts::SharedTtsRegistry;
 use tokio::sync::{mpsc, Notify};
 
 const EARLY_RESPONSE_INPUT_CAPACITY: usize = 8;
@@ -591,7 +592,7 @@ pub struct EarlyResponsePipelineServices {
     pub media_registry: SharedMediaRegistry,
     pub tts: SharedTtsRegistry,
     pub text_calls: SharedTextCallRegistry,
-    pub tts_backend: LiveTtsBackend,
+    pub speech_output: SpeechOutputConfig,
     pub processor: ConversationProcessorKind,
 }
 
@@ -618,7 +619,7 @@ pub fn spawn_early_response_pipeline(
         state: services.state.clone(),
         media_registry: services.media_registry.clone(),
         tts: services.tts.clone(),
-        tts_backend: services.tts_backend,
+        speech_output: services.speech_output,
         text_calls: services.text_calls.clone(),
         registry: registry.clone(),
         audio_mode,
@@ -660,6 +661,7 @@ pub fn spawn_early_response_pipeline(
             event_registry.observe_event(&event);
             spawn_early_response_event_forward(
                 event_text_calls.clone(),
+                services.media_registry.clone(),
                 event_call_id.clone(),
                 event.clone(),
             );
@@ -678,16 +680,50 @@ pub fn spawn_early_response_pipeline(
 
 fn spawn_early_response_event_forward(
     text_calls: SharedTextCallRegistry,
+    media_registry: SharedMediaRegistry,
     call_id: String,
     event: EarlyResponseEvent,
 ) {
     tokio::spawn(async move {
+        let cleanup_event = event.clone();
         if let Err(error) = text_calls.send_early_response_event(&call_id, event).await {
             tracing::warn!(
                 gateway_call_id = call_id.as_str(),
                 error = %error,
                 "text_call.early_response.forward_failed"
             );
+        }
+        match cleanup_event {
+            EarlyResponseEvent::Canceled {
+                provisional_turn_id,
+                generation,
+                reason,
+                ..
+            } => {
+                let clear_reason = match reason {
+                    EarlyResponseCancelReason::CallerBargeIn => SpeechClearReason::BargeIn,
+                    _ => SpeechClearReason::CancelAndReplace,
+                };
+                text_calls
+                    .cancel_agent_provisional_turn(
+                        &media_registry,
+                        &call_id,
+                        &provisional_turn_id,
+                        generation,
+                        clear_reason,
+                    )
+                    .await;
+            }
+            EarlyResponseEvent::Committed {
+                provisional_turn_id,
+                generation,
+                ..
+            } => {
+                text_calls
+                    .finish_agent_provisional_turn(&call_id, &provisional_turn_id, generation)
+                    .await;
+            }
+            EarlyResponseEvent::Started { .. } | EarlyResponseEvent::Updated { .. } => {}
         }
     });
 }
@@ -702,7 +738,7 @@ struct EarlyResponseIntentServices {
     state: SharedState,
     media_registry: SharedMediaRegistry,
     tts: SharedTtsRegistry,
-    tts_backend: LiveTtsBackend,
+    speech_output: SpeechOutputConfig,
     text_calls: SharedTextCallRegistry,
     registry: ProvisionalPlaybackRegistry,
     audio_mode: EarlyResponseAudioMode,
@@ -819,7 +855,7 @@ async fn start_provisional_speech(
         &services.media_registry,
         &services.tts,
         SpeechQueueRequest {
-            tts_backend: services.tts_backend,
+            tts_backend: services.speech_output.tts_backend,
             gateway_call_id: call_id.clone(),
             text: text.clone(),
             source_label: "early response".to_string(),
@@ -831,6 +867,7 @@ async fn start_provisional_speech(
             source_asr_session_ids: Vec::new(),
             source_utterance_ids: vec![utterance_id.clone()],
             prebuffer_chunks_override: Some(services.provisional_max_prebuffer_frames),
+            speech_output: Some(services.speech_output),
         },
         vec![text],
     )
@@ -1736,7 +1773,10 @@ mod tests {
             state: shared_state("127.0.0.1:0".parse().expect("valid addr")),
             media_registry: SharedMediaRegistry::default(),
             tts: unavailable_registry(),
-            tts_backend: LiveTtsBackend::Piper,
+            speech_output: SpeechOutputConfig::from_quality(
+                LiveTtsBackend::Piper,
+                &crate::quality::TtsQualityConfig::default(),
+            ),
             text_calls: SharedTextCallRegistry::default(),
             registry: registry.clone(),
             audio_mode: EarlyResponseAudioMode::PrepareOnly,
