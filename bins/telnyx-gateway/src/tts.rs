@@ -6,15 +6,15 @@ use anyhow::bail;
 use anyhow::Context;
 use async_trait::async_trait;
 use clap::ValueEnum;
+use motlie_model::typed::IncrementalSpeechCancelToken;
 #[cfg(any(feature = "kokoro", feature = "piper"))]
 use motlie_model::typed::SynthesisRequest;
 #[cfg(feature = "kokoro")]
 use motlie_model::typed::{
     BufferedSpeechSynthesizer, IncrementalSpeechStream, IncrementalSpeechSynthesizer,
 };
-use motlie_model::typed::{
-    IncrementalSpeechCancelToken, IncrementalSpeechControls, IncrementalSpeechRequestLabel,
-};
+#[cfg(feature = "kokoro")]
+use motlie_model::typed::{IncrementalSpeechControls, IncrementalSpeechRequestLabel};
 #[cfg(feature = "piper")]
 use motlie_model::typed::{SpeechStream, SpeechSynthesizer};
 #[cfg(any(feature = "kokoro", feature = "piper"))]

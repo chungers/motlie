@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
-use crate::conversation::ConversationProcessorKind;
+use crate::processors::ConversationProcessorKind;
 use crate::quality::{
     ActiveAsrQualitySession, CallerTurnEventMetadata, QualityEvent, QualityEventContext,
     QualityEventSink, RedactionMode, VoiceQualityConfig,

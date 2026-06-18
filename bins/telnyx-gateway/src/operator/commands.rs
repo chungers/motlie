@@ -6,7 +6,7 @@ use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegis
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
-use crate::conversation::{ConversationProcessorKind, ConversationRuntime};
+use crate::conversation::ConversationRuntime;
 use crate::early_response::{
     BoundaryRequirement, EarlyResponseAppendMode, EarlyResponseAudioMode, EarlyResponseStartTiming,
     MissingSignalPolicy,
@@ -20,6 +20,7 @@ use crate::operator::state::{
     asr_warm_key, tts_warm_key, CallStatus, ConversationMode, ConversationStatus, GatewayState,
     InboundMode, LogLevel, SharedState,
 };
+use crate::processors::ConversationProcessorKind;
 use crate::quality::{
     OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, TtsGenerationMode,
     VoiceQualityConfig,
@@ -2098,21 +2099,19 @@ async fn conversation_command(
             let enabled = state.enabled();
             context.conversation.set_processor_enabled(enabled);
             let label = if enabled { "on" } else { "off" };
-            if enabled {
-                set_barge_in_enabled(context, false, "conversation smoke-test").await?;
-            }
-            {
+            let barge_in_label = {
                 let mut guard = context.state.write().await;
                 guard.config.conversation_enabled = enabled;
                 guard.config.conversation_final_coalescing_enabled =
                     context.conversation.final_coalescing_enabled();
                 guard.log(LogLevel::Info, format!("conversation smoke-test {label}"));
-            }
+                quality_barge_in_label(&guard).to_string()
+            };
             if enabled {
                 Ok(CommandOutput {
                     lines: vec![
                         format!("conversation smoke-test: {label}"),
-                        "conversation barge-in: off".to_string(),
+                        format!("conversation barge-in: {barge_in_label}"),
                     ],
                     effects: Vec::new(),
                 })
@@ -3939,15 +3938,16 @@ fn conversation_help() -> String {
         "  conversation status",
         "",
         "Smoke-test two-way loop:",
-        "  conversation smoke-test on   # also turns barge-in off for deterministic echo",
-        "  conversation barge-in on     # optional: explicitly test interruption behavior",
+        "  conversation smoke-test on   # preserves current barge-in setting",
+        "  conversation barge-in off    # deterministic identity/repeat baseline",
+        "  conversation barge-in on     # explicitly test interruption behavior",
         "  answer    # or: dial <callee-e164>",
         "  conversation status",
         "  speak cancel",
         "  conversation smoke-test off",
         "",
         "Controls:",
-        "  smoke-test enablement turns barge-in off; turn it back on only to test interruption.",
+        "  smoke-test enablement preserves barge-in; use conversation barge-in on/off explicitly.",
         "  barge-in off keeps active TTS from being cleared by partial/final transcripts.",
         "  disapprove cancels active conversation TTS and leaves transcription-only mode.",
         "  mode manual records assistant proposals; approve/say speaks the pending proposal",
@@ -4122,7 +4122,7 @@ fn socket_help() -> String {
         "Agent workflows:",
         "  inbound: calls -> answer [call-id] -> conversation status [call-id]",
         "  outbound: dial <callee-e164> -> conversation status",
-        "  smoke test: conversation smoke-test on -> answer or dial (barge-in defaults off)",
+        "  smoke test: conversation smoke-test on -> conversation barge-in on|off -> answer or dial",
         "  stop assistant audio: conversation disapprove [call-id]",
         "  inspect: status, calls, call show [call-id], transcript follow [call-id]",
         "  call show includes TTS buffer/latency/underrun and echo-suppression counters",
@@ -5105,12 +5105,12 @@ mod tests {
             .expect("enable smoke test");
         assert_eq!(
             enabled.lines,
-            vec!["conversation smoke-test: on", "conversation barge-in: off"]
+            vec!["conversation smoke-test: on", "conversation barge-in: on"]
         );
         assert!(engine.context().conversation.processor_enabled());
         assert!(!engine.context().conversation.final_coalescing_enabled());
-        assert!(!engine.context().conversation.barge_in_enabled());
-        assert!(!state.read().await.quality.config.barge_in.enabled);
+        assert!(engine.context().conversation.barge_in_enabled());
+        assert!(state.read().await.quality.config.barge_in.enabled);
 
         let disabled = engine
             .run_line("conversation smoke-test off")
@@ -5118,6 +5118,24 @@ mod tests {
             .expect("disable smoke test");
         assert_eq!(disabled.lines, vec!["conversation smoke-test: off"]);
         assert!(!engine.context().conversation.processor_enabled());
+
+        let barge_in_off = engine
+            .run_line("conversation barge-in off")
+            .await
+            .expect("disable barge-in");
+        assert_eq!(barge_in_off.lines, vec!["conversation barge-in: off"]);
+
+        let enabled = engine
+            .run_line("conversation smoke-test on")
+            .await
+            .expect("enable smoke test with barge-in off");
+        assert_eq!(
+            enabled.lines,
+            vec!["conversation smoke-test: on", "conversation barge-in: off"]
+        );
+        assert!(engine.context().conversation.processor_enabled());
+        assert!(!engine.context().conversation.barge_in_enabled());
+        assert!(!state.read().await.quality.config.barge_in.enabled);
     }
 
     #[tokio::test]

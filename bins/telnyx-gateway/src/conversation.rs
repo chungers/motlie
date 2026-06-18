@@ -4,17 +4,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context};
-use futures_util::{stream, Stream, StreamExt};
+use futures_util::{stream, StreamExt};
 use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 use motlie_voice::telephony::CallAction;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
-use crate::early_response::{AppendOrReplace, EarlyResponseEvent, EarlyResponseIntent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
     CallStatus, ConversationMode, LogLevel, QualitySpanEmission, SharedState,
+};
+pub use crate::processors::{
+    ConversationCommittedTurn, ConversationProcessorInput, ConversationProcessorKind,
+    ConversationProcessorOutput,
 };
 use crate::quality::{
     BargeInQualityConfig, EndpointQualityConfig, RedactionMode, VoiceQualityConfig,
@@ -24,69 +27,6 @@ use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::SharedTtsRegistry;
 
 const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
-
-/// Events that may drive a conversation processor.
-#[derive(Clone, Debug)]
-pub enum ConversationProcessorInput {
-    /// Provisional ASR-derived event before the final committed turn boundary.
-    EarlyResponse(EarlyResponseEvent),
-    /// Final, post-settle conversation turn.
-    CommittedTurn(ConversationCommittedTurn),
-}
-
-/// Final turn data sent to buffered processors after endpoint settle/coalescing.
-#[derive(Clone, Debug)]
-pub struct ConversationCommittedTurn {
-    pub call_id: String,
-    pub turn_id: Option<String>,
-    pub text: String,
-    pub event: TranscriptEvent,
-}
-
-/// Processor output accepted by the gateway.
-pub enum ConversationProcessorOutput {
-    /// Provisional speech/cancel/commit intent for the early-response pipeline.
-    EarlyResponse(EarlyResponseIntent),
-    /// Committed-turn command for normal conversation state.
-    Command(ConversationCommand),
-    /// Conversation-scoped failure. This records failed state without failing the media path.
-    Error(String),
-}
-
-/// Static processor selection for a call.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ConversationProcessorKind {
-    /// Repeat accepted caller text exactly for both committed and provisional paths.
-    #[default]
-    Identity,
-}
-
-impl ConversationProcessorKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Identity => "identity",
-        }
-    }
-
-    pub fn process_input(
-        self,
-        input: ConversationProcessorInput,
-    ) -> Option<ConversationProcessorOutput> {
-        match self {
-            Self::Identity => IdentityRepeatConversationProcessor.process_input(input),
-        }
-    }
-
-    pub fn process_stream<S>(
-        self,
-        inputs: S,
-    ) -> impl Stream<Item = ConversationProcessorOutput> + Send
-    where
-        S: Stream<Item = ConversationProcessorInput> + Send,
-    {
-        inputs.filter_map(move |input| async move { self.process_input(input) })
-    }
-}
 
 #[derive(Clone)]
 pub struct ConversationRuntime {
@@ -189,98 +129,6 @@ struct ConversationTurnContext {
     latest_finalized_at: Option<Instant>,
     turn_id: Option<String>,
     coalesced_turn_ids: Vec<String>,
-}
-
-/// Minimal processor used for smoke tests and identity/repeat live validation.
-///
-/// It repeats committed turns exactly and passes provisional early-response text through
-/// without adding a response prefix.
-#[derive(Clone, Debug, Default)]
-pub struct IdentityRepeatConversationProcessor;
-
-impl IdentityRepeatConversationProcessor {
-    fn process_input(
-        self,
-        input: ConversationProcessorInput,
-    ) -> Option<ConversationProcessorOutput> {
-        match input {
-            ConversationProcessorInput::EarlyResponse(event) => {
-                repeat_early_response(event).map(ConversationProcessorOutput::EarlyResponse)
-            }
-            ConversationProcessorInput::CommittedTurn(turn) => {
-                let text = turn.text.trim().to_string();
-                if text.is_empty() {
-                    Some(ConversationProcessorOutput::Command(
-                        ConversationCommand::Noop,
-                    ))
-                } else {
-                    Some(ConversationProcessorOutput::Command(
-                        ConversationCommand::Say { text },
-                    ))
-                }
-            }
-        }
-    }
-}
-
-fn repeat_early_response(event: EarlyResponseEvent) -> Option<EarlyResponseIntent> {
-    match event {
-        EarlyResponseEvent::Started {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            ..
-        } => Some(EarlyResponseIntent::Speak {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace: AppendOrReplace::Replace,
-        }),
-        EarlyResponseEvent::Updated {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace,
-        } => Some(EarlyResponseIntent::Speak {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            text,
-            append_or_replace,
-        }),
-        EarlyResponseEvent::Canceled {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            reason,
-        } => Some(EarlyResponseIntent::Cancel {
-            provisional_turn_id,
-            call_id,
-            utterance_id,
-            generation,
-            reason,
-        }),
-        EarlyResponseEvent::Committed {
-            provisional_turn_id,
-            call_id,
-            generation,
-            turn_id,
-            ..
-        } => Some(EarlyResponseIntent::Commit {
-            provisional_turn_id,
-            call_id,
-            generation,
-            turn_id,
-        }),
-    }
 }
 
 pub async fn handle_transcript_event(
@@ -1306,7 +1154,6 @@ async fn record_conversation_failed_unless_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::early_response::{EarlyResponseEvent, EarlyResponseIntent};
     use crate::media::SpeechCancelToken;
     use crate::operator::state::{shared_state, CallStatus, ConversationStatus, TelnyxIds};
     use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
@@ -1394,134 +1241,6 @@ mod tests {
         .await;
     }
 
-    async fn process_committed_turn(text: &str) -> Option<ConversationCommand> {
-        let input = ConversationProcessorInput::CommittedTurn(ConversationCommittedTurn {
-            call_id: "call-1".to_string(),
-            turn_id: Some("turn-1".to_string()),
-            text: text.to_string(),
-            event: TranscriptEvent::Final {
-                text: text.to_string(),
-                update: motlie_model::TranscriptionUpdate::default(),
-            },
-        });
-        match ConversationProcessorKind::Identity.process_input(input) {
-            Some(ConversationProcessorOutput::Command(command)) => Some(command),
-            Some(_other) => panic!("unexpected processor output"),
-            None => None,
-        }
-    }
-
-    #[tokio::test]
-    async fn identity_repeat_processor_turns_committed_transcript_into_plain_say() {
-        let command = process_committed_turn("hello")
-            .await
-            .expect("identity processor should emit a command");
-
-        match command {
-            ConversationCommand::Say { text } => assert_eq!(text, "hello"),
-            _ => panic!("expected say command"),
-        }
-    }
-
-    async fn process_early_response_event(
-        event: EarlyResponseEvent,
-    ) -> Option<EarlyResponseIntent> {
-        let input = ConversationProcessorInput::EarlyResponse(event);
-        match ConversationProcessorKind::Identity.process_input(input) {
-            Some(ConversationProcessorOutput::EarlyResponse(intent)) => Some(intent),
-            Some(_other) => panic!("unexpected processor output"),
-            None => None,
-        }
-    }
-
-    #[tokio::test]
-    async fn identity_repeat_processor_repeats_early_response_start_as_identity_fragment() {
-        let intent = process_early_response_event(EarlyResponseEvent::Started {
-            provisional_turn_id: "pt-1".to_string(),
-            call_id: "call-1".to_string(),
-            utterance_id: "utt-1".to_string(),
-            generation: 1,
-            text: "I need a tow truck.".to_string(),
-            confidence: Some(0.91),
-            stability: Some(0.86),
-            speech_state: crate::text_calls::turns::CallerSpeechState::EndpointCandidate,
-        })
-        .await;
-
-        assert_eq!(
-            intent,
-            Some(EarlyResponseIntent::Speak {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                utterance_id: "utt-1".to_string(),
-                generation: 1,
-                text: "I need a tow truck.".to_string(),
-                append_or_replace: crate::early_response::AppendOrReplace::Replace,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn identity_repeat_processor_preserves_early_response_update_cancel_and_commit() {
-        assert_eq!(
-            process_early_response_event(EarlyResponseEvent::Updated {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                utterance_id: "utt-1".to_string(),
-                generation: 2,
-                text: "I need a tow truck in Oakland.".to_string(),
-                append_or_replace: crate::early_response::AppendOrReplace::Replace,
-            })
-            .await,
-            Some(EarlyResponseIntent::Speak {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                utterance_id: "utt-1".to_string(),
-                generation: 2,
-                text: "I need a tow truck in Oakland.".to_string(),
-                append_or_replace: crate::early_response::AppendOrReplace::Replace,
-            })
-        );
-        assert_eq!(
-            process_early_response_event(EarlyResponseEvent::Canceled {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                utterance_id: "utt-1".to_string(),
-                generation: 2,
-                reason: crate::early_response::EarlyResponseCancelReason::AsrCorrection,
-            })
-            .await,
-            Some(EarlyResponseIntent::Cancel {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                utterance_id: "utt-1".to_string(),
-                generation: 2,
-                reason: crate::early_response::EarlyResponseCancelReason::AsrCorrection,
-            })
-        );
-        assert_eq!(
-            process_early_response_event(EarlyResponseEvent::Committed {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                utterance_id: "utt-1".to_string(),
-                generation: 2,
-                turn_id: "turn-1".to_string(),
-                coalesced_turn_ids: Vec::new(),
-                coalesced_utterance_ids: vec!["utt-1".to_string()],
-                member_final_text: "I need a tow truck in Oakland.".to_string(),
-                final_text: "I need a tow truck in Oakland.".to_string(),
-                role: crate::early_response::EarlyResponseCommitRole::PrimaryPlayback,
-            })
-            .await,
-            Some(EarlyResponseIntent::Commit {
-                provisional_turn_id: "pt-1".to_string(),
-                call_id: "call-1".to_string(),
-                generation: 2,
-                turn_id: "turn-1".to_string(),
-            })
-        );
-    }
-
     #[tokio::test]
     async fn identity_processor_dispatches_without_final_coalescing() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
@@ -1598,18 +1317,6 @@ mod tests {
             call.conversation.last_assistant_text.as_deref(),
             Some("this should merge into one processor turn.")
         );
-    }
-
-    #[tokio::test]
-    async fn identity_repeat_processor_empty_committed_turn_is_noop() {
-        let command = process_committed_turn("   ")
-            .await
-            .expect("identity processor should emit a command");
-
-        match command {
-            ConversationCommand::Noop => {}
-            _ => panic!("expected noop command"),
-        }
     }
 
     #[tokio::test]
