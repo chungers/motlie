@@ -200,6 +200,12 @@ fn render_records_markdown(
     out.push_str("\n## Platform Notes\n\n");
     render_platform_notes(&mut out, records);
 
+    out.push_str("\n## LLM Accelerator Comparison\n\n");
+    render_llm_accelerator_comparison(&mut out, records);
+
+    out.push_str("\n## Coverage Accounting Matrix\n\n");
+    render_accounting_matrix(&mut out, records);
+
     out.push_str("\n## Per-Cell Coverage\n\n");
     out.push_str("| cell | host | arch | run | bundle | capability | depth | profile | requested | resolved | outcome | reason |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for record in records {
@@ -226,6 +232,7 @@ fn render_records_markdown(
     }
 
     out.push_str("\n## Latency Metrics\n\n");
+    out.push_str("Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streaming-benefit signal only for longer inputs. Short and medium Kokoro inputs around the current ~166-374 character segment-emission threshold may synthesize as a single segment, so proof=true there is bookkeeping; use `max_inter_chunk_gap_ms` and `underrun_count` as the breakdown signals.\n\n");
     render_latency_metrics(&mut out, records);
 
     out.push_str("\n## Model x Capability\n\n");
@@ -376,10 +383,389 @@ fn render_platform_notes(out: &mut String, records: &[ResultRecord]) {
     }
 }
 
-fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
-    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | thinking_tokens_to_answer | completion_tokens | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | mean_transcription_latency_ms | p95_transcription_latency_ms | mean_ttfp_first_partial_ms | p95_ttfp_first_partial_ms | mean_synthesis_latency_ms | p95_synthesis_latency_ms | mean_ttfa_first_chunk_ms | p95_ttfa_first_chunk_ms | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
+/// LLM bundles run through `llama.cpp`/GGUF or `mistralrs`/HF; everything else
+/// (ASR/TTS/embeddings) is excluded from the accelerator comparison.
+fn is_llm_record(record: &ResultRecord) -> bool {
+    matches!(record.coverage.backend.as_str(), "llama_cpp" | "mistralrs")
+        && matches!(
+            record.coverage.capability.as_str(),
+            "chat" | "perf" | "tool_use"
+        )
+}
+
+fn backend_family_label(backend: &str) -> &'static str {
+    match backend {
+        "llama_cpp" => "llama.cpp/GGUF",
+        "mistralrs" => "mistralrs/HF",
+        other => other_backend_family(other),
+    }
+}
+
+fn other_backend_family(_backend: &str) -> &'static str {
+    "other"
+}
+
+/// Accelerator axis for the comparison: the *target* the cell asked for
+/// (derived from the profile), so a backend that refuses to forward to
+/// CUDA/Metal still shows up under that column as blocked rather than vanishing.
+const COMPARISON_ACCELERATORS: [&str; 3] = ["cpu", "cuda", "metal"];
+
+#[derive(Default)]
+struct AcceleratorPerf {
+    decode_tps: Vec<f64>,
+    ttft_ms: Vec<f64>,
+}
+
+fn perf_metrics(record: &ResultRecord) -> Option<&crate::metrics::PerfPerformanceMetrics> {
+    match &record.performance.capability_metrics {
+        CapabilityPerformanceMetrics::Perf(metrics) => Some(metrics),
+        _ => None,
+    }
+}
+
+/// "LLM Accelerator Comparison": a bundle × accelerator throughput/TTFT pivot
+/// plus a backend-family viability rollup. Reproduced from records, not
+/// hand-authored.
+fn render_llm_accelerator_comparison(out: &mut String, records: &[ResultRecord]) {
+    let llm_records: Vec<&ResultRecord> = records.iter().filter(|r| is_llm_record(r)).collect();
+    if llm_records.is_empty() {
+        out.push_str("No LLM (`llama.cpp`/GGUF or `mistralrs`/HF) records in this input set.\n");
+        return;
+    }
+
+    render_llm_throughput(out, &llm_records);
+    out.push_str("\n### Backend-family viability\n\n");
+    render_llm_viability(out, &llm_records);
+    out.push_str("\n### Build provenance\n\n");
+    render_llm_provenance(out, &llm_records);
+}
+
+/// Build-SHA provenance per accelerator, from `identity.git_sha` of the records
+/// whose numbers feed the tables above (on-target passing cells). Surfaces pin
+/// mismatch honestly: an accelerator whose SHA set differs from the others is
+/// prior-pin data. Fully data-driven — no pin is hardcoded.
+fn render_llm_provenance(out: &mut String, llm_records: &[&ResultRecord]) {
     out.push_str(
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "Distinct build SHAs (`identity.git_sha`) of the on-target passing records backing the \
+         numbers above, per accelerator. An accelerator whose SHA set differs from the others is \
+         **prior-pin** data (pin mismatch — confirmatory only, not a fresh re-run).\n\n",
+    );
+    out.push_str("| accelerator | build SHAs |\n|---|---|\n");
+
+    let mut by_accel: BTreeMap<&'static str, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for record in llm_records {
+        if record.coverage.terminal_outcome != TerminalOutcome::Passed
+            || record.coverage.resolved_accelerator != record.coverage.requested_accelerator
+        {
+            continue;
+        }
+        let accelerator = record.coverage.requested_accelerator.as_str();
+        if !COMPARISON_ACCELERATORS.contains(&accelerator) {
+            continue;
+        }
+        let sha = record
+            .identity
+            .git_sha
+            .as_deref()
+            .map(short_sha)
+            .unwrap_or_else(|| "unknown".to_owned());
+        by_accel.entry(accelerator).or_default().insert(sha);
+    }
+
+    if by_accel.is_empty() {
+        out.push_str("| `none` | — |\n");
+        return;
+    }
+    for accelerator in COMPARISON_ACCELERATORS {
+        let shas = by_accel.get(accelerator);
+        let rendered = shas
+            .filter(|set| !set.is_empty())
+            .map(|set| {
+                set.iter()
+                    .map(|sha| format!("`{sha}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "—".to_owned());
+        out.push_str(&format!("| `{accelerator}` | {rendered} |\n"));
+    }
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(8).collect()
+}
+
+/// Decode throughput (tok/s) and TTFT (ms), one row per LLM bundle × quant,
+/// pivoted by the cpu/cuda/metal target. Numbers come only from passing `perf` cells; a
+/// `—` means no passing perf metric for that bundle × accelerator (see the
+/// viability rollup below for whether the path was blocked vs simply not run).
+fn render_llm_throughput(out: &mut String, llm_records: &[&ResultRecord]) {
+    out.push_str(
+        "Decode throughput (tok/s) and TTFT (ms) per LLM bundle and quantization scheme, by target accelerator. \
+         Values are from passing `perf` cells; `—` = no passing perf metric for that pairing.\n\n",
+    );
+    out.push_str(
+        "| bundle | quant | family | cpu tok/s | cpu ttft ms | cuda tok/s | cuda ttft ms | metal tok/s | metal ttft ms |\n",
+    );
+    out.push_str("|---|---|---|---:|---:|---:|---:|---:|---:|\n");
+
+    // (bundle, quant, family) -> accelerator -> accumulated perf metrics.
+    let mut rows: BTreeMap<
+        (String, String, &'static str),
+        BTreeMap<&'static str, AcceleratorPerf>,
+    > = BTreeMap::new();
+    for record in llm_records {
+        if record.coverage.terminal_outcome != TerminalOutcome::Passed {
+            continue;
+        }
+        // Only count a cell under an accelerator column if it actually ran there.
+        // Blocked/fallback cells leave `resolved_accelerator` echoing the request,
+        // so guard on resolved == requested to avoid e.g. a silent cpu-fallback
+        // pass landing a cpu-speed number in the cuda column.
+        if record.coverage.resolved_accelerator != record.coverage.requested_accelerator {
+            continue;
+        }
+        let Some(metrics) = perf_metrics(record) else {
+            continue;
+        };
+        let accelerator = record.coverage.requested_accelerator.as_str();
+        if !COMPARISON_ACCELERATORS.contains(&accelerator) {
+            continue;
+        }
+        let family = backend_family_label(&record.coverage.backend);
+        let entry = rows
+            .entry((
+                record.coverage.bundle_id.clone(),
+                record.coverage.quantization.clone(),
+                family,
+            ))
+            .or_default()
+            .entry(accelerator)
+            .or_default();
+        if let Some(tps) = metrics.mean_decode_tokens_per_second {
+            entry.decode_tps.push(tps);
+        }
+        if let Some(ttft) = metrics.mean_ttft_first_token_ms {
+            entry.ttft_ms.push(ttft);
+        }
+    }
+
+    if rows.is_empty() {
+        out.push_str("| `none` | `none` | `none` | — | — | — | — | — | — |\n");
+        return;
+    }
+
+    for ((bundle, quant, family), per_accel) in &rows {
+        out.push_str(&format!("| `{bundle}` | `{quant}` | {family} |"));
+        for accelerator in COMPARISON_ACCELERATORS {
+            let cell = per_accel.get(accelerator);
+            let tps = cell.and_then(|c| mean_f64(&c.decode_tps));
+            let ttft = cell.and_then(|c| mean_f64(&c.ttft_ms));
+            out.push_str(&format!(
+                " {} | {} |",
+                format_decimal(tps, 1),
+                format_decimal(ttft, 0)
+            ));
+        }
+        out.push('\n');
+    }
+}
+
+/// Backend-family × accelerator rollup: how many LLM cells resolved to the
+/// requested accelerator and how the outcomes split. This stays data-driven so
+/// backend-specific accelerator fixes show up as changed viability, not as
+/// hardcoded prose.
+fn render_llm_viability(out: &mut String, llm_records: &[&ResultRecord]) {
+    out.push_str(
+        "`on_target` = passed cells that actually resolved to the requested accelerator (a \
+         passed cell that silently fell back to CPU is counted in `passed` but not \
+         `on_target`). `mean decode tok/s` is averaged over on-target passing `perf` cells.\n\n",
+    );
+    out.push_str(
+        "| family | accelerator | cells | passed | on_target | blocked | failed | mean decode tok/s |\n",
+    );
+    out.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
+
+    #[derive(Default)]
+    struct Viability {
+        cells: u64,
+        passed: u64,
+        on_target: u64,
+        blocked: u64,
+        failed: u64,
+        decode_tps: Vec<f64>,
+    }
+
+    let mut rollup: BTreeMap<(&'static str, &'static str), Viability> = BTreeMap::new();
+    for record in llm_records {
+        let accelerator = record.coverage.requested_accelerator.as_str();
+        if !COMPARISON_ACCELERATORS.contains(&accelerator) {
+            continue;
+        }
+        let on_target =
+            record.coverage.resolved_accelerator == record.coverage.requested_accelerator;
+        let family = backend_family_label(&record.coverage.backend);
+        let entry = rollup.entry((family, accelerator)).or_default();
+        entry.cells += 1;
+        match record.coverage.terminal_outcome {
+            TerminalOutcome::Passed => {
+                entry.passed += 1;
+                if on_target {
+                    entry.on_target += 1;
+                    if let Some(tps) =
+                        perf_metrics(record).and_then(|m| m.mean_decode_tokens_per_second)
+                    {
+                        entry.decode_tps.push(tps);
+                    }
+                }
+            }
+            TerminalOutcome::Blocked => entry.blocked += 1,
+            TerminalOutcome::Failed => entry.failed += 1,
+            TerminalOutcome::Skipped => {}
+        }
+    }
+
+    if rollup.is_empty() {
+        out.push_str("| `none` | `none` | 0 | 0 | 0 | 0 | 0 | — |\n");
+        return;
+    }
+
+    for ((family, accelerator), v) in &rollup {
+        out.push_str(&format!(
+            "| {family} | `{accelerator}` | {} | {} | {} | {} | {} | {} |\n",
+            v.cells,
+            v.passed,
+            v.on_target,
+            v.blocked,
+            v.failed,
+            format_decimal(mean_f64(&v.decode_tps), 1)
+        ));
+    }
+}
+
+fn mean_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn format_decimal(value: Option<f64>, places: usize) -> String {
+    value
+        .map(|value| format!("{value:.places$}"))
+        .unwrap_or_else(|| "—".to_owned())
+}
+
+/// The #521 coverage Accounting Matrix: 4-state coverage per
+/// `(bundle × capability) × Profile`, reconciled from the records against the
+/// `BackendKind::accel_support` declaration. One view over the reconciliation;
+/// quant rides with the bundle (1:1).
+fn render_accounting_matrix(out: &mut String, records: &[ResultRecord]) {
+    use crate::coverage::{reconcile_records, CoverageState};
+    use crate::profile::Profile;
+
+    let report = reconcile_records(records.iter());
+    if report.states.is_empty() {
+        out.push_str("No enum-keyed coverage cells in this input set.\n");
+        return;
+    }
+    out.push_str(
+        "4-state coverage per `(bundle × capability)` × Profile, reconciled from the records \
+         against the `BackendKind::accel_support` declaration. ✅ Validated · ⛔ NotApplicable(reason) \
+         · 🔧 BuildGap · ⏳ Gap · — none.\n\n",
+    );
+    out.push_str("| bundle | quant | capability |");
+    for profile in Profile::ALL {
+        out.push_str(&format!(" {} |", profile.canonical_id()));
+    }
+    out.push('\n');
+    out.push_str("|---|---|---|");
+    for _ in Profile::ALL {
+        out.push_str("---|");
+    }
+    out.push('\n');
+
+    // (bundle_id, capability+speech_mode) -> (quant label, profile -> state).
+    // Speech buffered vs streaming are distinct rows (#531).
+    type MatrixRow = (String, BTreeMap<&'static str, CoverageState>);
+    let mut rows: BTreeMap<(String, String), MatrixRow> = BTreeMap::new();
+    for (key, state) in &report.states {
+        let entry = rows
+            .entry((key.bundle_id.clone(), capability_row_label(key)))
+            .or_insert_with(|| (key.quant.as_str().to_owned(), BTreeMap::new()));
+        entry.1.insert(key.profile.canonical_id(), *state);
+    }
+    for ((bundle, capability), (quant, by_profile)) in &rows {
+        out.push_str(&format!("| `{bundle}` | `{quant}` | `{capability}` |"));
+        for profile in Profile::ALL {
+            let cell = by_profile
+                .get(profile.canonical_id())
+                .map(coverage_state_symbol)
+                .unwrap_or_else(|| "—".to_owned());
+            out.push_str(&format!(" {cell} |"));
+        }
+        out.push('\n');
+    }
+
+    if !report.findings.is_empty() {
+        out.push_str(&format!(
+            "\n**{} reconciliation finding(s)** — declaration↔runtime contradictions (fail-closed):\n",
+            report.findings.len()
+        ));
+        for (key, finding) in &report.findings {
+            out.push_str(&format!(
+                "- `{}` / `{}` / `{}`: `{:?}`\n",
+                key.bundle_id,
+                capability_row_label(key),
+                key.profile.canonical_id(),
+                finding
+            ));
+        }
+    }
+}
+
+/// Capability column label, distinguishing the Speech sub-dimension (#531):
+/// streaming TTS reads `tts (streaming)`; buffered TTS stays `tts` (unchanged).
+fn capability_row_label(key: &crate::coverage::CellKey) -> String {
+    use motlie_model::SpeechGeneration;
+    match key.speech_mode {
+        Some(SpeechGeneration::Streaming) => {
+            format!("{} (streaming)", capability_label(key.capability))
+        }
+        _ => capability_label(key.capability).to_owned(),
+    }
+}
+
+fn capability_label(capability: motlie_model::CapabilityKind) -> &'static str {
+    use motlie_model::CapabilityKind;
+    match capability {
+        CapabilityKind::Chat => "chat",
+        CapabilityKind::ToolUse => "tool_use",
+        CapabilityKind::Transcription => "asr",
+        CapabilityKind::Speech => "tts",
+        CapabilityKind::Embeddings => "embeddings",
+        CapabilityKind::Completion => "completion",
+        CapabilityKind::Ocr => "ocr",
+        CapabilityKind::Vision => "vision",
+        CapabilityKind::VoiceClone => "voice_clone",
+    }
+}
+
+fn coverage_state_symbol(state: &crate::coverage::CoverageState) -> String {
+    use crate::coverage::CoverageState;
+    match state {
+        CoverageState::Validated => "✅".to_owned(),
+        CoverageState::NotApplicable(reason) => format!("⛔ {}", reason.as_str()),
+        CoverageState::BuildGap => "🔧".to_owned(),
+        CoverageState::Gap(Some(reason)) => format!("⏳ {}", reason.as_str()),
+        CoverageState::Gap(None) => "⏳".to_owned(),
+    }
+}
+
+fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
+    out.push_str("| cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | thinking_tokens_to_answer | completion_tokens | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | mean_transcription_latency_ms | p95_transcription_latency_ms | mean_ttfp_first_partial_ms | p95_ttfp_first_partial_ms | mean_synthesis_latency_ms | p95_synthesis_latency_ms | mean_ttfa_first_chunk_ms | p95_ttfa_first_chunk_ms | mean_synth_complete_ms | p95_synth_complete_ms | mean_inter_chunk_gap_ms | p95_inter_chunk_gap_ms | max_inter_chunk_gap_ms | underrun_count | streaming_frame_ms | packetized_frame_count | ttfp_first_partial_ms | ttfa_first_chunk_ms |\n");
+    out.push_str(
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
 
     let mut row_count = 0_u64;
@@ -396,7 +782,7 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
             continue;
         }
         out.push_str(&format!(
-            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             record.coverage.cell_id,
             record.coverage.host_slug,
             record.coverage.capability,
@@ -416,6 +802,14 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
             format_optional_f64(metrics.p95_synthesis_latency_ms),
             format_optional_f64(metrics.mean_ttfa_first_chunk_ms),
             format_optional_f64(metrics.p95_ttfa_first_chunk_ms),
+            format_optional_f64(metrics.mean_synth_complete_ms),
+            format_optional_f64(metrics.p95_synth_complete_ms),
+            format_optional_f64(metrics.mean_inter_chunk_gap_ms),
+            format_optional_f64(metrics.p95_inter_chunk_gap_ms),
+            format_optional_u64(metrics.max_inter_chunk_gap_ms),
+            format_optional_u64(metrics.underrun_count),
+            format_optional_u64(metrics.streaming_frame_ms),
+            format_optional_u64(metrics.packetized_frame_count),
             format_optional_u64(metrics.ttfp_first_partial_ms),
             format_optional_u64(metrics.ttfa_first_chunk_ms),
         ));
@@ -423,7 +817,7 @@ fn render_latency_metrics(out: &mut String, records: &[ResultRecord]) {
     }
 
     if row_count == 0 {
-        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |\n");
+        out.push_str("| `none` | `none` | `none` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |\n");
     }
 }
 
@@ -445,6 +839,14 @@ struct LatencyMetricCells {
     p95_synthesis_latency_ms: Option<f64>,
     mean_ttfa_first_chunk_ms: Option<f64>,
     p95_ttfa_first_chunk_ms: Option<f64>,
+    mean_synth_complete_ms: Option<f64>,
+    p95_synth_complete_ms: Option<f64>,
+    mean_inter_chunk_gap_ms: Option<f64>,
+    p95_inter_chunk_gap_ms: Option<f64>,
+    max_inter_chunk_gap_ms: Option<u64>,
+    underrun_count: Option<u64>,
+    streaming_frame_ms: Option<u64>,
+    packetized_frame_count: Option<u64>,
     ttfp_first_partial_ms: Option<u64>,
     ttfa_first_chunk_ms: Option<u64>,
 }
@@ -467,6 +869,14 @@ impl LatencyMetricCells {
             || self.p95_synthesis_latency_ms.is_some()
             || self.mean_ttfa_first_chunk_ms.is_some()
             || self.p95_ttfa_first_chunk_ms.is_some()
+            || self.mean_synth_complete_ms.is_some()
+            || self.p95_synth_complete_ms.is_some()
+            || self.mean_inter_chunk_gap_ms.is_some()
+            || self.p95_inter_chunk_gap_ms.is_some()
+            || self.max_inter_chunk_gap_ms.is_some()
+            || self.underrun_count.is_some()
+            || self.streaming_frame_ms.is_some()
+            || self.packetized_frame_count.is_some()
             || self.ttfp_first_partial_ms.is_some()
             || self.ttfa_first_chunk_ms.is_some()
     }
@@ -501,6 +911,14 @@ fn latency_metric_cells(metrics: &CapabilityPerformanceMetrics) -> LatencyMetric
             p95_synthesis_latency_ms: metrics.p95_synthesis_latency_ms,
             mean_ttfa_first_chunk_ms: metrics.mean_ttfa_first_chunk_ms,
             p95_ttfa_first_chunk_ms: metrics.p95_ttfa_first_chunk_ms,
+            mean_synth_complete_ms: metrics.mean_synth_complete_ms,
+            p95_synth_complete_ms: metrics.p95_synth_complete_ms,
+            mean_inter_chunk_gap_ms: metrics.mean_inter_chunk_gap_ms,
+            p95_inter_chunk_gap_ms: metrics.p95_inter_chunk_gap_ms,
+            max_inter_chunk_gap_ms: metrics.max_inter_chunk_gap_ms,
+            underrun_count: metrics.underrun_count,
+            streaming_frame_ms: metrics.streaming_frame_ms,
+            packetized_frame_count: metrics.packetized_frame_count,
             ttfa_first_chunk_ms: metrics.ttfa_first_chunk_ms,
             ..Default::default()
         },
@@ -834,7 +1252,8 @@ fn take_value(args: &[String], index: &mut usize, flag: &str) -> Result<String> 
 mod tests {
     use super::*;
     use crate::metrics::{
-        AsrPerformanceMetrics, CapabilityPerformanceMetrics, TtsPerformanceMetrics,
+        AsrPerformanceMetrics, CapabilityPerformanceMetrics, PerfPerformanceMetrics,
+        TtsPerformanceMetrics,
     };
     use crate::platform::PlatformSnapshot;
     use crate::result::{
@@ -874,6 +1293,14 @@ mod tests {
                 p95_synthesis_latency_ms: Some(110.0),
                 mean_ttfa_first_chunk_ms: Some(17.0),
                 p95_ttfa_first_chunk_ms: Some(22.0),
+                mean_synth_complete_ms: Some(130.0),
+                p95_synth_complete_ms: Some(150.0),
+                mean_inter_chunk_gap_ms: Some(9.0),
+                p95_inter_chunk_gap_ms: Some(15.0),
+                max_inter_chunk_gap_ms: Some(21),
+                underrun_count: Some(0),
+                streaming_frame_ms: Some(20),
+                packetized_frame_count: Some(14),
                 ..Default::default()
             });
 
@@ -887,11 +1314,18 @@ mod tests {
         assert!(markdown.contains("mean_ttfp_first_partial_ms"));
         assert!(markdown.contains("p95_ttfp_first_partial_ms"));
         assert!(markdown.contains("mean_ttfa_first_chunk_ms"));
+        assert!(markdown.contains("first_pcm_before_synth_complete"));
+        assert!(markdown.contains("max_inter_chunk_gap_ms"));
+        assert!(markdown.contains("~166-374 character"));
         assert!(markdown.contains("p95_ttfa_first_chunk_ms"));
+        assert!(markdown.contains("mean_synth_complete_ms"));
+        assert!(markdown.contains("p95_synth_complete_ms"));
+        assert!(markdown.contains("mean_inter_chunk_gap_ms"));
+        assert!(markdown.contains("underrun_count"));
         assert!(markdown.contains("ttfp_first_partial_ms"));
         assert!(markdown.contains("ttfa_first_chunk_ms"));
         assert!(markdown.contains("| 100.00 | 120.00 | 42.00 | 48.00 |"));
-        assert!(markdown.contains("| 90.00 | 110.00 | 17.00 | 22.00 |"));
+        assert!(markdown.contains("| 90.00 | 110.00 | 17.00 | 22.00 | 130.00 | 150.00 | 9.00 | 15.00 | 21 | 0 | 20 | 14 |"));
     }
 
     #[test]
@@ -961,6 +1395,112 @@ mod tests {
         assert!(!markdown.contains("measured_null"));
         assert!(!markdown.contains("unmeasured"));
         assert!(markdown.contains("measured_value"));
+    }
+
+    fn llm_perf_record(
+        bundle: &str,
+        backend: &str,
+        accelerator: AcceleratorClass,
+        decode_tps: Option<f64>,
+        ttft_ms: Option<f64>,
+    ) -> ResultRecord {
+        let mut record = test_record();
+        record.coverage.bundle_id = bundle.to_owned();
+        record.coverage.cell_id = format!("{bundle}__perf");
+        record.coverage.capability = "perf".to_owned();
+        record.coverage.backend = backend.to_owned();
+        record.coverage.requested_accelerator = accelerator;
+        record.coverage.resolved_accelerator = accelerator;
+        record.performance.capability_metrics =
+            CapabilityPerformanceMetrics::Perf(PerfPerformanceMetrics {
+                mean_decode_tokens_per_second: decode_tps,
+                mean_ttft_first_token_ms: ttft_ms,
+                ..Default::default()
+            });
+        record
+    }
+
+    #[test]
+    fn llm_accelerator_comparison_pivots_throughput_and_viability() {
+        let cpu = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Cpu,
+            Some(11.5),
+            Some(540.0),
+        );
+        let cuda = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Cuda,
+            Some(95.2),
+            Some(120.0),
+        );
+
+        // mistralrs CUDA now forwards when the backend reports a CUDA observation.
+        let mistral_cuda = llm_perf_record(
+            "qwen3_4b",
+            "mistralrs",
+            AcceleratorClass::Cuda,
+            Some(47.3),
+            Some(230.0),
+        );
+
+        let mut markdown = String::new();
+        render_llm_accelerator_comparison(&mut markdown, &[cpu, cuda, mistral_cuda]);
+
+        // Throughput pivot: one bundle row carries both cpu and cuda numbers.
+        assert!(markdown
+            .contains("`qwen3_4b_gguf` | `q4_0` | llama.cpp/GGUF | 11.5 | 540 | 95.2 | 120 |"));
+        // Viability rollup: mistralrs/HF CUDA is counted as on-target only after
+        // the backend observation proves it.
+        // cols: cells | passed | on_target | blocked | failed | mean tok/s
+        assert!(markdown.contains("Backend-family viability"));
+        assert!(markdown.contains("| mistralrs/HF | `cuda` | 1 | 1 | 1 | 0 | 0 | 47.3 |"));
+        assert!(markdown.contains("| llama.cpp/GGUF | `cuda` | 1 | 1 | 1 | 0 | 0 | 95.2 |"));
+    }
+
+    #[test]
+    fn llm_accelerator_comparison_marks_prior_pin_provenance() {
+        let mut cpu = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Cpu,
+            Some(14.3),
+            Some(16000.0),
+        );
+        cpu.identity.git_sha = Some("e8f27b6e12c325f257aefa0e1f4714cce630330f".to_owned());
+
+        // Metal data from a prior #399-cycle pin — different sha.
+        let mut metal = llm_perf_record(
+            "qwen3_4b_gguf",
+            "llama_cpp",
+            AcceleratorClass::Metal,
+            Some(64.5),
+            Some(774.0),
+        );
+        metal.identity.git_sha = Some("874c9f69abcdef0123456789".to_owned());
+
+        let mut markdown = String::new();
+        render_llm_accelerator_comparison(&mut markdown, &[cpu, metal]);
+
+        assert!(markdown.contains("Build provenance"));
+        assert!(markdown.contains("| `cpu` | `e8f27b6e` |"));
+        assert!(markdown.contains("| `metal` | `874c9f69` |"));
+        // cuda had no records -> dash.
+        assert!(markdown.contains("| `cuda` | — |"));
+    }
+
+    #[test]
+    fn llm_accelerator_comparison_handles_no_llm_records() {
+        let mut asr = test_record();
+        asr.coverage.capability = "asr".to_owned();
+        asr.coverage.backend = "whisper".to_owned();
+
+        let mut markdown = String::new();
+        render_llm_accelerator_comparison(&mut markdown, &[asr]);
+
+        assert!(markdown.contains("No LLM"));
     }
 
     #[test]
@@ -1049,6 +1589,39 @@ mod tests {
             ("quantization".to_owned(), "q4_0".to_owned()),
             ("profile".to_owned(), "dgx-spark".to_owned()),
         ])
+    }
+
+    #[test]
+    fn accounting_matrix_renders_states_from_records() {
+        use crate::result::{AcceleratorClass, TerminalOutcome};
+
+        let mut validated = test_record();
+        validated.coverage.bundle_id = "qwen3_4b_gguf".to_owned();
+        validated.coverage.quantization = "gguf_q4_k_m".to_owned();
+        validated.coverage.capability = "chat".to_owned();
+        validated.coverage.backend = "llama_cpp".to_owned();
+        validated.coverage.profile = "local-cpu-x86_64".to_owned();
+        validated.coverage.requested_accelerator = AcceleratorClass::Cpu;
+        validated.coverage.resolved_accelerator = AcceleratorClass::Cpu;
+        validated.coverage.terminal_outcome = TerminalOutcome::Passed;
+
+        // mistralrs on metal is declared Unsupported -> ⛔ NotApplicable.
+        let mut blocked_metal = test_record();
+        blocked_metal.coverage.bundle_id = "qwen3_4b".to_owned();
+        blocked_metal.coverage.quantization = "bf16".to_owned();
+        blocked_metal.coverage.capability = "chat".to_owned();
+        blocked_metal.coverage.backend = "mistralrs".to_owned();
+        blocked_metal.coverage.profile = "apple-metal".to_owned();
+        blocked_metal.coverage.requested_accelerator = AcceleratorClass::Metal;
+        blocked_metal.coverage.resolved_accelerator = AcceleratorClass::Cpu;
+        blocked_metal.coverage.terminal_outcome = TerminalOutcome::Blocked;
+
+        let mut out = String::new();
+        render_accounting_matrix(&mut out, &[validated, blocked_metal]);
+
+        assert!(!out.contains("Coverage Accounting Matrix")); // body only, header is caller's
+        assert!(out.contains("| `qwen3_4b_gguf` | `gguf_q4_k_m` | `chat` | ✅"));
+        assert!(out.contains("⛔ upstream_no_gpu_forwarding"));
     }
 
     fn test_record() -> ResultRecord {

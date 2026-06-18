@@ -1,30 +1,184 @@
 # Curated Eval Coverage Report
 
-- generated: 2026-06-13 (cycle: evals/2026-06-infra)
-- canonical name is stable; per-cycle history lives in git + the chrono-named run dirs
-- includes: audio first-latency (ttfp/ttfa) cold/warm two-phase, 3-way TTS (piper/kokoro/qwen3-tts), qwen3 chat thinking_tokens (uncapped, run-to-EOS), ASR, perf/embeddings/tool_use
-
-- input files: `22`
-- records: `424`
+- input files: `44`
+- records: `502`
 - overall: `fail`
 
 ## Outcome Summary
 
 | outcome | count |
 |---|---:|
-| `blocked` | 256 |
+| `blocked` | 298 |
 | `failed` | 6 |
-| `passed` | 159 |
+| `passed` | 195 |
 | `skipped` | 3 |
 
 ## Platform Notes
 
 - `apple-metal` mistralrs rows with `accelerator_mismatch` are expected at this head: the curated `metal` profile feature does not currently enable the mistralrs Metal backend, and forced candle-metal probing is blocked by upstream M4 threadgroup-memory limits. These rows are honest CPU-fallback/blocked coverage, not an eval-framework failure.
 
+## LLM Accelerator Comparison
+
+Decode throughput (tok/s) and TTFT (ms) per LLM bundle and quantization scheme, by target accelerator. Values are from passing `perf` cells; `—` = no passing perf metric for that pairing.
+
+| bundle | quant | family | cpu tok/s | cpu ttft ms | cuda tok/s | cuda ttft ms | metal tok/s | metal ttft ms |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `gemma4_12b_gguf` | `gguf_q4_k_m` | llama.cpp/GGUF | 5.5 | 51967 | 24.6 | 1023 | 27.9 | 2788 |
+| `gemma4_12b_qat_gguf` | `gguf_q4_0` | llama.cpp/GGUF | 5.5 | 53668 | 27.0 | 944 | 28.6 | 2622 |
+| `gemma4_e2b` | `bf16` | mistralrs/HF | 6.9 | 48262 | — | — | — | — |
+| `gemma4_e2b` | `isq_q4` | mistralrs/HF | 7.0 | 48587 | — | — | — | — |
+| `gemma4_e2b` | `isq_q8` | mistralrs/HF | 9.5 | 20418 | — | — | — | — |
+| `gemma4_e2b_gguf` | `gguf_q4_k_m` | llama.cpp/GGUF | 21.5 | 9048 | 96.0 | 136 | 82.6 | 418 |
+| `gemma4_e4b` | `bf16` | mistralrs/HF | 6.3 | 40039 | — | — | — | — |
+| `gemma4_e4b_gguf` | `gguf_q4_k_m` | llama.cpp/GGUF | 12.0 | 19196 | 55.4 | 346 | 52.3 | 881 |
+| `qwen3_4b` | `bf16` | mistralrs/HF | 6.8 | 89163 | 47.3 | 230 | — | — |
+| `qwen3_4b` | `isq_q4` | mistralrs/HF | — | — | 49.4 | 217 | — | — |
+| `qwen3_4b` | `isq_q8` | mistralrs/HF | — | — | 36.2 | 227 | — | — |
+| `qwen3_4b_gguf` | `gguf_q4_k_m` | llama.cpp/GGUF | 13.3 | 16143 | 71.4 | 168 | 64.5 | 774 |
+| `qwen3_6_27b_gguf` | `gguf_q4_k_m` | llama.cpp/GGUF | 3.2 | 115863 | 11.3 | 928 | 11.7 | 5125 |
+
+### Backend-family viability
+
+`on_target` = passed cells that actually resolved to the requested accelerator (a passed cell that silently fell back to CPU is counted in `passed` but not `on_target`). `mean decode tok/s` is averaged over on-target passing `perf` cells.
+
+| family | accelerator | cells | passed | on_target | blocked | failed | mean decode tok/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| llama.cpp/GGUF | `cpu` | 162 | 35 | 35 | 125 | 2 | 11.0 |
+| llama.cpp/GGUF | `cuda` | 23 | 22 | 22 | 0 | 1 | 47.6 |
+| llama.cpp/GGUF | `metal` | 51 | 48 | 48 | 0 | 3 | 44.6 |
+| mistralrs/HF | `cpu` | 87 | 21 | 21 | 66 | 0 | 7.1 |
+| mistralrs/HF | `cuda` | 14 | 3 | 3 | 11 | 0 | 44.3 |
+| mistralrs/HF | `metal` | 27 | 0 | 0 | 27 | 0 | — |
+
+### Build provenance
+
+Distinct build SHAs (`identity.git_sha`) of the on-target passing records backing the numbers above, per accelerator. An accelerator whose SHA set differs from the others is **prior-pin** data (pin mismatch — confirmatory only, not a fresh re-run).
+
+| accelerator | build SHAs |
+|---|---|
+| `cpu` | `21f374da`, `65a9416f`, `99ac891d`, `e8f27b6e` |
+| `cuda` | `65a9416f`, `99ac891d`, `e8f27b6e` |
+| `metal` | `99ac891d`, `c91ba281`, `ec3edeba` |
+
+## Coverage Accounting Matrix
+
+4-state coverage per `(bundle × capability)` × Profile, reconciled from the records against the `BackendKind::accel_support` declaration. ✅ Validated · ⛔ NotApplicable(reason) · 🔧 BuildGap · ⏳ Gap · — none.
+
+| bundle | quant | capability | local-cpu-x86_64 | local-cpu-aarch64 | apple-metal | dgx-spark | cuda-workstation |
+|---|---|---|---|---|---|---|---|
+| `embeddinggemma_300m` | `fp32` | `embeddings` | ✅ | ✅ | ⛔ upstream_no_gpu_forwarding | ⏳ | — |
+| `gemma4_12b_gguf` | `gguf_q4_k_m` | `chat` | ✅ | ✅ | ✅ | ✅ | — |
+| `gemma4_12b_gguf` | `gguf_q4_k_m` | `tool_use` | ✅ | ✅ | ✅ | ✅ | — |
+| `gemma4_12b_qat_gguf` | `gguf_q4_0` | `chat` | ✅ | ✅ | ✅ | ✅ | — |
+| `gemma4_12b_qat_gguf` | `gguf_q4_0` | `tool_use` | ✅ | ✅ | ✅ | ✅ | — |
+| `gemma4_e2b` | `isq_q4` | `chat` | ✅ | ✅ | ⛔ upstream_no_gpu_forwarding | ⏳ | — |
+| `gemma4_e2b` | `bf16` | `tool_use` | ✅ | ✅ | ⛔ upstream_no_gpu_forwarding | ⏳ | — |
+| `gemma4_e2b_gguf` | `gguf_q4_k_m` | `chat` | ✅ | ✅ | ✅ | ✅ | — |
+| `gemma4_e2b_gguf` | `gguf_q4_k_m` | `tool_use` | ✅ | ✅ | ✅ | ✅ | — |
+| `gemma4_e4b` | `bf16` | `chat` | ✅ | ✅ | ⛔ upstream_no_gpu_forwarding | ⏳ | — |
+| `gemma4_e4b` | `bf16` | `tool_use` | ✅ | ✅ | ⛔ upstream_no_gpu_forwarding | ⏳ | — |
+| `gemma4_e4b_gguf` | `gguf_q4_k_m` | `chat` | ✅ | ✅ | ✅ | ✅ | — |
+| `gemma4_e4b_gguf` | `gguf_q4_k_m` | `tool_use` | ✅ | ✅ | ✅ | ✅ | — |
+| `kokoro_82m` | `onnx_int8` | `tts` | ✅ | ✅ | — | ✅ | — |
+| `kokoro_82m` | `onnx_int8` | `tts (streaming)` | ⏳ streaming_eval_out_of_scope | ⏳ streaming_eval_out_of_scope | — | ⏳ streaming_eval_out_of_scope | — |
+| `moonshine_streaming_en` | `fp32` | `asr` | ✅ | ✅ | ⛔ no_execution_provider_for_accelerator | ✅ | — |
+| `piper_en_us_ljspeech_medium` | `fp32` | `tts` | ✅ | ✅ | ⛔ no_execution_provider_for_accelerator | ✅ | — |
+| `qwen3_4b` | `isq_q4` | `chat` | ✅ | ✅ | ⛔ upstream_no_gpu_forwarding | ✅ | — |
+| `qwen3_4b` | `bf16` | `tool_use` | ✅ | ✅ | ⛔ upstream_no_gpu_forwarding | ⏳ | — |
+| `qwen3_4b_gguf` | `gguf_q4_k_m` | `chat` | ✅ | ✅ | ✅ | ✅ | — |
+| `qwen3_4b_gguf` | `gguf_q4_k_m` | `tool_use` | ✅ | ✅ | ✅ | ✅ | — |
+| `qwen3_6_27b_gguf` | `gguf_q4_k_m` | `chat` | ⏳ | ✅ | ✅ | ✅ | — |
+| `qwen3_embedding_06b` | `bf16` | `embeddings` | ✅ | ✅ | ⛔ upstream_no_gpu_forwarding | ⏳ | — |
+| `qwen3_tts_cpp_0_6b` | `gguf_q8_0` | `tts` | ⏳ | ✅ | ⏳ | ⏳ | — |
+| `sherpa_onnx_streaming_zipformer_en` | `onnx_int8` | `asr` | ✅ | ✅ | ⛔ no_execution_provider_for_accelerator | ✅ | — |
+| `sherpa_onnx_streaming_zipformer_en_kroko_2025` | `fp32` | `asr` | ✅ | — | — | — | — |
+| `whisper_base_en` | `fp16` | `asr` | ✅ | ✅ | 🔧 | ✅ | — |
+
 ## Per-Cell Coverage
 
 | cell | host | arch | run | bundle | capability | depth | profile | requested | resolved | outcome | reason |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `embeddinggemma_300m` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `embeddinggemma_300m` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `kokoro_82m` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304675328-3341559-0f8d7dff-spark-2f6e-aarch64-cuda` | `moonshine_streaming_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304675328-3341559-0f8d7dff-spark-2f6e-aarch64-cuda` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304675328-3341559-0f8d7dff-spark-2f6e-aarch64-cuda` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
+| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781325406916-3725809-700c0816-spark-2f6e-aarch64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `issue513-cold-cpu-cb2ec5f1` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `issue513-cold-cpu-cb2ec5f1` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-cold-cpu-cb2ec5f1` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-cold-cpu-cb2ec5f1` | `kokoro_82m` | `tts` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `issue513-cold-cuda-cb2ec5f1` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `issue513-cold-cuda-cb2ec5f1` | `moonshine_streaming_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-cold-cuda-cb2ec5f1` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-cold-cuda-cb2ec5f1` | `kokoro_82m` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-repro-cold-cuda-97a7a00d` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-repro-cold-cuda-97a7a00d` | `kokoro_82m` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
 | `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `embeddinggemma_300m` | `embeddings` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `qwen3_4b` | `chat` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
@@ -50,9 +204,9 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `whisper_base_en` | `asr` | `smoke` | `apple-metal` | `metal` | `metal` | `blocked` | `artifact_missing` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `moonshine_streaming_en` | `asr` | `smoke` | `apple-metal` | `metal` | `metal` | `blocked` | `artifact_missing` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
@@ -83,9 +237,9 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-1` | `x86_64` | `curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
@@ -116,9 +270,9 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `whisper_base_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `blocked` | `artifact_missing` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `moonshine_streaming_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `blocked` | `artifact_missing` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
@@ -149,9 +303,9 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
@@ -193,9 +347,9 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
@@ -226,9 +380,9 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `whisper_base_en` | `asr` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `moonshine_streaming_en` | `asr` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
@@ -259,9 +413,9 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
@@ -296,47 +450,75 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `apple-metal` | `metal` | `metal` | `passed` | `none` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `whisper_base_en` | `asr` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `moonshine_streaming_en` | `asr` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `apple-metal` | `metal` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `mac-mini-m4pro-local` | `aarch64` | `curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `apple-metal` | `metal` | `metal` | `skipped` | `profile_not_applicable` |
-| `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `embeddinggemma_300m` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `qwen3_4b` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `gemma4_e2b` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `blocked` | `child_run_failed` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `gemma4_e4b` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `blocked` | `child_run_failed` |
+| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `qwen3_4b_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `qwen3_6_27b_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `gemma4_e2b_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `gemma4_e4b_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `gemma4_12b_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `amd-ryzen7-2` | `x86_64` | `issue534-mistralrs-isq-x86-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `spark-2f6e` | `aarch64` | `issue534-mistralrs-isq-aarch64-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `spark-2f6e` | `aarch64` | `issue534-mistralrs-isq-aarch64-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `spark-2f6e` | `aarch64` | `issue534-mistralrs-isq-dgx-cuda` | `qwen3_4b` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `spark-2f6e` | `aarch64` | `issue534-mistralrs-isq-dgx-cuda` | `qwen3_4b` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `chat-coverage-21f374da-amd-x86` | `qwen3_4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `chat-coverage-21f374da-amd-x86` | `gemma4_e2b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `chat-coverage-21f374da-amd-x86` | `gemma4_e4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `embeddinggemma_300m` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `sherpa_onnx_streaming_zipformer_en_kroko_2025__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en_kroko_2025` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `kokoro_82m` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
+| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
 | `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `embeddinggemma_300m` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
 | `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
@@ -362,48 +544,14 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `embeddinggemma_300m` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_6_27b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e2b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_e4b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `kokoro_82m` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
 | `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `embeddinggemma_300m` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
 | `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_4b` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
@@ -429,31 +577,57 @@
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
-| `gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_q4_0_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `hf_token_missing` |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `whisper_base_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `kokoro_82m` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
 | `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `amd-ryzen7-2` | `x86_64` | `curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `blocked` | `artifact_missing` |
-| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304675328-3341559-0f8d7dff-spark-2f6e-aarch64-cuda` | `moonshine_streaming_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
-| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304675328-3341559-0f8d7dff-spark-2f6e-aarch64-cuda` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
-| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304675328-3341559-0f8d7dff-spark-2f6e-aarch64-cuda` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304904329-3359164-0f8d7dff-spark-2f6e-aarch64-cuda` | `moonshine_streaming_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304904329-3359164-0f8d7dff-spark-2f6e-aarch64-cuda` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781304904329-3359164-0f8d7dff-spark-2f6e-aarch64-cuda` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cpu` | `blocked` | `accelerator_mismatch` |
-| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781325406916-3725809-700c0816-spark-2f6e-aarch64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
 | `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1781325446467-3726817-700c0816-spark-2f6e-aarch64-cpu` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
-| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `chat-coverage-21f374da-amd-x86` | `qwen3_4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `chat-coverage-21f374da-amd-x86` | `gemma4_e2b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
-| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `x86_64` | `chat-coverage-21f374da-amd-x86` | `gemma4_e4b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `cpu` | `cpu` | `passed` | `none` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `issue513-warm-cpu-cb2ec5f1` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `issue513-warm-cpu-cb2ec5f1` | `moonshine_streaming_en` | `asr` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-warm-cpu-cb2ec5f1` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-warm-cpu-cb2ec5f1` | `kokoro_82m` | `tts` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `issue513-warm-cuda-cb2ec5f1` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `aarch64` | `issue513-warm-cuda-cb2ec5f1` | `moonshine_streaming_en` | `asr` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-warm-cuda-cb2ec5f1` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-warm-cuda-cb2ec5f1` | `kokoro_82m` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-repro-warm-cuda-97a7a00d` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `aarch64` | `issue513-repro-warm-cuda-97a7a00d` | `kokoro_82m` | `tts` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
 
 ## Latency Metrics
 
 | cell | host | capability | ttft_first_token_ms | ttft_first_answer_token_ms | thinking_tokens_to_answer | completion_tokens | mean_ttft_first_token_ms | p95_ttft_first_token_ms | mean_ttft_first_answer_token_ms | p95_ttft_first_answer_token_ms | mean_transcription_latency_ms | p95_transcription_latency_ms | mean_ttfp_first_partial_ms | p95_ttfp_first_partial_ms | mean_synthesis_latency_ms | p95_synthesis_latency_ms | mean_ttfa_first_chunk_ms | p95_ttfa_first_chunk_ms | ttfp_first_partial_ms | ttfa_first_chunk_ms |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 1299.00 | 1299.00 | null | null | null | null | null | null | null | null |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 3177.00 | 3177.00 | 59.00 | 59.00 | null | null | null | null | null | null |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 496.00 | 496.00 | 107.00 | 107.00 | null | null | null | null | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 89.00 | 89.00 | 89.00 | 89.00 | null | null |
+| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 1294.00 | 1294.00 | null | null | null | null | null | null | null | null |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 3128.00 | 3128.00 | 58.00 | 58.00 | null | null | null | null | null | null |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 514.00 | 514.00 | 114.00 | 114.00 | null | null | null | null | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 102.00 | 102.00 | 102.00 | 102.00 | null | null |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 2196.00 | 2196.00 | 2196.00 | 2196.00 | null | null |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 1606.00 | 1606.00 | 28.00 | 28.00 | null | null | null | null | null | null |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 240.00 | 240.00 | 55.00 | 55.00 | null | null | null | null | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 73.00 | 73.00 | 73.00 | 73.00 | null | null |
+| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 2569.00 | 2569.00 | 2569.00 | 2569.00 | null | null |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 581.00 | 581.00 | 130.00 | 130.00 | null | null | null | null | null | null |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 3389.00 | 3389.00 | 73.00 | 73.00 | null | null | null | null | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 91.00 | 91.00 | 91.00 | 91.00 | null | null |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 1119.00 | 1119.00 | 1119.00 | 1119.00 | null | null |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 648.00 | 648.00 | 147.00 | 147.00 | null | null | null | null | null | null |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 3658.00 | 3658.00 | 81.00 | 81.00 | null | null | null | null | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 262.00 | 262.00 | 262.00 | 262.00 | null | null |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 1115.00 | 1115.00 | 1114.00 | 1114.00 | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 56.00 | 56.00 | 56.00 | 56.00 | null | null |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 947.00 | 947.00 | 947.00 | 947.00 | null | null |
 | `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `mac-mini-m4pro-local` | `chat` | 990 | 990 | null | 38 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 15962.00 | 15979.00 | 15962.00 | 15979.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `mac-mini-m4pro-local` | `chat` | 2825 | 2825 | null | 31 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
@@ -468,8 +642,8 @@
 | `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 885.67 | 894.00 | 885.67 | 894.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `chat` | 899 | 899 | null | 34 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2766.67 | 2854.00 | 2766.67 | 2854.00 | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `chat` | 859 | 859 | null | 36 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2634.33 | 2689.00 | 2634.33 | 2689.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `chat` | 859 | 859 | null | 36 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2634.33 | 2689.00 | 2634.33 | 2689.00 | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-1` | `chat` | 7508 | 7508 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-1` | `perf` | null | null | null | null | 121678.67 | 122056.00 | 121678.67 | 122056.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `amd-ryzen7-1` | `chat` | 4664 | 4664 | null | 33 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
@@ -484,8 +658,8 @@
 | `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `perf` | null | null | null | null | 17633.00 | 17647.00 | 17633.00 | 17647.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `chat` | 8465 | 8465 | null | 41 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `perf` | null | null | null | null | 50309.00 | 50320.00 | 50309.00 | 50320.00 | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-1` | `chat` | 19353 | 19353 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-1` | `perf` | null | null | null | null | 48592.33 | 48883.00 | 48592.33 | 48883.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `amd-ryzen7-1` | `chat` | 19353 | 19353 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `amd-ryzen7-1` | `perf` | null | null | null | null | 48592.33 | 48883.00 | 48592.33 | 48883.00 | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 120 | 120 | null | 96 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 170.00 | 170.00 | 3299.33 | 3320.00 | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 552 | null | null | 96 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
@@ -496,8 +670,8 @@
 | `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 336.00 | 341.00 | 336.00 | 341.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 633 | 633 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 874.67 | 877.00 | 874.67 | 877.00 | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `chat` | 658 | 658 | null | 33 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `perf` | null | null | null | null | 841.00 | 846.00 | 841.00 | 846.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `chat` | 658 | 658 | null | 33 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `perf` | null | null | null | null | 841.00 | 846.00 | 841.00 | 846.00 | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `spark-2f6e` | `chat` | 1457 | 1457 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `spark-2f6e` | `perf` | null | null | null | null | 21343.33 | 21500.00 | 21343.33 | 21500.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `spark-2f6e` | `chat` | 1304 | 1304 | null | 28 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
@@ -514,8 +688,8 @@
 | `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 20758.67 | 20783.00 | 20758.67 | 20783.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 6961 | 6961 | null | 35 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 53624.67 | 53680.00 | 53624.67 | 53680.00 | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `chat` | 6862 | 6862 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `perf` | null | null | null | null | 58743.33 | 58792.00 | 58743.33 | 58792.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `spark-2f6e` | `chat` | 6862 | 6862 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `perf` | null | null | null | null | 58743.33 | 58792.00 | 58743.33 | 58792.00 | null | null | null | null | null | null | null | null | null | null |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | 61 | null |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | 110 | null |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | 183 |
@@ -533,8 +707,8 @@
 | `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 881.00 | 901.00 | 881.00 | 901.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `chat` | 921 | 921 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2777.00 | 2844.00 | 2777.00 | 2844.00 | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `chat` | 855 | 855 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2661.33 | 2725.00 | 2661.33 | 2725.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `chat` | 855 | 855 | null | 37 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2661.33 | 2725.00 | 2661.33 | 2725.00 | null | null | null | null | null | null | null | null | null | null |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `asr` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | 16 | null |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `asr` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | 29 | null |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `mac-mini-m4pro-local` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | 50 |
@@ -560,183 +734,208 @@
 | `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 876.67 | 886.00 | 876.67 | 886.00 | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `chat` | 896 | 896 | null | 34 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2819.33 | 2851.00 | 2819.33 | 2851.00 | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `chat` | 850 | 850 | null | 35 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2569.67 | 2646.00 | 2569.67 | 2646.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `chat` | 850 | 850 | null | 35 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `mac-mini-m4pro-local` | `perf` | null | null | null | null | 2569.67 | 2646.00 | 2569.67 | 2646.00 | null | null | null | null | null | null | null | null | null | null |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `mac-mini-m4pro-local` | `asr` | null | null | null | null | null | null | null | null | 226.33 | 230.00 | null | null | null | null | null | null | null | null |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `asr` | null | null | null | null | null | null | null | null | 1160.33 | 1165.00 | 13.67 | 14.00 | null | null | null | null | null | null |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `mac-mini-m4pro-local` | `asr` | null | null | null | null | null | null | null | null | 126.33 | 130.00 | 24.67 | 25.00 | null | null | null | null | null | null |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `mac-mini-m4pro-local` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 20.67 | 22.00 | 20.67 | 22.00 | null | null |
-| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 1299.00 | 1299.00 | null | null | null | null | null | null | null | null |
-| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 3177.00 | 3177.00 | 59.00 | 59.00 | null | null | null | null | null | null |
-| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 496.00 | 496.00 | 107.00 | 107.00 | null | null | null | null | null | null |
-| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 89.00 | 89.00 | 89.00 | 89.00 | null | null |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `spark-2f6e` | `perf` | null | null | null | null | 230.00 | 237.00 | 230.00 | 237.00 | null | null | null | null | null | null | null | null | null | null |
+| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 166.00 | 168.00 | 3848.33 | 3852.00 | null | null | null | null | null | null | null | null | null | null |
+| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 950.33 | 1013.00 | 139550.00 | 140029.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 137.00 | 146.00 | 137.00 | 146.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 355.00 | 358.00 | 355.00 | 358.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 1172.00 | 1288.00 | 1172.00 | 1288.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `spark-2f6e` | `perf` | null | null | null | null | 1047.00 | 1073.00 | 1047.00 | 1073.00 | null | null | null | null | null | null | null | null | null | null |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `amd-ryzen7-2` | `perf` | null | null | null | null | 124468.33 | 128613.00 | 124468.33 | 128613.00 | null | null | null | null | null | null | null | null | null | null |
+| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `amd-ryzen7-2` | `perf` | null | null | null | null | 16119.67 | 16142.00 | 39421.67 | 39579.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `amd-ryzen7-2` | `perf` | null | null | null | null | 80633.33 | 81074.00 | 80633.33 | 81074.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `spark-2f6e` | `perf` | null | null | null | null | 20418.00 | 20509.00 | 20418.00 | 20509.00 | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `spark-2f6e` | `perf` | null | null | null | null | 16541.33 | 16702.00 | 16541.33 | 16702.00 | null | null | null | null | null | null | null | null | null | null |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `spark-2f6e` | `perf` | null | null | null | null | 217.00 | 218.00 | 217.00 | 218.00 | null | null | null | null | null | null | null | null | null | null |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `spark-2f6e` | `perf` | null | null | null | null | 226.67 | 228.00 | 226.67 | 228.00 | null | null | null | null | null | null | null | null | null | null |
+| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `chat` | 1249 | 28217 | 344 | 372 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `chat` | 602 | 602 | 0 | 31 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `chat` | 3058 | 3058 | 0 | 31 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 517.67 | 522.00 | 111.67 | 114.00 | null | null | null | null | null | null |
+| `sherpa_onnx_streaming_zipformer_en_kroko_2025__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 308.33 | 314.00 | 99.33 | 104.00 | null | null | null | null | null | null |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 1289.67 | 1297.00 | null | null | null | null | null | null | null | null |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 3110.67 | 3150.00 | 57.33 | 58.00 | null | null | null | null | null | null |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 499.00 | 507.00 | 104.00 | 105.00 | null | null | null | null | null | null |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 69.33 | 73.00 | 69.33 | 73.00 | null | null |
-| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 1294.00 | 1294.00 | null | null | null | null | null | null | null | null |
-| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 3128.00 | 3128.00 | 58.00 | 58.00 | null | null | null | null | null | null |
-| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 514.00 | 514.00 | 114.00 | 114.00 | null | null | null | null | null | null |
-| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 102.00 | 102.00 | 102.00 | 102.00 | null | null |
-| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 2196.00 | 2196.00 | 2196.00 | 2196.00 | null | null |
 | `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 1285.00 | 1288.00 | null | null | null | null | null | null | null | null |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 3061.00 | 3098.00 | 62.00 | 65.00 | null | null | null | null | null | null |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `amd-ryzen7-2` | `asr` | null | null | null | null | null | null | null | null | 486.33 | 489.00 | 103.00 | 104.00 | null | null | null | null | null | null |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 71.67 | 83.00 | 71.67 | 83.00 | null | null |
 | `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `amd-ryzen7-2` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 2099.67 | 2124.00 | 2099.67 | 2124.00 | null | null |
-| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 1606.00 | 1606.00 | 28.00 | 28.00 | null | null | null | null | null | null |
-| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 240.00 | 240.00 | 55.00 | 55.00 | null | null | null | null | null | null |
-| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 73.00 | 73.00 | 73.00 | 73.00 | null | null |
 | `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 1556.67 | 1593.00 | 27.67 | 28.00 | null | null | null | null | null | null |
 | `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 318.33 | 319.00 | 67.00 | 67.00 | null | null | null | null | null | null |
 | `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 44.67 | 45.00 | 44.67 | 45.00 | null | null |
-| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 2569.00 | 2569.00 | 2569.00 | 2569.00 | null | null |
 | `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 2404.67 | 3084.00 | 2404.67 | 3084.00 | null | null |
-| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `chat` | 1249 | 28217 | 344 | 372 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `chat` | 602 | 602 | 0 | 31 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `amd-ryzen7-1` | `chat` | 3058 | 3058 | 0 | 31 | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 490.33 | 496.00 | 105.33 | 108.00 | null | null | null | null | null | null |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 3445.00 | 3612.00 | 63.00 | 66.00 | null | null | null | null | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 104.00 | 116.00 | 103.67 | 116.00 | null | null |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 1095.33 | 1142.00 | 1095.00 | 1142.00 | null | null |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 617.67 | 622.00 | 132.33 | 135.00 | null | null | null | null | null | null |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `spark-2f6e` | `asr` | null | null | null | null | null | null | null | null | 3215.00 | 3602.00 | 64.67 | 67.00 | null | null | null | null | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 97.33 | 122.00 | 97.33 | 122.00 | null | null |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 1115.00 | 1152.00 | 1115.00 | 1152.00 | null | null |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 47.67 | 54.00 | 47.67 | 54.00 | null | null |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `spark-2f6e` | `tts` | null | null | null | null | null | null | null | null | null | null | null | null | 909.00 | 916.00 | 909.00 | 916.00 | null | null |
 
 ## Model x Capability
 
 | model_family | capability | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
-| `gemma` | `chat` | 30 | 0 | 44 | 0 |
-| `gemma` | `embeddings` | 2 | 0 | 10 | 0 |
-| `gemma` | `perf` | 27 | 0 | 45 | 0 |
-| `gemma` | `tool_use` | 28 | 0 | 44 | 0 |
-| `kokoro` | `tts` | 2 | 0 | 0 | 0 |
-| `moonshine` | `asr` | 9 | 0 | 10 | 0 |
-| `piper` | `tts` | 8 | 0 | 7 | 0 |
-| `qwen3` | `chat` | 9 | 6 | 22 | 0 |
-| `qwen3` | `embeddings` | 2 | 0 | 10 | 0 |
-| `qwen3` | `perf` | 13 | 0 | 23 | 0 |
-| `qwen3` | `tool_use` | 8 | 0 | 16 | 0 |
-| `qwen3` | `tts` | 2 | 0 | 12 | 3 |
-| `sherpa_onnx` | `asr` | 8 | 0 | 7 | 0 |
-| `whisper` | `asr` | 11 | 0 | 6 | 0 |
+| `gemma` | `chat` | 30 | 0 | 50 | 0 |
+| `gemma` | `embeddings` | 2 | 0 | 11 | 0 |
+| `gemma` | `perf` | 34 | 0 | 59 | 0 |
+| `gemma` | `tool_use` | 28 | 0 | 50 | 0 |
+| `kokoro` | `tts` | 8 | 0 | 1 | 0 |
+| `moonshine` | `asr` | 13 | 0 | 11 | 0 |
+| `piper` | `tts` | 14 | 0 | 8 | 0 |
+| `qwen3` | `chat` | 9 | 6 | 25 | 0 |
+| `qwen3` | `embeddings` | 2 | 0 | 11 | 0 |
+| `qwen3` | `perf` | 20 | 0 | 27 | 0 |
+| `qwen3` | `tool_use` | 8 | 0 | 18 | 0 |
+| `qwen3` | `tts` | 2 | 0 | 13 | 3 |
+| `sherpa_onnx` | `asr` | 14 | 0 | 7 | 0 |
+| `whisper` | `asr` | 11 | 0 | 7 | 0 |
 
 ## Capability x Profile
 
 | capability | profile | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
 | `asr` | `apple-metal` | 0 | 0 | 11 | 0 |
-| `asr` | `dgx-spark` | 2 | 0 | 10 | 0 |
-| `asr` | `local-cpu-aarch64` | 3 | 0 | 2 | 0 |
-| `asr` | `local-cpu-x86_64` | 23 | 0 | 0 | 0 |
+| `asr` | `dgx-spark` | 6 | 0 | 10 | 0 |
+| `asr` | `local-cpu-aarch64` | 7 | 0 | 2 | 0 |
+| `asr` | `local-cpu-x86_64` | 25 | 0 | 2 | 0 |
 | `chat` | `apple-metal` | 15 | 3 | 9 | 0 |
 | `chat` | `dgx-spark` | 5 | 1 | 3 | 0 |
 | `chat` | `local-cpu-aarch64` | 8 | 1 | 0 | 0 |
-| `chat` | `local-cpu-x86_64` | 11 | 1 | 54 | 0 |
+| `chat` | `local-cpu-x86_64` | 11 | 1 | 63 | 0 |
 | `embeddings` | `apple-metal` | 0 | 0 | 6 | 0 |
 | `embeddings` | `dgx-spark` | 0 | 0 | 2 | 0 |
 | `embeddings` | `local-cpu-aarch64` | 2 | 0 | 0 | 0 |
-| `embeddings` | `local-cpu-x86_64` | 2 | 0 | 12 | 0 |
+| `embeddings` | `local-cpu-x86_64` | 2 | 0 | 14 | 0 |
 | `perf` | `apple-metal` | 18 | 0 | 9 | 0 |
-| `perf` | `dgx-spark` | 6 | 0 | 3 | 0 |
-| `perf` | `local-cpu-aarch64` | 9 | 0 | 0 | 0 |
-| `perf` | `local-cpu-x86_64` | 7 | 0 | 56 | 0 |
+| `perf` | `dgx-spark` | 15 | 0 | 5 | 0 |
+| `perf` | `local-cpu-aarch64` | 11 | 0 | 0 | 0 |
+| `perf` | `local-cpu-x86_64` | 10 | 0 | 72 | 0 |
 | `tool_use` | `apple-metal` | 15 | 0 | 9 | 0 |
 | `tool_use` | `dgx-spark` | 5 | 0 | 3 | 0 |
 | `tool_use` | `local-cpu-aarch64` | 8 | 0 | 0 | 0 |
-| `tool_use` | `local-cpu-x86_64` | 8 | 0 | 48 | 0 |
+| `tool_use` | `local-cpu-x86_64` | 8 | 0 | 56 | 0 |
 | `tts` | `apple-metal` | 0 | 0 | 3 | 3 |
-| `tts` | `dgx-spark` | 0 | 0 | 6 | 0 |
-| `tts` | `local-cpu-aarch64` | 3 | 0 | 2 | 0 |
-| `tts` | `local-cpu-x86_64` | 9 | 0 | 8 | 0 |
+| `tts` | `dgx-spark` | 8 | 0 | 6 | 0 |
+| `tts` | `local-cpu-aarch64` | 7 | 0 | 2 | 0 |
+| `tts` | `local-cpu-x86_64` | 9 | 0 | 11 | 0 |
 
 ## Capability x Depth
 
 | capability | depth | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
-| `asr` | `smoke` | 28 | 0 | 23 | 0 |
-| `chat` | `smoke` | 39 | 6 | 66 | 0 |
-| `embeddings` | `smoke` | 4 | 0 | 20 | 0 |
-| `perf` | `smoke` | 40 | 0 | 68 | 0 |
-| `tool_use` | `smoke` | 36 | 0 | 60 | 0 |
-| `tts` | `smoke` | 12 | 0 | 19 | 3 |
+| `asr` | `smoke` | 38 | 0 | 25 | 0 |
+| `chat` | `smoke` | 39 | 6 | 75 | 0 |
+| `embeddings` | `smoke` | 4 | 0 | 22 | 0 |
+| `perf` | `smoke` | 54 | 0 | 86 | 0 |
+| `tool_use` | `smoke` | 36 | 0 | 68 | 0 |
+| `tts` | `smoke` | 24 | 0 | 22 | 3 |
 
 ## Backend x Profile
 
 | backend | profile | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
 | `llama_cpp` | `apple-metal` | 48 | 3 | 0 | 0 |
-| `llama_cpp` | `dgx-spark` | 16 | 1 | 0 | 0 |
+| `llama_cpp` | `dgx-spark` | 22 | 1 | 0 | 0 |
 | `llama_cpp` | `local-cpu-aarch64` | 16 | 1 | 0 | 0 |
-| `llama_cpp` | `local-cpu-x86_64` | 18 | 1 | 103 | 0 |
+| `llama_cpp` | `local-cpu-x86_64` | 19 | 1 | 125 | 0 |
 | `mistralrs` | `apple-metal` | 0 | 0 | 33 | 0 |
-| `mistralrs` | `dgx-spark` | 0 | 0 | 11 | 0 |
-| `mistralrs` | `local-cpu-aarch64` | 11 | 0 | 0 | 0 |
-| `mistralrs` | `local-cpu-x86_64` | 10 | 0 | 67 | 0 |
+| `mistralrs` | `dgx-spark` | 3 | 0 | 13 | 0 |
+| `mistralrs` | `local-cpu-aarch64` | 13 | 0 | 0 | 0 |
+| `mistralrs` | `local-cpu-x86_64` | 12 | 0 | 80 | 0 |
 | `ort` | `apple-metal` | 0 | 0 | 7 | 0 |
-| `ort` | `dgx-spark` | 0 | 0 | 9 | 0 |
-| `ort` | `local-cpu-aarch64` | 2 | 0 | 1 | 0 |
-| `ort` | `local-cpu-x86_64` | 17 | 0 | 0 | 0 |
+| `ort` | `dgx-spark` | 10 | 0 | 9 | 0 |
+| `ort` | `local-cpu-aarch64` | 8 | 0 | 1 | 0 |
+| `ort` | `local-cpu-x86_64` | 17 | 0 | 3 | 0 |
 | `qwen3_tts_cpp` | `apple-metal` | 0 | 0 | 0 | 3 |
 | `qwen3_tts_cpp` | `dgx-spark` | 0 | 0 | 2 | 0 |
 | `qwen3_tts_cpp` | `local-cpu-aarch64` | 2 | 0 | 2 | 0 |
-| `qwen3_tts_cpp` | `local-cpu-x86_64` | 0 | 0 | 8 | 0 |
+| `qwen3_tts_cpp` | `local-cpu-x86_64` | 0 | 0 | 9 | 0 |
 | `sherpa_onnx` | `apple-metal` | 0 | 0 | 3 | 0 |
-| `sherpa_onnx` | `dgx-spark` | 0 | 0 | 4 | 0 |
-| `sherpa_onnx` | `local-cpu-aarch64` | 1 | 0 | 0 | 0 |
-| `sherpa_onnx` | `local-cpu-x86_64` | 7 | 0 | 0 | 0 |
+| `sherpa_onnx` | `dgx-spark` | 2 | 0 | 4 | 0 |
+| `sherpa_onnx` | `local-cpu-aarch64` | 3 | 0 | 0 | 0 |
+| `sherpa_onnx` | `local-cpu-x86_64` | 9 | 0 | 0 | 0 |
 | `whisper_cpp` | `apple-metal` | 0 | 0 | 4 | 0 |
 | `whisper_cpp` | `dgx-spark` | 2 | 0 | 1 | 0 |
 | `whisper_cpp` | `local-cpu-aarch64` | 1 | 0 | 1 | 0 |
-| `whisper_cpp` | `local-cpu-x86_64` | 8 | 0 | 0 | 0 |
+| `whisper_cpp` | `local-cpu-x86_64` | 8 | 0 | 1 | 0 |
 
 ## Model x Quantization x Backend/Profile/Depth
 
 | model | quantization | backend | profile | depth | passed | failed | blocked | skipped |
 |---|---|---|---|---|---:|---:|---:|---:|
-| `gemma` | `default` | `mistralrs` | `apple-metal` | `smoke` | 0 | 0 | 21 | 0 |
-| `gemma` | `default` | `mistralrs` | `dgx-spark` | `smoke` | 0 | 0 | 7 | 0 |
-| `gemma` | `default` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 7 | 0 | 0 | 0 |
-| `gemma` | `default` | `mistralrs` | `local-cpu-x86_64` | `smoke` | 6 | 0 | 43 | 0 |
-| `gemma` | `q4_0` | `llama_cpp` | `apple-metal` | `smoke` | 9 | 0 | 0 | 0 |
-| `gemma` | `q4_0` | `llama_cpp` | `dgx-spark` | `smoke` | 3 | 0 | 0 | 0 |
-| `gemma` | `q4_0` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 3 | 0 | 0 | 0 |
-| `gemma` | `q4_0` | `llama_cpp` | `local-cpu-x86_64` | `smoke` | 3 | 0 | 18 | 0 |
-| `gemma` | `q4_k_m` | `llama_cpp` | `apple-metal` | `smoke` | 27 | 0 | 0 | 0 |
-| `gemma` | `q4_k_m` | `llama_cpp` | `dgx-spark` | `smoke` | 9 | 0 | 0 | 0 |
-| `gemma` | `q4_k_m` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 9 | 0 | 0 | 0 |
-| `gemma` | `q4_k_m` | `llama_cpp` | `local-cpu-x86_64` | `smoke` | 11 | 0 | 54 | 0 |
-| `kokoro` | `default` | `ort` | `local-cpu-x86_64` | `smoke` | 2 | 0 | 0 | 0 |
-| `moonshine` | `default` | `ort` | `apple-metal` | `smoke` | 0 | 0 | 4 | 0 |
-| `moonshine` | `default` | `ort` | `dgx-spark` | `smoke` | 0 | 0 | 5 | 0 |
-| `moonshine` | `default` | `ort` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 1 | 0 |
-| `moonshine` | `default` | `ort` | `local-cpu-x86_64` | `smoke` | 8 | 0 | 0 | 0 |
-| `piper` | `default` | `ort` | `apple-metal` | `smoke` | 0 | 0 | 3 | 0 |
-| `piper` | `default` | `ort` | `dgx-spark` | `smoke` | 0 | 0 | 4 | 0 |
-| `piper` | `default` | `ort` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 0 | 0 |
-| `piper` | `default` | `ort` | `local-cpu-x86_64` | `smoke` | 7 | 0 | 0 | 0 |
-| `qwen3` | `default` | `mistralrs` | `apple-metal` | `smoke` | 0 | 0 | 12 | 0 |
-| `qwen3` | `default` | `mistralrs` | `dgx-spark` | `smoke` | 0 | 0 | 4 | 0 |
-| `qwen3` | `default` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 4 | 0 | 0 | 0 |
-| `qwen3` | `default` | `mistralrs` | `local-cpu-x86_64` | `smoke` | 4 | 0 | 24 | 0 |
-| `qwen3` | `q4_k_m` | `llama_cpp` | `apple-metal` | `smoke` | 12 | 3 | 0 | 0 |
-| `qwen3` | `q4_k_m` | `llama_cpp` | `dgx-spark` | `smoke` | 4 | 1 | 0 | 0 |
-| `qwen3` | `q4_k_m` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 4 | 1 | 0 | 0 |
-| `qwen3` | `q4_k_m` | `llama_cpp` | `local-cpu-x86_64` | `smoke` | 4 | 1 | 31 | 0 |
-| `qwen3` | `q8_0` | `qwen3_tts_cpp` | `apple-metal` | `smoke` | 0 | 0 | 0 | 3 |
-| `qwen3` | `q8_0` | `qwen3_tts_cpp` | `dgx-spark` | `smoke` | 0 | 0 | 2 | 0 |
-| `qwen3` | `q8_0` | `qwen3_tts_cpp` | `local-cpu-aarch64` | `smoke` | 2 | 0 | 2 | 0 |
-| `qwen3` | `q8_0` | `qwen3_tts_cpp` | `local-cpu-x86_64` | `smoke` | 0 | 0 | 8 | 0 |
-| `sherpa_onnx` | `default` | `sherpa_onnx` | `apple-metal` | `smoke` | 0 | 0 | 3 | 0 |
-| `sherpa_onnx` | `default` | `sherpa_onnx` | `dgx-spark` | `smoke` | 0 | 0 | 4 | 0 |
-| `sherpa_onnx` | `default` | `sherpa_onnx` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 0 | 0 |
-| `sherpa_onnx` | `default` | `sherpa_onnx` | `local-cpu-x86_64` | `smoke` | 7 | 0 | 0 | 0 |
-| `whisper` | `default` | `whisper_cpp` | `apple-metal` | `smoke` | 0 | 0 | 4 | 0 |
-| `whisper` | `default` | `whisper_cpp` | `dgx-spark` | `smoke` | 2 | 0 | 1 | 0 |
-| `whisper` | `default` | `whisper_cpp` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 1 | 0 |
-| `whisper` | `default` | `whisper_cpp` | `local-cpu-x86_64` | `smoke` | 8 | 0 | 0 | 0 |
+| `gemma` | `bf16` | `mistralrs` | `apple-metal` | `smoke` | 0 | 0 | 18 | 0 |
+| `gemma` | `bf16` | `mistralrs` | `dgx-spark` | `smoke` | 0 | 0 | 8 | 0 |
+| `gemma` | `bf16` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 6 | 0 | 0 | 0 |
+| `gemma` | `bf16` | `mistralrs` | `local-cpu-x86_64` | `smoke` | 5 | 0 | 45 | 0 |
+| `gemma` | `fp32` | `mistralrs` | `apple-metal` | `smoke` | 0 | 0 | 3 | 0 |
+| `gemma` | `fp32` | `mistralrs` | `dgx-spark` | `smoke` | 0 | 0 | 1 | 0 |
+| `gemma` | `fp32` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 0 | 0 |
+| `gemma` | `fp32` | `mistralrs` | `local-cpu-x86_64` | `smoke` | 1 | 0 | 7 | 0 |
+| `gemma` | `gguf_q4_0` | `llama_cpp` | `apple-metal` | `smoke` | 9 | 0 | 0 | 0 |
+| `gemma` | `gguf_q4_0` | `llama_cpp` | `dgx-spark` | `smoke` | 4 | 0 | 0 | 0 |
+| `gemma` | `gguf_q4_0` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 3 | 0 | 0 | 0 |
+| `gemma` | `gguf_q4_0` | `llama_cpp` | `local-cpu-x86_64` | `smoke` | 3 | 0 | 22 | 0 |
+| `gemma` | `gguf_q4_k_m` | `llama_cpp` | `apple-metal` | `smoke` | 27 | 0 | 0 | 0 |
+| `gemma` | `gguf_q4_k_m` | `llama_cpp` | `dgx-spark` | `smoke` | 12 | 0 | 0 | 0 |
+| `gemma` | `gguf_q4_k_m` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 9 | 0 | 0 | 0 |
+| `gemma` | `gguf_q4_k_m` | `llama_cpp` | `local-cpu-x86_64` | `smoke` | 11 | 0 | 66 | 0 |
+| `gemma` | `isq_q4` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 0 | 0 |
+| `gemma` | `isq_q4` | `mistralrs` | `local-cpu-x86_64` | `smoke` | 1 | 0 | 0 | 0 |
+| `gemma` | `isq_q8` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 0 | 0 |
+| `kokoro` | `onnx_int8` | `ort` | `dgx-spark` | `smoke` | 4 | 0 | 0 | 0 |
+| `kokoro` | `onnx_int8` | `ort` | `local-cpu-aarch64` | `smoke` | 2 | 0 | 0 | 0 |
+| `kokoro` | `onnx_int8` | `ort` | `local-cpu-x86_64` | `smoke` | 2 | 0 | 1 | 0 |
+| `moonshine` | `fp32` | `ort` | `apple-metal` | `smoke` | 0 | 0 | 4 | 0 |
+| `moonshine` | `fp32` | `ort` | `dgx-spark` | `smoke` | 2 | 0 | 5 | 0 |
+| `moonshine` | `fp32` | `ort` | `local-cpu-aarch64` | `smoke` | 3 | 0 | 1 | 0 |
+| `moonshine` | `fp32` | `ort` | `local-cpu-x86_64` | `smoke` | 8 | 0 | 1 | 0 |
+| `piper` | `fp32` | `ort` | `apple-metal` | `smoke` | 0 | 0 | 3 | 0 |
+| `piper` | `fp32` | `ort` | `dgx-spark` | `smoke` | 4 | 0 | 4 | 0 |
+| `piper` | `fp32` | `ort` | `local-cpu-aarch64` | `smoke` | 3 | 0 | 0 | 0 |
+| `piper` | `fp32` | `ort` | `local-cpu-x86_64` | `smoke` | 7 | 0 | 1 | 0 |
+| `qwen3` | `bf16` | `mistralrs` | `apple-metal` | `smoke` | 0 | 0 | 12 | 0 |
+| `qwen3` | `bf16` | `mistralrs` | `dgx-spark` | `smoke` | 1 | 0 | 4 | 0 |
+| `qwen3` | `bf16` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 4 | 0 | 0 | 0 |
+| `qwen3` | `bf16` | `mistralrs` | `local-cpu-x86_64` | `smoke` | 5 | 0 | 28 | 0 |
+| `qwen3` | `gguf_q4_k_m` | `llama_cpp` | `apple-metal` | `smoke` | 12 | 3 | 0 | 0 |
+| `qwen3` | `gguf_q4_k_m` | `llama_cpp` | `dgx-spark` | `smoke` | 6 | 1 | 0 | 0 |
+| `qwen3` | `gguf_q4_k_m` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 4 | 1 | 0 | 0 |
+| `qwen3` | `gguf_q4_k_m` | `llama_cpp` | `local-cpu-x86_64` | `smoke` | 5 | 1 | 37 | 0 |
+| `qwen3` | `gguf_q8_0` | `qwen3_tts_cpp` | `apple-metal` | `smoke` | 0 | 0 | 0 | 3 |
+| `qwen3` | `gguf_q8_0` | `qwen3_tts_cpp` | `dgx-spark` | `smoke` | 0 | 0 | 2 | 0 |
+| `qwen3` | `gguf_q8_0` | `qwen3_tts_cpp` | `local-cpu-aarch64` | `smoke` | 2 | 0 | 2 | 0 |
+| `qwen3` | `gguf_q8_0` | `qwen3_tts_cpp` | `local-cpu-x86_64` | `smoke` | 0 | 0 | 9 | 0 |
+| `qwen3` | `isq_q4` | `mistralrs` | `dgx-spark` | `smoke` | 1 | 0 | 0 | 0 |
+| `qwen3` | `isq_q8` | `mistralrs` | `dgx-spark` | `smoke` | 1 | 0 | 0 | 0 |
+| `sherpa_onnx` | `fp32` | `sherpa_onnx` | `local-cpu-x86_64` | `smoke` | 1 | 0 | 0 | 0 |
+| `sherpa_onnx` | `onnx_int8` | `sherpa_onnx` | `apple-metal` | `smoke` | 0 | 0 | 3 | 0 |
+| `sherpa_onnx` | `onnx_int8` | `sherpa_onnx` | `dgx-spark` | `smoke` | 2 | 0 | 4 | 0 |
+| `sherpa_onnx` | `onnx_int8` | `sherpa_onnx` | `local-cpu-aarch64` | `smoke` | 3 | 0 | 0 | 0 |
+| `sherpa_onnx` | `onnx_int8` | `sherpa_onnx` | `local-cpu-x86_64` | `smoke` | 8 | 0 | 0 | 0 |
+| `whisper` | `fp16` | `whisper_cpp` | `apple-metal` | `smoke` | 0 | 0 | 4 | 0 |
+| `whisper` | `fp16` | `whisper_cpp` | `dgx-spark` | `smoke` | 2 | 0 | 1 | 0 |
+| `whisper` | `fp16` | `whisper_cpp` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 1 | 0 |
+| `whisper` | `fp16` | `whisper_cpp` | `local-cpu-x86_64` | `smoke` | 8 | 0 | 1 | 0 |
 
 ## Requested x Resolved Accelerator
 
 | requested | resolved | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
-| `cpu` | `cpu` | 93 | 2 | 182 | 0 |
+| `cpu` | `cpu` | 108 | 2 | 222 | 0 |
 | `cuda` | `cpu` | 0 | 0 | 12 | 0 |
-| `cuda` | `cuda` | 18 | 1 | 15 | 0 |
+| `cuda` | `cuda` | 39 | 1 | 17 | 0 |
 | `metal` | `cpu` | 0 | 0 | 39 | 0 |
 | `metal` | `metal` | 48 | 3 | 8 | 3 |
 
@@ -749,25 +948,91 @@
 | `artifact_missing` | `apple-metal` | 2 |
 | `artifact_missing` | `dgx-spark` | 4 |
 | `artifact_missing` | `local-cpu-aarch64` | 4 |
-| `artifact_missing` | `local-cpu-x86_64` | 62 |
+| `artifact_missing` | `local-cpu-x86_64` | 77 |
 | `behavior_assertion_failed` | `apple-metal` | 3 |
 | `behavior_assertion_failed` | `dgx-spark` | 1 |
 | `behavior_assertion_failed` | `local-cpu-aarch64` | 1 |
 | `behavior_assertion_failed` | `local-cpu-x86_64` | 1 |
-| `hf_token_missing` | `local-cpu-x86_64` | 114 |
+| `child_run_failed` | `dgx-spark` | 2 |
+| `hf_token_missing` | `local-cpu-x86_64` | 139 |
 | `native_link_failed` | `dgx-spark` | 11 |
 | `runtime_budget_exceeded` | `apple-metal` | 6 |
 | `runtime_budget_exceeded` | `local-cpu-x86_64` | 2 |
 
 ## Missing Coverage
 
-Snapshot manifest not supplied; pass `--snapshot <path>` to list missing cells.
+| cell | bundle | capability | depth | profile | reason |
+|---|---|---|---|---|---|
+| `embeddinggemma_300m__embeddings_similarity__smoke__hf_default` | `embeddinggemma_300m` | `embeddings` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_embedding_06b__embeddings_similarity__smoke__hf_default` | `qwen3_embedding_06b` | `embeddings` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_4b__chat_smoke__smoke__hf_safetensors_default` | `qwen3_4b` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default` | `qwen3_4b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-x86_64` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-aarch64` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `qwen3_4b` | `perf` | `smoke` | `apple-metal` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `qwen3_4b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-x86_64` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `qwen3_4b` | `perf` | `smoke` | `local-cpu-aarch64` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `qwen3_4b` | `perf` | `smoke` | `apple-metal` | `no_record` |
+| `qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `qwen3_4b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `qwen3_4b` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e2b__chat_smoke__smoke__hf_safetensors_default` | `gemma4_e2b` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default` | `gemma4_e2b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `gemma4_e2b` | `perf` | `smoke` | `apple-metal` | `no_record` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `gemma4_e2b` | `perf` | `smoke` | `dgx-spark` | `no_record` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `gemma4_e2b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e2b` | `perf` | `smoke` | `local-cpu-x86_64` | `no_record` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e2b` | `perf` | `smoke` | `apple-metal` | `no_record` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e2b` | `perf` | `smoke` | `dgx-spark` | `no_record` |
+| `gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e2b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `gemma4_e2b` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e4b__chat_smoke__smoke__hf_safetensors_default` | `gemma4_e4b` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default` | `gemma4_e4b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-x86_64` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-aarch64` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `gemma4_e4b` | `perf` | `smoke` | `apple-metal` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `gemma4_e4b` | `perf` | `smoke` | `dgx-spark` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q4` | `gemma4_e4b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-x86_64` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e4b` | `perf` | `smoke` | `local-cpu-aarch64` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e4b` | `perf` | `smoke` | `apple-metal` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e4b` | `perf` | `smoke` | `dgx-spark` | `no_record` |
+| `gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_isq_q8` | `gemma4_e4b` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default` | `gemma4_e4b` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `qwen3_4b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `qwen3_4b_gguf` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `qwen3_4b_gguf` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `qwen3_6_27b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `qwen3_6_27b_gguf` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `gemma4_e2b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `gemma4_e2b_gguf` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `gemma4_e2b_gguf` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `gemma4_e4b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `gemma4_e4b_gguf` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `gemma4_e4b_gguf` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `gemma4_12b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `gemma4_12b_gguf` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `gemma4_12b_gguf` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_12b_qat_gguf__chat_smoke__smoke__gguf_q4_0` | `gemma4_12b_qat_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_12b_qat_gguf__bench_chat_startup__smoke__gguf_q4_0` | `gemma4_12b_qat_gguf` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
+| `gemma4_12b_qat_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0` | `gemma4_12b_qat_gguf` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
+| `whisper_base_en__asr_short_transcription__smoke__ggml_default` | `whisper_base_en` | `asr` | `smoke` | `cuda-workstation` | `no_record` |
+| `moonshine_streaming_en__asr_short_transcription__smoke__hf_default` | `moonshine_streaming_en` | `asr` | `smoke` | `cuda-workstation` | `no_record` |
+| `sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default` | `sherpa_onnx_streaming_zipformer_en` | `asr` | `smoke` | `cuda-workstation` | `no_record` |
+| `sherpa_onnx_streaming_zipformer_en_kroko_2025__asr_short_transcription__smoke__hf_default` | `sherpa_onnx_streaming_zipformer_en_kroko_2025` | `asr` | `smoke` | `local-cpu-aarch64` | `no_record` |
+| `sherpa_onnx_streaming_zipformer_en_kroko_2025__asr_short_transcription__smoke__hf_default` | `sherpa_onnx_streaming_zipformer_en_kroko_2025` | `asr` | `smoke` | `apple-metal` | `no_record` |
+| `sherpa_onnx_streaming_zipformer_en_kroko_2025__asr_short_transcription__smoke__hf_default` | `sherpa_onnx_streaming_zipformer_en_kroko_2025` | `asr` | `smoke` | `dgx-spark` | `no_record` |
+| `sherpa_onnx_streaming_zipformer_en_kroko_2025__asr_short_transcription__smoke__hf_default` | `sherpa_onnx_streaming_zipformer_en_kroko_2025` | `asr` | `smoke` | `cuda-workstation` | `no_record` |
+| `piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default` | `piper_en_us_ljspeech_medium` | `tts` | `smoke` | `cuda-workstation` | `no_record` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `kokoro_82m` | `tts` | `smoke` | `apple-metal` | `no_record` |
+| `kokoro_82m__tts_synthesis_smoke__smoke__onnx_default` | `kokoro_82m` | `tts` | `smoke` | `cuda-workstation` | `no_record` |
+| `qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0` | `qwen3_tts_cpp_0_6b` | `tts` | `smoke` | `cuda-workstation` | `no_record` |
 
 ## Metric Gaps
 
 | metric | reason | source | count |
 |---|---|---|---:|
-| `gpu_memory_peak_bytes` | `metric_not_instrumented` | `accelerator_sampler` | 216 |
+| `gpu_memory_peak_bytes` | `metric_not_instrumented` | `accelerator_sampler` | 252 |
 | `mean_ttft_first_answer_token_ms` | `metric_not_reported_by_backend` | `chat_response.timing.first_answer_token_at` | 5 |
 | `process_swap_delta_peak_bytes` | `metric_unavailable_on_platform` | `mach_task_info_unimplemented` | 90 |
 | `ttfp_first_partial_ms` | `metric_not_applicable_for_batch_engine` | `asr_runner` | 9 |
@@ -776,25 +1041,47 @@ Snapshot manifest not supplied; pass `--snapshot <path>` to list missing cells.
 
 ## Inputs
 
-- `/tmp/cov-stage/curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781168668566-1963-e14eaa7e-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781168781390-337905-e14eaa7e-spark-2f6e-aarch64-cuda/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781169018588-4036013-e14eaa7e-amd-ryzen7-1-x86_64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781169935139-380628-e14eaa7e-spark-2f6e-aarch64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781250249521-2226566-874c9f69-spark-2f6e-aarch64-cuda/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781304675328-3341559-0f8d7dff-spark-2f6e-aarch64-cuda/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781304904329-3359164-0f8d7dff-spark-2f6e-aarch64-cuda/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781325406916-3725809-700c0816-spark-2f6e-aarch64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-1781325446467-3726817-700c0816-spark-2f6e-aarch64-cpu/results.jsonl`
-- `/tmp/cov-stage/curated-v2-smoke-chat-1781336576000-531676-21f374da-amd-ryzen7-1-x86_64-cpu/results.jsonl`
+- `evals/results/cold/curated-v2-smoke/curated-v2-smoke-1781279754808-169677-d9b4edf3-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/cold/curated-v2-smoke/curated-v2-smoke-1781293445628-366696-33ae5538-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/cold/curated-v2-smoke/curated-v2-smoke-1781304675328-3341559-0f8d7dff-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/cold/curated-v2-smoke/curated-v2-smoke-1781325406916-3725809-700c0816-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/cold/issue513-audio-smoke-cb2ec5f1-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/cold/issue513-audio-smoke-cb2ec5f1-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/cold/issue513-repro-audio-smoke-97a7a00d-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781113765355-3322247-01e3e487-amd-ryzen7-1-x86_64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781115804075-67266-01e3e487-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781131781834-3412429-0b8e8e5e-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781132594513-3432241-0b8e8e5e-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781144844000-95309-167f5d89-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781160252203-78445-99ac891d-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781161388061-150204-99ac891d-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781162017635-162832-99ac891d-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781168668566-1963-e14eaa7e-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781168781390-337905-e14eaa7e-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781169018588-4036013-e14eaa7e-amd-ryzen7-1-x86_64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781169935139-380628-e14eaa7e-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781245983100-3848332-c91ba281-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781246052011-76378-c91ba281-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781250014256-3940694-874c9f69-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781250249521-2226566-874c9f69-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781406499927-1166281-e8f27b6e-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-1781408495216-857605-e8f27b6e-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-postfix-1781146615-167f5d89-spark-2f6e-aarch64-cpu-release-regression/results.jsonl`
+- `evals/results/curated-v2-smoke/curated-v2-smoke-postfix-1781146615-167f5d89-spark-2f6e-aarch64-cuda-release-regression/results.jsonl`
+- `evals/results/curated-v2-smoke/issue534-mistralrs-isq-65a9416f-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/issue534-mistralrs-isq-65a9416f-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke/issue534-mistralrs-isq-65a9416f-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/curated-v2-smoke-1781113807227-2899469-01e3e487-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/curated-v2-smoke-1781115563074-2973366-01e3e487-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke-chat-1781336576000-531676-21f374da-amd-ryzen7-1-x86_64-cpu/results.jsonl`
+- `evals/results/curated-v2-smoke-regression-amd-x86-release-167f5d89-amd-ryzen7-1/results.jsonl`
+- `evals/results/kroko-2025/curated-v2-smoke/curated-v2-smoke-1781410958247-881263-47b919b5-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/warm/curated-v2-smoke/curated-v2-smoke-1781279824950-171475-d9b4edf3-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/warm/curated-v2-smoke/curated-v2-smoke-1781293559829-369124-33ae5538-amd-ryzen7-2-x86_64-cpu/results.jsonl`
+- `evals/results/warm/curated-v2-smoke/curated-v2-smoke-1781304904329-3359164-0f8d7dff-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/warm/curated-v2-smoke/curated-v2-smoke-1781325446467-3726817-700c0816-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/warm/issue513-audio-smoke-cb2ec5f1-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/warm/issue513-audio-smoke-cb2ec5f1-spark-2f6e-aarch64-cuda/results.jsonl`
+- `evals/results/warm/issue513-repro-audio-smoke-97a7a00d-spark-2f6e-aarch64-cuda/results.jsonl`

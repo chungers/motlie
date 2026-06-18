@@ -1,220 +1,54 @@
 # Motlie Curated Model Evals
 
-`evals/` contains scenario manifests, datasets, and generated reports for
-curated model acceptance.
+`evals/` contains the curated model eval scenarios, matrix snapshots, raw run records, and generated reports used to decide whether local model bundles are deployable on the supported host classes.
 
-Human-facing examples stay under `libs/models/examples`. The eval suite is for
-repeatable curation evidence: bundle behavior, runtime configuration, platform
-profile, performance, resources, and final acceptance status.
+## Start Here
+
+- [RUNBOOK.md](RUNBOOK.md): operational how-to for running the matrix, preflighting artifacts, collecting host results, and generating aggregate reports.
+- [docs/PROCESS.md](docs/PROCESS.md): authoritative policies and process rules for eval data, artifacts, coverage, metrics, acceleration, review, and migrations.
+- [docs/DESIGN.md](docs/DESIGN.md): deeper coverage-ontology design context behind the generated coverage index and accounting matrix.
+- [artifacts/provenance.md](artifacts/provenance.md): generated artifact provenance from the 18 curated bundle descriptors.
+- [results/](results/): committed raw result records and generated coverage/index artifacts that are intentionally versioned.
+- [reports/](reports/): generated report outputs when a cycle produces committed report artifacts.
 
 ## Layout
 
 ```text
 evals/
+  README.md        # this index
+  RUNBOOK.md       # operator commands and cycle notes
+  docs/
+    PROCESS.md     # authoritative policies and process
+    DESIGN.md      # deep ontology design notes
+  artifacts/       # generated provenance over curated bundle descriptors
   scenarios/       # TOML scenario manifests
   datasets/        # prompts, images, audio, and expected outputs
   snapshots/       # pinned matrix manifests
-  results/         # per-host raw JSONL/logs, ignored except committed .md summaries
-  reports/         # generated outputs, ignored by default
+  results/         # immutable raw records plus committed derived coverage artifacts
+  reports/         # generated aggregate reports, when committed for a cycle
 ```
 
-## Scenario Conventions
+## Common Entry Points
 
-- `id` is stable snake_case and matches the filename without `.toml`.
-- Top-level `capability` names the eval capability and serializes as snake_case, for example `embeddings`, `chat`, `asr`, `tts`, or `perf`.
-- `bundle_filter.capability` selects the primary model capability; `bundle_filter.required_capabilities` adds model-surface requirements such as `completion` or `tool_use`.
-- `input` describes prompts, audio, images, or text inputs.
-- `assertions` defines behavioral pass/fail checks.
-- `metrics` requests performance and resource capture.
-- `profiles.<name>.gates` may define optional acceptance thresholds.
-
-## Gate Scope
-
-Issue #399 gates the eval suite with eval-scoped formatting plus the eval binary
-build, tests, and clippy. The intended commands are:
-
-```sh
-cargo fmt -p evals --check
-cargo build -p evals --all-targets
-cargo test -p evals --all-targets
-cargo clippy -p evals --all-targets -- -D warnings
-```
-
-Full-workspace `cargo fmt --check` may report pre-existing formatting drift
-outside the eval suite; that broader cleanup is separate from this issue.
-
-## Current Scenarios
-
-- `embeddings_similarity`: embedding dimensions plus similar-vs-dissimilar cosine ordering.
-- `chat_smoke`: single-turn and follow-up chat response checks.
-- `chat_completion_smoke`: chat plus completion-path smoke for bundles that advertise `completion`.
-- `chat_tool_use_smoke`: legacy chat-scoped tool-call smoke for bundles that advertise `tool_use`.
-- `tool_use_weather_cel_smoke`: first-class tool-use smoke with deterministic weather/CEL handlers.
-- `asr_short_transcription`: short WAV transcription smoke over the checked-in 16 kHz speech reference.
-- `tts_synthesis_smoke`: short speech synthesis smoke over curated TTS bundles.
-- `bench_chat_startup`: comparable chat startup and steady-state request latency benchmark.
-
-## Run Examples
-
-Embeddings:
-
-```sh
-cargo run -p evals --features "model-google-gemma-300m model-qwen3-embedding-06b" -- run --bundle embeddinggemma_300m --scenario embeddings_similarity
-```
-
-Chat:
-
-```sh
-cargo run -p evals --features "model-qwen3-4b" -- run --bundle qwen3_4b --scenario chat_smoke
-```
-
-ASR:
-
-```sh
-cargo run -p evals --features "model-whisper-base-en" -- run --bundle whisper_base_en --scenario asr_short_transcription
-```
-
-TTS:
-
-```sh
-cargo run -p evals --features "model-piper-en-us-ljspeech-medium" -- run --bundle piper_en_us_ljspeech_medium --scenario tts_synthesis_smoke
-```
-
-Perf:
-
-```sh
-cargo run -p evals --features "model-qwen3-4b" -- run --bundle qwen3_4b --scenario bench_chat_startup
-```
-
-The commands parse scenario TOML, start one compiled bundle from local
-artifacts, emit a sectioned JSONL result record, and apply capability-specific
-assertions. Result schema v4 adds ASR time-to-first-partial and TTS
-time-to-first-audio metrics; schema v3 added the chat/perf TTFT split into first
-generated token and first answer token, plus decode tokens/second. Use
-`--artifact-root ~/.cache/huggingface/hub` when the default repo-local artifact
-cache does not contain the bundle artifacts.
-
-On GB10/Linux AArch64, the repo `.cargo/config.toml` wires the required
-`+fp16,+fhm` target features, so no manual `RUSTFLAGS` are needed for the
-default Cargo command.
-
-For GGUF snapshot cells on Linux, `evals matrix` wires `BINDGEN_EXTRA_CLANG_ARGS`
-for child builds with the repo-local `tools/clang-compat/include` shim; host
-compiler builtin include directories are appended when discovered. Direct,
-hand-run Linux GGUF feature builds need the same include arguments until
-`llama-cpp-sys` handles this C-header path itself:
+Run artifact preflight before matrix work:
 
 ```sh
 BINDGEN_EXTRA_CLANG_ARGS="-I$PWD/tools/clang-compat/include" \
-  cargo build -p evals --no-default-features --features model-qwen3-4b-gguf --all-targets
+  cargo run -p evals --features all-curated -- preflight
 ```
 
-## Build Policy
-
-The eval driver is feature-light and builds one model cell at a time in child
-Cargo processes. Child builds must be reproducible from repo policy rather than
-host-specific shell setup.
-
-ORT-backed cells (`checkpoint_format = "onnx"`, including Piper TTS and
-Sherpa/Moonshine ASR) prefer static ONNX Runtime linkage. `evals matrix` scrubs
-`ORT_LIB_PATH`, `ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK`,
-`ORT_SKIP_DOWNLOAD`, `ORT_OFFLINE`, and `CARGO_NET_OFFLINE` from ORT child
-builds, then sets `MOTLIE_ORT_SOURCE=sherpa-onnx`. The workspace patches
-`ort-sys` under `third_party/ort-sys`; that patch downloads the k2-fsa
-`sherpa-onnx` static package for Linux/macOS/Windows targets and links its
-`libonnxruntime.a` as the single static ORT provider. Do not rely on host
-`ORT_LIB_PATH` or shared ONNX Runtime libraries for curated eval cells.
-
-First ORT-backed builds need network access unless the static archive is already
-cached by Cargo or supplied through `SHERPA_ONNX_ARCHIVE_DIR`. The token policy
-is unchanged: `HF_TOKEN` is only for Hugging Face artifacts and is never logged.
-
-For CUDA-class hosts, pass the matching profile:
-
-```sh
-cargo run -p evals --features "model-google-gemma-300m model-qwen3-embedding-06b" -- run --bundle embeddinggemma_300m --scenario embeddings_similarity --profile dgx-spark
-```
-
-For Apple Metal GGUF verification, run the pinned matrix on the Metal host. The
-curated snapshot includes GGUF cells for `apple-metal`; those cells verify the
-Apple clang + llama.cpp Metal path by building and running with the profile's
-`metal` marker. If a GGUF Metal cell is not configured for that verification,
-the matrix emits a blocked `gguf_metal_unverified` record instead of leaving the
-quantization x platform row empty.
-
-```sh
-cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --profile apple-metal
-```
-
-When `nvidia-smi` is available, platform records include `gpu_backend =
-"nvidia"`, GPU identity, and driver/CUDA metadata. Resource acceptance uses
-process swap delta gates on Linux CPU/CUDA smoke profiles with a 4 GiB per-cell
-process-swap delta ceiling; this catches runaway paging while allowing known
-large model-load paging that still passes behavior. CUDA peak VRAM is currently
-recorded as an unavailable `gpu_memory_peak_bytes` metric with reason
-`metric_not_instrumented` when the sampler is absent; that gap is advisory
-and does not block a CUDA cell that otherwise proves accelerator use and passes
-behavior, performance, and resource gates. `apple-metal` intentionally
-does not gate on machine-wide swap because macOS reports system swap rather
-than per-process bundle swap through the current sampler. Performance output
-keeps common latency fields plus a nested `capability_metrics` object tagged by
-capability. Current `apple-metal` mistralrs rows may report
-`accelerator_mismatch`; that reflects missing/blocked mistralrs Metal backend
-wiring at this head and is called out in generated aggregate report platform
-notes.
-
-`evals matrix` children build the selected feature set with `cargo build
---release -p evals --no-default-features ...` and then run `target/release/evals`
-so runtime/budget-bearing cells are not measured against debug binaries. Before
-launching a child, the driver verifies that LocalOnly artifact patterns are
-present under the resolved artifact root. Uncached gated cells block as
-`hf_token_missing` when `HF_TOKEN` is absent, or as `artifact_missing` when the
-token is present but artifacts were not provisioned. Token values are never
-logged.
-
-The `model-qwen3-tts-cpp` feature depends on the native submodule checkout.
-`evals matrix` preflights that scoped checkout, attempts the init command once,
-and emits `submodule_missing` before child build if the checkout remains
-incomplete:
-
-```sh
-git submodule update --init --recursive libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp
-```
-
-## Distributed Matrix Commands
-
-The canonical v2 snapshot command is host self-selecting and feature-light:
+Run a host-selected matrix:
 
 ```sh
 cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml
 ```
 
-Useful variants:
+Generate an aggregate report from committed raw results:
 
 ```sh
-cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --profile dgx-spark --artifact-root ~/.cache/huggingface/hub
-cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --profile apple-metal --artifact-root ~/.cache/huggingface/hub
-cargo run -p evals -- matrix --snapshot evals/snapshots/curated-v2-smoke.toml --dry-run --results-root /tmp/motlie-evals-dry-run
+cargo run -p evals -- report --aggregate 'evals/results/**/results.jsonl' \
+  --snapshot evals/snapshots/curated-v2-smoke.toml \
+  --output evals/reports/curated-v2-smoke/coverage.md
 ```
 
-`HF_TOKEN` is read only from the environment for gated Hugging Face artifacts.
-The runner records token presence as a boolean and never logs or serializes the
-token value. A present token does not make matrix children download artifacts;
-run `evals provision` or prefetch with the models downloader before matrix
-execution when the LocalOnly cache is cold.
-
-Per-host raw output lands under:
-
-```text
-evals/results/<snapshot-id>/<run-id>/
-```
-
-That directory contains `results.jsonl`, `summary.md`, `run-manifest.toml`, and
-per-cell logs. Raw result artifacts are ignored by default; committed Markdown
-coverage summaries can live in `evals/results/`.
-
-Aggregate cross-host reports are generated with:
-
-```sh
-cargo run -p evals -- report --aggregate 'evals/results/**/results.jsonl' --snapshot evals/snapshots/curated-v2-smoke.toml --output evals/reports/curated-v2-smoke/coverage.md
-```
+Operational detail belongs in [RUNBOOK.md](RUNBOOK.md). Policy decisions belong in [docs/PROCESS.md](docs/PROCESS.md). Do not add separate artifact, coverage, or methodology policy docs; fold those updates into PROCESS and link out to generated artifacts or reports.

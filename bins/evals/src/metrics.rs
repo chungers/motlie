@@ -16,6 +16,7 @@ pub struct PerformanceMetrics {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "capability", rename_all = "snake_case")]
 pub enum CapabilityPerformanceMetrics {
     #[default]
@@ -172,6 +173,65 @@ pub struct TtsPerformanceMetrics {
     /// `ttfa_first_chunk_samples_ms`.
     #[serde(default)]
     pub p95_ttfa_first_chunk_ms: Option<f64>,
+    /// True only for incremental TTS runs where playable PCM arrived before the
+    /// independent synthesis-complete signal returned by `finish()`. Buffered
+    /// TTS records leave this null.
+    #[serde(default)]
+    pub streaming_proof_first_pcm_before_synth_complete: Option<bool>,
+    #[serde(default)]
+    pub synth_complete_samples_ms: Vec<u64>,
+    #[serde(default)]
+    pub mean_synth_complete_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_synth_complete_ms: Option<f64>,
+    #[serde(default)]
+    pub inter_chunk_gap_samples_ms: Vec<u64>,
+    #[serde(default)]
+    pub mean_inter_chunk_gap_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_inter_chunk_gap_ms: Option<f64>,
+    #[serde(default)]
+    pub max_inter_chunk_gap_ms: Option<u64>,
+    #[serde(default)]
+    pub underrun_count: Option<u64>,
+    #[serde(default)]
+    pub streaming_frame_ms: Option<u64>,
+    #[serde(default)]
+    pub packetized_frame_count: Option<u64>,
+    #[serde(default)]
+    pub max_buffered_audio_ms: Option<u64>,
+    pub audio_duration_ms: Option<u64>,
+    pub real_time_factor: Option<f64>,
+    pub sample_count: Option<u64>,
+    pub sample_rate_hz: Option<u64>,
+    pub chunk_count: Option<u64>,
+    #[serde(default)]
+    pub per_length: Vec<TtsLengthPerformanceMetrics>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TtsLengthPerformanceMetrics {
+    pub id: String,
+    pub label: Option<String>,
+    pub text_chars: u64,
+    pub iterations: u64,
+    pub successful_iterations: u64,
+    pub failed_iterations: u64,
+    pub ttfa_first_chunk_samples_ms: Vec<u64>,
+    pub mean_ttfa_first_chunk_ms: Option<f64>,
+    pub p95_ttfa_first_chunk_ms: Option<f64>,
+    pub streaming_proof_first_pcm_before_synth_complete: Option<bool>,
+    pub synth_complete_samples_ms: Vec<u64>,
+    pub mean_synth_complete_ms: Option<f64>,
+    pub p95_synth_complete_ms: Option<f64>,
+    pub inter_chunk_gap_samples_ms: Vec<u64>,
+    pub mean_inter_chunk_gap_ms: Option<f64>,
+    pub p95_inter_chunk_gap_ms: Option<f64>,
+    pub max_inter_chunk_gap_ms: Option<u64>,
+    pub underrun_count: Option<u64>,
+    pub streaming_frame_ms: Option<u64>,
+    pub packetized_frame_count: Option<u64>,
+    pub max_buffered_audio_ms: Option<u64>,
     pub audio_duration_ms: Option<u64>,
     pub real_time_factor: Option<f64>,
     pub sample_count: Option<u64>,
@@ -485,6 +545,13 @@ mod serde_tests {
         assert!(tts.ttfa_first_chunk_samples_ms.is_empty());
         assert_eq!(tts.mean_ttfa_first_chunk_ms, None);
         assert_eq!(tts.p95_ttfa_first_chunk_ms, None);
+        assert_eq!(tts.streaming_proof_first_pcm_before_synth_complete, None);
+        assert!(tts.synth_complete_samples_ms.is_empty());
+        assert!(tts.inter_chunk_gap_samples_ms.is_empty());
+        assert_eq!(tts.underrun_count, None);
+        assert_eq!(tts.streaming_frame_ms, None);
+        assert_eq!(tts.packetized_frame_count, None);
+        assert_eq!(tts.max_buffered_audio_ms, None);
     }
 }
 

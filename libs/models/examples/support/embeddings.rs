@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use motlie_model::{
-    ArtifactPolicy, BundleHandle, BundleId, EmbeddingModel, EmbeddingRequest, QuantizationBits,
+    ArtifactPolicy, BundleHandle, BundleId, EmbeddingModel, EmbeddingRequest, QuantizationScheme,
     StartOptions,
 };
 use motlie_models::{
@@ -42,10 +42,10 @@ struct ResolvedSelection {
 
 pub async fn run(target_name: &'static str) -> Result<()> {
     let args = parse_args(target_name)?;
-    let quantization = parse_quantization(args.precision.as_deref())?;
     let artifact_root = default_artifact_root();
     let catalog = Catalog::with_defaults();
     let resolved = resolve_selection(args.selection, &catalog)?;
+    let quantization = parse_quantization(args.precision.as_deref(), &resolved.bundle_id)?;
 
     println!("example-target: {}", target_name);
     println!("catalog-entry-count: {}", catalog.len());
@@ -98,7 +98,7 @@ pub async fn run(target_name: &'static str) -> Result<()> {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
-            quantization,
+            quantization_scheme: quantization,
             ..Default::default()
         })
         .await
@@ -255,12 +255,30 @@ fn set_selection(current: Option<Selection>, next: Selection) -> Result<Option<S
     Ok(Some(next))
 }
 
-fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationBits>> {
-    match precision {
-        Some("q4") => Ok(Some(QuantizationBits::Four)),
-        Some("q8") => Ok(Some(QuantizationBits::Eight)),
-        Some("f32") | None => Ok(None),
-        Some(other) => bail!("unknown precision `{other}` - use q4, q8, or f32"),
+fn parse_quantization(
+    precision: Option<&str>,
+    bundle_id: &BundleId,
+) -> Result<Option<QuantizationScheme>> {
+    match bundle_id.as_str() {
+        "embeddinggemma_300m" => match precision {
+            None | Some("default") | Some("fp32") | Some("f32") => {
+                Ok(Some(QuantizationScheme::Fp32))
+            }
+            Some("q4") | Some("q8") => bail!(
+                "precision `{}` is not supported by embeddinggemma_300m; use fp32",
+                precision.unwrap()
+            ),
+            Some(other) => bail!("unknown precision `{other}` - use fp32"),
+        },
+        "qwen3_embedding_06b" => match precision {
+            None | Some("default") | Some("bf16") => Ok(Some(QuantizationScheme::Bf16)),
+            Some("q8") => Ok(Some(QuantizationScheme::IsqQ8)),
+            Some("q4") => {
+                bail!("precision `q4` is not supported by qwen3_embedding_06b; use bf16 or q8")
+            }
+            Some(other) => bail!("unknown precision `{other}` - use bf16 or q8"),
+        },
+        other => bail!("no embedding precision mapping registered for bundle `{other}`"),
     }
 }
 
@@ -408,7 +426,7 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f32> {
 
 fn usage(target_name: &str) -> String {
     format!(
-        "usage: cargo run -p motlie-models --no-default-features --features 'model-google-gemma-300m model-qwen3-embedding-06b' --example {} -- [--bundle embeddinggemma_300m|qwen3_embedding_06b | --selector embedding:google/embeddinggemma_300m|embedding:qwen/qwen3_embedding_06b | --embedding=google/embeddinggemma_300m|qwen/qwen3_embedding_06b] [--download-artifacts] [--precision=q4|q8|f32] <text to embed>",
+        "usage: cargo run -p motlie-models --no-default-features --features 'model-google-gemma-300m model-qwen3-embedding-06b' --example {} -- [--bundle embeddinggemma_300m|qwen3_embedding_06b | --selector embedding:google/embeddinggemma_300m|embedding:qwen/qwen3_embedding_06b | --embedding=google/embeddinggemma_300m|qwen/qwen3_embedding_06b] [--download-artifacts] [--precision=fp32|bf16|q8] <text to embed>",
         target_name
     )
 }

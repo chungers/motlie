@@ -12,8 +12,8 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Upstream sherpa-onnx currently publishes CPU static archives through the Rust crate.
-cuda = []
+# Enable CUDA provider selection when the linked ORT build exposes the CUDA EP.
+cuda = ["motlie-model-ort/cuda"]
 
 [dependencies]
 async-trait = "0.1.89"

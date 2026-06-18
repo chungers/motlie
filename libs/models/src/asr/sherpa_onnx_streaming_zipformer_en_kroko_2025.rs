@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
+    BundleId, Capabilities, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity,
+    QuantizationScheme, QuantizationSupport, StartOptions,
 };
 use motlie_model_sherpa_onnx::{
     SherpaOnnxHandle, SherpaOnnxStreamingBundle, SherpaOnnxStreamingSpec,
@@ -14,12 +15,12 @@ use crate::{
     BundleRequirements, PlatformConstraint,
 };
 
-pub const SELECTOR: &str = "sherpa-onnx/streaming_zipformer_en";
+pub const SELECTOR: &str = "sherpa-onnx/streaming_zipformer_en_kroko_2025";
 
-const HF_REPO: &str = "csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26";
-const ENCODER_FILE: &str = "encoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
-const DECODER_FILE: &str = "decoder-epoch-99-avg-1-chunk-16-left-64.onnx";
-const JOINER_FILE: &str = "joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
+const HF_REPO: &str = "csukuangfj/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06";
+const ENCODER_FILE: &str = "encoder.onnx";
+const DECODER_FILE: &str = "decoder.onnx";
+const JOINER_FILE: &str = "joiner.onnx";
 const TOKENS_FILE: &str = "tokens.txt";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
@@ -29,10 +30,10 @@ pub(crate) fn register(catalog: &mut crate::Catalog) {
 
 pub(crate) fn identity() -> ModelIdentity {
     ModelIdentity {
-        id: BundleId::new("sherpa_onnx_streaming_zipformer_en"),
-        display_name: "Sherpa ONNX Streaming Zipformer EN".into(),
+        id: BundleId::new("sherpa_onnx_streaming_zipformer_en_kroko_2025"),
+        display_name: "Sherpa ONNX Streaming Zipformer EN Kroko 2025".into(),
         family: BundleFamily::Other("SherpaOnnx".into()),
-        capabilities: motlie_model::Capabilities::transcription_stream_partial_only(),
+        capabilities: Capabilities::transcription_stream_partial_only(),
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -51,7 +52,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(JOINER_FILE),
             ArtifactRule::Exact(TOKENS_FILE),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Fp32),
     }
 }
 
@@ -71,14 +72,15 @@ pub fn descriptor() -> BundleDescriptor {
         },
         eval_tracks: identity.eval_tracks,
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
-            "sherpa_onnx_streaming_zipformer_en",
+            "sherpa_onnx_streaming_zipformer_en_kroko_2025",
             &checkpoint,
+            crate::ArtifactProvenance::new("unknown", crate::ArtifactGating::Public),
         )),
     }
 }
 
 pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
-    let spec = SherpaOnnxStreamingSpec::zipformer_en_streaming();
+    let spec = spec();
     crate::ModelVariantDescriptor {
         backend: BackendKind::SherpaOnnx,
         capabilities: spec.capabilities,
@@ -87,8 +89,21 @@ pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
     }
 }
 
+pub fn spec() -> SherpaOnnxStreamingSpec {
+    SherpaOnnxStreamingSpec {
+        id: BundleId::new("sherpa_onnx_streaming_zipformer_en_kroko_2025"),
+        display_name: "Sherpa ONNX Streaming Zipformer EN Kroko 2025",
+        encoder_filename: ENCODER_FILE,
+        decoder_filename: DECODER_FILE,
+        joiner_filename: JOINER_FILE,
+        tokens_filename: TOKENS_FILE,
+        capabilities: Capabilities::transcription_stream_partial_only(),
+        quantization: QuantizationSupport::none(),
+    }
+}
+
 pub fn typed_bundle() -> SherpaOnnxStreamingBundle {
-    SherpaOnnxStreamingBundle::new(SherpaOnnxStreamingSpec::zipformer_en_streaming())
+    SherpaOnnxStreamingBundle::new(spec())
 }
 
 pub async fn start_typed(options: StartOptions) -> Result<SherpaOnnxHandle, ModelError> {
@@ -151,17 +166,20 @@ fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Catalog;
+    use crate::{AsrModels, Catalog, CuratedBundle, ResolveModelOptions};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
         let descriptor = descriptor();
 
-        assert_eq!(descriptor.id.as_str(), "sherpa_onnx_streaming_zipformer_en");
+        assert_eq!(
+            descriptor.id.as_str(),
+            "sherpa_onnx_streaming_zipformer_en_kroko_2025"
+        );
         assert_eq!(
             descriptor.display_name,
-            "Sherpa ONNX Streaming Zipformer EN"
+            "Sherpa ONNX Streaming Zipformer EN Kroko 2025"
         );
         assert_eq!(descriptor.backend, BackendKind::SherpaOnnx);
         assert!(descriptor
@@ -170,17 +188,35 @@ mod tests {
     }
 
     #[test]
-    fn default_catalog_includes_bundle_when_feature_enabled() {
+    fn default_catalog_resolves_kroko_through_curated_path() {
         let catalog = Catalog::with_defaults();
-        let bundle_id = BundleId::new("sherpa_onnx_streaming_zipformer_en");
+        let bundle_id = BundleId::new("sherpa_onnx_streaming_zipformer_en_kroko_2025");
 
-        #[cfg(feature = "model-sherpa-onnx-streaming")]
-        {
-            assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Transcription)
-                .any(|bundle| bundle.id == bundle_id));
-        }
+        assert_eq!(
+            SELECTOR
+                .parse::<AsrModels>()
+                .expect("Kroko selector should parse"),
+            AsrModels::SherpaOnnxStreamingZipformerEnKroko2025
+        );
+        assert_eq!(
+            catalog.model(&bundle_id).map(|model| model.id.clone()),
+            Some(bundle_id.clone())
+        );
+        assert!(catalog
+            .bundles_for_track(EvalTrack::Transcription)
+            .any(|bundle| bundle.id == bundle_id));
+        assert_eq!(
+            catalog.instantiate(&bundle_id),
+            Some(CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025)
+        );
+
+        let resolved = catalog
+            .resolve_model(&bundle_id, &ResolveModelOptions::default())
+            .expect("Kroko should resolve from the default curated catalog");
+        assert_eq!(
+            catalog.instantiate_resolved(&resolved),
+            Some(CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025)
+        );
     }
 
     #[test]
@@ -189,7 +225,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after unix epoch")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("sherpa-direct-root-{unique}"));
+        let root = std::env::temp_dir().join(format!("sherpa-kroko-direct-root-{unique}"));
         std::fs::create_dir_all(&root).expect("direct root should be creatable");
         for filename in [ENCODER_FILE, DECODER_FILE, JOINER_FILE, TOKENS_FILE] {
             std::fs::write(root.join(filename), b"test").expect("artifact should be writable");

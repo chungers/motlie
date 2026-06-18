@@ -13,7 +13,7 @@ use motlie_model::typed::{
     VoiceCloneSynthesizer,
 };
 use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
-use motlie_models::tts::qwen3_tts_cpp;
+use motlie_models::tts::qwen3_tts_cpp_0_6b;
 use motlie_voice::pipeline::convert::{decode_samples_to_f32, downmix_to_mono};
 use motlie_voice::pipeline::resample::{LinearInterpolator, Resampler};
 
@@ -103,7 +103,7 @@ async fn run(args: Args) -> Result<()> {
     let _quiet_stderr = quiet_support::QuietStderrGuard::maybe_enable(args.quiet)
         .context("failed to enable quiet stderr mode")?;
 
-    let handle = qwen3_tts_cpp::start_typed(StartOptions {
+    let handle = qwen3_tts_cpp_0_6b::start_typed(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
             root: args
                 .artifact_root

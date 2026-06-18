@@ -1,5 +1,10 @@
 # Distributed Eval Runbook — evals/2026-06-infra
 
+> Operational how-to and historical cycle notes live here. Standing policies live in
+> [docs/PROCESS.md](docs/PROCESS.md); deep coverage design lives in
+> [docs/DESIGN.md](docs/DESIGN.md). If a historical note conflicts with PROCESS,
+> PROCESS is authoritative.
+
 Live operational log of the first distributed eval exercise (issue #399 v2). Documents process steps **as executed**, gotchas, and open issues, so the next round is repeatable. Entries carry datetime + self-identifier. Final version ships in the coverage-report PR (David's direction, 2026-06-10).
 
 ## Decisions (David, 2026-06-10)
@@ -26,17 +31,19 @@ Piper TTS, Sherpa ASR, Moonshine ASR, and future `checkpoint_format = "onnx"`
 cells use ONNX Runtime. Eval child builds prefer static ORT linkage:
 
 - The workspace uses `ort` with `download-binaries`, `tls-native`, and `api-24`.
-- The workspace patches `ort-sys` from `third_party/ort-sys`.
+- The workspace patches `ort-sys` from `libs/model/backends/ort/ort-sys`.
 - `evals matrix` removes dynamic/offline ORT env overrides from ORT-backed child
   builds: `ORT_LIB_PATH`, `ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK`,
   `ORT_SKIP_DOWNLOAD`, `ORT_OFFLINE`, and `CARGO_NET_OFFLINE`.
-- The driver sets `MOTLIE_ORT_SOURCE=sherpa-onnx`; patched `ort-sys` downloads
-  the k2-fsa `sherpa-onnx` static package for the target and links
-  `libonnxruntime.a` as the process ORT provider.
+- The driver sets `MOTLIE_ORT_SOURCE=sherpa-onnx`; patched `ort-sys` uses
+  the k2-fsa `sherpa-onnx` static package for CPU targets and builds ONNX
+  Runtime v1.24.2 from `libs/model/backends/ort/vendor/onnxruntime` when
+  `ort/cuda` is enabled.
 
-First ORT-backed builds require network access unless the archive is already
-cached or provided via `SHERPA_ONNX_ARCHIVE_DIR`. `ORT_LIB_PATH` and shared ONNX
-Runtime libraries are not accepted runbook paths for curated evals.
+First CPU ORT-backed builds require network access unless the archive is already
+cached or provided via `SHERPA_ONNX_ARCHIVE_DIR`. First CUDA ORT-backed builds
+require CUDA 13, cuDNN 9, and the ONNX Runtime submodule. `ORT_LIB_PATH` and
+shared ONNX Runtime libraries are not accepted runbook paths for curated evals.
 
 ### Classification
 
@@ -48,9 +55,21 @@ failures.
 
 ### Artifacts
 
-`HF_TOKEN` may be used to fetch gated Hugging Face artifacts. The eval runner
-records only token presence as a boolean and must never log or serialize the
-token value.
+The canonical per-host Hugging Face cache for evals is
+`$HOME/artifacts/hf-cache`. It uses the standard HF layout
+`models--<owner>--<repo>/refs/main` plus `snapshots/<sha>/<files>`.
+
+`cargo run -p evals --features all-curated -- preflight` is the permanent
+artifact gate. It derives all 18 curated artifact requirements from the
+`motlie-models` registry, reports each HF source and resolved snapshot hash, and
+exits non-zero if any required artifact is absent. Use
+`cargo run -p evals --features all-curated -- artifacts sync` to populate gaps
+through the same registry download and derivation machinery exposed per bundle by
+`cargo run -p motlie-models --bin motlie-models-download -- <bundle_id>`. The
+generated provenance document is [`evals/artifacts/provenance.md`](artifacts/provenance.md)
+and is guarded by an all-curated regen test. Artifact provenance policy,
+including downloaded vs derived rules and env-only token handling, is
+authoritative in [docs/PROCESS.md](docs/PROCESS.md#2-artifacts-and-provenance).
 
 ## General process (David, 2026-06-11 — the standing model for eval cycles)
 1. **All cycle work merges into the `evals/<cycle>` branch first** — framework code, per-host results PRs, fixes, the coverage-report PR. The branch is the coordination + data substrate.
@@ -147,9 +166,10 @@ Curated bundles are LOCAL models meant for CPU inference — failures and budget
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **debug child builds inflate wall time (mac1 data for the orchestrator gotcha above):** every mistralrs chat/perf/tool cell on this host burned the full 1200s budget (7 cells ≈ 2h20m for zero successful generations). The #435 harness batch switches matrix children to release before the next round.
 
 ## Open issues
+- `@513-impl 2026-06-13 PDT` — **#513 supersedes the #495/#496/#497 DGX CUDA-ORT platform-gap finding for current branch builds.** The committed path keeps `MOTLIE_ORT_SOURCE=sherpa-onnx` and builds ONNX Runtime v1.24.2 from `libs/model/backends/ort/vendor/onnxruntime` with the CUDA EP statically linked for DGX CUDA audio. Pyke remains rejected; the old CPU-only static archive is still used only for non-CUDA CPU builds.
 - `@qtts-impl 2026-06-12 PDT` — **#508 qwen3-tts provisioned + now produces real CPU records; root cause was NOT artifact-missing but a runtime shared-library load failure.** The `koboldcpp/tts` GGUF artifacts (`qwen3-tts-0.6b-q8_0.gguf` 1.34 GB + `qwen3-tts-tokenizer-f16.gguf` 341 MB, public/ungated) match the snapshot patterns and the backend's expected filenames exactly; historical `artifact_missing` was simply that the bundle was never prefetched on the run hosts (matrix children are `LocalOnly` and never download). Once prefetched, the NEXT (latent) blocker surfaced: qwen3-tts.cpp links `libqwen3tts.so` **dynamically** (deliberate `-Bsymbolic` design to isolate its bundled ggml from co-linked whisper.cpp ggml), but cargo does not propagate an rpath from a dependency build script to the dependent `evals` binary and the build emits no RUNPATH — so the child eval aborted at exec with `libqwen3tts.so.0: cannot open shared object file`. Fix: the matrix driver (which both builds and runs the child) now prepends the freshly built `libqwen3tts` dir to `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` for qwen3-tts child runs (mirrors the static-ORT env special-casing). Validated two-phase on `local-cpu-aarch64` at `700c0816`: PASS both phases (warm `warmup_ms=2970`, `mean_ttfa_first_chunk_ms=2405`, `p95=3084`, RTF 1.32, audio 1816 ms, assertions pass). Requires `git submodule update --init --recursive libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` (nested ggml) before the build — the driver's submodule preflight handles this automatically.
 - `@495-impl 2026-06-12 PDT` — **#495/#496/#497 ORT CUDA on aarch64: no CUDA execution provider exists for the dgx under the static-ORT policy (platform gap, mistralrs-metal-class).** Evidence chain: (a) the pinned static archive `sherpa-onnx-v1.13.2-linux-aarch64-static-lib` contains the CUDA C-API entry points but ZERO references to `cuda*`/`cudnn*` runtime symbols — the CUDA EP implementation is not compiled in (`GetAvailableProviders` reports CPU only); (b) pyke (the workspace `ort` binary source) publishes `cu12`/`cu13` builds for x86_64 ONLY — `aarch64-unknown-linux-gnu+cu{12,13}` 404 on the CDN; (c) Microsoft's official ORT releases through v1.26.0 ship `linux-aarch64` CPU-only (GPU = x64 only); (d) k2-fsa's aarch64 GPU builds are Jetson-era shared libs against ORT 1.11.0–1.18.1 (pre-Blackwell CUDA — cannot run on GB10 sm_121, and shared linkage is not an accepted runbook path); (e) the GB10 host has CUDA 13.0 but no cuDNN installed (ORT CUDA EP hard-requires cuDNN 9). Fix landed for honesty instead: `motlie-model-ort` now resolves CUDA only when the linked ORT actually compiles the EP in (`ep::CUDA::is_available()`), registers it `error_on_failure`, and piper/moonshine records carry `cuda_execution_provider=unavailable;ort_build=cpu_only`. NOTE this applies to **cuda-workstation x86_64 too**: matrix children pin `MOTLIE_ORT_SOURCE=sherpa-onnx` (CPU static) on every target, so piper/kokoro/moonshine cells cannot resolve CUDA anywhere until the cycle either ships a CUDA-capable static ORT or sanctions `MOTLIE_ORT_SOURCE=pyke` for cuda profiles (x86_64 has pyke cu12/cu13). sherpa cells additionally need an upstream GPU static archive (none published). kokoro: same gap, plus `KokoroHandle` has no `accelerator_observation()` at all — its dgx/cuda-workstation cells will record `backend_offload_unverified` even where CUDA were possible; follow-up needed.
-- `@codex-399-impl 2026-06-10 PDT` -- **#444/#449/#451 ORT follow-up:** eval child builds for ONNX/ORT-backed Piper and Sherpa cells now use static ORT from the workspace `third_party/ort-sys` patch, scrub host dynamic ORT env, and classify `_OrtGetApiBase`/undefined-symbol linker failures as `native_link_failed`. Local aarch64 one-cell repros for Piper and Sherpa both passed with poisoned parent ORT env; see issue comments for raw commands and metrics.
+- `@codex-399-impl 2026-06-10 PDT` -- **#444/#449/#451 ORT follow-up:** eval child builds for ONNX/ORT-backed Piper and Sherpa cells now use static ORT from the workspace `libs/model/backends/ort/ort-sys` patch, scrub host dynamic ORT env, and classify `_OrtGetApiBase`/undefined-symbol linker failures as `native_link_failed`. Local aarch64 one-cell repros for Piper and Sherpa both passed with poisoned parent ORT env; see issue comments for raw commands and metrics.
 - Umbrella tracker: #435 (sub-issues filed as runs land)
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **snapshot quant label vs runtime default mismatch:** `qwen3_6_27b_gguf` cells are labeled `q4_k_m` but the runtime default (no `--precision` from the driver) resolves the bundle's recommended quant **Q5_K_M** → `GGUF artifact Qwen3.6-27B-Q5_K_M.gguf not found`. Any green record under this condition would mislabel the quant axis. Fix: driver passes `--precision` derived from the cell's quantization label, or snapshot validation against `QuantizationSupport.recommended`.
 - `@claude-fable5-399-rv 2026-06-10 PDT` — **failure-classification heuristics misfire (2 cases):** (a) the 27B `Q5_K_M.gguf not found` log classified `child_run_failed` instead of `artifact_missing` (phrasing dodges the heuristics); (b) sherpa/piper child **builds** failed with ort-sys link errors (`_OrtGetApiBase ... not found for architecture arm64` — ORT dylib not linkable on macOS without `ORT_LIB_PATH`) but classified `artifact_unauthorized`. Suggest matching on the specific loader error strings and checking child_build status before artifact heuristics.

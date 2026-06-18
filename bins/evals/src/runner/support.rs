@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
-    ArtifactPolicy, BundleHandle, BundleId, CapabilityKind, QuantizationBits, StartOptions,
+    ArtifactPolicy, BundleHandle, BundleId, CapabilityKind, QuantizationScheme, StartOptions,
 };
 use motlie_models::{
     download_bundle_artifacts_with_options, ArtifactDownloadOptions, BackendKind, BundleDescriptor,
@@ -27,7 +27,7 @@ pub struct PreparedBundle {
     pub descriptor: BundleDescriptor,
     pub bundle: CuratedBundle,
     pub downloaded_artifacts: Vec<String>,
-    pub quantization: Option<QuantizationBits>,
+    pub quantization: Option<QuantizationScheme>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,7 +78,7 @@ pub fn prepare_bundle(
     let downloaded_artifacts = if context.runtime_flags.download_artifacts {
         let download_options = ArtifactDownloadOptions {
             hf_token: hf_token_from_env(),
-            quantization: artifact_download_quantization(&descriptor, quantization),
+            quantization_scheme: artifact_download_quantization(&descriptor, quantization),
         };
         download_bundle_artifacts_with_options(
             &catalog,
@@ -110,8 +110,8 @@ pub fn prepare_bundle(
 
 fn artifact_download_quantization(
     descriptor: &BundleDescriptor,
-    quantization: Option<QuantizationBits>,
-) -> Option<QuantizationBits> {
+    quantization: Option<QuantizationScheme>,
+) -> Option<QuantizationScheme> {
     let artifacts = descriptor.artifacts.as_ref()?;
     if descriptor.backend == BackendKind::LlamaCpp && artifacts.format == CheckpointFormat::Gguf {
         quantization
@@ -122,7 +122,7 @@ fn artifact_download_quantization(
 
 fn artifact_patterns_for_record(
     descriptor: &BundleDescriptor,
-    quantization: Option<QuantizationBits>,
+    quantization: Option<QuantizationScheme>,
 ) -> Vec<String> {
     descriptor
         .artifacts
@@ -181,7 +181,7 @@ pub fn start_options(context: &RunContext, prepared: &PreparedBundle) -> StartOp
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
             root: context.artifact_root.clone(),
         }),
-        quantization: prepared.quantization,
+        quantization_scheme: prepared.quantization,
         ..Default::default()
     }
 }
@@ -514,6 +514,11 @@ pub fn build_record(
                 context.runtime_flags.precision.as_deref(),
             )
         });
+    let coverage_quantization = context
+        .runtime_flags
+        .precision
+        .clone()
+        .unwrap_or_else(|| artifact_quantization.clone());
     let host_id = platform
         .host_id
         .clone()
@@ -532,7 +537,7 @@ pub fn build_record(
             &host_slug,
             &backend,
             checkpoint_format.as_deref().unwrap_or("unknown"),
-            &artifact_quantization,
+            &coverage_quantization,
             accelerator.requested_class,
             accelerator.resolved_class,
         )
@@ -621,7 +626,7 @@ fn default_coverage(
     host_slug: &str,
     backend: &str,
     checkpoint_format: &str,
-    artifact_quantization: &str,
+    coverage_quantization: &str,
     requested_accelerator: crate::result::AcceleratorClass,
     resolved_accelerator: crate::result::AcceleratorClass,
 ) -> CoverageSection {
@@ -637,8 +642,14 @@ fn default_coverage(
     );
     grouping_keys.insert("backend".to_owned(), backend.to_owned());
     grouping_keys.insert("checkpoint_format".to_owned(), checkpoint_format.to_owned());
-    grouping_keys.insert("quantization".to_owned(), artifact_quantization.to_owned());
+    grouping_keys.insert("quantization".to_owned(), coverage_quantization.to_owned());
     grouping_keys.insert("profile".to_owned(), context.profile.name.clone());
+    if context.scenario.capability() == crate::scenario::CapabilityName::Tts {
+        grouping_keys.insert(
+            "speech_mode".to_owned(),
+            tts_speech_mode_for_scenario(&context.scenario.id).to_owned(),
+        );
+    }
 
     CoverageSection {
         snapshot_id: "ad_hoc".to_owned(),
@@ -649,7 +660,7 @@ fn default_coverage(
         bundle_id: prepared.bundle_id.as_str().to_owned(),
         model_family: format!("{:?}", prepared.descriptor.family),
         checkpoint_format: checkpoint_format.to_owned(),
-        quantization: artifact_quantization.to_owned(),
+        quantization: coverage_quantization.to_owned(),
         backend: backend.to_owned(),
         profile: context.profile.name.clone(),
         host_id: host_id.to_owned(),
@@ -664,6 +675,13 @@ fn default_coverage(
     }
 }
 
+fn tts_speech_mode_for_scenario(scenario_id: &str) -> &'static str {
+    match scenario_id {
+        "tts_streaming_synthesis" => "streaming",
+        _ => "buffered",
+    }
+}
+
 fn artifact_quantization_label(checkpoint_format: Option<&str>, precision: Option<&str>) -> String {
     if checkpoint_format
         .unwrap_or_default()
@@ -672,7 +690,7 @@ fn artifact_quantization_label(checkpoint_format: Option<&str>, precision: Optio
     {
         precision.unwrap_or("gguf_default").to_owned()
     } else {
-        precision.unwrap_or("default").to_owned()
+        "default".to_owned()
     }
 }
 
@@ -786,14 +804,20 @@ fn ensure_capability(descriptor: &BundleDescriptor, capability: CapabilityKind) 
     Ok(())
 }
 
-fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationBits>> {
+fn parse_quantization(precision: Option<&str>) -> Result<Option<QuantizationScheme>> {
     match precision {
-        Some("q4") => Ok(Some(QuantizationBits::Four)),
-        Some("q5") => Ok(Some(QuantizationBits::Five)),
-        Some("q8") => Ok(Some(QuantizationBits::Eight)),
-        Some("fp8") => Ok(Some(QuantizationBits::FloatEight)),
-        Some("f16") | Some("f32") | None => Ok(None),
-        Some(other) => bail!("unknown precision `{other}` - use q4, q5, q8, fp8, f16, or f32"),
+        Some("q4") | Some("q4_k_m") | Some("gguf_q4_k_m") => Ok(Some(QuantizationScheme::GgufQ4_K_M)),
+        Some("q4_0") | Some("gguf_q4_0") => Ok(Some(QuantizationScheme::GgufQ4_0)),
+        Some("q5") | Some("q5_k_m") | Some("gguf_q5_k_m") => Ok(Some(QuantizationScheme::GgufQ5_K_M)),
+        Some("q8") | Some("q8_0") | Some("gguf_q8_0") => Ok(Some(QuantizationScheme::GgufQ8_0)),
+        Some("onnx_int8") | Some("int8") => Ok(Some(QuantizationScheme::OnnxInt8)),
+        Some("isq_q4") => Ok(Some(QuantizationScheme::IsqQ4)),
+        Some("isq_q8") => Ok(Some(QuantizationScheme::IsqQ8)),
+        Some("f16") | Some("fp16") => Ok(Some(QuantizationScheme::Fp16)),
+        Some("f32") | Some("fp32") => Ok(Some(QuantizationScheme::Fp32)),
+        Some("bf16") => Ok(Some(QuantizationScheme::Bf16)),
+        None => Ok(None),
+        Some(other) => bail!("unknown precision `{other}` - use a QuantizationScheme id such as gguf_q4_k_m, gguf_q4_0, gguf_q5_k_m, gguf_q8_0, onnx_int8, isq_q4, isq_q8, fp32, fp16, or bf16"),
     }
 }
 
@@ -845,8 +869,8 @@ fn active_features() -> Vec<String> {
             cfg!(feature = "model-gemma4-12b-gguf"),
         ),
         (
-            "model-gemma4-12b-qat-q4-0-gguf",
-            cfg!(feature = "model-gemma4-12b-qat-q4-0-gguf"),
+            "model-gemma4-12b-qat-gguf",
+            cfg!(feature = "model-gemma4-12b-qat-gguf"),
         ),
         ("model-qwen3-4b-gguf", cfg!(feature = "model-qwen3-4b-gguf")),
         (
@@ -865,6 +889,7 @@ fn active_features() -> Vec<String> {
             "model-piper-en-us-ljspeech-medium",
             cfg!(feature = "model-piper-en-us-ljspeech-medium"),
         ),
+        ("model-kokoro-82m", cfg!(feature = "model-kokoro-82m")),
         ("model-qwen3-tts-cpp", cfg!(feature = "model-qwen3-tts-cpp")),
         (
             "model-moonshine-streaming",
@@ -880,6 +905,8 @@ fn active_features() -> Vec<String> {
         ),
         ("llama-cpp-cuda", cfg!(feature = "llama-cpp-cuda")),
         ("piper-cuda", cfg!(feature = "piper-cuda")),
+        ("kokoro-cuda", cfg!(feature = "kokoro-cuda")),
+        ("moonshine-cuda", cfg!(feature = "moonshine-cuda")),
         ("qwen3-tts-cpp-cuda", cfg!(feature = "qwen3-tts-cpp-cuda")),
         ("sherpa-onnx-cuda", cfg!(feature = "sherpa-onnx-cuda")),
         ("whisper-cpp-cuda", cfg!(feature = "whisper-cpp-cuda")),

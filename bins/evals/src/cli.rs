@@ -40,6 +40,8 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
             list_scenarios(PathBuf::from(root))
         }
         [command, subject] if command == "list" && subject == "bundles" => list_bundles(),
+        [command, rest @ ..] if command == "preflight" => crate::artifacts::run_preflight(rest),
+        [command, rest @ ..] if command == "artifacts" => crate::artifacts::run_artifacts(rest),
         [command, rest @ ..] if command == "run" => run_scenario(command_line, rest).await,
         [command, rest @ ..] if command == "matrix" => {
             crate::driver::run_matrix(command_line, rest).await
@@ -48,6 +50,15 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
             crate::driver::run_provision(command_line, rest).await
         }
         [command, rest @ ..] if command == "report" => report::run_report(rest),
+        [command, sub, rest @ ..] if command == "coverage" && sub == "query" => {
+            crate::coverage::run_coverage_query(rest)
+        }
+        [command, sub, rest @ ..] if command == "coverage" && sub == "index" => {
+            crate::coverage::run_coverage_index(rest)
+        }
+        [command, rest @ ..] if command == "coverage-index" => {
+            crate::coverage::run_coverage_index(rest)
+        }
         _ => {
             print_usage();
             bail!("unknown evals command")
@@ -417,6 +428,10 @@ impl RunOptions {
             .artifact_quantization
             .clone()
             .unwrap_or_else(|| "default".to_owned());
+        let coverage_quantization = self
+            .precision
+            .clone()
+            .unwrap_or_else(|| artifact_quantization.clone());
         let backend = self.backend.clone().unwrap_or_else(|| "unknown".to_owned());
         let mut grouping_keys = std::collections::BTreeMap::new();
         grouping_keys.insert("bundle".to_owned(), self.bundle.clone());
@@ -427,8 +442,14 @@ impl RunOptions {
         grouping_keys.insert("depth".to_owned(), depth.as_str().to_owned());
         grouping_keys.insert("backend".to_owned(), backend.clone());
         grouping_keys.insert("checkpoint_format".to_owned(), checkpoint_format.clone());
-        grouping_keys.insert("quantization".to_owned(), artifact_quantization.clone());
+        grouping_keys.insert("quantization".to_owned(), coverage_quantization.clone());
         grouping_keys.insert("profile".to_owned(), self.profile.clone());
+        if scenario.capability() == scenario::CapabilityName::Tts {
+            grouping_keys.insert(
+                "speech_mode".to_owned(),
+                tts_speech_mode_for_scenario(&scenario.id).to_owned(),
+            );
+        }
 
         Some(CoverageSection {
             snapshot_id,
@@ -445,7 +466,7 @@ impl RunOptions {
                 .clone()
                 .unwrap_or_else(|| "unknown".to_owned()),
             checkpoint_format,
-            quantization: artifact_quantization,
+            quantization: coverage_quantization,
             backend,
             profile: self.profile.clone(),
             host_id,
@@ -458,6 +479,13 @@ impl RunOptions {
             reason: None,
             grouping_keys,
         })
+    }
+}
+
+fn tts_speech_mode_for_scenario(scenario_id: &str) -> &'static str {
+    match scenario_id {
+        "tts_streaming_synthesis" => "streaming",
+        _ => "buffered",
     }
 }
 
@@ -511,6 +539,8 @@ fn print_usage() {
     println!("usage:");
     println!("  evals list scenarios [--root PATH]");
     println!("  evals list bundles");
+    println!("  evals preflight [--artifact-root PATH] [--hf-token-env NAME] [--offline]");
+    println!("  evals artifacts check|sync|provenance [--artifact-root PATH] [--hf-token-env NAME] [--offline]");
     println!("  evals run --bundle <bundle_id> --scenario <scenario_id> [--profile NAME] [--artifact-root PATH] [--jsonl PATH] [--warmup-iterations N | --cold] [--max-wall-time-secs N]");
     println!("  evals matrix --snapshot <path> [--profile NAME] [--artifact-root PATH] [--warmup-iterations N | --cold]");
     println!("  evals provision --snapshot <path> [--artifact-root PATH]");
@@ -577,6 +607,60 @@ mod tests {
         assert_eq!(options.profile, "local-cpu-x86_64");
         // No wall-time backstop unless explicitly requested (#492): default off.
         assert_eq!(options.max_wall_time_secs, None);
+    }
+
+    #[test]
+    fn coverage_quantization_uses_precision_not_artifact_quantization() {
+        let options = RunOptions::parse(&[
+            "--bundle".to_owned(),
+            "qwen3_4b".to_owned(),
+            "--scenario".to_owned(),
+            "bench_chat_startup".to_owned(),
+            "--profile".to_owned(),
+            "dgx-spark".to_owned(),
+            "--snapshot-id".to_owned(),
+            "snap".to_owned(),
+            "--cell-id".to_owned(),
+            "qwen3_4b__bench_chat_startup__smoke__hf_safetensors_isq_q4".to_owned(),
+            "--checkpoint-format".to_owned(),
+            "hf_safetensors".to_owned(),
+            "--artifact-quantization".to_owned(),
+            "bf16".to_owned(),
+            "--precision".to_owned(),
+            "isq_q4".to_owned(),
+            "--model-family".to_owned(),
+            "qwen3".to_owned(),
+            "--backend".to_owned(),
+            "mistralrs".to_owned(),
+        ])
+        .unwrap();
+        let scenario = scenario::load_scenario(&default_eval_root(), "bench_chat_startup").unwrap();
+        let platform = crate::platform::PlatformSnapshot {
+            os: Some("linux".to_owned()),
+            arch: Some("aarch64".to_owned()),
+            target_triple: None,
+            hostname: Some("DGX Spark".to_owned()),
+            host_id: Some("DGX Spark".to_owned()),
+            host_slug: Some("dgx-spark".to_owned()),
+            total_memory_bytes: None,
+            available_memory_bytes: None,
+            total_swap_bytes: None,
+            free_swap_bytes: None,
+            gpu_backend: Some("nvidia".to_owned()),
+            gpus: Vec::new(),
+            accelerator_metadata: std::collections::BTreeMap::new(),
+            unavailable: Vec::new(),
+        };
+        let coverage = options.coverage(&scenario, None, &platform).unwrap();
+
+        assert_eq!(coverage.quantization, "isq_q4");
+        assert_eq!(
+            coverage
+                .grouping_keys
+                .get("quantization")
+                .map(String::as_str),
+            Some("isq_q4")
+        );
     }
 
     #[test]

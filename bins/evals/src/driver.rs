@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Context, Result};
-use motlie_models::{ArtifactSource, BundleId, Catalog};
+use motlie_models::{ArtifactSource, BundleId, Catalog, QuantizationScheme};
 
 use crate::accelerator;
 use crate::metrics::{PerformanceMetrics, ResourceMetrics};
@@ -76,7 +76,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
             ApplicabilityDecision::Applicable,
             TerminalOutcome::Blocked,
             None,
-        );
+        )?;
 
         if !cell.applies_to_profile(&profile) {
             sink.emit(&pre_run_record(
@@ -246,7 +246,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
                 ApplicabilityDecision::BlockedPreRun,
                 TerminalOutcome::Blocked,
                 child.reason.clone(),
-            );
+            )?;
             let mut record = pre_run_record(
                 &snapshot,
                 cell,
@@ -291,7 +291,7 @@ pub async fn run_matrix(command_line: Vec<String>, args: &[String]) -> Result<()
                 ApplicabilityDecision::BlockedPreRun,
                 TerminalOutcome::Blocked,
                 Some(reason.clone()),
-            );
+            )?;
             let mut record = pre_run_record(
                 &snapshot,
                 cell,
@@ -653,10 +653,11 @@ fn run_child_cell(
     run_command.args(["--snapshot-id", &snapshot.id]);
     run_command.args(["--cell-id", &cell.id]);
     run_command.args(["--depth", cell.depth.as_str()]);
+    let artifact_quantization = cell_artifact_quantization_scheme(cell)?.as_str().to_owned();
     run_command.args(["--checkpoint-format", &cell.checkpoint_format]);
-    run_command.args(["--artifact-quantization", &cell.quantization]);
+    run_command.args(["--artifact-quantization", &artifact_quantization]);
     if let Some(precision) = cell_runtime_precision(cell)? {
-        run_command.args(["--precision", precision]);
+        run_command.arg("--precision").arg(precision);
     }
     run_command.args(["--model-family", &cell.model_family]);
     run_command.args(["--backend", &cell.backend]);
@@ -907,7 +908,7 @@ fn pre_run_record(
     profile: &str,
     platform: &PlatformSnapshot,
     accelerator: &AcceleratorSection,
-    coverage: CoverageSection,
+    mut coverage: CoverageSection,
     status: AcceptanceStatus,
     failure_reason: Option<String>,
     run_id: &str,
@@ -929,6 +930,15 @@ fn pre_run_record(
         Some(std::env::var_os("HF_TOKEN").is_some().to_string()),
     );
 
+    let coverage_quantization = coverage.quantization.clone();
+    let artifact_quantization = cell_artifact_quantization_scheme(cell)
+        .map(|scheme| scheme.as_str().to_owned())
+        .unwrap_or_else(|_| coverage_quantization.clone());
+    let accelerator = synthetic_pre_run_accelerator(accelerator);
+    let accelerator_status = synthetic_pre_run_accelerator_status(&accelerator);
+    coverage.requested_accelerator = accelerator.requested_class;
+    coverage.resolved_accelerator = accelerator.resolved_class;
+
     ResultRecord {
         schema_version: RESULT_SCHEMA_VERSION,
         identity: IdentitySection {
@@ -945,7 +955,7 @@ fn pre_run_record(
             selector: cell.selector.clone(),
             backend: Some(cell.backend.clone()),
             checkpoint_format: Some(cell.checkpoint_format.clone()),
-            artifact_quantization: Some(cell.quantization.clone()),
+            artifact_quantization: Some(artifact_quantization),
             artifact_snapshot: snapshot.git_sha.clone(),
             artifact_patterns: cell.artifact.patterns.clone(),
             artifact_files: Vec::new(),
@@ -956,12 +966,12 @@ fn pre_run_record(
             name: profile.to_owned(),
         },
         platform,
-        accelerator: accelerator.clone(),
+        accelerator,
         runtime: RuntimeSection {
             cargo_features: cell.features_for_profile(profile),
             build_profile: None,
-            quantization: Some(cell.quantization.clone()),
-            runtime_precision: cell_runtime_precision_label(cell),
+            quantization: Some(coverage_quantization.clone()),
+            runtime_precision: Some(coverage_quantization),
             artifact_root: String::new(),
             download_artifacts: false,
             context_length: None,
@@ -976,12 +986,31 @@ fn pre_run_record(
             behavior_status: status.clone(),
             performance_status: AcceptanceStatus::NotMeasured,
             resource_status: AcceptanceStatus::NotMeasured,
-            accelerator_status: accelerator::evaluate_use(accelerator),
+            accelerator_status,
             overall_status: status,
             failure_reason,
             assertions: Vec::new(),
             gates: Vec::new(),
         },
+    }
+}
+
+fn synthetic_pre_run_accelerator(accelerator: &AcceleratorSection) -> AcceleratorSection {
+    let mut accelerator = accelerator.clone();
+    if accelerator.fallback_reason == Some(OutcomeReason::BackendOffloadUnverified) {
+        accelerator.fallback_reason = None;
+        accelerator.backend_mode = Some("backend_not_started".to_owned());
+        accelerator.offload = None;
+        accelerator.use_proof_source = Some("pre_run:backend_not_started".to_owned());
+    }
+    accelerator
+}
+
+fn synthetic_pre_run_accelerator_status(accelerator: &AcceleratorSection) -> AcceptanceStatus {
+    if accelerator.use_proof_source.as_deref() == Some("pre_run:backend_not_started") {
+        AcceptanceStatus::NotMeasured
+    } else {
+        accelerator::evaluate_use(accelerator)
     }
 }
 
@@ -995,7 +1024,7 @@ fn coverage_for_cell(
     applicability: ApplicabilityDecision,
     terminal_outcome: TerminalOutcome,
     reason: Option<OutcomeReason>,
-) -> CoverageSection {
+) -> Result<CoverageSection> {
     let host_id = platform
         .host_id
         .clone()
@@ -1005,6 +1034,7 @@ fn coverage_for_cell(
         .host_slug
         .clone()
         .unwrap_or_else(|| sanitize_slug(&host_id));
+    let quantization = cell_quantization_scheme(cell)?.as_str().to_owned();
     let mut grouping_keys = BTreeMap::new();
     grouping_keys.insert("bundle".to_owned(), cell.bundle_id.clone());
     grouping_keys.insert("capability".to_owned(), cell.capability.as_str().to_owned());
@@ -1014,10 +1044,16 @@ fn coverage_for_cell(
         "checkpoint_format".to_owned(),
         cell.checkpoint_format.clone(),
     );
-    grouping_keys.insert("quantization".to_owned(), cell.quantization.clone());
+    grouping_keys.insert("quantization".to_owned(), quantization.clone());
     grouping_keys.insert("profile".to_owned(), profile.to_owned());
+    if cell.capability == CapabilityName::Tts {
+        grouping_keys.insert(
+            "speech_mode".to_owned(),
+            tts_speech_mode_for_scenario(&cell.scenario).to_owned(),
+        );
+    }
 
-    CoverageSection {
+    Ok(CoverageSection {
         snapshot_id: snapshot.id.clone(),
         cell_id: cell.id.clone(),
         depth: cell.depth,
@@ -1026,7 +1062,7 @@ fn coverage_for_cell(
         bundle_id: cell.bundle_id.clone(),
         model_family: cell.model_family.clone(),
         checkpoint_format: cell.checkpoint_format.clone(),
-        quantization: cell.quantization.clone(),
+        quantization: quantization.clone(),
         backend: cell.backend.clone(),
         profile: profile.to_owned(),
         host_id,
@@ -1038,6 +1074,13 @@ fn coverage_for_cell(
         terminal_outcome,
         reason,
         grouping_keys,
+    })
+}
+
+fn tts_speech_mode_for_scenario(scenario_id: &str) -> &'static str {
+    match scenario_id {
+        "tts_streaming_synthesis" => "streaming",
+        _ => "buffered",
     }
 }
 
@@ -1307,26 +1350,60 @@ fn merge_bindgen_args(
     args.join(" ")
 }
 
-fn cell_runtime_precision(cell: &SnapshotCell) -> Result<Option<&'static str>> {
-    quantization_precision(&cell.quantization)
+fn cell_runtime_precision(cell: &SnapshotCell) -> Result<Option<String>> {
+    let scheme = cell_quantization_scheme(cell)?;
+    if cell.quantization == "default" {
+        return Ok(None);
+    }
+    Ok(Some(scheme.as_str().to_owned()))
 }
 
-fn cell_runtime_precision_label(cell: &SnapshotCell) -> Option<String> {
-    quantization_precision(&cell.quantization)
-        .ok()
-        .flatten()
-        .map(ToOwned::to_owned)
+fn cell_artifact_quantization_scheme(cell: &SnapshotCell) -> Result<QuantizationScheme> {
+    let scheme = cell_quantization_scheme(cell)?;
+    if matches!(
+        scheme,
+        QuantizationScheme::IsqQ4 | QuantizationScheme::IsqQ8
+    ) {
+        default_quantization_scheme(cell)
+    } else {
+        Ok(scheme)
+    }
 }
 
-fn quantization_precision(quantization: &str) -> Result<Option<&'static str>> {
-    match quantization {
-        "default" => Ok(None),
-        "q4_k_m" | "q4_0" => Ok(Some("q4")),
-        "q5_k_m" => Ok(Some("q5")),
-        "q8_0" => Ok(Some("q8")),
-        "fp8" => Ok(Some("fp8")),
-        "f16" | "f32" => Ok(None),
+fn cell_quantization_scheme(cell: &SnapshotCell) -> Result<QuantizationScheme> {
+    match cell.quantization.as_str() {
+        "q4_k_m" | "gguf_q4_k_m" => Ok(QuantizationScheme::GgufQ4_K_M),
+        "q4_0" | "gguf_q4_0" => Ok(QuantizationScheme::GgufQ4_0),
+        "q5_k_m" | "gguf_q5_k_m" => Ok(QuantizationScheme::GgufQ5_K_M),
+        "q8_0" | "gguf_q8_0" => Ok(QuantizationScheme::GgufQ8_0),
+        "onnx_int8" => Ok(QuantizationScheme::OnnxInt8),
+        "isq_q4" => Ok(QuantizationScheme::IsqQ4),
+        "isq_q8" => Ok(QuantizationScheme::IsqQ8),
+        "fp32" | "f32" => Ok(QuantizationScheme::Fp32),
+        "fp16" | "f16" => Ok(QuantizationScheme::Fp16),
+        "bf16" => Ok(QuantizationScheme::Bf16),
+        "default" => default_quantization_scheme(cell),
         other => bail!("unknown snapshot quantization `{other}`"),
+    }
+}
+
+fn default_quantization_scheme(cell: &SnapshotCell) -> Result<QuantizationScheme> {
+    match cell.bundle_id.as_str() {
+        "qwen3_4b" | "gemma4_e2b" | "gemma4_e4b" | "qwen3_embedding_06b" => {
+            Ok(QuantizationScheme::Bf16)
+        }
+        "embeddinggemma_300m" => Ok(QuantizationScheme::Fp32),
+        "whisper_base_en" => Ok(QuantizationScheme::Fp16),
+        "sherpa_onnx_streaming_zipformer_en" | "kokoro_82m" => {
+            Ok(QuantizationScheme::OnnxInt8)
+        }
+        "sherpa_onnx_streaming_zipformer_en_kroko_2025"
+        | "moonshine_streaming_en"
+        | "piper_en_us_ljspeech_medium" => Ok(QuantizationScheme::Fp32),
+        other => bail!(
+            "snapshot cell `{}` uses default quantization for bundle `{other}` without a bundle-aware QuantizationScheme mapping",
+            cell.id
+        ),
     }
 }
 
@@ -1394,7 +1471,7 @@ fn curated_hf_repo_for_bundle(bundle_id: &str) -> Option<&'static str> {
         "gemma4_e2b_gguf" => Some("unsloth/gemma-4-E2B-it-GGUF"),
         "gemma4_e4b_gguf" => Some("unsloth/gemma-4-E4B-it-GGUF"),
         "gemma4_12b_gguf" => Some("unsloth/gemma-4-12b-it-GGUF"),
-        "gemma4_12b_qat_q4_0_gguf" => Some("google/gemma-4-12B-it-qat-q4_0-gguf"),
+        "gemma4_12b_qat_gguf" => Some("google/gemma-4-12B-it-qat-q4_0-gguf"),
         "whisper_base_en" => Some("ggerganov/whisper.cpp"),
         "moonshine_streaming_en" => Some("UsefulSensors/moonshine-streaming"),
         "sherpa_onnx_streaming_zipformer_en" => {
@@ -1667,6 +1744,96 @@ mod tests {
     }
 
     #[test]
+    fn child_failure_record_does_not_claim_backend_offload_unverified() {
+        let snapshot = EvalSnapshot {
+            schema_version: 1,
+            id: "snap".to_owned(),
+            git_sha: None,
+            cells: Vec::new(),
+        };
+        let mut cell = test_snapshot_cell();
+        cell.bundle_id = "qwen3_4b".to_owned();
+        cell.quantization = "bf16".to_owned();
+        let platform = PlatformSnapshot {
+            os: Some("linux".to_owned()),
+            arch: Some("aarch64".to_owned()),
+            target_triple: None,
+            hostname: Some("DGX Spark".to_owned()),
+            host_id: Some("DGX Spark".to_owned()),
+            host_slug: Some("dgx-spark".to_owned()),
+            total_memory_bytes: None,
+            available_memory_bytes: None,
+            total_swap_bytes: None,
+            free_swap_bytes: None,
+            gpu_backend: Some("nvidia".to_owned()),
+            gpus: vec![GpuSnapshot {
+                index: Some(0),
+                backend: Some("nvidia".to_owned()),
+                id: Some("GPU-1".to_owned()),
+                model: Some("NVIDIA GB10".to_owned()),
+                total_memory_bytes: None,
+                free_memory_bytes: None,
+                unified_memory: Some(false),
+                recommended_max_working_set_size_bytes: None,
+            }],
+            accelerator_metadata: BTreeMap::new(),
+            unavailable: Vec::new(),
+        };
+        let speculative = accelerator::resolve(AcceleratorClass::Cuda, &platform, None, None);
+        assert_eq!(
+            speculative.fallback_reason,
+            Some(OutcomeReason::BackendOffloadUnverified)
+        );
+        let coverage = coverage_for_cell(
+            &snapshot,
+            &cell,
+            "dgx-spark",
+            &platform,
+            &speculative,
+            ApplicabilityDecision::BlockedPreRun,
+            TerminalOutcome::Blocked,
+            Some(OutcomeReason::NativeLinkFailed),
+        )
+        .expect("coverage");
+
+        let record = pre_run_record(
+            &snapshot,
+            &cell,
+            "dgx-spark",
+            &platform,
+            &speculative,
+            coverage,
+            AcceptanceStatus::Blocked,
+            Some("child eval invocation failed".to_owned()),
+            "run",
+            &[],
+        );
+
+        assert_eq!(
+            record.coverage.reason,
+            Some(OutcomeReason::NativeLinkFailed)
+        );
+        assert_eq!(record.accelerator.requested_class, AcceleratorClass::Cuda);
+        assert_eq!(record.accelerator.resolved_class, AcceleratorClass::Cuda);
+        assert_eq!(record.coverage.resolved_accelerator, AcceleratorClass::Cuda);
+        assert_eq!(record.accelerator.selected_devices.len(), 1);
+        assert_eq!(record.accelerator.fallback_reason, None);
+        assert_eq!(
+            record.accelerator.backend_mode.as_deref(),
+            Some("backend_not_started")
+        );
+        assert_eq!(
+            record.accelerator.use_proof_source.as_deref(),
+            Some("pre_run:backend_not_started")
+        );
+        assert_eq!(
+            record.acceptance.accelerator_status,
+            AcceptanceStatus::NotMeasured
+        );
+        assert_eq!(record.acceptance.overall_status, AcceptanceStatus::Blocked);
+    }
+
+    #[test]
     fn child_timeout_reason_does_not_depend_on_log_marker() {
         let cell = test_snapshot_cell();
         let log_path = std::env::temp_dir().join(format!(
@@ -1758,13 +1925,86 @@ unauthorized access to model cache"#,
     }
 
     #[test]
-    fn snapshot_quantization_maps_to_child_precision() {
-        assert_eq!(quantization_precision("default").unwrap(), None);
-        assert_eq!(quantization_precision("q4_k_m").unwrap(), Some("q4"));
-        assert_eq!(quantization_precision("q4_0").unwrap(), Some("q4"));
-        assert_eq!(quantization_precision("q5_k_m").unwrap(), Some("q5"));
-        assert_eq!(quantization_precision("q8_0").unwrap(), Some("q8"));
-        assert!(quantization_precision("q6_k").is_err());
+    fn snapshot_quantization_maps_to_scheme_ids_without_bits_collapse() {
+        let mut cell = test_snapshot_cell();
+
+        cell.bundle_id = "qwen3_4b".to_owned();
+        cell.quantization = "default".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::Bf16
+        );
+        assert_eq!(cell_runtime_precision(&cell).unwrap(), None);
+
+        cell.bundle_id = "embeddinggemma_300m".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::Fp32
+        );
+
+        cell.quantization = "q4_k_m".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::GgufQ4_K_M
+        );
+        assert_eq!(
+            cell_runtime_precision(&cell).unwrap(),
+            Some("gguf_q4_k_m".to_owned())
+        );
+
+        cell.quantization = "q4_0".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::GgufQ4_0
+        );
+        assert_eq!(
+            cell_runtime_precision(&cell).unwrap(),
+            Some("gguf_q4_0".to_owned())
+        );
+
+        cell.quantization = "q5_k_m".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::GgufQ5_K_M
+        );
+
+        cell.quantization = "q8_0".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::GgufQ8_0
+        );
+
+        cell.bundle_id = "qwen3_4b".to_owned();
+        cell.quantization = "isq_q4".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::IsqQ4
+        );
+        assert_eq!(
+            cell_runtime_precision(&cell).unwrap(),
+            Some("isq_q4".to_owned())
+        );
+        assert_eq!(
+            cell_artifact_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::Bf16
+        );
+
+        cell.quantization = "isq_q8".to_owned();
+        assert_eq!(
+            cell_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::IsqQ8
+        );
+        assert_eq!(
+            cell_runtime_precision(&cell).unwrap(),
+            Some("isq_q8".to_owned())
+        );
+        assert_eq!(
+            cell_artifact_quantization_scheme(&cell).unwrap(),
+            QuantizationScheme::Bf16
+        );
+
+        cell.quantization = "q6_k".to_owned();
+        assert!(cell_quantization_scheme(&cell).is_err());
     }
 
     #[test]
@@ -1925,6 +2165,21 @@ unauthorized access to model cache"#,
         write_file(&root.join(
             "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/voices/af_bella.bin",
         ));
+        write_file(
+            &root.join("models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/model.onnx"),
+        );
+        write_file(
+            &root.join("models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/voices.bin"),
+        );
+        write_file(
+            &root.join("models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/tokens.txt"),
+        );
+        write_file(&root.join(
+            "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/espeak-ng-data/phondata",
+        ));
+        write_file(&root.join(
+            "models--onnx-community--Kokoro-82M-v1.0-ONNX/snapshots/test/espeak-ng-data/phontab",
+        ));
 
         let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
             .expect("curated snapshot should parse");
@@ -1932,6 +2187,7 @@ unauthorized access to model cache"#,
             "whisper_base_en__asr_short_transcription__smoke__ggml_default",
             "moonshine_streaming_en__asr_short_transcription__smoke__hf_default",
             "kokoro_82m__tts_synthesis_smoke__smoke__onnx_default",
+            "kokoro_82m__tts_streaming_synthesis__smoke__onnx_default",
             "qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0",
         ] {
             let cell = snapshot
@@ -1946,6 +2202,110 @@ unauthorized access to model cache"#,
         }
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // --- Issue #518 structural rules: snapshot/data bundle_id must be a
+    // CuratedBundle canonical string, and every variant must have a cell. ---
+
+    #[test]
+    fn snapshot_bundle_ids_are_canonical() {
+        let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
+            .expect("curated snapshot should parse");
+        for cell in &snapshot.cells {
+            assert!(
+                motlie_models::CuratedBundle::CANONICAL_IDS.contains(&cell.bundle_id.as_str()),
+                "snapshot cell `{}` bundle_id `{}` is not a CuratedBundle canonical id",
+                cell.id,
+                cell.bundle_id
+            );
+        }
+    }
+
+    #[test]
+    fn every_curated_bundle_has_a_snapshot_cell() {
+        let snapshot = load_snapshot(&repo_root().join("evals/snapshots/curated-v2-smoke.toml"))
+            .expect("curated snapshot should parse");
+        let covered: std::collections::BTreeSet<&str> = snapshot
+            .cells
+            .iter()
+            .map(|cell| cell.bundle_id.as_str())
+            .collect();
+        let missing: Vec<&str> = motlie_models::CuratedBundle::CANONICAL_IDS
+            .iter()
+            .copied()
+            .filter(|id| !covered.contains(id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "CuratedBundle variants without a curated cell (completeness gap): {missing:?}"
+        );
+    }
+
+    #[test]
+    fn committed_result_bundle_ids_are_canonical() {
+        // Data guard: proves committed records already use canonical bundle_ids
+        // without editing any data. Walks evals/results/**/results.jsonl.
+        let canonical: std::collections::BTreeSet<&str> =
+            motlie_models::CuratedBundle::CANONICAL_IDS
+                .iter()
+                .copied()
+                .collect();
+        let results_root = repo_root().join("evals/results");
+        let mut stack = vec![results_root];
+        let mut checked = 0_u64;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.file_name().and_then(|n| n.to_str()) != Some("results.jsonl") {
+                    continue;
+                }
+                let contents = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|err| panic!("failed to read `{}`: {err}", path.display()));
+                for (line_no, line) in contents.lines().enumerate() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let value: serde_json::Value =
+                        serde_json::from_str(line).unwrap_or_else(|err| {
+                            panic!(
+                                "invalid jsonl in `{}` line {}: {err}",
+                                path.display(),
+                                line_no + 1
+                            )
+                        });
+                    let bundle_id = value
+                        .get("coverage")
+                        .and_then(|c| c.get("bundle_id"))
+                        .and_then(|b| b.as_str())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "missing coverage.bundle_id in `{}` line {}",
+                                path.display(),
+                                line_no + 1
+                            )
+                        });
+                    assert!(
+                        canonical.contains(bundle_id),
+                        "committed record `{}` line {} has non-canonical bundle_id `{}`",
+                        path.display(),
+                        line_no + 1,
+                        bundle_id
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "data guard found no committed result records to check"
+        );
     }
 
     #[test]

@@ -6,6 +6,12 @@ use crate::result::{
 };
 
 pub fn requested_for_profile(profile: &str) -> AcceleratorClass {
+    // Canonical profiles resolve through the closed `Profile` registry (#521) —
+    // the single source of truth for the Profile→Accelerator join.
+    if let Some(profile) = crate::profile::Profile::from_id(profile) {
+        return profile.accelerator_class();
+    }
+    // Non-canonical / ad-hoc profile strings keep the legacy substring fallback.
     let profile = profile.to_ascii_lowercase();
     if profile.contains("cuda") || profile.contains("dgx") {
         AcceleratorClass::Cuda
@@ -242,6 +248,25 @@ mod tests {
 
         assert_eq!(accelerator.requested_class, AcceleratorClass::Metal);
         assert_eq!(accelerator.resolved_class, AcceleratorClass::Metal);
+        assert_eq!(accelerator.selected_devices.len(), 1);
+        assert_eq!(
+            accelerator.fallback_reason,
+            Some(OutcomeReason::BackendOffloadUnverified)
+        );
+        assert_eq!(
+            accelerator.use_proof_source.as_deref(),
+            Some("backend:unreported")
+        );
+        assert_eq!(evaluate_use(&accelerator), AcceptanceStatus::Blocked);
+    }
+
+    #[test]
+    fn inventory_only_cuda_is_unverified_until_backend_reports_device() {
+        let platform = platform_with("nvidia", "NVIDIA GB10");
+        let accelerator = resolve_for_profile("dgx-spark", &platform);
+
+        assert_eq!(accelerator.requested_class, AcceleratorClass::Cuda);
+        assert_eq!(accelerator.resolved_class, AcceleratorClass::Cuda);
         assert_eq!(accelerator.selected_devices.len(), 1);
         assert_eq!(
             accelerator.fallback_reason,

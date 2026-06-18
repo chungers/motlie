@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-kokoro-82m",
@@ -26,6 +26,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+pub mod artifact_manifest;
 pub mod asr;
 pub mod chat;
 pub mod embeddings;
@@ -43,7 +44,7 @@ use motlie_model_kokoro::KokoroHandle;
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 ))]
 use motlie_model_llama_cpp::LlamaCppTextHandle;
 #[cfg(any(
@@ -73,7 +74,7 @@ pub use motlie_model::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleFamily, BundleId,
     BundleRequirements, Capabilities, CapabilityDescriptor, CapabilityKind, CheckpointFormat,
     ContentKind, EvalTrack, InteractionStyle, ModelBundle, ModelCheckpoint, ModelIdentity,
-    PlatformConstraint, QuantizationBits, QuantizationSupport,
+    PlatformConstraint, QuantizationScheme, QuantizationSupport,
 };
 use motlie_model::{
     BundleHandle, ChatModel, CompletionModel, EmbeddingModel, LoadedBundleDescriptor, ModelError,
@@ -126,29 +127,34 @@ pub enum ModelsError {
     NoEmbeddingModelsEnabled,
     #[error("expected exactly one curated embedding model in this build, found {count}")]
     AmbiguousEmbeddingModelSelection { count: usize },
+    #[error("invalid quantization scheme: {message}")]
+    InvalidQuantizationScheme { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
 
 pub const LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX: &str = "artifact policy `LocalOnly`";
 
-pub fn quantization_label_isq(quantization: Option<QuantizationBits>) -> &'static str {
+pub fn quantization_label_isq(quantization: Option<QuantizationScheme>) -> &'static str {
     match quantization {
-        Some(QuantizationBits::Four) => "ISQ Q4",
-        Some(QuantizationBits::Eight) => "ISQ Q8",
-        Some(QuantizationBits::Five) | Some(QuantizationBits::FloatEight) => {
-            "unsupported ISQ precision"
-        }
-        None => "F32 (none)",
+        Some(QuantizationScheme::IsqQ4) => "ISQ Q4",
+        Some(QuantizationScheme::IsqQ8) => "ISQ Q8",
+        Some(QuantizationScheme::Bf16) => "BF16",
+        Some(QuantizationScheme::Fp32) => "F32",
+        Some(QuantizationScheme::Fp16) => "F16",
+        Some(_) => "unsupported ISQ precision",
+        None => "default",
     }
 }
 
-pub fn quantization_label_gguf(quantization: Option<QuantizationBits>) -> &'static str {
+pub fn quantization_label_gguf(quantization: Option<QuantizationScheme>) -> &'static str {
     match quantization {
-        Some(QuantizationBits::Four) => "GGUF Q4_K_M",
-        Some(QuantizationBits::Five) => "GGUF Q5_K_M",
-        Some(QuantizationBits::Eight) => "GGUF Q8_0",
-        Some(QuantizationBits::FloatEight) => "GGUF FP8",
+        Some(QuantizationScheme::GgufQ4_K_M) => "GGUF Q4_K_M",
+        Some(QuantizationScheme::GgufQ4_0) => "GGUF Q4_0",
+        Some(QuantizationScheme::GgufQ5_K_M) => "GGUF Q5_K_M",
+        Some(QuantizationScheme::GgufQ8_0) => "GGUF Q8_0",
+        Some(QuantizationScheme::Fp16) => "GGUF F16",
+        Some(_) => "unsupported GGUF precision",
         None => "GGUF F16 (no quantization)",
     }
 }
@@ -284,7 +290,7 @@ pub fn resolve_hf_gguf_snapshot(
 /// root-level GGUF filename for the selected curated variant.
 #[cfg(any(
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
 ))]
 pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
     model_id: &str,
@@ -316,7 +322,7 @@ pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
@@ -333,7 +339,7 @@ pub(crate) fn resolve_typed_artifact_policy(
 ) -> std::result::Result<StartOptions, motlie_model::ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization,
+        quantization_scheme,
         unpack_root,
         max_concurrency,
     } = options;
@@ -349,7 +355,7 @@ pub(crate) fn resolve_typed_artifact_policy(
 
     Ok(StartOptions {
         artifact_policy,
-        quantization,
+        quantization_scheme,
         unpack_root,
         max_concurrency,
     })
@@ -375,18 +381,18 @@ pub enum CuratedBundle {
     Gemma4E4B_Gguf,
     #[cfg(feature = "model-gemma4-12b-gguf")]
     Gemma4_12B_Gguf,
-    #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-    Gemma4_12B_QatQ4_0_Gguf,
+    #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+    Gemma4_12B_Qat_Gguf,
     #[cfg(feature = "model-google-gemma-300m")]
-    GoogleGemma300m,
+    EmbeddingGemma300m,
     #[cfg(feature = "model-qwen3-embedding-06b")]
     Qwen3Embedding06B,
     #[cfg(feature = "model-whisper-base-en")]
     WhisperBaseEn,
     #[cfg(feature = "model-sherpa-onnx-streaming")]
-    SherpaOnnxStreamingEn,
+    SherpaOnnxStreamingZipformerEn,
     #[cfg(feature = "model-sherpa-onnx-streaming")]
-    SherpaOnnxStreamingEnKroko2025,
+    SherpaOnnxStreamingZipformerEnKroko2025,
     #[cfg(feature = "model-moonshine-streaming")]
     MoonshineStreamingEn,
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -398,8 +404,83 @@ pub enum CuratedBundle {
 }
 
 impl CuratedBundle {
+    /// The single canonical id string for every curated bundle, used identically
+    /// across the eval snapshot, the driver artifact map, and result records.
+    /// This list is always present (not feature-gated) so snapshot/data lints can
+    /// enumerate the full set without compiling every model backend. The
+    /// `canonical_ids_match_bundle_ids` test (run with all model features) keeps
+    /// this list exactly in sync with the enum's `bundle_id()`/`canonical_id()`.
+    pub const CANONICAL_IDS: &'static [&'static str] = &[
+        "qwen3_4b",
+        "gemma4_e2b",
+        "gemma4_e4b",
+        "qwen3_4b_gguf",
+        "qwen3_6_27b_gguf",
+        "gemma4_e2b_gguf",
+        "gemma4_e4b_gguf",
+        "gemma4_12b_gguf",
+        "gemma4_12b_qat_gguf",
+        "embeddinggemma_300m",
+        "qwen3_embedding_06b",
+        "whisper_base_en",
+        "sherpa_onnx_streaming_zipformer_en",
+        "sherpa_onnx_streaming_zipformer_en_kroko_2025",
+        "moonshine_streaming_en",
+        "piper_en_us_ljspeech_medium",
+        "kokoro_82m",
+        "qwen3_tts_cpp_0_6b",
+    ];
+
     pub fn bundle_id(&self) -> BundleId {
         self.descriptor().id
+    }
+
+    /// The canonical id string for this variant. Equals `bundle_id().as_str()`
+    /// (enforced by the `canonical_ids_match_bundle_ids` test) and is always a
+    /// member of [`CuratedBundle::CANONICAL_IDS`].
+    pub fn canonical_id(&self) -> &'static str {
+        #[allow(unreachable_patterns)]
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B => "qwen3_4b",
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B => "gemma4_e2b",
+            #[cfg(feature = "model-gemma4-e4b")]
+            Self::Gemma4E4B => "gemma4_e4b",
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf => "qwen3_4b_gguf",
+            #[cfg(feature = "model-qwen3-6-27b-gguf")]
+            Self::Qwen3_6_27B_Gguf => "qwen3_6_27b_gguf",
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf => "gemma4_e2b_gguf",
+            #[cfg(feature = "model-gemma4-e4b-gguf")]
+            Self::Gemma4E4B_Gguf => "gemma4_e4b_gguf",
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            Self::Gemma4_12B_Gguf => "gemma4_12b_gguf",
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf => "gemma4_12b_qat_gguf",
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::EmbeddingGemma300m => "embeddinggemma_300m",
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B => "qwen3_embedding_06b",
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn => "whisper_base_en",
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingZipformerEn => "sherpa_onnx_streaming_zipformer_en",
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
+                "sherpa_onnx_streaming_zipformer_en_kroko_2025"
+            }
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn => "moonshine_streaming_en",
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium => "piper_en_us_ljspeech_medium",
+            #[cfg(feature = "model-kokoro-82m")]
+            Self::Kokoro82m => "kokoro_82m",
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B => "qwen3_tts_cpp_0_6b",
+            _ => unreachable!("no curated bundle variants are enabled"),
+        }
     }
 
     pub fn descriptor(&self) -> BundleDescriptor {
@@ -421,19 +502,21 @@ impl CuratedBundle {
             Self::Gemma4E4B_Gguf => chat::gemma4_e4b_gguf::descriptor(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf => chat::gemma4_12b_gguf::descriptor(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf => chat::gemma4_12b_qat_q4_0_gguf::descriptor(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf => chat::gemma4_12b_qat_gguf::descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => embeddings::google_gemma_300m::descriptor(),
+            Self::EmbeddingGemma300m => embeddings::embeddinggemma_300m::descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => embeddings::qwen3_embedding_06b::descriptor(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => asr::whisper_base_en::descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::descriptor(),
+            Self::SherpaOnnxStreamingZipformerEn => {
+                asr::sherpa_onnx_streaming_zipformer_en::descriptor()
+            }
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025 => {
-                asr::sherpa_onnx_streaming_en_kroko_2025::descriptor()
+            Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
+                asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::descriptor()
             }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::descriptor(),
@@ -442,7 +525,7 @@ impl CuratedBundle {
             #[cfg(feature = "model-kokoro-82m")]
             Self::Kokoro82m => tts::kokoro_82m::descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::descriptor(),
+            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp_0_6b::descriptor(),
             _ => unreachable!("no curated bundle variants are enabled"),
         }
     }
@@ -487,14 +570,14 @@ impl CuratedBundle {
             Self::Gemma4_12B_Gguf => chat::gemma4_12b_gguf::start(options)
                 .await
                 .map(CuratedHandle::Gemma4_12B_Gguf),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf => chat::gemma4_12b_qat_q4_0_gguf::start(options)
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf => chat::gemma4_12b_qat_gguf::start(options)
                 .await
-                .map(CuratedHandle::Gemma4_12B_QatQ4_0_Gguf),
+                .map(CuratedHandle::Gemma4_12B_Qat_Gguf),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m => embeddings::google_gemma_300m::start(options)
+            Self::EmbeddingGemma300m => embeddings::embeddinggemma_300m::start(options)
                 .await
-                .map(CuratedHandle::GoogleGemma300m),
+                .map(CuratedHandle::EmbeddingGemma300m),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B => embeddings::qwen3_embedding_06b::start(options)
                 .await
@@ -504,14 +587,16 @@ impl CuratedBundle {
                 .await
                 .map(CuratedHandle::WhisperBaseEn),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::start_typed(options)
-                .await
-                .map(CuratedHandle::SherpaOnnxStreamingEn),
-            #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025 => {
-                asr::sherpa_onnx_streaming_en_kroko_2025::start_typed(options)
+            Self::SherpaOnnxStreamingZipformerEn => {
+                asr::sherpa_onnx_streaming_zipformer_en::start_typed(options)
                     .await
-                    .map(CuratedHandle::SherpaOnnxStreamingEnKroko2025)
+                    .map(CuratedHandle::SherpaOnnxStreamingZipformerEn)
+            }
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingZipformerEnKroko2025 => {
+                asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::start_typed(options)
+                    .await
+                    .map(CuratedHandle::SherpaOnnxStreamingZipformerEnKroko2025)
             }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::start_typed(options)
@@ -526,7 +611,7 @@ impl CuratedBundle {
                 .await
                 .map(CuratedHandle::Kokoro82m),
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::start_typed(options)
+            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp_0_6b::start_typed(options)
                 .await
                 .map(CuratedHandle::Qwen3TtsCpp0_6B),
             _ => Err(ModelError::InvalidConfiguration(
@@ -554,18 +639,18 @@ pub enum CuratedHandle {
     Gemma4E4B_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-gemma4-12b-gguf")]
     Gemma4_12B_Gguf(LlamaCppTextHandle),
-    #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-    Gemma4_12B_QatQ4_0_Gguf(LlamaCppTextHandle),
+    #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+    Gemma4_12B_Qat_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-google-gemma-300m")]
-    GoogleGemma300m(MistralEmbeddingHandle),
+    EmbeddingGemma300m(MistralEmbeddingHandle),
     #[cfg(feature = "model-qwen3-embedding-06b")]
     Qwen3Embedding06B(MistralEmbeddingHandle),
     #[cfg(feature = "model-whisper-base-en")]
     WhisperBaseEn(WhisperCppHandle),
     #[cfg(feature = "model-sherpa-onnx-streaming")]
-    SherpaOnnxStreamingEn(SherpaOnnxHandle),
+    SherpaOnnxStreamingZipformerEn(SherpaOnnxHandle),
     #[cfg(feature = "model-sherpa-onnx-streaming")]
-    SherpaOnnxStreamingEnKroko2025(SherpaOnnxHandle),
+    SherpaOnnxStreamingZipformerEnKroko2025(SherpaOnnxHandle),
     #[cfg(feature = "model-moonshine-streaming")]
     MoonshineStreamingEn(MoonshineHandle),
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -601,18 +686,18 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.descriptor(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.descriptor(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.descriptor(),
+            Self::EmbeddingGemma300m(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.descriptor(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.descriptor(),
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.descriptor(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.descriptor(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -644,18 +729,18 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.capabilities(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.capabilities(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.capabilities(),
+            Self::EmbeddingGemma300m(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.capabilities(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.capabilities(),
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.capabilities(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.capabilities(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -687,18 +772,18 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.metric_snapshot(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.metric_snapshot(),
+            Self::EmbeddingGemma300m(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.metric_snapshot(),
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.metric_snapshot(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -730,18 +815,20 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.accelerator_observation(),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.accelerator_observation(),
+            Self::EmbeddingGemma300m(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.accelerator_observation(),
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.accelerator_observation(),
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => {
+                handle.accelerator_observation()
+            }
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -773,8 +860,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(_) => Ok(self),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(_) => Ok(self),
             _ => Err(ModelError::UnsupportedCapability(CapabilityKind::Chat)),
         }
     }
@@ -794,8 +881,8 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(_) => Ok(self),
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(_) => Ok(self),
             _ => Err(ModelError::UnsupportedCapability(
                 CapabilityKind::Completion,
             )),
@@ -806,7 +893,7 @@ impl BundleHandle for CuratedHandle {
         #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(_) => Ok(self),
+            Self::EmbeddingGemma300m(_) => Ok(self),
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(_) => Ok(self),
             _ => Err(ModelError::UnsupportedCapability(
@@ -833,18 +920,18 @@ impl BundleHandle for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.shutdown().await,
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.shutdown().await,
+            Self::EmbeddingGemma300m(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.shutdown().await,
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn(handle) => handle.shutdown().await,
+            Self::SherpaOnnxStreamingZipformerEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEnKroko2025(handle) => handle.shutdown().await,
+            Self::SherpaOnnxStreamingZipformerEnKroko2025(handle) => handle.shutdown().await,
             #[cfg(feature = "model-moonshine-streaming")]
             Self::MoonshineStreamingEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
@@ -881,8 +968,8 @@ impl ChatModel for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.generate(request).await,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.generate(request).await,
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.generate(request).await,
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.generate(request).await,
             _ => UnsupportedChat.generate(request).await,
         }
     }
@@ -908,8 +995,8 @@ impl CompletionModel for CuratedHandle {
             Self::Gemma4E4B_Gguf(handle) => handle.complete(request).await,
             #[cfg(feature = "model-gemma4-12b-gguf")]
             Self::Gemma4_12B_Gguf(handle) => handle.complete(request).await,
-            #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-            Self::Gemma4_12B_QatQ4_0_Gguf(handle) => handle.complete(request).await,
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            Self::Gemma4_12B_Qat_Gguf(handle) => handle.complete(request).await,
             _ => UnsupportedCompletion.complete(request).await,
         }
     }
@@ -924,7 +1011,7 @@ impl EmbeddingModel for CuratedHandle {
         #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
-            Self::GoogleGemma300m(handle) => handle.embed(request).await,
+            Self::EmbeddingGemma300m(handle) => handle.embed(request).await,
             #[cfg(feature = "model-qwen3-embedding-06b")]
             Self::Qwen3Embedding06B(handle) => handle.embed(request).await,
             _ => UnsupportedEmbeddings.embed(request).await,
@@ -932,22 +1019,110 @@ impl EmbeddingModel for CuratedHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArtifactGating {
+    Public,
+    Manual,
+    Unknown,
+}
+
+impl ArtifactGating {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Manual => "manual",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArtifactProvenance {
+    pub license: &'static str,
+    pub gating: ArtifactGating,
+}
+
+impl ArtifactProvenance {
+    pub const fn new(license: &'static str, gating: ArtifactGating) -> Self {
+        Self { license, gating }
+    }
+
+    pub const fn unknown() -> Self {
+        Self {
+            license: "unknown",
+            gating: ArtifactGating::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundleArtifactSource {
+    pub label: &'static str,
+    pub source: ArtifactSource,
+    pub include: Vec<ArtifactRule>,
+    pub provenance: ArtifactProvenance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DerivedArtifactRecipe {
+    CopyFromDownloaded { source: &'static str },
+    KokoroTokensFromTokenizerJson { source: &'static str },
+}
+
+impl DerivedArtifactRecipe {
+    pub const fn source(&self) -> &'static str {
+        match self {
+            Self::CopyFromDownloaded { source } => source,
+            Self::KokoroTokensFromTokenizerJson { source } => source,
+        }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::CopyFromDownloaded { .. } => "copy from downloaded source artifact",
+            Self::KokoroTokensFromTokenizerJson { .. } => {
+                "generate from tokenizer.json model.vocab via kokoro_82m::tokens_txt_from_tokenizer_json (introduced by 91cc0f32)"
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivedBundleArtifact {
+    pub label: &'static str,
+    pub output: &'static str,
+    pub recipe: DerivedArtifactRecipe,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleArtifacts {
+    pub source_label: &'static str,
     pub control_name: &'static str,
     pub format: CheckpointFormat,
     pub source: ArtifactSource,
     pub include: Vec<ArtifactRule>,
+    pub quantization: Option<QuantizationScheme>,
+    pub provenance: ArtifactProvenance,
+    pub extra_sources: Vec<BundleArtifactSource>,
+    pub derived: Vec<DerivedBundleArtifact>,
 }
 
 impl BundleArtifacts {
     pub fn includes(&self, filename: &str) -> bool {
         self.include.iter().any(|rule| rule.matches(filename))
+            || self
+                .extra_sources
+                .iter()
+                .any(|source| source.include.iter().any(|rule| rule.matches(filename)))
+            || self.derived.iter().any(|artifact| {
+                artifact.output == filename
+                    || (artifact.output.ends_with('/') && filename.starts_with(artifact.output))
+            })
     }
 
     pub fn include_for_quantization(
         &self,
-        quantization: Option<QuantizationBits>,
+        quantization: Option<QuantizationScheme>,
     ) -> Vec<ArtifactRule> {
         artifact_rules_for_quantization(self.format, &self.include, quantization)
     }
@@ -962,11 +1137,11 @@ pub struct ArtifactDownloadSummary {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArtifactDownloadOptions {
     pub hf_token: Option<String>,
-    pub quantization: Option<QuantizationBits>,
+    pub quantization_scheme: Option<QuantizationScheme>,
 }
 
 pub fn default_artifact_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/models/hf-cache")
+    artifact_manifest::canonical_artifact_root()
 }
 
 pub fn download_bundle_artifacts(
@@ -1004,14 +1179,23 @@ pub fn download_bundle_artifacts_with_options(
         &ModelCheckpoint {
             format: artifacts.format,
             source: artifacts.source.clone(),
-            include: artifacts.include_for_quantization(options.quantization),
-            quantization: None,
+            include: artifacts.include_for_quantization(options.quantization_scheme),
+            quantization: options.quantization_scheme.or(artifacts.quantization),
         },
         artifact_root,
         options,
     )?;
+    for source in &artifacts.extra_sources {
+        downloaded.extend(download_artifact_source_with_options(
+            &source.source,
+            &source.include,
+            artifact_root,
+            options,
+        )?);
+    }
     prepare_downloaded_bundle_artifacts(descriptor, &mut downloaded)?;
     downloaded.sort();
+    downloaded.dedup();
 
     Ok(ArtifactDownloadSummary {
         bundle_id: bundle_id.clone(),
@@ -1049,7 +1233,27 @@ fn download_checkpoint_artifacts_with_options(
     artifact_root: &Path,
     options: &ArtifactDownloadOptions,
 ) -> Result<Vec<PathBuf>> {
-    match &checkpoint.source {
+    checkpoint.validate_quantization().map_err(|source| {
+        ModelsError::InvalidQuantizationScheme {
+            message: source.to_string(),
+        }
+    })?;
+
+    download_artifact_source_with_options(
+        &checkpoint.source,
+        &checkpoint.include,
+        artifact_root,
+        options,
+    )
+}
+
+fn download_artifact_source_with_options(
+    source: &ArtifactSource,
+    include: &[ArtifactRule],
+    artifact_root: &Path,
+    options: &ArtifactDownloadOptions,
+) -> Result<Vec<PathBuf>> {
+    match source {
         ArtifactSource::HuggingFace { repo } => {
             std::fs::create_dir_all(artifact_root).map_err(|source| {
                 ModelsError::CreateArtifactRoot {
@@ -1076,7 +1280,7 @@ fn download_checkpoint_artifacts_with_options(
 
             let mut downloaded = Vec::new();
             for sibling in info.siblings {
-                if checkpoint.includes(&sibling.rfilename) {
+                if include.iter().any(|rule| rule.matches(&sibling.rfilename)) {
                     let path = repo_api.get(&sibling.rfilename).map_err(|source| {
                         ModelsError::DownloadArtifact {
                             repo,
@@ -1097,7 +1301,7 @@ fn download_checkpoint_artifacts_with_options(
 pub fn artifact_rules_for_quantization(
     format: CheckpointFormat,
     include: &[ArtifactRule],
-    quantization: Option<QuantizationBits>,
+    quantization: Option<QuantizationScheme>,
 ) -> Vec<ArtifactRule> {
     if format != CheckpointFormat::Gguf {
         return include.to_vec();
@@ -1113,22 +1317,29 @@ pub fn artifact_rules_for_quantization(
         .collect()
 }
 
-fn artifact_rule_matches_gguf_quant(rule: &ArtifactRule, quantization: QuantizationBits) -> bool {
+fn artifact_rule_matches_gguf_quant(rule: &ArtifactRule, quantization: QuantizationScheme) -> bool {
     let raw = match rule {
-        ArtifactRule::Exact(value) | ArtifactRule::Suffix(value) => value,
+        ArtifactRule::Exact(value) | ArtifactRule::Prefix(value) | ArtifactRule::Suffix(value) => {
+            value
+        }
     };
     let normalized = raw.to_ascii_lowercase();
+    if normalized.contains("tokenizer") {
+        return true;
+    }
     gguf_quant_markers(quantization)
         .iter()
         .any(|marker| normalized.contains(marker))
 }
 
-fn gguf_quant_markers(quantization: QuantizationBits) -> &'static [&'static str] {
+fn gguf_quant_markers(quantization: QuantizationScheme) -> &'static [&'static str] {
     match quantization {
-        QuantizationBits::Four => &["q4_k_m", "q4_0"],
-        QuantizationBits::Five => &["q5_k_m"],
-        QuantizationBits::Eight => &["q8_0"],
-        QuantizationBits::FloatEight => &["fp8"],
+        QuantizationScheme::GgufQ4_K_M => &["q4_k_m"],
+        QuantizationScheme::GgufQ4_0 => &["q4_0"],
+        QuantizationScheme::GgufQ5_K_M => &["q5_k_m"],
+        QuantizationScheme::GgufQ8_0 => &["q8_0"],
+        QuantizationScheme::Fp16 => &["f16"],
+        _ => &[],
     }
 }
 
@@ -1171,7 +1382,7 @@ impl BundleDescriptor {
             format: artifacts.format,
             source: artifacts.source.clone(),
             include: artifacts.include.clone(),
-            quantization: None,
+            quantization: artifacts.quantization,
         })
     }
 }
@@ -1180,12 +1391,21 @@ impl BundleDescriptor {
 pub(crate) fn bundle_artifacts_from_checkpoint(
     control_name: &'static str,
     checkpoint: &ModelCheckpoint,
+    provenance: ArtifactProvenance,
 ) -> BundleArtifacts {
+    checkpoint
+        .validate_quantization()
+        .expect("curated checkpoint quantization must use a checkpoint-legal scheme");
     BundleArtifacts {
+        source_label: "primary",
         control_name,
         format: checkpoint.format,
         source: checkpoint.source.clone(),
         include: checkpoint.include.clone(),
+        quantization: checkpoint.quantization,
+        provenance,
+        extra_sources: Vec::new(),
+        derived: Vec::new(),
     }
 }
 
@@ -1232,7 +1452,7 @@ pub enum ModelSelector {
         feature = "model-gemma4-e2b-gguf",
         feature = "model-gemma4-e4b",
         feature = "model-gemma4-12b-gguf",
-        feature = "model-gemma4-12b-qat-q4-0-gguf",
+        feature = "model-gemma4-12b-qat-gguf",
         feature = "model-gemma4-e4b-gguf",
     ))]
     Chat(ChatModels),
@@ -1253,7 +1473,7 @@ pub enum ModelSelector {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-kokoro-82m",
@@ -1285,7 +1505,7 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => format!("chat:{}", model.as_str()),
@@ -1319,7 +1539,7 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => model.bundle_id(),
@@ -1353,7 +1573,7 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => model.descriptor(),
@@ -1387,7 +1607,7 @@ impl ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             Self::Chat(model) => Ok(model.bundle()),
@@ -1410,7 +1630,7 @@ impl ModelSelector {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
     feature = "model-gemma4-12b-gguf",
-    feature = "model-gemma4-12b-qat-q4-0-gguf",
+    feature = "model-gemma4-12b-qat-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-kokoro-82m",
@@ -1495,8 +1715,8 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(not(feature = "model-gemma4-12b-qat-q4-0-gguf"))]
-            if raw == chat::GEMMA4_12B_QAT_Q4_0_GGUF_SELECTOR {
+            #[cfg(not(feature = "model-gemma4-12b-qat-gguf"))]
+            if raw == chat::GEMMA4_12B_QAT_GGUF_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
@@ -1527,7 +1747,7 @@ impl FromStr for ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             ))]
             return Ok(Self::Chat(raw.parse()?));
@@ -1539,7 +1759,7 @@ impl FromStr for ModelSelector {
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
                 feature = "model-gemma4-12b-gguf",
-                feature = "model-gemma4-12b-qat-q4-0-gguf",
+                feature = "model-gemma4-12b-qat-gguf",
                 feature = "model-gemma4-e4b-gguf",
             )))]
             return Err(ModelsError::UnknownModelSelector {
@@ -1639,19 +1859,19 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "gemma4_e4b_gguf" => Some(CuratedBundle::Gemma4E4B_Gguf),
         #[cfg(feature = "model-gemma4-12b-gguf")]
         "gemma4_12b_gguf" => Some(CuratedBundle::Gemma4_12B_Gguf),
-        #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-        "gemma4_12b_qat_q4_0_gguf" => Some(CuratedBundle::Gemma4_12B_QatQ4_0_Gguf),
+        #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+        "gemma4_12b_qat_gguf" => Some(CuratedBundle::Gemma4_12B_Qat_Gguf),
         #[cfg(feature = "model-google-gemma-300m")]
-        "embeddinggemma_300m" => Some(CuratedBundle::GoogleGemma300m),
+        "embeddinggemma_300m" => Some(CuratedBundle::EmbeddingGemma300m),
         #[cfg(feature = "model-qwen3-embedding-06b")]
         "qwen3_embedding_06b" => Some(CuratedBundle::Qwen3Embedding06B),
         #[cfg(feature = "model-whisper-base-en")]
         "whisper_base_en" => Some(CuratedBundle::WhisperBaseEn),
         #[cfg(feature = "model-sherpa-onnx-streaming")]
-        "sherpa_onnx_streaming_zipformer_en" => Some(CuratedBundle::SherpaOnnxStreamingEn),
+        "sherpa_onnx_streaming_zipformer_en" => Some(CuratedBundle::SherpaOnnxStreamingZipformerEn),
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         "sherpa_onnx_streaming_zipformer_en_kroko_2025" => {
-            Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025)
+            Some(CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025)
         }
         #[cfg(feature = "model-moonshine-streaming")]
         "moonshine_streaming_en" => Some(CuratedBundle::MoonshineStreamingEn),
@@ -1705,7 +1925,7 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         }
         #[cfg(feature = "model-google-gemma-300m")]
         ("embeddinggemma_300m", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
-            Some(CuratedBundle::GoogleGemma300m)
+            Some(CuratedBundle::EmbeddingGemma300m)
         }
         #[cfg(feature = "model-qwen3-embedding-06b")]
         ("qwen3_embedding_06b", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
@@ -1717,14 +1937,14 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         }
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         ("sherpa_onnx_streaming_zipformer_en", BackendKind::SherpaOnnx, CheckpointFormat::Onnx) => {
-            Some(CuratedBundle::SherpaOnnxStreamingEn)
+            Some(CuratedBundle::SherpaOnnxStreamingZipformerEn)
         }
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         (
             "sherpa_onnx_streaming_zipformer_en_kroko_2025",
             BackendKind::SherpaOnnx,
             CheckpointFormat::Onnx,
-        ) => Some(CuratedBundle::SherpaOnnxStreamingEnKroko2025),
+        ) => Some(CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025),
         #[cfg(feature = "model-moonshine-streaming")]
         ("moonshine_streaming_en", BackendKind::Ort, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::MoonshineStreamingEn)
@@ -1764,7 +1984,7 @@ impl Catalog {
         #[allow(unused_mut)]
         let mut catalog = Self::new();
         #[cfg(feature = "model-google-gemma-300m")]
-        embeddings::google_gemma_300m::register(&mut catalog);
+        embeddings::embeddinggemma_300m::register(&mut catalog);
         #[cfg(feature = "model-qwen3-embedding-06b")]
         embeddings::qwen3_embedding_06b::register(&mut catalog);
         #[cfg(feature = "model-qwen3-4b")]
@@ -1783,20 +2003,20 @@ impl Catalog {
         chat::gemma4_e4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-12b-gguf")]
         chat::gemma4_12b_gguf::register(&mut catalog);
-        #[cfg(feature = "model-gemma4-12b-qat-q4-0-gguf")]
-        chat::gemma4_12b_qat_q4_0_gguf::register(&mut catalog);
+        #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+        chat::gemma4_12b_qat_gguf::register(&mut catalog);
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
         #[cfg(feature = "model-kokoro-82m")]
         tts::kokoro_82m::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-cpp")]
-        tts::qwen3_tts_cpp::register(&mut catalog);
+        tts::qwen3_tts_cpp_0_6b::register(&mut catalog);
         #[cfg(feature = "model-moonshine-streaming")]
         asr::moonshine_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
-        asr::sherpa_onnx_streaming_en::register(&mut catalog);
+        asr::sherpa_onnx_streaming_zipformer_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
-        asr::sherpa_onnx_streaming_en_kroko_2025::register(&mut catalog);
+        asr::sherpa_onnx_streaming_zipformer_en_kroko_2025::register(&mut catalog);
         #[cfg(feature = "model-whisper-base-en")]
         asr::whisper_base_en::register(&mut catalog);
         catalog
@@ -1920,6 +2140,86 @@ impl Catalog {
 mod tests {
     use super::*;
 
+    #[test]
+    fn canonical_ids_are_unique_and_complete() {
+        let mut seen = std::collections::BTreeSet::new();
+        for id in CuratedBundle::CANONICAL_IDS {
+            assert!(
+                seen.insert(*id),
+                "duplicate canonical id `{id}` in CANONICAL_IDS"
+            );
+        }
+        assert_eq!(
+            CuratedBundle::CANONICAL_IDS.len(),
+            18,
+            "expected 18 curated bundles; update CANONICAL_IDS and the enum together"
+        );
+    }
+
+    #[test]
+    fn canonical_ids_match_bundle_ids() {
+        // Each compiled variant's canonical_id() must equal its descriptor
+        // bundle_id() and be a member of CANONICAL_IDS, and must round-trip
+        // through bundle_from_id(). Run with all model features (CI) to cover
+        // all 18 variants; with fewer features this covers the compiled subset.
+        let variants: Vec<CuratedBundle> = vec![
+            #[cfg(feature = "model-qwen3-4b")]
+            CuratedBundle::Qwen3_4B,
+            #[cfg(feature = "model-gemma4-e2b")]
+            CuratedBundle::Gemma4E2B,
+            #[cfg(feature = "model-gemma4-e4b")]
+            CuratedBundle::Gemma4E4B,
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            CuratedBundle::Qwen3_4B_Gguf,
+            #[cfg(feature = "model-qwen3-6-27b-gguf")]
+            CuratedBundle::Qwen3_6_27B_Gguf,
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            CuratedBundle::Gemma4E2B_Gguf,
+            #[cfg(feature = "model-gemma4-e4b-gguf")]
+            CuratedBundle::Gemma4E4B_Gguf,
+            #[cfg(feature = "model-gemma4-12b-gguf")]
+            CuratedBundle::Gemma4_12B_Gguf,
+            #[cfg(feature = "model-gemma4-12b-qat-gguf")]
+            CuratedBundle::Gemma4_12B_Qat_Gguf,
+            #[cfg(feature = "model-google-gemma-300m")]
+            CuratedBundle::EmbeddingGemma300m,
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            CuratedBundle::Qwen3Embedding06B,
+            #[cfg(feature = "model-whisper-base-en")]
+            CuratedBundle::WhisperBaseEn,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            CuratedBundle::SherpaOnnxStreamingZipformerEn,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            CuratedBundle::SherpaOnnxStreamingZipformerEnKroko2025,
+            #[cfg(feature = "model-moonshine-streaming")]
+            CuratedBundle::MoonshineStreamingEn,
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            CuratedBundle::PiperEnUsLjspeechMedium,
+            #[cfg(feature = "model-kokoro-82m")]
+            CuratedBundle::Kokoro82m,
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            CuratedBundle::Qwen3TtsCpp0_6B,
+        ];
+
+        for variant in variants {
+            let canonical = variant.canonical_id();
+            assert_eq!(
+                canonical,
+                variant.bundle_id().as_str(),
+                "canonical_id() must equal bundle_id() for {variant:?}"
+            );
+            assert!(
+                CuratedBundle::CANONICAL_IDS.contains(&canonical),
+                "canonical id `{canonical}` is missing from CANONICAL_IDS"
+            );
+            assert_eq!(
+                bundle_from_id(&BundleId::new(canonical)),
+                Some(variant),
+                "canonical id `{canonical}` must round-trip through bundle_from_id()"
+            );
+        }
+    }
+
     fn stub_descriptor(id: &str) -> BundleDescriptor {
         BundleDescriptor {
             id: BundleId::new(id),
@@ -1947,7 +2247,7 @@ mod tests {
             artifact_policy: Some(motlie_model::ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/cache"),
             }),
-            quantization: Some(motlie_model::QuantizationBits::Four),
+            quantization_scheme: Some(motlie_model::QuantizationScheme::GgufQ4_K_M),
             unpack_root: Some(PathBuf::from("/tmp/unpack")),
             max_concurrency: Some(2),
         };
@@ -1963,8 +2263,8 @@ mod tests {
             })
         );
         assert_eq!(
-            resolved.quantization,
-            Some(motlie_model::QuantizationBits::Four)
+            resolved.quantization_scheme,
+            Some(motlie_model::QuantizationScheme::GgufQ4_K_M)
         );
         assert_eq!(resolved.unpack_root, Some(PathBuf::from("/tmp/unpack")));
         assert_eq!(resolved.max_concurrency, Some(2));
@@ -2023,12 +2323,17 @@ mod tests {
 
         let mistral = BundleDescriptor {
             artifacts: Some(BundleArtifacts {
+                source_label: "primary",
                 control_name: "qwen3_4b",
                 format: CheckpointFormat::Safetensors,
                 source: ArtifactSource::HuggingFace {
                     repo: "Qwen/Qwen3-4B",
                 },
                 include: vec![ArtifactRule::Exact("config.json")],
+                quantization: None,
+                provenance: ArtifactProvenance::unknown(),
+                extra_sources: Vec::new(),
+                derived: Vec::new(),
             }),
             model_id: BundleId::new("qwen3_4b"),
             display_name: "Qwen3 4B".into(),
@@ -2044,12 +2349,17 @@ mod tests {
             model_id: BundleId::new("qwen3_4b"),
             backend: BackendKind::LlamaCpp,
             artifacts: Some(BundleArtifacts {
+                source_label: "primary",
                 control_name: "qwen3_4b_gguf",
                 format: CheckpointFormat::Gguf,
                 source: ArtifactSource::HuggingFace {
                     repo: "Qwen/Qwen3-4B-GGUF",
                 },
                 include: vec![ArtifactRule::Suffix(".gguf")],
+                quantization: None,
+                provenance: ArtifactProvenance::unknown(),
+                extra_sources: Vec::new(),
+                derived: Vec::new(),
             }),
             ..mistral.clone()
         };
@@ -2086,8 +2396,8 @@ mod tests {
                 backend: BackendKind::LlamaCpp,
                 capabilities: Capabilities::chat_and_completion(),
                 quantization: QuantizationSupport::with_recommended(
-                    [motlie_model::QuantizationBits::Four],
-                    motlie_model::QuantizationBits::Four,
+                    [motlie_model::QuantizationScheme::GgufQ4_K_M],
+                    motlie_model::QuantizationScheme::GgufQ4_K_M,
                 )
                 .expect("test quantization support should be valid"),
                 checkpoint: llama
@@ -2187,7 +2497,7 @@ mod tests {
                 .parse()
                 .expect("known embedding selector should parse");
 
-            assert_eq!(model, EmbeddingModels::GoogleGemma300m);
+            assert_eq!(model, EmbeddingModels::EmbeddingGemma300m);
             assert_eq!(model.to_string(), "google/embeddinggemma_300m");
         }
 
@@ -2212,7 +2522,7 @@ mod tests {
 
             assert_eq!(
                 selector,
-                ModelSelector::Embedding(EmbeddingModels::GoogleGemma300m)
+                ModelSelector::Embedding(EmbeddingModels::EmbeddingGemma300m)
             );
             assert_eq!(selector.to_string(), "embedding:google/embeddinggemma_300m");
         }
@@ -2269,7 +2579,7 @@ mod tests {
         {
             assert_eq!(
                 EmbeddingModels::only_enabled().expect("single gemma build should succeed"),
-                EmbeddingModels::GoogleGemma300m
+                EmbeddingModels::EmbeddingGemma300m
             );
         }
 
@@ -2527,7 +2837,7 @@ mod tests {
 
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         {
-            let descriptor = crate::asr::sherpa_onnx_streaming_en::descriptor();
+            let descriptor = crate::asr::sherpa_onnx_streaming_zipformer_en::descriptor();
             assert_eq!(
                 descriptor.capabilities.descriptors(),
                 &[CapabilityDescriptor::transcription_stream_partial()]
@@ -2554,7 +2864,7 @@ mod tests {
 
         #[cfg(feature = "model-qwen3-tts-cpp")]
         {
-            let descriptor = crate::tts::qwen3_tts_cpp::descriptor();
+            let descriptor = crate::tts::qwen3_tts_cpp_0_6b::descriptor();
             assert_eq!(
                 descriptor.capabilities.descriptors(),
                 &[
@@ -2568,6 +2878,7 @@ mod tests {
     #[test]
     fn artifact_rules_match_expected_files() {
         let artifacts = BundleArtifacts {
+            source_label: "primary",
             control_name: "embeddinggemma_300m",
             format: CheckpointFormat::Safetensors,
             source: ArtifactSource::HuggingFace {
@@ -2577,6 +2888,10 @@ mod tests {
                 ArtifactRule::Exact("config.json"),
                 ArtifactRule::Suffix(".safetensors"),
             ],
+            quantization: None,
+            provenance: ArtifactProvenance::unknown(),
+            extra_sources: Vec::new(),
+            derived: Vec::new(),
         };
 
         assert!(artifacts.includes("config.json"));
@@ -2587,6 +2902,7 @@ mod tests {
     #[test]
     fn gguf_artifact_rules_filter_to_requested_quantization() {
         let artifacts = BundleArtifacts {
+            source_label: "primary",
             control_name: "qwen3_6_27b_gguf",
             format: CheckpointFormat::Gguf,
             source: ArtifactSource::HuggingFace {
@@ -2597,14 +2913,18 @@ mod tests {
                 ArtifactRule::Exact("Qwen3.6-27B-Q5_K_M.gguf"),
                 ArtifactRule::Exact("Qwen3.6-27B-Q8_0.gguf"),
             ],
+            quantization: None,
+            provenance: ArtifactProvenance::unknown(),
+            extra_sources: Vec::new(),
+            derived: Vec::new(),
         };
 
         assert_eq!(
-            artifacts.include_for_quantization(Some(QuantizationBits::Four)),
+            artifacts.include_for_quantization(Some(QuantizationScheme::GgufQ4_K_M)),
             vec![ArtifactRule::Exact("Qwen3.6-27B-Q4_K_M.gguf")]
         );
         assert_eq!(
-            artifacts.include_for_quantization(Some(QuantizationBits::Five)),
+            artifacts.include_for_quantization(Some(QuantizationScheme::GgufQ5_K_M)),
             vec![ArtifactRule::Exact("Qwen3.6-27B-Q5_K_M.gguf")]
         );
         assert_eq!(artifacts.include_for_quantization(None), artifacts.include);

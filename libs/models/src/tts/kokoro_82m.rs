@@ -2,23 +2,39 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, CheckpointQuantization, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, QuantizationScheme,
     StartOptions,
 };
 use motlie_model_kokoro::{KokoroHandle, KokoroSpeechBundle, KokoroSpeechSpec};
 
 use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
-    BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifactSource,
+    BundleDescriptor, BundleFamily, BundleRequirements, DerivedArtifactRecipe,
+    DerivedBundleArtifact, PlatformConstraint,
 };
 
 pub const SELECTOR: &str = "kokoro/kokoro_82m";
 
 const HF_REPO: &str = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const STREAMING_HF_REPO: &str = "csukuangfj/kokoro-en-v0_19";
 const MODEL_FILE: &str = "onnx/model_quantized.onnx";
 const TOKENIZER_FILE: &str = "tokenizer.json";
 const VOICE_FILE: &str = "voices/af_bella.bin";
+const STREAMING_MODEL_FILE: &str = "model.onnx";
+const STREAMING_VOICES_FILE: &str = "voices.bin";
+const STREAMING_DATA_DIR: &str = "espeak-ng-data/";
+const STREAMING_TOKENS_FILE: &str = "tokens.txt";
+const STREAMING_ESPEAK_FILES: &[&str] = &[
+    "espeak-ng-data/intonations",
+    "espeak-ng-data/en_dict",
+    "espeak-ng-data/phondata",
+    "espeak-ng-data/phondata-manifest",
+    "espeak-ng-data/phonindex",
+    "espeak-ng-data/phontab",
+    "espeak-ng-data/lang/gmw/en",
+    "espeak-ng-data/lang/gmw/en-US",
+];
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register_descriptor(descriptor());
@@ -47,17 +63,66 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(MODEL_FILE),
             ArtifactRule::Exact(TOKENIZER_FILE),
             ArtifactRule::Exact(VOICE_FILE),
-            ArtifactRule::Exact("model.onnx"),
-            ArtifactRule::Exact("voices.bin"),
-            ArtifactRule::Exact("tokens.txt"),
         ],
-        quantization: Some(CheckpointQuantization::Onnx { bits: 8 }),
+        quantization: Some(QuantizationScheme::OnnxInt8),
     }
 }
 
 pub fn descriptor() -> BundleDescriptor {
     let identity = identity();
     let checkpoint = checkpoint();
+    let mut artifacts = crate::bundle_artifacts_from_checkpoint(
+        "kokoro_82m",
+        &checkpoint,
+        crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
+    );
+    artifacts.source_label = "buffered";
+    artifacts.extra_sources.push(BundleArtifactSource {
+        label: "streaming",
+        source: ArtifactSource::HuggingFace {
+            repo: STREAMING_HF_REPO,
+        },
+        include: std::iter::once(ArtifactRule::Exact(STREAMING_MODEL_FILE))
+            .chain(std::iter::once(ArtifactRule::Exact(STREAMING_VOICES_FILE)))
+            .chain(
+                STREAMING_ESPEAK_FILES
+                    .iter()
+                    .copied()
+                    .map(ArtifactRule::Exact),
+            )
+            .collect(),
+        provenance: crate::ArtifactProvenance::new("unknown", crate::ArtifactGating::Public),
+    });
+    artifacts.derived.extend([
+        DerivedBundleArtifact {
+            label: "streaming",
+            output: STREAMING_MODEL_FILE,
+            recipe: DerivedArtifactRecipe::CopyFromDownloaded {
+                source: STREAMING_MODEL_FILE,
+            },
+        },
+        DerivedBundleArtifact {
+            label: "streaming",
+            output: STREAMING_VOICES_FILE,
+            recipe: DerivedArtifactRecipe::CopyFromDownloaded {
+                source: STREAMING_VOICES_FILE,
+            },
+        },
+        DerivedBundleArtifact {
+            label: "streaming",
+            output: STREAMING_DATA_DIR,
+            recipe: DerivedArtifactRecipe::CopyFromDownloaded {
+                source: STREAMING_DATA_DIR,
+            },
+        },
+        DerivedBundleArtifact {
+            label: "streaming",
+            output: STREAMING_TOKENS_FILE,
+            recipe: DerivedArtifactRecipe::KokoroTokensFromTokenizerJson {
+                source: TOKENIZER_FILE,
+            },
+        },
+    ]);
 
     BundleDescriptor {
         id: identity.id.clone(),
@@ -71,10 +136,7 @@ pub fn descriptor() -> BundleDescriptor {
             build: vec![BuildConstraint::Feature("backend-kokoro".into())],
         },
         eval_tracks: identity.eval_tracks,
-        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
-            "kokoro_82m",
-            &checkpoint,
-        )),
+        artifacts: Some(artifacts),
     }
 }
 
@@ -88,21 +150,40 @@ pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
     }
 }
 
-const INCREMENTAL_TOKENS_FILE: &str = "tokens.txt";
-
 pub(crate) fn prepare_downloaded_artifacts(downloaded: &mut Vec<PathBuf>) -> Result<(), String> {
-    let tokenizer_json = downloaded
-        .iter()
-        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(TOKENIZER_FILE))
-        .cloned()
+    let tokenizer_json = find_downloaded_file(downloaded, TOKENIZER_FILE)
         .ok_or_else(|| format!("downloaded Kokoro bundle did not include `{TOKENIZER_FILE}`"))?;
-    let parent = tokenizer_json.parent().ok_or_else(|| {
+    let primary_root = tokenizer_json.parent().ok_or_else(|| {
         format!(
             "downloaded Kokoro tokenizer path `{}` has no parent",
             tokenizer_json.display()
         )
     })?;
-    let tokens_path = parent.join(INCREMENTAL_TOKENS_FILE);
+
+    let streaming_model =
+        find_downloaded_file(downloaded, STREAMING_MODEL_FILE).ok_or_else(|| {
+            format!("downloaded Kokoro streaming bundle did not include `{STREAMING_MODEL_FILE}`")
+        })?;
+    let streaming_voices =
+        find_downloaded_file(downloaded, STREAMING_VOICES_FILE).ok_or_else(|| {
+            format!("downloaded Kokoro streaming bundle did not include `{STREAMING_VOICES_FILE}`")
+        })?;
+    let streaming_data_dir =
+        find_downloaded_dir(downloaded, STREAMING_DATA_DIR).ok_or_else(|| {
+            format!("downloaded Kokoro streaming bundle did not include `{STREAMING_DATA_DIR}`")
+        })?;
+
+    copy_file_if_changed(&streaming_model, &primary_root.join(STREAMING_MODEL_FILE))?;
+    push_unique(downloaded, primary_root.join(STREAMING_MODEL_FILE));
+    copy_file_if_changed(&streaming_voices, &primary_root.join(STREAMING_VOICES_FILE))?;
+    push_unique(downloaded, primary_root.join(STREAMING_VOICES_FILE));
+    copy_dir_if_changed(
+        &streaming_data_dir,
+        &primary_root.join(STREAMING_DATA_DIR.trim_end_matches('/')),
+        downloaded,
+    )?;
+
+    let tokens_path = primary_root.join(STREAMING_TOKENS_FILE);
     let tokenizer = std::fs::read_to_string(&tokenizer_json).map_err(|err| {
         format!(
             "failed to read Kokoro tokenizer `{}`: {err}",
@@ -121,9 +202,7 @@ pub(crate) fn prepare_downloaded_artifacts(downloaded: &mut Vec<PathBuf>) -> Res
             )
         })?;
     }
-    if !downloaded.iter().any(|path| path == &tokens_path) {
-        downloaded.push(tokens_path);
-    }
+    push_unique(downloaded, tokens_path);
     Ok(())
 }
 
@@ -157,6 +236,107 @@ fn tokens_txt_from_tokenizer_json(tokenizer_json: &str) -> Result<String, String
         output.push('\n');
     }
     Ok(output)
+}
+
+fn find_downloaded_file(downloaded: &[PathBuf], relative: &str) -> Option<PathBuf> {
+    downloaded
+        .iter()
+        .find(|path| path_matches_relative(path, relative) && path.is_file())
+        .cloned()
+}
+
+fn find_downloaded_dir(downloaded: &[PathBuf], relative: &str) -> Option<PathBuf> {
+    let trimmed = relative.trim_end_matches('/');
+    downloaded.iter().find_map(|path| {
+        let mut current = path.as_path();
+        loop {
+            if current.file_name().and_then(|name| name.to_str()) == Some(trimmed)
+                && current.is_dir()
+            {
+                return Some(current.to_path_buf());
+            }
+            current = current.parent()?;
+        }
+    })
+}
+
+fn path_matches_relative(path: &Path, relative: &str) -> bool {
+    let relative_path = Path::new(relative);
+    path.ends_with(relative_path)
+        || relative_path
+            .file_name()
+            .is_some_and(|basename| path.file_name() == Some(basename))
+}
+
+fn copy_file_if_changed(source: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create Kokoro artifact directory `{}`: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    let source_bytes = std::fs::read(source)
+        .map_err(|err| format!("failed to read `{}`: {err}", source.display()))?;
+    let needs_write = std::fs::read(target)
+        .map(|existing| existing != source_bytes)
+        .unwrap_or(true);
+    if needs_write {
+        std::fs::write(target, source_bytes)
+            .map_err(|err| format!("failed to write `{}`: {err}", target.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_dir_if_changed(
+    source: &Path,
+    target: &Path,
+    downloaded: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(target)
+        .map_err(|err| format!("failed to create `{}`: {err}", target.display()))?;
+    copy_dir_inner(source, source, target, downloaded)
+}
+
+fn copy_dir_inner(
+    root: &Path,
+    dir: &Path,
+    target_root: &Path,
+    downloaded: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir)
+        .map_err(|err| format!("failed to read `{}`: {err}", dir.display()))?
+    {
+        let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|err| format!("failed to inspect `{}`: {err}", path.display()))?;
+        let relative = path.strip_prefix(root).map_err(|err| {
+            format!(
+                "failed to compute relative path for `{}` under `{}`: {err}",
+                path.display(),
+                root.display()
+            )
+        })?;
+        let target = target_root.join(relative);
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|err| format!("failed to create `{}`: {err}", target.display()))?;
+            copy_dir_inner(root, &path, target_root, downloaded)?;
+        } else if file_type.is_file() || file_type.is_symlink() {
+            copy_file_if_changed(&path, &target)?;
+            push_unique(downloaded, target);
+        }
+    }
+    Ok(())
+}
+
+fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
 }
 
 pub fn typed_bundle() -> KokoroSpeechBundle {
@@ -249,16 +429,12 @@ mod tests {
         assert_eq!(descriptor.family, BundleFamily::Kokoro);
         assert_eq!(descriptor.backend, BackendKind::Ort);
         assert!(descriptor.capabilities.supports(CapabilityKind::Speech));
-        assert!(
-            descriptor
-                .capabilities
-                .supports_speech_generation(SpeechGeneration::Buffered)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports_speech_generation(SpeechGeneration::Streaming)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports_speech_generation(SpeechGeneration::Buffered));
+        assert!(descriptor
+            .capabilities
+            .supports_speech_generation(SpeechGeneration::Streaming));
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Speech]);
 
         let artifacts = descriptor
@@ -268,9 +444,11 @@ mod tests {
         assert!(artifacts.includes(MODEL_FILE));
         assert!(artifacts.includes(TOKENIZER_FILE));
         assert!(artifacts.includes(VOICE_FILE));
-        assert!(artifacts.includes("model.onnx"));
-        assert!(artifacts.includes("voices.bin"));
-        assert!(artifacts.includes("tokens.txt"));
+        assert!(artifacts.includes(STREAMING_MODEL_FILE));
+        assert!(artifacts.includes(STREAMING_VOICES_FILE));
+        assert!(artifacts.includes(STREAMING_DATA_DIR));
+        assert!(artifacts.includes("espeak-ng-data/lang/gmw/en-US"));
+        assert!(artifacts.includes(STREAMING_TOKENS_FILE));
     }
 
     #[test]
@@ -289,28 +467,68 @@ mod tests {
         let tokens = tokens_txt_from_tokenizer_json(raw).expect("tokens should generate");
         let esh = char::from_u32(0x0283).expect("esh char should exist");
 
-        assert_eq!(tokens, format!("a 0\n  1\nb 2\n{} 3\n", esh));
+        assert_eq!(
+            tokens,
+            format!(
+                "a 0
+  1
+b 2
+{} 3
+",
+                esh
+            )
+        );
     }
 
     #[test]
-    fn prepare_downloaded_artifacts_rewrites_kokoro_tokens_file() {
-        let root = unique_temp_dir();
-        std::fs::create_dir_all(&root).expect("temp root should exist");
-        let tokenizer = root.join(TOKENIZER_FILE);
-        let tokens = root.join(INCREMENTAL_TOKENS_FILE);
+    fn prepare_downloaded_artifacts_writes_streaming_runtime_files() {
+        let primary = unique_temp_dir();
+        let streaming = unique_temp_dir();
+        std::fs::create_dir_all(&primary).expect("primary root should exist");
+        std::fs::create_dir_all(streaming.join("espeak-ng-data/lang/gmw"))
+            .expect("streaming data dir should exist");
+        let tokenizer = primary.join(TOKENIZER_FILE);
+        let model = streaming.join(STREAMING_MODEL_FILE);
+        let voices = streaming.join(STREAMING_VOICES_FILE);
+        let data = streaming.join("espeak-ng-data/lang/gmw/en-US");
         std::fs::write(&tokenizer, r#"{"model":{"vocab":{"z":2," ":1,"a":0}}}"#)
             .expect("tokenizer should be writable");
-        std::fs::write(&tokens, "<pad> 0\n").expect("old tokens should be writable");
-        let mut downloaded = vec![tokenizer.clone(), tokens.clone()];
+        std::fs::write(&model, "model").expect("model should be writable");
+        std::fs::write(&voices, "voices").expect("voices should be writable");
+        std::fs::write(&data, "voice data").expect("data should be writable");
+        let mut downloaded = vec![
+            tokenizer.clone(),
+            model.clone(),
+            voices.clone(),
+            data.clone(),
+        ];
 
-        prepare_downloaded_artifacts(&mut downloaded).expect("tokens should be prepared");
+        prepare_downloaded_artifacts(&mut downloaded).expect("streaming artifacts should prepare");
 
         assert_eq!(
-            std::fs::read_to_string(&tokens).expect("tokens should be readable"),
-            "a 0\n  1\nz 2\n"
+            std::fs::read_to_string(primary.join(STREAMING_MODEL_FILE)).expect("model"),
+            "model"
         );
-        assert!(downloaded.iter().any(|path| path == &tokens));
-        std::fs::remove_dir_all(root).ok();
+        assert_eq!(
+            std::fs::read_to_string(primary.join(STREAMING_VOICES_FILE)).expect("voices"),
+            "voices"
+        );
+        assert_eq!(
+            std::fs::read_to_string(primary.join("espeak-ng-data/lang/gmw/en-US")).expect("data"),
+            "voice data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(primary.join(STREAMING_TOKENS_FILE)).expect("tokens"),
+            "a 0
+  1
+z 2
+"
+        );
+        assert!(downloaded
+            .iter()
+            .any(|path| path == &primary.join(STREAMING_TOKENS_FILE)));
+        std::fs::remove_dir_all(primary).ok();
+        std::fs::remove_dir_all(streaming).ok();
     }
 
     #[test]

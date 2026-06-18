@@ -17,7 +17,7 @@ use motlie_model::{
     ArtifactPolicy, ArtifactSource, Bytes, CapabilityKind, ChatFinishReason, ChatMessage,
     ChatRequest, ChatResponse, ChatRole, CheckpointFormat, ContentPart, EmbeddingMetrics,
     GenerationParams, GenerationTiming, GenerationUsage, Milliseconds, ModelError,
-    ModelMetricSnapshot, QuantizationBits, ResolvedCheckpoint, RuntimeAcceleratorObservation,
+    ModelMetricSnapshot, QuantizationScheme, ResolvedCheckpoint, RuntimeAcceleratorObservation,
     RuntimeMetrics, StartOptions, TextGenerationMetrics, Tokens, TokensPerSecond,
 };
 use serde_json::Value;
@@ -70,10 +70,10 @@ pub(crate) fn resolve_local_checkpoint(
     ))
 }
 
-pub(crate) fn map_quantization_bits(bits: QuantizationBits) -> Result<IsqBits, ModelError> {
-    match bits {
-        QuantizationBits::Four => Ok(IsqBits::Four),
-        QuantizationBits::Eight => Ok(IsqBits::Eight),
+pub(crate) fn map_quantization_scheme(scheme: QuantizationScheme) -> Result<IsqBits, ModelError> {
+    match scheme {
+        QuantizationScheme::IsqQ4 => Ok(IsqBits::Four),
+        QuantizationScheme::IsqQ8 => Ok(IsqBits::Eight),
         other => Err(ModelError::InvalidConfiguration(format!(
             "mistral.rs backend does not support {other:?} quantization"
         ))),

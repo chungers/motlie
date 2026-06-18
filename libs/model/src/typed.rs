@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::{ModelError, SpeechParams, TranscriptionParams, TranscriptionUpdate};
 
