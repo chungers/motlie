@@ -37,6 +37,7 @@ impl BridgeTurnTarget {
 struct ActiveBridgeTurn {
     key: String,
     target: BridgeTurnTarget,
+    input_text: String,
     abort: BridgeAbortToken,
     task: JoinHandle<()>,
 }
@@ -245,7 +246,30 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                             ));
                         }
                     }
-                    Ok(GatewayTextFrame::CallerTurnProvisionalUpdate { .. }) => {}
+                    Ok(GatewayTextFrame::CallerTurnProvisionalUpdate {
+                        provisional_turn_id,
+                        generation,
+                        text,
+                        append_or_replace,
+                        ..
+                    }) => {
+                        let updated_text = provisional_update_text(
+                            &active,
+                            &provisional_turn_id,
+                            &append_or_replace,
+                            &text,
+                        );
+                        cancel_matching_provisional_id(&mut active, &provisional_turn_id);
+                        active = Some(spawn_bridge_turn(
+                            bridge.clone(),
+                            agent_tx.clone(),
+                            BridgeTurnTarget::Provisional {
+                                provisional_turn_id,
+                                generation,
+                            },
+                            updated_text,
+                        ));
+                    }
                     Ok(GatewayTextFrame::CallerTurnProvisionalCancel {
                         provisional_turn_id,
                         generation,
@@ -298,6 +322,7 @@ fn spawn_bridge_turn(
     let abort = BridgeAbortToken::default();
     let task_abort = abort.clone();
     let key = target.bridge_turn_id().to_string();
+    let input_text = text.clone();
     let task_target = target.clone();
     let task_turn_id = key.clone();
     let task = tokio::spawn(async move {
@@ -334,6 +359,7 @@ fn spawn_bridge_turn(
     ActiveBridgeTurn {
         key,
         target,
+        input_text,
         abort,
         task,
     }
@@ -372,6 +398,46 @@ fn agent_final_frame(target: &BridgeTurnTarget, text: String) -> AgentTextFrame 
             generation: *generation,
             text,
         },
+    }
+}
+
+fn provisional_update_text(
+    active: &Option<ActiveBridgeTurn>,
+    provisional_turn_id: &str,
+    append_or_replace: &str,
+    text: &str,
+) -> String {
+    if append_or_replace == "append" {
+        if let Some(active) = active.as_ref() {
+            if active_provisional_id_matches(active, provisional_turn_id) {
+                return format!("{} {}", active.input_text.trim_end(), text.trim_start())
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
+    text.to_string()
+}
+
+fn active_provisional_id_matches(active: &ActiveBridgeTurn, provisional_turn_id: &str) -> bool {
+    matches!(
+        &active.target,
+        BridgeTurnTarget::Provisional {
+            provisional_turn_id: active_id,
+            ..
+        } if active_id == provisional_turn_id
+    )
+}
+
+fn cancel_matching_provisional_id(
+    active: &mut Option<ActiveBridgeTurn>,
+    provisional_turn_id: &str,
+) {
+    if active
+        .as_ref()
+        .is_some_and(|turn| active_provisional_id_matches(turn, provisional_turn_id))
+    {
+        cancel_active_turn(active);
     }
 }
 
@@ -543,6 +609,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provisional_update_text_reconstructs_append_from_active_input() {
+        let abort = BridgeAbortToken::default();
+        let task = tokio::spawn(async {});
+        let active = Some(ActiveBridgeTurn {
+            key: "pt-test".to_string(),
+            target: BridgeTurnTarget::Provisional {
+                provisional_turn_id: "pt-test".to_string(),
+                generation: 1,
+            },
+            input_text: "need a tow".to_string(),
+            abort,
+            task,
+        });
+
+        assert_eq!(
+            provisional_update_text(&active, "pt-test", "append", "truck"),
+            "need a tow truck"
+        );
+        assert_eq!(
+            provisional_update_text(&active, "pt-test", "replace", "need roadside help"),
+            "need roadside help"
+        );
+        assert_eq!(
+            provisional_update_text(&active, "other", "append", "truck"),
+            "truck"
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_active_turn_signals_abort_before_hard_abort() {
         let abort = BridgeAbortToken::default();
         let task_abort = abort.clone();
@@ -557,6 +652,7 @@ mod tests {
             target: BridgeTurnTarget::Committed {
                 turn_id: "turn-test".to_string(),
             },
+            input_text: "hello".to_string(),
             abort,
             task,
         });

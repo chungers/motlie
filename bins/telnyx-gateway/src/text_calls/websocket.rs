@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,7 +59,18 @@ pub(crate) enum AgentTurnDisposition {
 pub(crate) struct AgentAppendTurn {
     pub(crate) packer: crate::tts::StreamingSpeechTextPacker,
     pub(crate) speech: Option<crate::speech::AppendSpeechHandle>,
-    pub(crate) timing: TextCallTurnTiming,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentProvisionalTerminal {
+    Canceled,
+    Committed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AgentProvisionalGeneration {
+    pub(crate) generation: u64,
+    pub(crate) terminal: Option<AgentProvisionalTerminal>,
 }
 
 pub(crate) struct AgentProvisionalTurn {
@@ -313,7 +324,9 @@ impl SharedTextCallRegistry {
             sequence: Arc::new(AtomicU64::new(1)),
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
+            append_turn_canceled: Arc::new(Mutex::new(BTreeSet::new())),
             provisional_turns: Arc::new(Mutex::new(BTreeMap::new())),
+            provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             speech_output: SpeechOutputConfig::default(),
             emit_partials,
@@ -397,6 +410,7 @@ impl SharedTextCallRegistry {
         if !handle.emit_early_turns {
             return Ok(false);
         }
+        record_agent_provisional_generation(&handle, &event).await;
         match event {
             EarlyResponseEvent::Started {
                 provisional_turn_id,
@@ -662,11 +676,69 @@ pub(crate) struct TextCallSessionHandle {
     pub(crate) sequence: Arc<AtomicU64>,
     pub(crate) turns: Arc<Mutex<TextCallTurnTracker>>,
     pub(crate) append_turns: Arc<Mutex<BTreeMap<String, AgentAppendTurn>>>,
+    pub(crate) append_turn_canceled: Arc<Mutex<BTreeSet<String>>>,
     pub(crate) provisional_turns: Arc<Mutex<BTreeMap<String, AgentProvisionalTurn>>>,
+    pub(crate) provisional_generations: Arc<Mutex<BTreeMap<String, AgentProvisionalGeneration>>>,
     pub(crate) config: TextCallSessionConfig,
     pub(crate) speech_output: SpeechOutputConfig,
     pub(crate) emit_partials: bool,
     pub(crate) emit_early_turns: bool,
+}
+
+async fn record_agent_provisional_generation(
+    handle: &TextCallSessionHandle,
+    event: &EarlyResponseEvent,
+) {
+    let Some((provisional_turn_id, generation, terminal)) = (match event {
+        EarlyResponseEvent::Started {
+            provisional_turn_id,
+            generation,
+            ..
+        }
+        | EarlyResponseEvent::Updated {
+            provisional_turn_id,
+            generation,
+            ..
+        } => Some((provisional_turn_id, *generation, None)),
+        EarlyResponseEvent::Canceled {
+            provisional_turn_id,
+            generation,
+            ..
+        } => Some((
+            provisional_turn_id,
+            *generation,
+            Some(AgentProvisionalTerminal::Canceled),
+        )),
+        EarlyResponseEvent::Committed {
+            provisional_turn_id,
+            generation,
+            ..
+        } => Some((
+            provisional_turn_id,
+            *generation,
+            Some(AgentProvisionalTerminal::Committed),
+        )),
+    }) else {
+        return;
+    };
+
+    let mut guard = handle.provisional_generations.lock().await;
+    match guard.get_mut(provisional_turn_id) {
+        Some(existing) if existing.generation > generation => {}
+        Some(existing) => {
+            existing.generation = generation;
+            existing.terminal = terminal;
+        }
+        None => {
+            guard.insert(
+                provisional_turn_id.clone(),
+                AgentProvisionalGeneration {
+                    generation,
+                    terminal,
+                },
+            );
+        }
+    }
 }
 
 impl TextCallSessionHandle {
@@ -733,7 +805,9 @@ fn text_call_session_handle(
             session_config.max_active_turns,
         ))),
         append_turns: Arc::new(Mutex::new(BTreeMap::new())),
+        append_turn_canceled: Arc::new(Mutex::new(BTreeSet::new())),
         provisional_turns: Arc::new(Mutex::new(BTreeMap::new())),
+        provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
         config: session_config,
         speech_output,
         emit_partials,
@@ -853,7 +927,9 @@ where
     .await;
 
     handle.append_turns.lock().await.clear();
+    handle.append_turn_canceled.lock().await.clear();
     handle.provisional_turns.lock().await.clear();
+    handle.provisional_generations.lock().await.clear();
     handle.turns.lock().await.clear();
     services
         .registry
@@ -1049,7 +1125,9 @@ async fn run_text_call_session<W, R>(
     }
 
     handle.append_turns.lock().await.clear();
+    handle.append_turn_canceled.lock().await.clear();
     handle.provisional_turns.lock().await.clear();
+    handle.provisional_generations.lock().await.clear();
     handle.turns.lock().await.clear();
     services
         .registry
@@ -1156,6 +1234,7 @@ async fn log_text_call_error(state: &SharedState, gateway_call_id: &str, error: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::early_response::{AppendOrReplace, EarlyResponseEvent};
     use crate::processors::external_text::playback_finished_status;
     use crate::text_calls::turns::AgentTextFrame;
     use std::sync::Arc;
@@ -1693,6 +1772,249 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_agent_provisional_generation_is_rejected_after_gateway_update() {
+        let call_id = "gwc-provisional-stale";
+        let provisional_turn_id = "pt-provisional-stale";
+        let (services, _media_rx) = test_services(call_id).await;
+        let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.emit_early_turns = true;
+        services
+            .registry
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
+
+        services
+            .registry
+            .send_early_response_event(
+                call_id,
+                EarlyResponseEvent::Started {
+                    provisional_turn_id: provisional_turn_id.to_string(),
+                    call_id: call_id.to_string(),
+                    utterance_id: "utt-stale".to_string(),
+                    generation: 1,
+                    text: "first text".to_string(),
+                    confidence: None,
+                    stability: None,
+                    speech_state: CallerSpeechState::Speaking,
+                },
+            )
+            .await
+            .expect("started event should forward");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurnProvisional { generation: 1, .. })
+        ));
+        services
+            .registry
+            .send_early_response_event(
+                call_id,
+                EarlyResponseEvent::Updated {
+                    provisional_turn_id: provisional_turn_id.to_string(),
+                    call_id: call_id.to_string(),
+                    utterance_id: "utt-stale".to_string(),
+                    generation: 2,
+                    text: "second text".to_string(),
+                    append_or_replace: AppendOrReplace::Replace,
+                },
+            )
+            .await
+            .expect("updated event should forward");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurnProvisionalUpdate { generation: 2, .. })
+        ));
+
+        send_agent_frame(
+            &services,
+            call_id,
+            &handle,
+            AgentTextFrame::AgentTurnProvisionalPartial {
+                provisional_turn_id: provisional_turn_id.to_string(),
+                generation: 1,
+                text: "stale response".to_string(),
+                append: true,
+            },
+        )
+        .await;
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::Error { code, .. }) if code == "stale_provisional_generation"
+        ));
+        assert_eq!(
+            services.media.active_speech_playback_id(call_id).await,
+            None
+        );
+
+        send_agent_frame(
+            &services,
+            call_id,
+            &handle,
+            AgentTextFrame::AgentTurnProvisionalPartial {
+                provisional_turn_id: provisional_turn_id.to_string(),
+                generation: 2,
+                text: "Fresh response.".to_string(),
+                append: true,
+            },
+        )
+        .await;
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::ProvisionalPlaybackStarted { generation: 2, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn provisional_cancel_while_queue_waits_for_media_does_not_resurrect_playback() {
+        let call_id = "gwc-provisional-cancel-race";
+        let provisional_turn_id = "pt-provisional-cancel-race";
+        let (services, _media_rx) = test_services(call_id).await;
+        services.media.unregister_call(call_id).await;
+        let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.emit_early_turns = true;
+        handle.config.media_ready_timeout = Duration::from_secs(2);
+        services
+            .registry
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
+        services
+            .registry
+            .send_early_response_event(
+                call_id,
+                EarlyResponseEvent::Started {
+                    provisional_turn_id: provisional_turn_id.to_string(),
+                    call_id: call_id.to_string(),
+                    utterance_id: "utt-cancel-race".to_string(),
+                    generation: 1,
+                    text: "caller text".to_string(),
+                    confidence: None,
+                    stability: None,
+                    speech_state: CallerSpeechState::EndpointCandidate,
+                },
+            )
+            .await
+            .expect("started event should forward");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurnProvisional { .. })
+        ));
+
+        let services_for_task = services.clone();
+        let handle_for_task = handle.clone();
+        let task = tokio::spawn(async move {
+            send_agent_frame(
+                &services_for_task,
+                call_id,
+                &handle_for_task,
+                AgentTextFrame::AgentTurnProvisionalPartial {
+                    provisional_turn_id: provisional_turn_id.to_string(),
+                    generation: 1,
+                    text: "queued while media is missing".to_string(),
+                    append: true,
+                },
+            )
+            .await;
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            crate::processors::external_text::cancel_agent_provisional_turn(
+                &services.media,
+                &handle,
+                call_id,
+                provisional_turn_id,
+                1,
+                crate::media::SpeechClearReason::CancelAndReplace,
+            )
+            .await
+        );
+        let (media_tx, _media_rx) = mpsc::channel(128);
+        services
+            .media
+            .register_call(call_id.to_string(), media_tx)
+            .await;
+        task.await.expect("agent frame task should finish");
+        assert!(
+            time::timeout(Duration::from_millis(100), outbound_rx.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            services.media.active_speech_playback_id(call_id).await,
+            None
+        );
+        assert!(handle.provisional_turns.lock().await.is_empty());
+        assert_eq!(
+            handle
+                .provisional_generations
+                .lock()
+                .await
+                .get(provisional_turn_id)
+                .and_then(|state| state.terminal),
+            Some(AgentProvisionalTerminal::Canceled)
+        );
+    }
+
+    #[tokio::test]
+    async fn append_cancel_while_queue_waits_for_media_does_not_resurrect_playback() {
+        let call_id = "gwc-append-cancel-race";
+        let turn_id = "turn-append-cancel-race";
+        let (services, _media_rx) = test_services(call_id).await;
+        services.media.unregister_call(call_id).await;
+        let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.config.media_ready_timeout = Duration::from_secs(2);
+        services
+            .registry
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
+        handle
+            .turns
+            .lock()
+            .await
+            .add_caller_turn(turn_id.to_string(), Instant::now())
+            .expect("caller turn should be tracked");
+
+        let services_for_task = services.clone();
+        let handle_for_task = handle.clone();
+        let task = tokio::spawn(async move {
+            send_agent_frame(
+                &services_for_task,
+                call_id,
+                &handle_for_task,
+                AgentTextFrame::AgentTurnPartial {
+                    turn_id: turn_id.to_string(),
+                    text: "queued while media is missing".to_string(),
+                    append: true,
+                },
+            )
+            .await;
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        crate::processors::external_text::cancel_append_turn(&handle, turn_id).await;
+        let (media_tx, _media_rx) = mpsc::channel(128);
+        services
+            .media
+            .register_call(call_id.to_string(), media_tx)
+            .await;
+        task.await.expect("agent frame task should finish");
+        assert!(
+            time::timeout(Duration::from_millis(100), outbound_rx.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            services.media.active_speech_playback_id(call_id).await,
+            None
+        );
+        assert!(handle.append_turns.lock().await.is_empty());
+        assert!(handle.append_turn_canceled.lock().await.contains(turn_id));
+    }
+
+    #[tokio::test]
     async fn append_turn_streams_partials_and_terminal_on_one_playback() {
         let call_id = "gwc-stream";
         let turn_id = "turn-stream";
@@ -1983,7 +2305,9 @@ mod tests {
             sequence: Arc::new(AtomicU64::new(1)),
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
+            append_turn_canceled: Arc::new(Mutex::new(BTreeSet::new())),
             provisional_turns: Arc::new(Mutex::new(BTreeMap::new())),
+            provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             speech_output: SpeechOutputConfig::default(),
             emit_partials: false,
