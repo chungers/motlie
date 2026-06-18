@@ -8,6 +8,7 @@ Current API snapshot for the Telnyx gateway operator/TUI/socket control surface.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-18 PDT | @codex-367-design | Documented `speak` as safe manual speech injection for an attached call, distinct from future operator interrupt/takeover semantics tracked in #551, and clarified text-call knob apply boundaries. |
 | 2026-06-16 PDT | @codex-535 | Scrubbed live routing from the checked-in canonical `gateway.toml`; local live runs should materialize values only in `$HOME/telnyx-test/gateway.toml` and start with `--config`. |
 | 2026-06-16 PDT | @codex-535 | Added checked-in canonical `bins/telnyx-gateway/gateway.toml` and tightened strict TOML parsing for nested `[voice_quality.*]` tables. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Replaced split startup config with one durable `--config <gateway.toml>` file. `state dump` now emits readable TOML with full `[voice_quality.*]`; `.repl` command files are only sourced interactively with `source <path>`. |
@@ -70,10 +71,11 @@ pub enum ConversationProcessorOutput {
 
 pub enum ConversationProcessorKind {
     Identity,
+    ExternalTextStream,
 }
 ```
 
-Current implementation rule: processors are statically selected by enum. Do not add `Box<dyn ...>` dispatch for gateway-local processors. The only current processor is `Identity`, which repeats accepted caller text exactly and does not add an `I heard:` prefix.
+Current implementation rule: processors are statically selected by enum. Do not add `Box<dyn ...>` dispatch for gateway-local processors. `Identity` repeats accepted caller text exactly and does not add an `I heard:` prefix. `ExternalTextStream` is an adapter-backed processor kind for app-agent/text-call sessions: it represents an external text owner for the call, while the websocket session plus `processors::external_text` handle `caller.turn`, `agent.turn.partial`, and terminal `agent.turn` frames. It intentionally does not generate local speech from `process_stream()`.
 
 ## Operator Call Sequence
 
@@ -102,6 +104,18 @@ Notes:
 - `conversation smoke-test on` is the current command that enables gateway-local identity/repeat replies. It is not a separate processor pipeline. It turns barge-in off for deterministic echo testing, so live interruptibility tests should run `conversation barge-in on` after it.
 - `quality early-response boundary none` is useful for identity latency tests with stable unpunctuated partials. Real agent tests usually prefer `clause` or `sentence`.
 - `quality early-response start-timing endpoint-candidate-only` avoids starting provisional speech while the caller is still actively speaking; `while-speaking` is more aggressive and can be canceled by barge-in.
+
+## Manual Speech Injection (`speak`)
+
+`speak [call-id] <text...>` is an operator-driven manual speech injection command for an attached call. It is available through the TUI and line-oriented socket. If the command source has selected exactly one active call, the call id may be omitted; socket clients should prefer an explicit call id or a source-local `call use <call>` selection.
+
+The current contract is intentionally conservative:
+
+- `speak` queues text onto the selected call's shared TTS/media output path as `source=operator_speak`, `manual_injection=true`, and `turn_id=null`. It is loosely associated with the live conversation timeline, not with a specific processor turn.
+- `speak` works for a transcription-only call, for a call with no automatic processor replies, and for a call where the gateway-local `Identity` processor is selected but not currently occupying the TTS slot. If gateway-local identity/repeat playback is already active, normal TTS conflict policy can reject or delay the manual injection; use `speak cancel [call-id]` or wait for playback to finish when the operator wants to clear the slot.
+- `speak` is blocked while an external text-call/app-agent websocket owns the call. In that mode the external app must send `agent.turn.partial` or terminal `agent.turn` frames over the text stream. This avoids two independent text owners injecting unrelated speech into the same call.
+- `speak cancel [call-id]` is still available as emergency clear. It cancels active gateway TTS through the same media clear path, but it does not transfer ownership away from an attached text-call/app-agent stream.
+- `speak` is not an interrupt or takeover primitive. A future operator interrupt feature is tracked in #551 and should decide whether to add `speak interrupt ...` or make interruption an explicit policy. Until that lands, plain `speak` remains a safe manual injection command.
 
 ## Control Knobs
 
@@ -251,9 +265,9 @@ Only `enabled`, `boundary`, and `start_timing` are currently exposed as live com
 | Command / field | Values | Default | Apply boundary | Effect |
 |---|---|---:|---|---|
 | `quality text-call max-active-turns <n>` | `1..1024` | `32` | new text-call session | Outstanding caller-turn cap. |
-| `quality text-call media-ready-timeout-ms <ms>` | `1000..120000` | `20000` | new playback request | Wait for media readiness. |
-| `quality text-call playback-wait-timeout-ms <ms>` | `1000..600000` | `180000` | new playback request | Playback completion timeout. |
-| `quality text-call latest-response-wins on|off` | bool | `true` | new turn | Cancel/replace policy for stale app responses. |
+| `quality text-call media-ready-timeout-ms <ms>` | `1000..120000` | `20000` | new text-call session | Wait for media readiness. |
+| `quality text-call playback-wait-timeout-ms <ms>` | `1000..600000` | `180000` | new text-call session | Playback completion timeout. |
+| `quality text-call latest-response-wins on|off` | bool | `true` | new text-call session | Cancel/replace policy for stale app responses. |
 | `quality text-call callback-timeout-ms <ms>` | `100..60000` | `5000` | new callback attempt | Subscriber callback timeout. |
 | `quality logging on <path>` / `off` | path/bool | configured | immediate | Enables/disables JSONL quality events. |
 | `quality logging include-transcript-text on|off` | bool | `false` | immediate | Sensitive transcript opt-in. |

@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-18 PDT | @codex-367-design | Clarified that text-call playback and latest-response knobs apply to new text-call sessions, matching live config snapshot behavior. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Simplified gateway startup around one durable `--config <gateway.toml>` file; `state dump` now emits readable TOML with full `[voice_quality.*]`, while `.repl` scripts are limited to interactive `source <path>` command replay. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Removed the smoke-command committed-final debounce side effect and exposed `early_response.boundary` as a live-safe knob so identity tests can accept stable unpunctuated partials without changing stricter real-agent modes. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Clarified the processor model after consolidation: `ConversationProcessorKind` is per-call static dispatch, currently `identity`; `early_response.enabled` only gates provisional ASR input into the same processor and does not select a separate path. |
@@ -1023,9 +1024,9 @@ Prompt requirements:
 | `asr.repeated_token_run_threshold` | `Count` | `2..128` | `16` | clamp to range | next ASR session | Suppression policy. |
 | `asr.repeated_q_run_threshold` | `Count` | `2..64` | `8` | clamp to range | next ASR session | Suppression policy. |
 | `text_call.max_active_turns` | `Count` | `1..1024` | `32` | reject zero, clamp high | new text-call session or new turn | Backpressure cap. |
-| `text_call.media_ready_timeout_ms` | `DurationMs` | `1000..120000` | `20000` | clamp to range | new playback request | Setup wait policy. |
-| `text_call.playback_wait_timeout_ms` | `DurationMs` | `1000..600000` | `180000` | clamp to range | new playback request | Hung playback detection. |
-| `text_call.latest_response_wins` | `bool` | `true,false` | `true` | reject non-bool | new agent turn | Cancel-and-replace policy. |
+| `text_call.media_ready_timeout_ms` | `DurationMs` | `1000..120000` | `20000` | clamp to range | new text-call session | Setup wait policy. |
+| `text_call.playback_wait_timeout_ms` | `DurationMs` | `1000..600000` | `180000` | clamp to range | new text-call session | Hung playback detection. |
+| `text_call.latest_response_wins` | `bool` | `true,false` | `true` | reject non-bool | new text-call session | Cancel-and-replace policy. |
 | `text_call.callback_timeout_ms` | `DurationMs` | `100..60000` | `5000` | clamp to range | new callback attempt | Subscriber responsiveness. |
 | `tts.generation_mode` | enum | `buffered,streaming` | `buffered` | reject unknown | new playback request | Selects the gateway TTS execution path. `buffered` uses existing full/chunk synthesis; `streaming` requires a backend implementing true incremental TTS and fails visibly instead of falling back to buffered synthesis. |
 | `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. Applies to buffered synthesis and to streaming mode, where the gateway opens incremental TTS requests per prepared text chunk. For committed streaming turns, the gateway holds the first tiny text chunk until the next prepared text chunk has audio to avoid outbound underruns; provisional append playback stays one-frame JIT. |

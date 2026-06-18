@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-18 PDT | @codex-367-design: Documented `speak` as safe operator manual speech injection, distinct from external text-call ownership and future operator interrupt/takeover semantics tracked in #551. | Milestone 2: Outbound Dialer and TTS, Operator REPL and TUI Control Surface, Driver REPL Dialer Surface |
 | 2026-06-16 PDT | @codex-535: Scrubbed live routing from checked-in `gateway.toml`; future live runs should load local materialized TOML at startup while keeping `source` for ad hoc interactive replay. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
 | 2026-06-16 PDT | @codex-535: Added canonical checked-in `bins/telnyx-gateway/gateway.toml` for strict startup config tuning and made nested `[voice_quality.*]` TOML fail closed on unknown keys. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
 | 2026-06-15 PDT | @codex-m6-ds-rv: Replaced split startup config with one durable `--config <gateway.toml>` file and readable TOML `state dump`; `.repl` command files remain only for interactive `source <path>` replay. | Gateway Configuration Requirement, Operator REPL and TUI Control Surface |
@@ -559,6 +560,8 @@ status [call-id]
 ```
 
 The command names above are the M2 operator-facing surface. If the implementation retains an internal `say()` method for compatibility with `ConversationCommand::Say`, `speak` must still dispatch to that exact same controller path rather than introducing a second TTS route.
+
+Current `speak` semantics are manual speech injection, not operator takeover. It queues operator text on the selected call's shared TTS/media path with manual-injection metadata and no processor `turn_id`. That makes it appropriate for a TUI/socket operator who is watching transcripts and wants to speak on a call that is otherwise transcription-only, has no automatic processor replies, or has the gateway-local `Identity` processor selected but no active TTS occupying the slot. It is intentionally blocked while an external text-call/app-agent websocket owns the call; those agents must speak through `agent.turn.partial` or terminal `agent.turn` frames so the gateway has one text owner for the call. `speak cancel` remains an emergency media clear, but it does not transfer ownership away from an attached external stream. Operator interrupt/takeover semantics, including whether to add `speak interrupt` or make plain `speak` interrupting by policy, are tracked separately in #551.
 
 Recommended controller surface:
 
@@ -3635,7 +3638,7 @@ pub struct TelnyxDialerState<C> {
 }
 ```
 
-`dial` stores the active `CallHandle` in the command source that requested it. `speak` sends text to the active call through `OutboundSpeechController::speak()`. `speak cancel` interrupts the active speech job through the same controller and WebSocket `clear` path. `hangup` terminates the active call. `status` returns the source-local selected call plus call/media/TTS state so a socket-driven agent can operate without scraping the TUI.
+`dial` stores the active `CallHandle` in the command source that requested it. `speak` sends operator-provided text to the active call through `OutboundSpeechController::speak()` as manual speech injection, with no processor `turn_id` and no implicit interrupt/takeover. It is valid for transcription-only or gateway-local processor calls when the TTS slot is available, and rejected while an external text-call/app-agent stream owns the call so the app remains the only text owner. `speak cancel` interrupts the active speech job through the same controller and WebSocket `clear` path. `hangup` terminates the active call. `status` returns the source-local selected call plus call/media/TTS state so a socket-driven agent can operate without scraping the TUI.
 
 The same controller should also accept text from non-REPL sources. The bidirectional text WebSocket, mstream bridge, broadcast command, fixture replay, or tmux-driven test should not need a second TTS pathway; each source should produce text and call the same outbound controller.
 
