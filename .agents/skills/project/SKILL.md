@@ -36,6 +36,8 @@ These rules hold across every section below. They are stated once here; later se
 8. **TUI submit retry.** Agent TUIs sometimes miss the submit newline. If the timeline shows typed-but-unsubmitted text after a send, wait briefly and send one extra empty `--enter`. This is a targeted retry, not a default double-send. (`send`/`broadcast`/`timer` now also accept `--submit-retries`/`--submit-retry-delay-ms` for a built-in settle-delayed resubmit; the bare empty `--enter` is the manual fallback.)
 9. **No unilateral scope decisions.** As orchestrator/coordinator you do not own scope. Never defer, drop, postpone, descope, or split a review finding or requirement into a follow-on — or otherwise change agreed scope — without **explicit, documented human approval**. Surface the tradeoff and your recommendation, then wait; if something is genuinely out of scope or blocked, flag it and let the human decide. Record the human's decision (who, when, and the issue/PR link for any follow-on) where the work is tracked. A human-approved follow-on is allowed; an orchestrator-initiated deferral is not. The same bar applies to collaborator agents: if one proposes a deferral or scope change, route it to the human — do not sanction it yourself.
 10. **Relay human decisions with high fidelity, and verify they land.** Capture each human design decision exactly as stated — names, values, ranges, scope — and relay it to implementers verbatim where specifics matter; do not paraphrase away or substitute your own wording. Track every directed change to **landed-and-verified**: confirm the merged code/CLI actually matches the directive (e.g. the renamed flag exists, the value is in range), and **surface any drop, divergence, or silent revert immediately** — never document the divergent reality as if it were settled. A directive is not done until you have verified it shipped as specified. If reality and a prior directive conflict, flag the conflict to the human rather than quietly adopting reality.
+11. **Ground status claims in observations.** When reporting status, distinguish what you *observed* from what you *inferred*, and know what each signal proves: `delivery_verified` means the message landed in the agent's composer and submitted — nothing more; an agent's `busy`/`active` state is liveness, not evidence it is working on *your* task (it may be serving another principal). Before reporting "X is doing Y", confirm via a pane read (`snapshot --target`) or a posted artifact (PR push, commit, comment). Inference is acceptable when labeled as inference ("inferred from delivery + busy state"); grounded confirmation is required for anything a human will act on.
+12. **Name agents by their tmux session name — always.** The ONE canonical identity of any agent is its tmux session name (`tmux display-message -p '#S'`, written `@{session_name}`). Agents self-identify by it in every comment/commit/handoff; you (orchestrator/PM) refer to agents by it in every status report, relay, and handoff to the user — NEVER by the cwd / working-directory name, a cwd-derived handle, or the mstream session id (`$NNN`, a transient tooling handle only). A reassigned or long-lived session's cwd and prior self-id drift from its real tmux name (e.g. tmux `codex-541-amd2` vs cwd `…/codex-367-design`); on repurpose, rename the session so name==identity==work and have the agent re-self-identify, and resolve the true name from live tmux — not stale mstream `identity`/`cwd`. See Agent Session Naming.
 
 ## Prerequisites To Collect
 
@@ -257,6 +259,18 @@ run: the gh queries, `status`, the discussion/PR to read), decision rules for
 what to do with the results, and standing guardrails. "Check open PRs against
 <branch> and merge token-clean results" is durable; "PRs #433+#434 are merged,
 amd still running" rots the moment it is written.
+
+**Pointer-prompt pattern (recommended).** Long procedures pasted into timer
+prompts re-enter the orchestrator's transcript verbatim on every fire — noisy
+and expensive. Instead, keep the timer prompt to a 1–2 line *pointer*: "Read
+'<name>' procedure in <durable procedures file> and execute the tick." The full
+procedure (goal, which lookups to run, decision rules, guardrails) lives in
+that durable file — one named section per timer. On phase change, rewrite the
+*procedure section*, not the timer; the timer itself only needs re-arming when
+cadence changes or the goal completes. Write the procedure section *before*
+arming the timer — a fire that finds no procedure wastes the tick. The same
+no-lookup-able-state rule applies inside procedure sections: goals, lookups,
+decision rules, and guardrails only.
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key. Retries send only extra Enter keys, not
 the prompt text; `--no-prompt-submit` disables retries (deprecated alias
@@ -512,6 +526,19 @@ Common role abbreviations:
 If reassigning a free agent, rename the tmux session when appropriate so the identity matches the workstream. Tell agents to self-identify as `@{session_name}`.
 
 Use the concrete model name in the session name when known, not just the CLI family. For example, name an Opus 4.7 reviewer `opus47-337-rv` even if the command used to start it is `claude`.
+
+### Canonical agent reference — ALWAYS the tmux session name
+
+The ONE canonical name for any agent is its **tmux session name** (`tmux display-message -p '#S'`, used as `@{session_name}`). This is non-negotiable for both roles:
+
+1. **Agents** self-identify by their tmux session name — `@{session_name}` — in every PR/issue comment, commit, changelog, and handoff. Never a cwd-derived name, a role-guessed handle, or a stale name from a prior assignment.
+2. **Orchestrator / PM** (you) refers to every agent by its tmux session name in all status reports, relays, and handoffs to the user. NEVER report the cwd / working-directory name, a cwd-derived handle, or the mstream session id (`$NNN`) as the agent's identity. (`$NNN` may be used only as a transient mechanism handle in tooling, never as the name you speak to the user.)
+
+**Reassignment / drift hazard (this WILL bite you):** a repurposed or long-lived session's cwd and prior self-id drift away from its actual tmux session name. Real example: tmux session `codex-541-amd2`, but cwd is `~/sessions/issue-367-m4-design/codex-367-design` and the agent still self-ids `@codex-367-design` — three different "names" for one session, and only the tmux session name is canonical. Mitigations:
+
+- When you repurpose/reassign a session to new work, **rename the tmux session** to match (so session name == identity == current workstream), and tell the agent to **re-self-identify** to the new `@{session_name}`.
+- Until a session is renamed, refer to it by its **actual** tmux session name (`tmux display-message -p '#S'`), never the cwd or the old handle.
+- When in doubt about an agent's true name, resolve it from the live tmux session name, not from mstream `identity`/`cwd` fields (which can be stale).
 
 ## Work Directories And Worktrees
 
