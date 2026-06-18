@@ -95,10 +95,7 @@ mod tests {
             drop(txn);
 
             // Verify data is not visible even in same session
-            let result = txn_db.get_cf(
-                &cf,
-                Vectors::key_to_bytes(&VectorCfKey(embedding, 0)),
-            );
+            let result = txn_db.get_cf(&cf, Vectors::key_to_bytes(&VectorCfKey(embedding, 0)));
             assert!(
                 result.expect("Failed to get").is_none(),
                 "Uncommitted data should not be visible"
@@ -113,10 +110,7 @@ mod tests {
                 .cf_handle(Vectors::CF_NAME)
                 .expect("Vectors CF not found");
 
-            let result = txn_db.get_cf(
-                &cf,
-                Vectors::key_to_bytes(&VectorCfKey(embedding, 0)),
-            );
+            let result = txn_db.get_cf(&cf, Vectors::key_to_bytes(&VectorCfKey(embedding, 0)));
             assert!(
                 result.expect("Failed to get").is_none(),
                 "Uncommitted data should not persist after restart"
@@ -164,7 +158,10 @@ mod tests {
                 .get_cf(&cf, Vectors::key_to_bytes(&VectorCfKey(embedding, vec_id)))
                 .expect("Failed to get");
 
-            assert!(result.is_some(), "Committed data should persist after restart");
+            assert!(
+                result.is_some(),
+                "Committed data should persist after restart"
+            );
 
             // Verify the data is correct
             let bytes = result.unwrap();
@@ -184,7 +181,6 @@ mod tests {
         let embedding: EmbeddingCode = 1;
 
         // Phase 1: Allocate IDs and persist
-        let allocated_ids: Vec<VecId>;
         {
             let storage = create_test_storage(temp_dir.path());
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
@@ -192,13 +188,17 @@ mod tests {
             let allocator = IdAllocator::new();
 
             // Allocate 10 IDs
-            allocated_ids = (0..10).map(|_| allocator.allocate_local()).collect();
+            for _ in 0..10 {
+                allocator.allocate_local();
+            }
 
             // Free ID 5
             allocator.free_local(5);
 
             // Persist state
-            allocator.persist(&txn_db, embedding).expect("Failed to persist");
+            allocator
+                .persist(txn_db, embedding)
+                .expect("Failed to persist");
 
             assert_eq!(allocator.next_id(), 10);
             assert_eq!(allocator.free_count(), 1);
@@ -209,7 +209,7 @@ mod tests {
             let storage = create_test_storage(temp_dir.path());
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
 
-            let recovered = IdAllocator::recover(&txn_db, embedding).expect("Failed to recover");
+            let recovered = IdAllocator::recover(txn_db, embedding).expect("Failed to recover");
 
             assert_eq!(recovered.next_id(), 10, "next_id should be recovered");
             assert_eq!(recovered.free_count(), 1, "free_count should be recovered");
@@ -241,7 +241,7 @@ mod tests {
             // Allocate 5 IDs in transaction
             for _ in 0..5 {
                 allocator
-                    .allocate(&txn, &txn_db, embedding)
+                    .allocate(&txn, txn_db, embedding)
                     .expect("Failed to allocate in txn");
             }
 
@@ -253,7 +253,7 @@ mod tests {
             let storage = create_test_storage(temp_dir.path());
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
 
-            let recovered = IdAllocator::recover(&txn_db, embedding).expect("Failed to recover");
+            let recovered = IdAllocator::recover(txn_db, embedding).expect("Failed to recover");
             assert_eq!(recovered.next_id(), 5, "Should have 5 IDs allocated");
         }
     }
@@ -305,9 +305,8 @@ mod tests {
 
             for (i, vector) in vectors.iter().enumerate() {
                 let txn = txn_db.transaction();
-                let cache_update =
-                    insert(&index, &txn, &txn_db, &storage, i as VecId, vector)
-                        .expect("Failed to insert");
+                let cache_update = insert(&index, &txn, txn_db, &storage, i as VecId, vector)
+                    .expect("Failed to insert");
                 txn.commit().expect("Failed to commit");
                 cache_update.apply(index.nav_cache());
             }
@@ -378,8 +377,8 @@ mod tests {
             let index = hnsw::Index::from_spec(embedding, &spec, 64, nav_cache.clone());
 
             let txn = txn_db.transaction();
-            let cache_update = insert(&index, &txn, &txn_db, &storage, 0, &vector)
-                .expect("Failed to insert");
+            let cache_update =
+                insert(&index, &txn, txn_db, &storage, 0, &vector).expect("Failed to insert");
             txn.commit().expect("Failed to commit");
             cache_update.apply(index.nav_cache());
 
@@ -405,7 +404,8 @@ mod tests {
                 .expect("Failed to get")
                 .expect("Entry point should exist");
 
-            let value = GraphMeta::value_from_bytes(&ep_key, &bytes).expect("Failed to deserialize");
+            let value =
+                GraphMeta::value_from_bytes(&ep_key, &bytes).expect("Failed to deserialize");
             match value.0 {
                 GraphMetaField::EntryPoint(ep) => {
                     assert_eq!(ep, expected_entry_point, "Entry point should match");
@@ -465,9 +465,8 @@ mod tests {
 
             for (i, vector) in vectors.iter().enumerate() {
                 let txn = txn_db.transaction();
-                let cache_update =
-                    insert(&index, &txn, &txn_db, &storage, i as VecId, vector)
-                        .expect("Failed to insert");
+                let cache_update = insert(&index, &txn, txn_db, &storage, i as VecId, vector)
+                    .expect("Failed to insert");
                 txn.commit().expect("Failed to commit");
                 cache_update.apply(index.nav_cache());
             }
@@ -529,7 +528,7 @@ mod tests {
 
             let txn = txn_db.transaction();
             let cache_update =
-                insert(&index, &txn, &txn_db, &storage, 0, &vector).expect("Insert failed");
+                insert(&index, &txn, txn_db, &storage, 0, &vector).expect("Insert failed");
 
             // Commit
             txn.commit().expect("Commit failed");
@@ -552,7 +551,10 @@ mod tests {
 
             assert_eq!(results.len(), 1, "Should find exactly one result");
             assert_eq!(results[0].1, 0, "Should find vec_id 0");
-            assert!(results[0].0 < 0.001, "Distance should be ~0 for exact match");
+            assert!(
+                results[0].0 < 0.001,
+                "Distance should be ~0 for exact match"
+            );
         }
     }
 }

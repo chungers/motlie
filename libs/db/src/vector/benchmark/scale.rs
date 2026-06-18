@@ -403,13 +403,25 @@ impl fmt::Display for ScaleResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Scale Benchmark Results ===")?;
         writeln!(f, "Configuration:")?;
-        writeln!(f, "  Vectors: {}", format_number(self.config.num_vectors as u64))?;
+        writeln!(
+            f,
+            "  Vectors: {}",
+            format_number(self.config.num_vectors as u64)
+        )?;
         writeln!(f, "  Dimension: {}D", self.config.dim)?;
-        writeln!(f, "  HNSW M={}, ef_construction={}", self.config.hnsw_m, self.config.hnsw_ef_construction)?;
+        writeln!(
+            f,
+            "  HNSW M={}, ef_construction={}",
+            self.config.hnsw_m, self.config.hnsw_ef_construction
+        )?;
         writeln!(f, "  Batch size: {}", self.config.batch_size)?;
         writeln!(f)?;
         writeln!(f, "Insert Performance:")?;
-        writeln!(f, "  Vectors inserted: {}", format_number(self.vectors_inserted))?;
+        writeln!(
+            f,
+            "  Vectors inserted: {}",
+            format_number(self.vectors_inserted)
+        )?;
         writeln!(f, "  Errors: {}", self.insert_errors)?;
         writeln!(f, "  Duration: {:.1}s", self.insert_duration.as_secs_f64())?;
         writeln!(f, "  Throughput: {:.1} vec/s", self.insert_throughput)?;
@@ -620,7 +632,10 @@ impl ScaleBenchmark {
     ) -> Result<ScaleResult> {
         let progress = Arc::new(ScaleProgress::new(config.num_vectors));
 
-        println!("=== Scale Benchmark: {} vectors ===", format_number(config.num_vectors as u64));
+        println!(
+            "=== Scale Benchmark: {} vectors ===",
+            format_number(config.num_vectors as u64)
+        );
         println!("Estimated storage: {}", config.estimated_memory_human());
         if !config.immediate_index {
             println!("Mode: ASYNC (deferred HNSW construction)");
@@ -781,8 +796,14 @@ impl ScaleBenchmark {
 
         // Calculate percentiles
         latencies.sort();
-        let search_p50 = latencies.get(latencies.len() / 2).copied().unwrap_or_default();
-        let search_p99 = latencies.get(latencies.len() * 99 / 100).copied().unwrap_or_default();
+        let search_p50 = latencies
+            .get(latencies.len() / 2)
+            .copied()
+            .unwrap_or_default();
+        let search_p99 = latencies
+            .get(latencies.len() * 99 / 100)
+            .copied()
+            .unwrap_or_default();
 
         // Final memory snapshot
         let final_rss = get_rss_bytes();
@@ -810,11 +831,18 @@ impl ScaleBenchmark {
             while let Some(batch) = db_gen.next_batch(10_000) {
                 db_vectors.extend(batch);
                 if db_vectors.len() % 100_000 == 0 {
-                    print!("\r  Regenerated {}/{} vectors for ground truth...", db_vectors.len(), vectors_inserted);
+                    print!(
+                        "\r  Regenerated {}/{} vectors for ground truth...",
+                        db_vectors.len(),
+                        vectors_inserted
+                    );
                     std::io::stdout().flush().ok();
                 }
             }
-            println!("\r  Regenerated {} vectors for ground truth.          ", db_vectors.len());
+            println!(
+                "\r  Regenerated {} vectors for ground truth.          ",
+                db_vectors.len()
+            );
 
             // Generate recall test queries (different seed)
             let mut recall_query_gen = StreamingVectorGenerator::new_with_distance(
@@ -824,8 +852,10 @@ impl ScaleBenchmark {
                 config.distance,
             );
 
-            let mut all_search_results: Vec<Vec<usize>> = Vec::with_capacity(config.recall_sample_size);
-            let mut all_ground_truth: Vec<Vec<usize>> = Vec::with_capacity(config.recall_sample_size);
+            let mut all_search_results: Vec<Vec<usize>> =
+                Vec::with_capacity(config.recall_sample_size);
+            let mut all_ground_truth: Vec<Vec<usize>> =
+                Vec::with_capacity(config.recall_sample_size);
 
             for qi in 0..config.recall_sample_size {
                 let query = recall_query_gen.generate_query();
@@ -837,7 +867,8 @@ impl ScaleBenchmark {
                     .map(|(i, v)| (i, config.distance.compute(&query, v)))
                     .collect();
                 distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-                let ground_truth: Vec<usize> = distances.iter().take(config.k).map(|(i, _)| *i).collect();
+                let ground_truth: Vec<usize> =
+                    distances.iter().take(config.k).map(|(i, _)| *i).collect();
                 all_ground_truth.push(ground_truth);
 
                 // Run HNSW search
@@ -845,10 +876,8 @@ impl ScaleBenchmark {
                     Ok(results) => {
                         // Convert VecId (u32) to usize for recall computation
                         // VecId matches insertion order (0, 1, 2, ...) since we use sequential insert
-                        let result_indices: Vec<usize> = results
-                            .iter()
-                            .map(|(_dist, vid)| *vid as usize)
-                            .collect();
+                        let result_indices: Vec<usize> =
+                            results.iter().map(|(_dist, vid)| *vid as usize).collect();
                         all_search_results.push(result_indices);
                     }
                     Err(_) => {
@@ -857,7 +886,11 @@ impl ScaleBenchmark {
                 }
 
                 if (qi + 1) % 20 == 0 || qi + 1 == config.recall_sample_size {
-                    print!("\r  Computed {}/{} recall queries...", qi + 1, config.recall_sample_size);
+                    print!(
+                        "\r  Computed {}/{} recall queries...",
+                        qi + 1,
+                        config.recall_sample_size
+                    );
                     std::io::stdout().flush().ok();
                 }
             }

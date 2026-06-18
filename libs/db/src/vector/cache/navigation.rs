@@ -399,16 +399,8 @@ impl NavigationCache {
 
     /// Get edge cache statistics.
     pub fn edge_cache_stats(&self) -> (usize, usize) {
-        let entries = self
-            .edge_cache
-            .read()
-            .map(|c| c.len())
-            .unwrap_or(0);
-        let size = self
-            .edge_cache_size
-            .read()
-            .map(|s| *s)
-            .unwrap_or(0);
+        let entries = self.edge_cache.read().map(|c| c.len()).unwrap_or(0);
+        let size = self.edge_cache_size.read().map(|s| *s).unwrap_or(0);
         (entries, size)
     }
 

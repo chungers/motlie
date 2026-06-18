@@ -12,10 +12,7 @@ use motlie_db::Id;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let base_path = std::env::temp_dir().join(format!(
-        "motlie-db-vector-example-{}",
-        Id::new()
-    ));
+    let base_path = std::env::temp_dir().join(format!("motlie-db-vector-example-{}", Id::new()));
 
     let mut storage = Storage::readwrite(&base_path);
     storage.ready()?;
@@ -23,9 +20,8 @@ async fn main() -> Result<()> {
 
     let registry = storage.cache().clone();
     registry.set_storage(storage.clone())?;
-    let embedding = registry.register(
-        EmbeddingBuilder::new("demo-embedding", 3, Distance::Cosine),
-    )?;
+    let embedding =
+        registry.register(EmbeddingBuilder::new("demo-embedding", 3, Distance::Cosine))?;
 
     let (writer, mutation_rx) = create_writer(WriterConfig::default());
     let mutation_handle = spawn_mutation_consumer_with_storage_autoreg(
@@ -46,30 +42,18 @@ async fn main() -> Result<()> {
     let id_b = Id::new();
     let id_c = Id::new();
 
-    InsertVector::new(
-        &embedding,
-        ExternalKey::NodeId(id_a),
-        vec![1.0, 0.0, 0.0],
-    )
-    .immediate()
-    .run(&writer)
-    .await?;
-    InsertVector::new(
-        &embedding,
-        ExternalKey::NodeId(id_b),
-        vec![0.9, 0.1, 0.0],
-    )
-    .immediate()
-    .run(&writer)
-    .await?;
-    InsertVector::new(
-        &embedding,
-        ExternalKey::NodeId(id_c),
-        vec![0.0, 1.0, 0.0],
-    )
-    .immediate()
-    .run(&writer)
-    .await?;
+    InsertVector::new(&embedding, ExternalKey::NodeId(id_a), vec![1.0, 0.0, 0.0])
+        .immediate()
+        .run(&writer)
+        .await?;
+    InsertVector::new(&embedding, ExternalKey::NodeId(id_b), vec![0.9, 0.1, 0.0])
+        .immediate()
+        .run(&writer)
+        .await?;
+    InsertVector::new(&embedding, ExternalKey::NodeId(id_c), vec![0.0, 1.0, 0.0])
+        .immediate()
+        .run(&writer)
+        .await?;
 
     writer.flush().await?;
 

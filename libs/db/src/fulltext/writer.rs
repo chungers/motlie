@@ -69,15 +69,15 @@ impl Index {
         // Index each mutation
         for mutation in mutations {
             match mutation {
-                Mutation::AddNode(m) => m.index(&mut writer, fields)?,
-                Mutation::AddEdge(m) => m.index(&mut writer, fields)?,
-                Mutation::AddNodeFragment(m) => m.index(&mut writer, fields)?,
-                Mutation::AddEdgeFragment(m) => m.index(&mut writer, fields)?,
+                Mutation::AddNode(m) => m.index(&writer, fields)?,
+                Mutation::AddEdge(m) => m.index(&writer, fields)?,
+                Mutation::AddNodeFragment(m) => m.index(&writer, fields)?,
+                Mutation::AddEdgeFragment(m) => m.index(&writer, fields)?,
                 // CONTENT-ADDRESS: Update/Delete mutations
-                Mutation::UpdateNode(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateEdge(m) => m.index(&mut writer, fields)?,
-                Mutation::DeleteNode(m) => m.index(&mut writer, fields)?,
-                Mutation::DeleteEdge(m) => m.index(&mut writer, fields)?,
+                Mutation::UpdateNode(m) => m.index(&writer, fields)?,
+                Mutation::UpdateEdge(m) => m.index(&writer, fields)?,
+                Mutation::DeleteNode(m) => m.index(&writer, fields)?,
+                Mutation::DeleteEdge(m) => m.index(&writer, fields)?,
                 // Restore mutations don't need fulltext indexing - they restore from existing summaries
                 // which are already indexed. The restored summary hash points to existing content.
                 Mutation::RestoreNode(_) => {}
@@ -108,17 +108,6 @@ impl Index {
 /// Use this for mutation consumers.
 pub(super) fn create_readwrite_index(index_path: &Path) -> Index {
     let mut storage = Storage::readwrite(index_path);
-    storage.ready().expect("Failed to ready storage");
-    Index::new(Arc::new(storage))
-}
-
-/// Create a readonly Index from a path (convenience function).
-///
-/// This handles the full setup: Storage::readonly -> ready -> Arc -> Index.
-/// Use this for query consumers.
-#[allow(dead_code)]
-pub(super) fn create_readonly_index(index_path: &Path) -> Index {
-    let mut storage = Storage::readonly(index_path);
     storage.ready().expect("Failed to ready storage");
     Index::new(Arc::new(storage))
 }
@@ -385,8 +374,8 @@ pub fn spawn_mutation_consumer_with_params_and_next(
 mod tests {
     use super::*;
     use crate::graph::mutation::{AddNode, AddNodeFragment};
-    use crate::writer::Runnable as MutRunnable;
     use crate::graph::writer::create_mutation_writer;
+    use crate::writer::Runnable as MutRunnable;
     use crate::{DataUrl, Id, TimestampMilli};
     use std::time::Duration;
     use tantivy::collector::TopDocs;

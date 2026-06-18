@@ -112,7 +112,12 @@ impl RaBitQ {
 
     /// Create a RaBitQ encoder from configuration.
     pub fn from_config(dim: usize, config: &RaBitQConfig) -> Self {
-        Self::with_options(dim, config.bits_per_dim, config.rotation_seed, config.use_simd_dot)
+        Self::with_options(
+            dim,
+            config.bits_per_dim,
+            config.rotation_seed,
+            config.use_simd_dot,
+        )
     }
 
     /// Get the dimensionality.
@@ -127,7 +132,7 @@ impl RaBitQ {
 
     /// Get the code size in bytes.
     pub fn code_size(&self) -> usize {
-        (self.dim * self.bits_per_dim as usize + 7) / 8
+        (self.dim * self.bits_per_dim as usize).div_ceil(8)
     }
 
     /// Generate a random orthonormal rotation matrix via Gram-Schmidt.
@@ -228,12 +233,12 @@ impl RaBitQ {
         let mut rotated = vec![0.0f32; self.dim];
 
         // Matrix-vector multiplication: rotated[i] = sum_j(R[i][j] * v[j])
-        for i in 0..self.dim {
+        for (i, output) in rotated.iter_mut().enumerate().take(self.dim) {
             let mut sum = 0.0f32;
-            for j in 0..self.dim {
-                sum += self.rotation[i * self.dim + j] * vector[j];
+            for (j, &value) in vector.iter().enumerate().take(self.dim) {
+                sum += self.rotation[i * self.dim + j] * value;
             }
-            rotated[i] = sum;
+            *output = sum;
         }
 
         rotated
@@ -264,7 +269,7 @@ impl RaBitQ {
 
     /// 1-bit quantization: sign(x) -> {0, 1}.
     fn quantize_1bit(&self, rotated: &[f32]) -> Vec<u8> {
-        let num_bytes = (self.dim + 7) / 8;
+        let num_bytes = self.dim.div_ceil(8);
         let mut code = vec![0u8; num_bytes];
 
         for (i, &val) in rotated.iter().enumerate() {
@@ -287,7 +292,7 @@ impl RaBitQ {
     /// - Level 2 (0..0.5): Gray 11
     /// - Level 3 (>= 0.5): Gray 10
     fn quantize_2bit(&self, rotated: &[f32]) -> Vec<u8> {
-        let num_bytes = (self.dim * 2 + 7) / 8;
+        let num_bytes = (self.dim * 2).div_ceil(8);
         let mut code = vec![0u8; num_bytes];
 
         for (i, &val) in rotated.iter().enumerate() {
@@ -323,7 +328,7 @@ impl RaBitQ {
     /// Gray code sequence: 0000, 0001, 0011, 0010, 0110, 0111, 0101, 0100,
     ///                     1100, 1101, 1111, 1110, 1010, 1011, 1001, 1000
     fn quantize_4bit(&self, rotated: &[f32]) -> Vec<u8> {
-        let num_bytes = (self.dim * 4 + 7) / 8;
+        let num_bytes = (self.dim * 4).div_ceil(8);
         let mut code = vec![0u8; num_bytes];
 
         for (i, &val) in rotated.iter().enumerate() {
@@ -383,20 +388,7 @@ impl RaBitQ {
 
     /// Convert Gray code back to binary.
     ///
-    /// Inverse of `to_gray_code()`. Used for decoding multi-bit quantization levels.
-    #[inline]
-    #[allow(dead_code)] // Reserved for multi-bit quantization support
-    const fn from_gray_code(gray: u8) -> u8 {
-        let mut n = gray;
-        let mut mask = n >> 1;
-        while mask != 0 {
-            n ^= mask;
-            mask >>= 1;
-        }
-        n
-    }
-
-    /// Non-const version for use in const contexts workaround.
+    /// Inverse of `to_gray_code()`; used for decoding multi-bit quantization levels.
     #[inline]
     fn from_gray_code_runtime(gray: u8) -> u8 {
         let mut n = gray;
@@ -455,11 +447,7 @@ impl RaBitQ {
         // Compute quantization error: dot product of decoded quantized vector with rotated original
         // This measures how well the binary code represents the rotated vector
         let decoded = self.decode_to_float(&code);
-        let quantization_error: f32 = rotated
-            .iter()
-            .zip(decoded.iter())
-            .map(|(r, d)| r * d)
-            .sum();
+        let quantization_error: f32 = rotated.iter().zip(decoded.iter()).map(|(r, d)| r * d).sum();
 
         // Ensure quantization_error is not zero to avoid division by zero
         let quantization_error = if quantization_error.abs() < 1e-10 {
@@ -613,11 +601,11 @@ impl RaBitQ {
         let query_sum: f32 = query.iter().sum();
         let mut positive_sum = 0.0f32;
 
-        for i in 0..self.dim {
+        for (i, &value) in query.iter().enumerate().take(self.dim) {
             let byte_idx = i / 8;
             let bit_idx = i % 8;
             if (code[byte_idx] >> bit_idx) & 1 == 1 {
-                positive_sum += query[i];
+                positive_sum += value;
             }
         }
 
@@ -634,13 +622,13 @@ impl RaBitQ {
         const LEVEL_VALUES: [f32; 4] = [-1.5, -0.5, 0.5, 1.5];
         let mut sum = 0.0f32;
 
-        for i in 0..self.dim {
+        for (i, &query_value) in query.iter().enumerate().take(self.dim) {
             let bit_offset = i * 2;
             let byte_idx = bit_offset / 8;
             let bit_shift = bit_offset % 8;
             let gray = (code[byte_idx] >> bit_shift) & 0b11;
             let level = Self::from_gray_code_runtime(gray) as usize;
-            sum += query[i] * LEVEL_VALUES[level.min(3)];
+            sum += query_value * LEVEL_VALUES[level.min(3)];
         }
 
         sum
@@ -652,7 +640,7 @@ impl RaBitQ {
     fn binary_dot_4bit(&self, query: &[f32], code: &[u8]) -> f32 {
         let mut sum = 0.0f32;
 
-        for i in 0..self.dim {
+        for (i, &query_value) in query.iter().enumerate().take(self.dim) {
             let bit_offset = i * 4;
             let byte_idx = bit_offset / 8;
             let bit_shift = bit_offset % 8;
@@ -664,7 +652,7 @@ impl RaBitQ {
             let level = Self::from_gray_code_runtime(gray);
             // Map level 0-15 to -2.0 to +2.0 (inverse of encode: level = (val+2)*3.75)
             let value = (level as f32 / 3.75) - 2.0;
-            sum += query[i] * value;
+            sum += query_value * value;
         }
 
         sum
@@ -721,8 +709,11 @@ impl RaBitQ {
         // Compute variance: E[X²] - E[X]²
         let n = all_components.len() as f32;
         let mean: f32 = all_components.iter().sum::<f32>() / n;
-        let variance: f32 =
-            all_components.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n;
+        let variance: f32 = all_components
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f32>()
+            / n;
 
         variance
     }
@@ -1067,7 +1058,8 @@ mod tests {
             let gray_b = RaBitQ::to_gray_code(level + 1);
             let hamming = (gray_a ^ gray_b).count_ones();
             assert_eq!(
-                hamming, 1,
+                hamming,
+                1,
                 "2-bit: Adjacent levels {} and {} should have Hamming distance 1, got {}. \
                  Gray codes: {:02b} and {:02b}",
                 level,
@@ -1084,7 +1076,8 @@ mod tests {
             let gray_b = RaBitQ::to_gray_code(level + 1);
             let hamming = (gray_a ^ gray_b).count_ones();
             assert_eq!(
-                hamming, 1,
+                hamming,
+                1,
                 "4-bit: Adjacent levels {} and {} should have Hamming distance 1, got {}. \
                  Gray codes: {:04b} and {:04b}",
                 level,

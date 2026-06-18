@@ -13,8 +13,8 @@ pub mod graph;
 
 // Vector module - HNSW-based vector storage and search
 // Users access via fully qualified paths: motlie_db::vector::*
-pub mod vector;
 pub mod request;
+pub mod vector;
 
 // Fulltext module - Tantivy-based fulltext search
 // Users access via fully qualified paths: motlie_db::fulltext::*
@@ -32,9 +32,7 @@ pub mod storage_builder;
 // Unified storage module - combines graph and fulltext
 // Users access via: motlie_db::Storage, motlie_db::StorageConfig, etc.
 mod storage;
-pub use storage::{
-    ReadOnly, ReadOnlyHandles, ReadWrite, ReadWriteHandles, Storage, StorageConfig,
-};
+pub use storage::{ReadOnly, ReadOnlyHandles, ReadWrite, ReadWriteHandles, Storage, StorageConfig};
 
 // Unified query module - composes fulltext search with graph hydration
 // Users access via fully qualified paths: motlie_db::query::*, motlie_db::reader::*
@@ -65,8 +63,21 @@ pub struct Id([u8; 16]);
 
 /// Timestamp in milliseconds since Unix epoch.
 /// Has rkyv derives for use in hot CF values.
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+)]
 #[archive(check_bytes)]
 #[archive_attr(derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord))]
 pub struct TimestampMilli(pub u64);
@@ -132,8 +143,18 @@ pub type ActiveTimeMillis = TimestampMilli;
 /// ```
 ///
 /// Has rkyv derives for use in hot CF values.
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+)]
 #[archive(check_bytes)]
 #[archive_attr(derive(Debug, Clone, Copy, PartialEq, Eq))]
 pub struct ActivePeriod(pub Option<ActiveFrom>, pub Option<ActiveUntil>);
@@ -466,10 +487,7 @@ impl Id {
     /// ```
     pub fn from_slice(bytes: &[u8]) -> Result<Self, IdError> {
         if bytes.len() != 16 {
-            return Err(IdError(format!(
-                "expected 16 bytes, got {}",
-                bytes.len()
-            )));
+            return Err(IdError(format!("expected 16 bytes, got {}", bytes.len())));
         }
         let mut id_bytes = [0u8; 16];
         id_bytes.copy_from_slice(bytes);
@@ -477,6 +495,10 @@ impl Id {
     }
 
     /// Parse from a string, returning an error if invalid
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "compatibility wrapper; FromStr is implemented below"
+    )]
     pub fn from_str(s: &str) -> Result<Self, IdError> {
         // Try to decode as ULID string first
         if let Ok(ulid) = ULID::decode(s) {
@@ -524,6 +546,14 @@ impl std::fmt::Display for Id {
     }
 }
 
+impl std::str::FromStr for Id {
+    type Err = IdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Id::from_str(s)
+    }
+}
+
 impl TryFrom<String> for Id {
     type Error = IdError;
 
@@ -568,9 +598,9 @@ impl From<Id> for [u8; 16] {
 mod tests {
     use super::*;
     use crate::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
-    use crate::writer::Runnable as MutRunnable;
     use crate::graph::schema::{EdgeSummary, NodeSummary};
     use crate::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+    use crate::writer::Runnable as MutRunnable;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -597,17 +627,17 @@ mod tests {
         for i in 0..3 {
             let node_id = Id::new();
             let node_args = AddNode {
-                id: node_id.clone(),
+                id: node_id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_node_{}", i),
                 valid_range: None,
-                summary: NodeSummary::from_text(&format!("integration test summary {}", i)),
+                summary: NodeSummary::from_text(format!("integration test summary {}", i)),
             };
 
             let fragment_args = AddNodeFragment {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
-                content: DataUrl::from_text(&format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i)),
+                content: DataUrl::from_text(format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i)),
                 valid_range: None,
             };
 
@@ -826,7 +856,7 @@ mod tests {
         sorted_ids.sort();
 
         // Compare using byte slice comparison
-        let mut byte_sorted: Vec<_> = ids.iter().map(|id| id.as_bytes().clone()).collect();
+        let mut byte_sorted: Vec<_> = ids.iter().map(|id| *id.as_bytes()).collect();
         byte_sorted.sort();
 
         // The orderings should match
@@ -1069,7 +1099,7 @@ mod tests {
         let html_url = DataUrl::from_html("<p>test</p>");
         assert!(html_url.mime_type().unwrap().contains("html"));
 
-        let jpeg_url = DataUrl::from_jpeg(&[0xFF, 0xD8]);
+        let jpeg_url = DataUrl::from_jpeg([0xFF, 0xD8]);
         assert_eq!(jpeg_url.mime_type().unwrap(), "image/jpeg");
     }
 

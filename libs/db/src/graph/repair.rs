@@ -31,9 +31,8 @@ use std::time::Duration;
 use anyhow::Result;
 
 use super::schema::{
-    ForwardEdges, ForwardEdgeCfKey, ForwardEdgeCfValue,
-    ReverseEdges, ReverseEdgeCfKey, ReverseEdgeCfValue,
-    GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField,
+    ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges, GraphMeta, GraphMetaCfKey,
+    GraphMetaCfValue, GraphMetaField, ReverseEdgeCfKey, ReverseEdgeCfValue, ReverseEdges,
 };
 use super::{ColumnFamily, HotColumnFamilyRecord, Storage};
 
@@ -221,7 +220,9 @@ impl GraphRepairer {
         // Check reverse edges point to existing forward edges
         self.check_reverse_to_forward()?;
 
-        self.metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .cycles_completed
+            .fetch_add(1, Ordering::Relaxed);
 
         let after = self.metrics.snapshot();
 
@@ -258,9 +259,7 @@ impl GraphRepairer {
         // Load cursor (reuse NodeTombstones cursor slot for forward scan)
         let cursor_key = GraphMetaCfKey::gc_cursor_node_tombstones();
         let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
-        let start_key = txn
-            .get_cf(meta_cf, &cursor_key_bytes)?
-            .unwrap_or_default();
+        let start_key = txn.get_cf(meta_cf, &cursor_key_bytes)?.unwrap_or_default();
 
         // Create iterator from cursor position
         let iter = if start_key.is_empty() {
@@ -311,7 +310,7 @@ impl GraphRepairer {
                 if self.config.auto_fix {
                     // Create missing reverse entry
                     // ReverseEdgeCfValue: (ValidUntil, ActivePeriod)
-                    let rev_value = ReverseEdgeCfValue(fwd_value.0.clone(), fwd_value.1.clone());
+                    let rev_value = ReverseEdgeCfValue(fwd_value.0, fwd_value.1);
                     let rev_value_bytes = ReverseEdges::value_to_bytes(&rev_value)?;
                     txn.put_cf(reverse_cf, rev_key_bytes, rev_value_bytes)?;
                     fixed += 1;
@@ -321,17 +320,27 @@ impl GraphRepairer {
 
         // Persist cursor
         if let Some(key) = last_key {
-            let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorNodeTombstones(key));
-            txn.put_cf(meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
+            let cursor_value = GraphMetaCfValue(GraphMetaField::NodeTombstones(key));
+            txn.put_cf(
+                meta_cf,
+                &cursor_key_bytes,
+                GraphMeta::value_to_bytes(&cursor_value),
+            )?;
         } else {
             // Iterator exhausted - delete cursor to start fresh
             txn.delete_cf(meta_cf, &cursor_key_bytes)?;
         }
 
         txn.commit()?;
-        self.metrics.forward_checked.fetch_add(checked as u64, Ordering::Relaxed);
-        self.metrics.missing_reverse.fetch_add(missing, Ordering::Relaxed);
-        self.metrics.entries_fixed.fetch_add(fixed, Ordering::Relaxed);
+        self.metrics
+            .forward_checked
+            .fetch_add(checked as u64, Ordering::Relaxed);
+        self.metrics
+            .missing_reverse
+            .fetch_add(missing, Ordering::Relaxed);
+        self.metrics
+            .entries_fixed
+            .fetch_add(fixed, Ordering::Relaxed);
 
         Ok(missing)
     }
@@ -358,9 +367,7 @@ impl GraphRepairer {
         // Load cursor (reuse EdgeTombstones cursor slot for reverse scan)
         let cursor_key = GraphMetaCfKey::gc_cursor_edge_tombstones();
         let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
-        let start_key = txn
-            .get_cf(meta_cf, &cursor_key_bytes)?
-            .unwrap_or_default();
+        let start_key = txn.get_cf(meta_cf, &cursor_key_bytes)?.unwrap_or_default();
 
         // Create iterator from cursor position
         let iter = if start_key.is_empty() {
@@ -398,7 +405,8 @@ impl GraphRepairer {
                 Some(fwd_value_bytes) => {
                     // Forward exists - check if it's deleted
                     // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
-                    let fwd_value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&fwd_value_bytes)?;
+                    let fwd_value: ForwardEdgeCfValue =
+                        ForwardEdges::value_from_bytes(&fwd_value_bytes)?;
                     if fwd_value.5 {
                         // Forward edge is tombstoned, reverse is orphan
                         orphans += 1;
@@ -423,17 +431,27 @@ impl GraphRepairer {
 
         // Persist cursor
         if let Some(key) = last_key {
-            let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorEdgeTombstones(key));
-            txn.put_cf(meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
+            let cursor_value = GraphMetaCfValue(GraphMetaField::EdgeTombstones(key));
+            txn.put_cf(
+                meta_cf,
+                &cursor_key_bytes,
+                GraphMeta::value_to_bytes(&cursor_value),
+            )?;
         } else {
             // Iterator exhausted - delete cursor to start fresh
             txn.delete_cf(meta_cf, &cursor_key_bytes)?;
         }
 
         txn.commit()?;
-        self.metrics.reverse_checked.fetch_add(checked as u64, Ordering::Relaxed);
-        self.metrics.orphan_reverse.fetch_add(orphans, Ordering::Relaxed);
-        self.metrics.entries_fixed.fetch_add(fixed, Ordering::Relaxed);
+        self.metrics
+            .reverse_checked
+            .fetch_add(checked as u64, Ordering::Relaxed);
+        self.metrics
+            .orphan_reverse
+            .fetch_add(orphans, Ordering::Relaxed);
+        self.metrics
+            .entries_fixed
+            .fetch_add(fixed, Ordering::Relaxed);
 
         Ok(orphans)
     }

@@ -265,7 +265,9 @@ pub trait HotColumnFamilyRecord: ColumnFamily {
         <Self::Value as Archive>::Archived: RkyvDeserialize<Self::Value, rkyv::Infallible>,
     {
         let archived = Self::value_archived(bytes)?;
-        Ok(archived.deserialize(&mut rkyv::Infallible).expect("Infallible"))
+        Ok(archived
+            .deserialize(&mut rkyv::Infallible)
+            .expect("Infallible"))
     }
 
     /// Serialize value to bytes using rkyv.

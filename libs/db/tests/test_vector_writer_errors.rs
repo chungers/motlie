@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use motlie_db::vector;
 use motlie_db::vector::mutation::{InsertVector, Mutation};
-use motlie_db::vector::writer::{create_writer, WriterConfig};
 use motlie_db::vector::spawn_mutation_consumer_with_storage_autoreg;
+use motlie_db::vector::writer::{create_writer, WriterConfig};
 use motlie_db::Id;
 use tempfile::TempDir;
 

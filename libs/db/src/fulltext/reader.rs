@@ -129,9 +129,7 @@ impl Default for ReaderConfig {
 
 /// Create a new fulltext query reader and receiver pair
 #[doc(hidden)]
-pub fn create_query_reader(
-    config: ReaderConfig,
-) -> (Reader, flume::Receiver<QueryRequest>) {
+pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::new(sender);
     (reader, receiver)
@@ -278,7 +276,7 @@ pub fn spawn_query_consumer_pool_shared(
             // Process queries from shared channel
             // All workers share the same Tantivy Index via Arc<Index>
             while let Ok(request) = receiver.recv_async().await {
-                execute_request(&*index, request).await;
+                execute_request(&index, request).await;
             }
 
             tracing::info!(worker_id, "Fulltext query worker shutting down");

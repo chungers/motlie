@@ -8,9 +8,15 @@ use tantivy::schema::*;
 use tantivy::{doc, IndexWriter};
 
 use crate::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
+    AddEdge,
+    AddEdgeFragment,
+    AddNode,
+    AddNodeFragment,
+    DeleteEdge,
+    DeleteNode,
+    UpdateEdge,
     // CONTENT-ADDRESS: Update/Delete mutations
-    UpdateNode, UpdateEdge, DeleteNode, DeleteEdge,
+    UpdateNode,
 };
 
 use super::schema::{compute_validity_facet, extract_tags, DocumentFields};
@@ -311,7 +317,8 @@ impl MutationExecutor for UpdateEdge {
         if let Some(ref new_summary) = self.new_summary {
             // Delete existing documents for this edge by src_id
             // Note: Tantivy doesn't support composite term deletion, so we delete by src_id
-            let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
+            let src_term =
+                tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
             index_writer.delete_term(src_term);
 
             // Decode new summary content
@@ -352,7 +359,8 @@ impl MutationExecutor for UpdateEdge {
             );
         } else if self.new_active_period.is_some() {
             // For active period updates, delete existing documents
-            let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
+            let src_term =
+                tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
             index_writer.delete_term(src_term);
 
             tracing::debug!(

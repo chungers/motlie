@@ -18,9 +18,9 @@ use super::schema::{
     NodeFragmentCfValue, NodeFragments, Version,
 };
 use super::writer::{MutationExecutor, Writer};
+use crate::request::{ReplyEnvelope, RequestMeta};
 use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
-use crate::request::{ReplyEnvelope, RequestMeta};
 
 // ============================================================================
 // Execution Options + Replies
@@ -49,56 +49,56 @@ pub enum MutationResult {
 }
 
 impl MutationResult {
-    fn as_update_node(self) -> Result<(Id, Version)> {
+    fn into_update_node(self) -> Result<(Id, Version)> {
         match self {
             MutationResult::UpdateNode { id, version } => Ok((id, version)),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
     }
 
-    fn as_add_node(self) -> Result<(Id, Version)> {
+    fn into_add_node(self) -> Result<(Id, Version)> {
         match self {
             MutationResult::AddNode { id, version } => Ok((id, version)),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
     }
 
-    fn as_restore_node(self) -> Result<(Id, Version)> {
+    fn into_restore_node(self) -> Result<(Id, Version)> {
         match self {
             MutationResult::RestoreNode { id, version } => Ok((id, version)),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
     }
 
-    fn as_delete_node(self) -> Result<(Id, Version)> {
+    fn into_delete_node(self) -> Result<(Id, Version)> {
         match self {
             MutationResult::DeleteNode { id, version } => Ok((id, version)),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
     }
 
-    fn as_add_edge(self) -> Result<Version> {
+    fn into_add_edge(self) -> Result<Version> {
         match self {
             MutationResult::AddEdge { version } => Ok(version),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
     }
 
-    fn as_update_edge(self) -> Result<Version> {
+    fn into_update_edge(self) -> Result<Version> {
         match self {
             MutationResult::UpdateEdge { version } => Ok(version),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
     }
 
-    fn as_restore_edge(self) -> Result<Version> {
+    fn into_restore_edge(self) -> Result<Version> {
         match self {
             MutationResult::RestoreEdge { version } => Ok(version),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
     }
 
-    fn as_delete_edge(self) -> Result<Version> {
+    fn into_delete_edge(self) -> Result<Version> {
         match self {
             MutationResult::DeleteEdge { version } => Ok(version),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
@@ -461,8 +461,6 @@ impl RequestMeta for UpdateEdge {
     }
 }
 
-
-
 /// Delete a node with tombstone semantics.
 ///
 /// This mutation:
@@ -582,7 +580,7 @@ impl MutationReply for AddNode {
     type Reply = (Id, Version);
 
     fn from_result(result: MutationResult) -> Result<Self::Reply> {
-        result.as_add_node()
+        result.into_add_node()
     }
 }
 
@@ -590,7 +588,7 @@ impl MutationReply for AddEdge {
     type Reply = Version;
 
     fn from_result(result: MutationResult) -> Result<Self::Reply> {
-        result.as_add_edge()
+        result.into_add_edge()
     }
 }
 
@@ -620,7 +618,7 @@ impl MutationReply for UpdateNode {
     type Reply = (Id, Version);
 
     fn from_result(result: MutationResult) -> Result<Self::Reply> {
-        result.as_update_node()
+        result.into_update_node()
     }
 }
 
@@ -628,7 +626,7 @@ impl MutationReply for UpdateEdge {
     type Reply = Version;
 
     fn from_result(result: MutationResult) -> Result<Self::Reply> {
-        result.as_update_edge()
+        result.into_update_edge()
     }
 }
 
@@ -636,7 +634,7 @@ impl MutationReply for DeleteNode {
     type Reply = (Id, Version);
 
     fn from_result(result: MutationResult) -> Result<Self::Reply> {
-        result.as_delete_node()
+        result.into_delete_node()
     }
 }
 
@@ -644,7 +642,7 @@ impl MutationReply for DeleteEdge {
     type Reply = Version;
 
     fn from_result(result: MutationResult) -> Result<Self::Reply> {
-        result.as_delete_edge()
+        result.into_delete_edge()
     }
 }
 
@@ -652,7 +650,7 @@ impl MutationReply for RestoreNode {
     type Reply = (Id, Version);
 
     fn from_result(result: MutationResult) -> Result<Self::Reply> {
-        result.as_restore_node()
+        result.into_restore_node()
     }
 }
 
@@ -660,7 +658,7 @@ impl MutationReply for RestoreEdge {
     type Reply = Version;
 
     fn from_result(result: MutationResult) -> Result<Self::Reply> {
-        result.as_restore_edge()
+        result.into_restore_edge()
     }
 }
 
@@ -673,7 +671,7 @@ impl MutationCodec for AddNodeFragment {
 
     fn to_record(&self) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
         let key = NodeFragmentCfKey(self.id, self.ts_millis);
-        let value = NodeFragmentCfValue(self.valid_range.clone(), self.content.clone());
+        let value = NodeFragmentCfValue(self.valid_range, self.content.clone());
         (key, value)
     }
 }
@@ -684,7 +682,7 @@ impl MutationCodec for AddEdgeFragment {
     fn to_record(&self) -> (EdgeFragmentCfKey, EdgeFragmentCfValue) {
         let name_hash = NameHash::from_name(&self.edge_name);
         let key = EdgeFragmentCfKey(self.src_id, self.dst_id, name_hash, self.ts_millis);
-        let value = EdgeFragmentCfValue(self.valid_range.clone(), self.content.clone());
+        let value = EdgeFragmentCfValue(self.valid_range, self.content.clone());
         (key, value)
     }
 }
@@ -826,11 +824,11 @@ impl MutationExecutor for RestoreEdge {
         _processor: &Processor,
     ) -> Result<MutationOutcome> {
         let version = ops::edge::restore_edge(txn, txn_db, self)?;
-        Ok(MutationOutcome::new(MutationResult::RestoreEdge { version }))
+        Ok(MutationOutcome::new(MutationResult::RestoreEdge {
+            version,
+        }))
     }
 }
-
-
 
 impl Mutation {
     /// Execute this mutation directly against storage.
@@ -947,7 +945,11 @@ impl Runnable for RestoreEdge {
 
 #[async_trait::async_trait]
 pub trait RunnableWithResult<R> {
-    async fn run_with_result(self, writer: &Writer, options: ExecOptions) -> Result<ReplyEnvelope<R>>;
+    async fn run_with_result(
+        self,
+        writer: &Writer,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<R>>;
 }
 
 pub trait MutationReply: Into<Mutation> + Send {
@@ -1059,7 +1061,6 @@ impl From<RestoreEdge> for Mutation {
     }
 }
 
-
 // ============================================================================
 // Vec<Mutation> - Zero-overhead batching
 // ============================================================================
@@ -1151,12 +1152,10 @@ macro_rules! mutations {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::writer::{
-        spawn_consumer, Consumer, WriterConfig,
-    };
     use super::super::processor::Processor as GraphProcessor;
+    use super::super::writer::{spawn_consumer, Consumer, WriterConfig};
     use super::super::Storage;
+    use super::*;
     use crate::Id;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -1225,18 +1224,15 @@ mod tests {
         // Create channels
         let (graph_sender, graph_receiver) = mpsc::channel(graph_config.channel_buffer_size);
         // Very small buffer for next consumer to force overflow
-        let (next_sender, mut next_receiver) = mpsc::channel::<super::super::writer::MutationRequest>(2);
+        let (next_sender, mut next_receiver) =
+            mpsc::channel::<super::super::writer::MutationRequest>(2);
 
         // Create writer
         let writer = super::super::writer::Writer::new(graph_sender);
 
         // Create graph consumer with chaining
-        let graph_consumer = Consumer::with_next(
-            graph_receiver,
-            graph_config,
-            processor,
-            next_sender,
-        );
+        let graph_consumer =
+            Consumer::with_next(graph_receiver, graph_config, processor, next_sender);
 
         let graph_handle = spawn_consumer(graph_consumer);
 
@@ -1258,7 +1254,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 valid_range: None,
-                summary: super::schema::NodeSummary::from_text(&format!("summary {}", i)),
+                summary: super::schema::NodeSummary::from_text(format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }
@@ -1271,12 +1267,18 @@ mod tests {
 
         // Wait for graph consumer to finish
         let graph_result = tokio::time::timeout(Duration::from_secs(5), graph_handle).await;
-        assert!(graph_result.is_ok(), "Graph consumer should finish promptly");
+        assert!(
+            graph_result.is_ok(),
+            "Graph consumer should finish promptly"
+        );
         graph_result.unwrap().unwrap().unwrap();
 
         // Wait for next consumer to finish
         let next_result = tokio::time::timeout(Duration::from_secs(5), next_handle).await;
-        assert!(next_result.is_ok(), "Next consumer should finish after channel closed");
+        assert!(
+            next_result.is_ok(),
+            "Next consumer should finish after channel closed"
+        );
         let next_processed = next_result.unwrap().unwrap();
 
         // The next consumer should have processed fewer mutations due to buffer overflow

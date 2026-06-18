@@ -50,8 +50,8 @@ use tokio::sync::mpsc;
 
 use super::mutation::{ExecOptions, Mutation};
 use super::processor::Processor;
-use super::writer::MutationRequest;
 use super::query::TransactionQueryExecutor;
+use super::writer::MutationRequest;
 use crate::request::new_request_id;
 
 /// A transaction scope for read-your-writes operations.
@@ -129,12 +129,6 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    #[allow(dead_code)]
-    /// Check if the transaction has been finished (committed or rolled back).
-    fn is_finished(&self) -> bool {
-        self.txn.is_none()
-    }
-
     /// Take the inner transaction, marking this as finished.
     fn take_txn(&mut self) -> Option<rocksdb::Transaction<'a, rocksdb::TransactionDB>> {
         self.txn.take()
@@ -165,7 +159,9 @@ impl<'a> Transaction<'a> {
         // Execute the mutation against the transaction (processor-centric pattern)
         mutation
             .execute(txn, self.txn_db, &self.processor)
-            .with_context(|| format!("Failed to execute mutation in transaction: {:?}", mutation))?;
+            .with_context(|| {
+                format!("Failed to execute mutation in transaction: {:?}", mutation)
+            })?;
 
         // Track for forwarding on commit
         self.mutations.push(mutation);
@@ -260,11 +256,7 @@ impl<'a> Transaction<'a> {
         // 2. Forward mutations to configured receiver (non-blocking, best-effort)
         if let Some(sender) = &self.forward_to {
             // Filter out Flush markers (not relevant for downstream)
-            let mutations: Vec<_> = self
-                .mutations
-                .drain(..)
-                .filter(|m| !m.is_flush())
-                .collect();
+            let mutations: Vec<_> = self.mutations.drain(..).filter(|m| !m.is_flush()).collect();
 
             if !mutations.is_empty() {
                 // Best-effort send using try_send (non-blocking)

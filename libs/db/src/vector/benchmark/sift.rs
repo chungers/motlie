@@ -103,7 +103,11 @@ impl SiftDataset {
 
         println!("Loading SIFT base vectors (max {})...", max_base);
         let base_vectors = read_fvecs_limited(&base_path, max_base)?;
-        println!("  Loaded {} base vectors ({}D)", base_vectors.len(), base_vectors[0].len());
+        println!(
+            "  Loaded {} base vectors ({}D)",
+            base_vectors.len(),
+            base_vectors[0].len()
+        );
 
         println!("Loading SIFT query vectors (max {})...", max_queries);
         let query_vectors = read_fvecs_limited(&query_path, max_queries)?;
@@ -111,10 +115,16 @@ impl SiftDataset {
 
         println!("Loading SIFT ground truth...");
         let ground_truth_full = read_ivecs_limited(&gt_path, max_queries)?;
-        println!("  Loaded ground truth for {} queries", ground_truth_full.len());
+        println!(
+            "  Loaded ground truth for {} queries",
+            ground_truth_full.len()
+        );
 
         Ok(Self {
-            dim: base_vectors.first().map(|v| v.len()).unwrap_or(SIFT_EMBEDDING_DIM),
+            dim: base_vectors
+                .first()
+                .map(|v| v.len())
+                .unwrap_or(SIFT_EMBEDDING_DIM),
             base_vectors,
             query_vectors,
             ground_truth_full,
@@ -175,7 +185,10 @@ impl SiftSubset {
         k: usize,
         distance: Distance,
     ) -> Vec<Vec<usize>> {
-        println!("Computing brute-force ground truth (k={}, {:?})...", k, distance);
+        println!(
+            "Computing brute-force ground truth (k={}, {:?})...",
+            k, distance
+        );
 
         let mut results = Vec::with_capacity(self.queries.len());
 

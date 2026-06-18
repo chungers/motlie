@@ -140,22 +140,13 @@ pub trait Runnable {
 /// Configuration for the unified writer.
 ///
 /// Composes configurations for both graph and fulltext subsystems.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WriterConfig {
     /// Configuration for the graph mutation writer
     pub graph: graph::writer::WriterConfig,
 
     /// Configuration for the fulltext mutation consumer
     pub fulltext: graph::writer::WriterConfig,
-}
-
-impl Default for WriterConfig {
-    fn default() -> Self {
-        Self {
-            graph: graph::writer::WriterConfig::default(),
-            fulltext: graph::writer::WriterConfig::default(),
-        }
-    }
 }
 
 impl WriterConfig {
@@ -378,10 +369,16 @@ impl WriterBuilder {
         graph_writer.set_transaction_forward_to(fulltext_tx.clone());
 
         // Spawn graph consumer with chaining to fulltext
-        let graph_handle =
-            spawn_graph_consumer_with_next(graph_rx, self.config.graph, graph_processor, fulltext_tx);
+        let graph_handle = spawn_graph_consumer_with_next(
+            graph_rx,
+            self.config.graph,
+            graph_processor,
+            fulltext_tx,
+        );
 
-        let writer = Writer { inner: graph_writer };
+        let writer = Writer {
+            inner: graph_writer,
+        };
         let handles = vec![graph_handle, fulltext_handle];
 
         (writer, handles)

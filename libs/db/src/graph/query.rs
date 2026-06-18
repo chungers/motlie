@@ -17,22 +17,20 @@ use std::time::Duration;
 use super::name_hash::NameHash;
 use super::ops::name::resolve_name_from_txn;
 use super::ops::read::{find_edge_version, find_node_version, StorageAccess};
-use super::ops::summary::{
-    resolve_edge_summary_from_txn, resolve_node_summary_from_txn,
-};
+use super::ops::summary::{resolve_edge_summary_from_txn, resolve_node_summary_from_txn};
 use super::ops::util::timestamp_in_range;
 use super::processor::Processor as GraphProcessor;
 use super::reader::{QueryExecutor, QueryRequest};
+use super::schema::{
+    self, DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, SrcId,
+    Version,
+};
 use super::summary_hash::SummaryHash;
 use super::HotColumnFamilyRecord;
 use super::{ColumnFamily, ColumnFamilySerde};
 use crate::reader::Runnable;
 use crate::request::{new_request_id, RequestMeta};
 use crate::{ActivePeriod, ActiveTimeMillis, Id, SystemTimeMillis, TimestampMilli};
-use super::schema::{
-    self, DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, SrcId,
-    Version,
-};
 use tokio::sync::oneshot;
 
 // ============================================================================
@@ -183,10 +181,20 @@ impl std::fmt::Display for Query {
                 "EdgesBySummaryHash: hash={:?}, current_only={}",
                 q.hash, q.current_only
             ),
-            Query::NodeAtVersion(q) => write!(f, "NodeAtVersion: id={}, back={}", q.id, q.versions_back),
-            Query::EdgeAtVersion(q) => write!(f, "EdgeAtVersion: src={}, dst={}, name={}, back={}", q.source_id, q.dest_id, q.name, q.versions_back),
+            Query::NodeAtVersion(q) => {
+                write!(f, "NodeAtVersion: id={}, back={}", q.id, q.versions_back)
+            }
+            Query::EdgeAtVersion(q) => write!(
+                f,
+                "EdgeAtVersion: src={}, dst={}, name={}, back={}",
+                q.source_id, q.dest_id, q.name, q.versions_back
+            ),
             Query::NodeVersions(q) => write!(f, "NodeVersions: id={}, limit={}", q.id, q.limit),
-            Query::EdgeVersions(q) => write!(f, "EdgeVersions: src={}, dst={}, name={}, limit={}", q.source_id, q.dest_id, q.name, q.limit),
+            Query::EdgeVersions(q) => write!(
+                f,
+                "EdgeVersions: src={}, dst={}, name={}, limit={}",
+                q.source_id, q.dest_id, q.name, q.limit
+            ),
         }
     }
 }
@@ -211,13 +219,15 @@ pub enum QueryResult {
 }
 
 impl Query {
-    pub(crate) async fn execute_with_processor(&self, processor: &GraphProcessor) -> Result<QueryResult> {
+    pub(crate) async fn execute_with_processor(
+        &self,
+        processor: &GraphProcessor,
+    ) -> Result<QueryResult> {
         match self {
             Query::NodeById(q) => q.execute(processor).await.map(QueryResult::NodeById),
-            Query::NodesByIdsMulti(q) => q
-                .execute(processor)
-                .await
-                .map(QueryResult::NodesByIdsMulti),
+            Query::NodesByIdsMulti(q) => {
+                q.execute(processor).await.map(QueryResult::NodesByIdsMulti)
+            }
             Query::EdgeSummaryBySrcDstName(q) => q
                 .execute(processor)
                 .await
@@ -234,12 +244,14 @@ impl Query {
             Query::IncomingEdges(q) => q.execute(processor).await.map(QueryResult::IncomingEdges),
             Query::AllNodes(q) => q.execute(processor).await.map(QueryResult::AllNodes),
             Query::AllEdges(q) => q.execute(processor).await.map(QueryResult::AllEdges),
-            Query::NodesBySummaryHash(q) => {
-                q.execute(processor).await.map(QueryResult::NodesBySummaryHash)
-            }
-            Query::EdgesBySummaryHash(q) => {
-                q.execute(processor).await.map(QueryResult::EdgesBySummaryHash)
-            }
+            Query::NodesBySummaryHash(q) => q
+                .execute(processor)
+                .await
+                .map(QueryResult::NodesBySummaryHash),
+            Query::EdgesBySummaryHash(q) => q
+                .execute(processor)
+                .await
+                .map(QueryResult::EdgesBySummaryHash),
             Query::NodeAtVersion(q) => q.execute(processor).await.map(QueryResult::NodeAtVersion),
             Query::EdgeAtVersion(q) => q.execute(processor).await.map(QueryResult::EdgeAtVersion),
             Query::NodeVersions(q) => q.execute(processor).await.map(QueryResult::NodeVersions),
@@ -287,18 +299,66 @@ macro_rules! impl_request_meta {
 }
 
 impl_request_meta!(NodeById, (NodeName, NodeSummary, Version), "node_by_id");
-impl_request_meta!(NodesByIdsMulti, Vec<(Id, NodeName, NodeSummary, Version)>, "nodes_by_ids_multi");
-impl_request_meta!(EdgeSummaryBySrcDstName, (EdgeSummary, Option<EdgeWeight>, Version), "edge_summary_by_src_dst_name");
-impl_request_meta!(NodeFragmentsByIdTimeRange, Vec<(TimestampMilli, FragmentContent)>, "node_fragments_by_id_time_range");
-impl_request_meta!(EdgeFragmentsByIdTimeRange, Vec<(TimestampMilli, FragmentContent)>, "edge_fragments_by_id_time_range");
-impl_request_meta!(OutgoingEdges, Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>, "outgoing_edges");
-impl_request_meta!(IncomingEdges, Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>, "incoming_edges");
-impl_request_meta!(AllNodes, Vec<(Id, NodeName, NodeSummary, Version)>, "all_nodes");
-impl_request_meta!(AllEdges, Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>, "all_edges");
-impl_request_meta!(NodesBySummaryHash, Vec<NodeSummaryLookupResult>, "nodes_by_summary_hash");
-impl_request_meta!(EdgesBySummaryHash, Vec<EdgeSummaryLookupResult>, "edges_by_summary_hash");
-impl_request_meta!(NodeAtVersion, VersionSnapshot<(NodeName, NodeSummary)>, "node_at_version");
-impl_request_meta!(EdgeAtVersion, VersionSnapshot<(EdgeSummary, Option<EdgeWeight>)>, "edge_at_version");
+impl_request_meta!(
+    NodesByIdsMulti,
+    Vec<(Id, NodeName, NodeSummary, Version)>,
+    "nodes_by_ids_multi"
+);
+impl_request_meta!(
+    EdgeSummaryBySrcDstName,
+    (EdgeSummary, Option<EdgeWeight>, Version),
+    "edge_summary_by_src_dst_name"
+);
+impl_request_meta!(
+    NodeFragmentsByIdTimeRange,
+    Vec<(TimestampMilli, FragmentContent)>,
+    "node_fragments_by_id_time_range"
+);
+impl_request_meta!(
+    EdgeFragmentsByIdTimeRange,
+    Vec<(TimestampMilli, FragmentContent)>,
+    "edge_fragments_by_id_time_range"
+);
+impl_request_meta!(
+    OutgoingEdges,
+    Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>,
+    "outgoing_edges"
+);
+impl_request_meta!(
+    IncomingEdges,
+    Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>,
+    "incoming_edges"
+);
+impl_request_meta!(
+    AllNodes,
+    Vec<(Id, NodeName, NodeSummary, Version)>,
+    "all_nodes"
+);
+impl_request_meta!(
+    AllEdges,
+    Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>,
+    "all_edges"
+);
+impl_request_meta!(
+    NodesBySummaryHash,
+    Vec<NodeSummaryLookupResult>,
+    "nodes_by_summary_hash"
+);
+impl_request_meta!(
+    EdgesBySummaryHash,
+    Vec<EdgeSummaryLookupResult>,
+    "edges_by_summary_hash"
+);
+impl_request_meta!(
+    NodeAtVersion,
+    VersionSnapshot<(NodeName, NodeSummary)>,
+    "node_at_version"
+);
+impl_request_meta!(
+    EdgeAtVersion,
+    VersionSnapshot<(EdgeSummary, Option<EdgeWeight>)>,
+    "edge_at_version"
+);
 impl_request_meta!(NodeVersions, Vec<VersionMeta>, "node_versions");
 impl_request_meta!(EdgeVersions, Vec<VersionMeta>, "edge_versions");
 
@@ -329,7 +389,6 @@ pub struct NodeById {
     pub as_of: Option<SystemTimeMillis>,
 }
 
-
 /// Query parameters for batch lookup of multiple nodes by ID.
 ///
 /// More efficient than multiple `NodeById` calls as it uses RocksDB's
@@ -358,7 +417,6 @@ pub struct NodesByIdsMulti {
     pub as_of: Option<SystemTimeMillis>,
 }
 
-
 /// Query parameters for scanning node fragments by ID with time range filtering.
 ///
 /// This struct contains only user-facing parameters and can be:
@@ -377,7 +435,6 @@ pub struct NodeFragmentsByIdTimeRange {
     /// If None, defaults to current time in the query executor
     pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
-
 
 /// Query parameters for scanning edge fragments by source ID, destination ID, edge name, and time range.
 ///
@@ -404,7 +461,6 @@ pub struct EdgeFragmentsByIdTimeRange {
     pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
-
 /// Query parameters for finding an edge by source ID, destination ID, and name.
 ///
 /// This struct contains only user-facing parameters and can be:
@@ -429,7 +485,6 @@ pub struct EdgeSummaryBySrcDstName {
     /// If None, returns current version. If Some(ts), returns version valid at that time.
     pub as_of: Option<SystemTimeMillis>,
 }
-
 
 /// Query parameters for finding all outgoing edges from a node.
 ///
@@ -465,7 +520,6 @@ pub struct OutgoingEdges {
     pub as_of: Option<SystemTimeMillis>,
 }
 
-
 /// Query parameters for finding all incoming edges to a node.
 ///
 /// This struct contains only user-facing parameters and can be:
@@ -486,7 +540,6 @@ pub struct IncomingEdges {
     /// If None, returns current versions. If Some(ts), returns versions valid at that time.
     pub as_of: Option<SystemTimeMillis>,
 }
-
 
 /// Query parameters for enumerating all nodes with pagination.
 ///
@@ -522,7 +575,6 @@ pub struct AllNodes {
     pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
-
 /// Query parameters for enumerating all edges with pagination.
 ///
 /// This is the query-based interface for graph enumeration, useful for
@@ -557,7 +609,6 @@ pub struct AllEdges {
     pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
-
 impl NodeById {
     /// Create a new query request for the current version.
     pub fn new(id: Id, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
@@ -569,19 +620,16 @@ impl NodeById {
     }
 
     /// Create a point-in-time query at a specific system time.
-    pub fn as_of(id: Id, system_time: SystemTimeMillis, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
+    pub fn as_of(
+        id: Id,
+        system_time: SystemTimeMillis,
+        reference_ts_millis: Option<ActiveTimeMillis>,
+    ) -> Self {
         Self {
             id,
             reference_ts_millis,
             as_of: Some(system_time),
         }
-    }
-}
-
-impl NodeById {
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<(NodeName, NodeSummary, Version)> {
-        self.execute(processor).await
     }
 }
 
@@ -596,7 +644,11 @@ impl NodesByIdsMulti {
     }
 
     /// Create a point-in-time batch query at a specific system time.
-    pub fn as_of(ids: Vec<Id>, system_time: SystemTimeMillis, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
+    pub fn as_of(
+        ids: Vec<Id>,
+        system_time: SystemTimeMillis,
+        reference_ts_millis: Option<ActiveTimeMillis>,
+    ) -> Self {
         Self {
             ids,
             reference_ts_millis,
@@ -622,11 +674,6 @@ impl NodeFragmentsByIdTimeRange {
     /// Check if a timestamp falls within this range.
     pub fn contains(&self, ts: TimestampMilli) -> bool {
         timestamp_in_range(ts, &self.time_range)
-    }
-
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        self.execute(processor).await
     }
 }
 
@@ -689,13 +736,6 @@ impl EdgeSummaryBySrcDstName {
     }
 }
 
-impl EdgeSummaryBySrcDstName {
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<(EdgeSummary, Option<EdgeWeight>, Version)> {
-        self.execute(processor).await
-    }
-}
-
 impl OutgoingEdges {
     /// Create a new query request for current versions.
     pub fn new(id: Id, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
@@ -707,17 +747,16 @@ impl OutgoingEdges {
     }
 
     /// Create a point-in-time query at a specific system time.
-    pub fn as_of(id: Id, system_time: SystemTimeMillis, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
+    pub fn as_of(
+        id: Id,
+        system_time: SystemTimeMillis,
+        reference_ts_millis: Option<ActiveTimeMillis>,
+    ) -> Self {
         Self {
             id,
             reference_ts_millis,
             as_of: Some(system_time),
         }
-    }
-
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>> {
-        self.execute(processor).await
     }
 }
 
@@ -732,17 +771,16 @@ impl IncomingEdges {
     }
 
     /// Create a point-in-time query at a specific system time.
-    pub fn as_of(id: DstId, system_time: SystemTimeMillis, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
+    pub fn as_of(
+        id: DstId,
+        system_time: SystemTimeMillis,
+        reference_ts_millis: Option<ActiveTimeMillis>,
+    ) -> Self {
         Self {
             id,
             reference_ts_millis,
             as_of: Some(system_time),
         }
-    }
-
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>> {
-        self.execute(processor).await
     }
 }
 
@@ -849,7 +887,12 @@ pub struct EdgeAtVersion {
 
 impl EdgeAtVersion {
     pub fn new(source_id: Id, dest_id: Id, name: String, versions_back: u32) -> Self {
-        Self { source_id, dest_id, name, versions_back }
+        Self {
+            source_id,
+            dest_id,
+            name,
+            versions_back,
+        }
     }
 }
 
@@ -864,7 +907,11 @@ pub struct NodeVersions {
 
 impl NodeVersions {
     pub fn new(id: Id, limit: usize) -> Self {
-        Self { id, limit, offset: 0 }
+        Self {
+            id,
+            limit,
+            offset: 0,
+        }
     }
 
     pub fn with_offset(mut self, offset: u32) -> Self {
@@ -886,7 +933,13 @@ pub struct EdgeVersions {
 
 impl EdgeVersions {
     pub fn new(source_id: Id, dest_id: Id, name: String, limit: usize) -> Self {
-        Self { source_id, dest_id, name, limit, offset: 0 }
+        Self {
+            source_id,
+            dest_id,
+            name,
+            limit,
+            offset: 0,
+        }
     }
 
     pub fn with_offset(mut self, offset: u32) -> Self {
@@ -1180,13 +1233,12 @@ impl TransactionQueryExecutor for NodeById {
         tracing::debug!(id = %self.id, "Executing NodeById query in transaction");
 
         // Default None to current time for temporal validity checks
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         // Find current version via prefix scan (VERSIONING)
-        let (_key_bytes, value) = find_node_version(StorageAccess::Transaction(txn, txn_db), self.id, None)?
-            .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
+        let (_key_bytes, value) =
+            find_node_version(StorageAccess::Transaction(txn, txn_db), self.id, None)?
+                .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
 
         // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
         // Check if deleted
@@ -1222,15 +1274,16 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
         txn_db: &rocksdb::TransactionDB,
         cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
-        tracing::debug!(count = self.ids.len(), "Executing NodesByIdsMulti query in transaction");
+        tracing::debug!(
+            count = self.ids.len(),
+            "Executing NodesByIdsMulti query in transaction"
+        );
 
         if self.ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         // Collect entries with NameHash and SummaryHash first
         // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
@@ -1284,9 +1337,7 @@ impl TransactionQueryExecutor for NodeFragmentsByIdTimeRange {
     ) -> Result<Self::Output> {
         tracing::debug!(id = %self.id, time_range = ?self.time_range, "Executing NodeFragmentsByIdTimeRange query in transaction");
 
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         let cf = txn_db
             .cf_handle(schema::NodeFragments::CF_NAME)
@@ -1314,13 +1365,12 @@ impl TransactionQueryExecutor for NodeFragmentsByIdTimeRange {
             let (key_bytes, value_bytes) = item?;
 
             // Check prefix match
-            if key_bytes.len() < prefix_len || &key_bytes[..prefix_len] != &prefix_bytes[..prefix_len]
+            if key_bytes.len() < prefix_len || key_bytes[..prefix_len] != prefix_bytes[..prefix_len]
             {
                 break;
             }
 
-            let key: schema::NodeFragmentCfKey =
-                schema::NodeFragments::key_from_bytes(&key_bytes)?;
+            let key: schema::NodeFragmentCfKey = schema::NodeFragments::key_from_bytes(&key_bytes)?;
             let ts = key.1;
 
             // Check time range
@@ -1359,9 +1409,7 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
             "Executing EdgeFragmentsByIdTimeRange query in transaction"
         );
 
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         let cf = txn_db
             .cf_handle(schema::EdgeFragments::CF_NAME)
@@ -1396,11 +1444,11 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
             let (key_bytes, value_bytes) = item?;
 
             // Parse key to check if it matches our edge
-            let key: schema::EdgeFragmentCfKey = match schema::EdgeFragments::key_from_bytes(&key_bytes)
-            {
-                Ok(k) => k,
-                Err(_) => break,
-            };
+            let key: schema::EdgeFragmentCfKey =
+                match schema::EdgeFragments::key_from_bytes(&key_bytes) {
+                    Ok(k) => k,
+                    Err(_) => break,
+                };
 
             // Check if this is still our edge
             if key.0 != self.source_id || key.1 != self.dest_id || key.2 != edge_name_hash {
@@ -1445,23 +1493,27 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
             "Executing EdgeSummaryBySrcDstName query in transaction"
         );
 
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         // Convert edge name to NameHash for key construction
         let name_hash = NameHash::from_name(&self.name);
 
         // Find current edge version via prefix scan
-        let (_, value) = find_edge_version(StorageAccess::Transaction(txn, txn_db), self.source_id, self.dest_id, name_hash, None)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Edge not found: {} -> {} ({})",
-                    self.source_id,
-                    self.dest_id,
-                    self.name
-                )
-            })?;
+        let (_, value) = find_edge_version(
+            StorageAccess::Transaction(txn, txn_db),
+            self.source_id,
+            self.dest_id,
+            name_hash,
+            None,
+        )?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Edge not found: {} -> {} ({})",
+                self.source_id,
+                self.dest_id,
+                self.name
+            )
+        })?;
 
         // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
         // Check if deleted
@@ -1504,9 +1556,7 @@ impl TransactionQueryExecutor for OutgoingEdges {
     ) -> Result<Self::Output> {
         tracing::debug!(id = %self.id, "Executing OutgoingEdges query in transaction");
 
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         let cf = txn_db
             .cf_handle(schema::ForwardEdges::CF_NAME)
@@ -1520,14 +1570,18 @@ impl TransactionQueryExecutor for OutgoingEdges {
         // Use source ID as prefix for iteration
         let prefix = self.id.into_bytes();
         // Use HashSet for deduplication with versioned keys
-        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> =
+            std::collections::HashSet::new();
         let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
             Vec::new();
 
         // NOTE: We use iterator_cf instead of prefix_iterator_cf because the CF has a
         // 40-byte prefix extractor but we're searching with a 16-byte prefix (src_id only).
         // Using prefix_iterator with mismatched prefix length causes bloom filter issues.
-        let iter = txn.iterator_cf(cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
+        let iter = txn.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
@@ -1589,9 +1643,7 @@ impl TransactionQueryExecutor for IncomingEdges {
     ) -> Result<Self::Output> {
         tracing::debug!(id = %self.id, "Executing IncomingEdges query in transaction");
 
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         let reverse_cf = txn_db
             .cf_handle(schema::ReverseEdges::CF_NAME)
@@ -1605,14 +1657,18 @@ impl TransactionQueryExecutor for IncomingEdges {
         // Use destination ID as prefix for iteration
         let prefix = self.id.into_bytes();
         // Use HashSet for deduplication with versioned keys
-        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> =
+            std::collections::HashSet::new();
         let mut edges_with_hash: Vec<(Option<EdgeWeight>, DstId, SrcId, NameHash, Version)> =
             Vec::new();
 
         // NOTE: We use iterator_cf instead of prefix_iterator_cf because the CF has a
         // 40-byte prefix extractor but we're searching with a 16-byte prefix (dst_id only).
         // Using prefix_iterator with mismatched prefix length causes bloom filter issues.
-        let iter = txn.iterator_cf(reverse_cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
+        let iter = txn.iterator_cf(
+            reverse_cf,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
@@ -1691,9 +1747,7 @@ impl TransactionQueryExecutor for AllNodes {
     ) -> Result<Self::Output> {
         tracing::debug!(limit = self.limit, cursor = ?self.last, "Executing AllNodes query in transaction");
 
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
@@ -1713,7 +1767,10 @@ impl TransactionQueryExecutor for AllNodes {
         });
 
         let iter = if let Some(ref bytes) = start_bytes {
-            txn.iterator_cf(cf, rocksdb::IteratorMode::From(bytes, rocksdb::Direction::Forward))
+            txn.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(bytes, rocksdb::Direction::Forward),
+            )
         } else {
             txn.iterator_cf(cf, rocksdb::IteratorMode::Start)
         };
@@ -1777,9 +1834,7 @@ impl TransactionQueryExecutor for AllEdges {
     ) -> Result<Self::Output> {
         tracing::debug!(limit = self.limit, cursor = ?self.last, "Executing AllEdges query in transaction");
 
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
 
         let cf = txn_db
             .cf_handle(schema::ForwardEdges::CF_NAME)
@@ -1804,13 +1859,17 @@ impl TransactionQueryExecutor for AllEdges {
         });
 
         let iter = if let Some(ref bytes) = start_bytes {
-            txn.iterator_cf(cf, rocksdb::IteratorMode::From(bytes, rocksdb::Direction::Forward))
+            txn.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(bytes, rocksdb::Direction::Forward),
+            )
         } else {
             txn.iterator_cf(cf, rocksdb::IteratorMode::Start)
         };
 
         // Use HashSet for deduplication with versioned keys
-        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> =
+            std::collections::HashSet::new();
         let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
             Vec::new();
 
@@ -1904,11 +1963,6 @@ impl NodesBySummaryHash {
             hash,
             current_only: true,
         }
-    }
-
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<NodeSummaryLookupResult>> {
-        self.execute(processor).await
     }
 }
 
@@ -2121,13 +2175,13 @@ impl QueryExecutor for EdgeVersions {
 #[cfg(test)]
 mod tests {
     use super::super::mutation::AddNode;
-    use crate::writer::Runnable as MutRunnable;
     use super::super::reader::{
         create_reader_with_processor, spawn_consumer, Consumer, ReaderConfig,
     };
     use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use super::super::{Processor, Storage};
     use super::*;
+    use crate::writer::Runnable as MutRunnable;
     use crate::{DataUrl, Id, TimestampMilli};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -2179,7 +2233,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
 
@@ -2207,8 +2262,8 @@ mod tests {
     async fn test_edge_summary_by_src_dst_name_query() {
         use super::super::mutation::{AddEdge, AddNode};
         use super::super::schema::EdgeSummary;
-        use crate::writer::Runnable as MutationRunnable;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::writer::Runnable as MutationRunnable;
         use crate::{Id, TimestampMilli};
         use tempfile::TempDir;
 
@@ -2288,7 +2343,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
 
@@ -2315,12 +2371,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_basic() {
-        use super::super::mutation::{
-            AddEdge, AddEdgeFragment, AddNode,
-        };
-        use crate::writer::Runnable as MutationRunnable;
+        use super::super::mutation::{AddEdge, AddEdgeFragment, AddNode};
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::writer::Runnable as MutationRunnable;
         use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
@@ -2441,7 +2495,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
 
@@ -2490,12 +2545,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_bounds() {
-        use super::super::mutation::{
-            AddEdge, AddEdgeFragment, AddNode,
-        };
-        use crate::writer::Runnable as MutationRunnable;
+        use super::super::mutation::{AddEdge, AddEdgeFragment, AddNode};
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::writer::Runnable as MutationRunnable;
         use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
@@ -2597,7 +2650,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
@@ -2673,13 +2727,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_temporal_validity() {
-        use super::super::mutation::{
-            AddEdge, AddEdgeFragment, AddNode,
-        };
-        use crate::writer::Runnable as MutationRunnable;
+        use super::super::mutation::{AddEdge, AddEdgeFragment, AddNode};
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
-        use crate::{Id, ActivePeriod, TimestampMilli};
+        use crate::writer::Runnable as MutationRunnable;
+        use crate::{ActivePeriod, Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -2789,7 +2841,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
@@ -2853,8 +2906,8 @@ mod tests {
     async fn test_edge_fragments_empty_result() {
         use super::super::mutation::{AddEdge, AddNode};
         use super::super::schema::{EdgeSummary, NodeSummary};
-        use crate::writer::Runnable as MutationRunnable;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::writer::Runnable as MutationRunnable;
         use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
@@ -2924,7 +2977,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
@@ -2970,7 +3024,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
                 valid_range: None,
-                summary: NodeSummary::from_text(&format!("summary for node {}", i)),
+                summary: NodeSummary::from_text(format!("summary for node {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }
@@ -2995,7 +3049,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3041,7 +3096,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
                 valid_range: None,
-                summary: NodeSummary::from_text(&format!("summary for node {}", i)),
+                summary: NodeSummary::from_text(format!("summary for node {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }
@@ -3066,7 +3121,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3134,7 +3190,8 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3174,7 +3231,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
                 valid_range: None,
-                summary: NodeSummary::from_text(&format!("summary for node {}", i)),
+                summary: NodeSummary::from_text(format!("summary for node {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }
@@ -3194,7 +3251,8 @@ mod tests {
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3210,9 +3268,15 @@ mod tests {
         // Verify each node has expected data
         for (id, name, summary, _version) in &results {
             assert!(!id.is_nil(), "Node ID should not be nil");
-            assert!(name.starts_with("node_"), "Node name should start with 'node_'");
             assert!(
-                summary.decode_string().unwrap().contains("summary for node"),
+                name.starts_with("node_"),
+                "Node name should start with 'node_'"
+            );
+            assert!(
+                summary
+                    .decode_string()
+                    .unwrap()
+                    .contains("summary for node"),
                 "Summary should contain expected text"
             );
         }
@@ -3243,7 +3307,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
                 valid_range: None,
-                summary: NodeSummary::from_text(&format!("summary {}", i)),
+                summary: NodeSummary::from_text(format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }
@@ -3263,7 +3327,8 @@ mod tests {
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3325,7 +3390,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
                 valid_range: None,
-                summary: NodeSummary::from_text(&format!("Node {}", name)),
+                summary: NodeSummary::from_text(format!("Node {}", name)),
             }
             .run(&writer)
             .await
@@ -3374,7 +3439,8 @@ mod tests {
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3388,9 +3454,14 @@ mod tests {
         assert_eq!(results.len(), 2, "Should return 2 edges");
 
         // Verify edge data
-        let edge_names: Vec<_> =
-            results.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
-        assert!(edge_names.contains(&"connects"), "Should contain 'connects' edge");
+        let edge_names: Vec<_> = results
+            .iter()
+            .map(|(_, _, _, name, _)| name.as_str())
+            .collect();
+        assert!(
+            edge_names.contains(&"connects"),
+            "Should contain 'connects' edge"
+        );
         assert!(edge_names.contains(&"links"), "Should contain 'links' edge");
 
         // Verify weights are present
@@ -3441,7 +3512,8 @@ mod tests {
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
-        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
+        let (reader, receiver) =
+            create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 

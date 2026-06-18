@@ -13,6 +13,9 @@ use rocksdb::{Cache, ColumnFamilyDescriptor, TransactionDB, DB};
 use super::config::BlockCacheConfig;
 use crate::SubsystemProvider;
 
+pub type DbIteratorItem = (Box<[u8]>, Box<[u8]>);
+pub type DbIterator<'a> = Box<dyn Iterator<Item = Result<DbIteratorItem>> + 'a>;
+
 // ============================================================================
 // DbAccess Trait
 // ============================================================================
@@ -29,10 +32,7 @@ pub trait DbAccess: Send + Sync {
     fn cf_handle(&self, name: &str) -> Option<&rocksdb::ColumnFamily>;
 
     /// Create an iterator over a column family.
-    fn iterator_cf(
-        &self,
-        cf_name: &str,
-    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + '_>>;
+    fn iterator_cf(&self, cf_name: &str) -> Result<DbIterator<'_>>;
 }
 
 impl DbAccess for DB {
@@ -46,10 +46,7 @@ impl DbAccess for DB {
         DB::cf_handle(self, name)
     }
 
-    fn iterator_cf(
-        &self,
-        cf_name: &str,
-    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + '_>> {
+    fn iterator_cf(&self, cf_name: &str) -> Result<DbIterator<'_>> {
         let cf = DB::cf_handle(self, cf_name)
             .ok_or_else(|| anyhow::anyhow!("Column family not found: {}", cf_name))?;
         Ok(Box::new(
@@ -70,10 +67,7 @@ impl DbAccess for TransactionDB {
         <TransactionDB>::cf_handle(self, name)
     }
 
-    fn iterator_cf(
-        &self,
-        cf_name: &str,
-    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + '_>> {
+    fn iterator_cf(&self, cf_name: &str) -> Result<DbIterator<'_>> {
         let cf = <TransactionDB>::cf_handle(self, cf_name)
             .ok_or_else(|| anyhow::anyhow!("Column family not found: {}", cf_name))?;
         Ok(Box::new(

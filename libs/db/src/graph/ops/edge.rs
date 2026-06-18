@@ -2,14 +2,7 @@ use anyhow::Result;
 
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 
-use super::name::{write_name_to_cf, write_name_to_cf_cached};
-use super::summary::{
-    ensure_edge_summary, mark_edge_summary_orphan_candidate, remove_summary_from_orphans,
-    verify_edge_summary_exists,
-};
-use super::super::mutation::{
-    AddEdge, DeleteEdge, RestoreEdge, UpdateEdge,
-};
+use super::super::mutation::{AddEdge, DeleteEdge, RestoreEdge, UpdateEdge};
 use super::super::name_hash::{NameCache, NameHash};
 use super::super::schema::{
     self, EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, EdgeVersionHistory,
@@ -17,6 +10,11 @@ use super::super::schema::{
     ForwardEdges, ReverseEdgeCfKey, ReverseEdgeCfValue, ReverseEdges, VERSION_MAX,
 };
 use super::super::summary_hash::SummaryHash;
+use super::name::{write_name_to_cf, write_name_to_cf_cached};
+use super::summary::{
+    ensure_edge_summary, mark_edge_summary_orphan_candidate, remove_summary_from_orphans,
+    verify_edge_summary_exists,
+};
 use crate::Id;
 
 pub(crate) fn add_edge(
@@ -41,9 +39,9 @@ pub(crate) fn add_edge(
         if let Ok(summary_hash) = SummaryHash::from_summary(&mutation.summary) {
             ensure_edge_summary(txn, txn_db, summary_hash, &mutation.summary)?;
 
-            let index_cf = txn_db
-                .cf_handle(EdgeSummaryIndex::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaryIndex::CF_NAME))?;
+            let index_cf = txn_db.cf_handle(EdgeSummaryIndex::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", EdgeSummaryIndex::CF_NAME)
+            })?;
             let index_key = EdgeSummaryIndexCfKey(
                 summary_hash,
                 mutation.source_node_id,
@@ -52,7 +50,8 @@ pub(crate) fn add_edge(
                 1,
             );
             let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-            let index_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
+            let index_value_bytes =
+                EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
             txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
         }
     }
@@ -89,7 +88,7 @@ pub(crate) fn add_edge(
         mutation.ts_millis,
         summary_hash,
         mutation.weight,
-        mutation.valid_range.clone(),
+        mutation.valid_range,
     );
     let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
     txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
@@ -140,23 +139,37 @@ pub(crate) fn update_edge(
         .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
 
     // Find current edge version
-    let (current_forward_key_bytes, current) =
-        find_current_forward_edge_version(txn, txn_db, mutation.src_id, mutation.dst_id, name_hash)?
-            .ok_or_else(|| anyhow::anyhow!(
-                "Edge not found: {}→{} (name={})",
-                mutation.src_id,
-                mutation.dst_id,
-                mutation.name
-            ))?;
+    let (current_forward_key_bytes, current) = find_current_forward_edge_version(
+        txn,
+        txn_db,
+        mutation.src_id,
+        mutation.dst_id,
+        name_hash,
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "Edge not found: {}→{} (name={})",
+            mutation.src_id,
+            mutation.dst_id,
+            mutation.name
+        )
+    })?;
 
-    let (current_reverse_key_bytes, current_reverse) =
-        find_current_reverse_edge_version(txn, txn_db, mutation.dst_id, mutation.src_id, name_hash)?
-            .ok_or_else(|| anyhow::anyhow!(
-                "ReverseEdge not found: {}→{} (name={})",
-                mutation.src_id,
-                mutation.dst_id,
-                mutation.name
-            ))?;
+    let (current_reverse_key_bytes, current_reverse) = find_current_reverse_edge_version(
+        txn,
+        txn_db,
+        mutation.dst_id,
+        mutation.src_id,
+        name_hash,
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "ReverseEdge not found: {}→{} (name={})",
+            mutation.src_id,
+            mutation.dst_id,
+            mutation.name
+        )
+    })?;
 
     let current_version = current.4;
     let old_hash = current.3;
@@ -195,15 +208,15 @@ pub(crate) fn update_edge(
     // Compute new values (merge mutations with current values)
     // new_weight: None = no change, Some(None) = reset, Some(Some(w)) = set
     let new_weight = match mutation.new_weight {
-        None => current.2,                   // No change
-        Some(None) => None,                  // Reset to None
-        Some(Some(w)) => Some(w),            // Set to specific weight
+        None => current.2,        // No change
+        Some(None) => None,       // Reset to None
+        Some(Some(w)) => Some(w), // Set to specific weight
     };
     // new_active_period: None = no change, Some(None) = reset, Some(Some(p)) = set
     let new_active_period = match &mutation.new_active_period {
-        None => current.1.clone(),           // No change
-        Some(None) => None,                  // Reset to None
-        Some(Some(p)) => Some(p.clone()),    // Set to specific period
+        None => current.1,         // No change
+        Some(None) => None,        // Reset to None
+        Some(Some(p)) => Some(*p), // Set to specific period
     };
 
     // Handle summary update (with index management)
@@ -219,9 +232,16 @@ pub(crate) fn update_edge(
             let index_cf = txn_db
                 .cf_handle(EdgeSummaryIndex::CF_NAME)
                 .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-            let old_index_key = EdgeSummaryIndexCfKey(old_h, mutation.src_id, mutation.dst_id, name_hash, current_version);
+            let old_index_key = EdgeSummaryIndexCfKey(
+                old_h,
+                mutation.src_id,
+                mutation.dst_id,
+                name_hash,
+                current_version,
+            );
             let old_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&old_index_key);
-            let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
+            let stale_value_bytes =
+                EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
             txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
         }
 
@@ -229,9 +249,16 @@ pub(crate) fn update_edge(
         let index_cf = txn_db
             .cf_handle(EdgeSummaryIndex::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-        let new_index_key = EdgeSummaryIndexCfKey(hash, mutation.src_id, mutation.dst_id, name_hash, new_version);
+        let new_index_key = EdgeSummaryIndexCfKey(
+            hash,
+            mutation.src_id,
+            mutation.dst_id,
+            name_hash,
+            new_version,
+        );
         let new_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&new_index_key);
-        let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
+        let current_value_bytes =
+            EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
         txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
 
         Some(hash)
@@ -242,7 +269,7 @@ pub(crate) fn update_edge(
     // Mark old forward edge version as superseded
     let old_forward_value = ForwardEdgeCfValue(
         Some(now),
-        current.1.clone(),
+        current.1,
         current.2,
         current.3,
         current.4,
@@ -252,10 +279,7 @@ pub(crate) fn update_edge(
     txn.put_cf(forward_cf, &current_forward_key_bytes, old_forward_bytes)?;
 
     // Mark old reverse edge version as superseded
-    let old_reverse_value = ReverseEdgeCfValue(
-        Some(now),
-        current_reverse.1.clone(),
-    );
+    let old_reverse_value = ReverseEdgeCfValue(Some(now), current_reverse.1);
     let old_reverse_bytes = ReverseEdges::value_to_bytes(&old_reverse_value)?;
     txn.put_cf(reverse_cf, &current_reverse_key_bytes, old_reverse_bytes)?;
 
@@ -264,7 +288,7 @@ pub(crate) fn update_edge(
     let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
     let new_forward_value = ForwardEdgeCfValue(
         None,
-        new_active_period.clone(),
+        new_active_period,
         new_weight,
         new_hash,
         new_version,
@@ -276,22 +300,20 @@ pub(crate) fn update_edge(
     // Write new reverse edge version
     let new_reverse_key = ReverseEdgeCfKey(mutation.dst_id, mutation.src_id, name_hash, now);
     let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
-    let new_reverse_value = ReverseEdgeCfValue(
-        None,
-        new_active_period.clone(),
-    );
+    let new_reverse_value = ReverseEdgeCfValue(None, new_active_period);
     let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
     txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
 
     // Write version history
-    let history_key = EdgeVersionHistoryCfKey(mutation.src_id, mutation.dst_id, name_hash, now, new_version);
-    let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
-    let history_value = EdgeVersionHistoryCfValue(
+    let history_key = EdgeVersionHistoryCfKey(
+        mutation.src_id,
+        mutation.dst_id,
+        name_hash,
         now,
-        new_hash,
-        new_weight,
-        new_active_period,
+        new_version,
     );
+    let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
+    let history_value = EdgeVersionHistoryCfValue(now, new_hash, new_weight, new_active_period);
     let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
     txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
@@ -325,9 +347,14 @@ pub(crate) fn delete_edge(
         .cf_handle(ForwardEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
 
-    let (edge_key_bytes, current) =
-        find_current_forward_edge_version(txn, txn_db, mutation.src_id, mutation.dst_id, name_hash)?
-            .ok_or_else(|| anyhow::anyhow!("Edge not found: {}→{}", mutation.src_id, mutation.dst_id))?;
+    let (edge_key_bytes, current) = find_current_forward_edge_version(
+        txn,
+        txn_db,
+        mutation.src_id,
+        mutation.dst_id,
+        name_hash,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("Edge not found: {}→{}", mutation.src_id, mutation.dst_id))?;
 
     let current_version = current.4;
     let current_hash = current.3;
@@ -364,7 +391,7 @@ pub(crate) fn delete_edge(
 
     let old_edge_value = ForwardEdgeCfValue(
         Some(now),
-        current.1.clone(),
+        current.1,
         current.2,
         current.3,
         current.4,
@@ -376,14 +403,8 @@ pub(crate) fn delete_edge(
 
     let new_edge_key = ForwardEdgeCfKey(mutation.src_id, mutation.dst_id, name_hash, now);
     let new_edge_key_bytes = ForwardEdges::key_to_bytes(&new_edge_key);
-    let new_edge_value = ForwardEdgeCfValue(
-        None,
-        current.1,
-        current.2,
-        current.3,
-        new_version,
-        true,
-    );
+    let new_edge_value =
+        ForwardEdgeCfValue(None, current.1, current.2, current.3, new_version, true);
     let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
         .map_err(|e| anyhow::anyhow!("Failed to serialize new edge version: {}", e))?;
     txn.put_cf(forward_cf, new_edge_key_bytes, new_edge_bytes)?;
@@ -396,9 +417,16 @@ pub(crate) fn delete_edge(
         let index_cf = txn_db
             .cf_handle(EdgeSummaryIndex::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-        let index_key = EdgeSummaryIndexCfKey(hash, mutation.src_id, mutation.dst_id, name_hash, current_version);
+        let index_key = EdgeSummaryIndexCfKey(
+            hash,
+            mutation.src_id,
+            mutation.dst_id,
+            name_hash,
+            current_version,
+        );
         let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-        let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
+        let stale_value_bytes =
+            EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
         txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
     }
 
@@ -447,20 +475,21 @@ pub(crate) fn restore_edge(
         let key: EdgeVersionHistoryCfKey = EdgeVersionHistory::key_from_bytes(&key_bytes)?;
         let value: EdgeVersionHistoryCfValue = EdgeVersionHistory::value_from_bytes(&value_bytes)?;
 
-        if value.0 <= mutation.as_of {
-            if target_history.is_none() || value.0 > target_history.as_ref().unwrap().1.0 {
-                target_history = Some((key, value));
-            }
+        if value.0 <= mutation.as_of
+            && (target_history.is_none() || value.0 > target_history.as_ref().unwrap().1 .0)
+        {
+            target_history = Some((key, value));
         }
     }
 
-    let (_history_key, history_value) = target_history
-        .ok_or_else(|| anyhow::anyhow!(
+    let (_history_key, history_value) = target_history.ok_or_else(|| {
+        anyhow::anyhow!(
             "No version found in EdgeVersionHistory at or before {} for edge {}→{}",
             mutation.as_of.0,
             mutation.src_id,
             mutation.dst_id
-        ))?;
+        )
+    })?;
 
     if let Some(hash) = history_value.1 {
         let summary_exists = verify_edge_summary_exists(txn, txn_db, hash)?;
@@ -511,7 +540,7 @@ pub(crate) fn restore_edge(
 
         let old_edge_value = ForwardEdgeCfValue(
             Some(now),
-            current.1.clone(),
+            current.1,
             current.2,
             current.3,
             current.4,
@@ -521,13 +550,14 @@ pub(crate) fn restore_edge(
             .map_err(|e| anyhow::anyhow!("Failed to serialize old edge version: {}", e))?;
         txn.put_cf(forward_cf, &current_key_bytes, old_edge_bytes)?;
 
-        if let Some((reverse_key_bytes, reverse)) =
-            find_current_reverse_edge_version(txn, txn_db, mutation.dst_id, mutation.src_id, name_hash)?
-        {
-            let old_reverse_value = ReverseEdgeCfValue(
-                Some(now),
-                reverse.1.clone(),
-            );
+        if let Some((reverse_key_bytes, reverse)) = find_current_reverse_edge_version(
+            txn,
+            txn_db,
+            mutation.dst_id,
+            mutation.src_id,
+            name_hash,
+        )? {
+            let old_reverse_value = ReverseEdgeCfValue(Some(now), reverse.1);
             let old_reverse_bytes = ReverseEdges::value_to_bytes(&old_reverse_value)?;
             txn.put_cf(reverse_cf, &reverse_key_bytes, old_reverse_bytes)?;
         }
@@ -537,7 +567,7 @@ pub(crate) fn restore_edge(
         let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
         let new_forward_value = ForwardEdgeCfValue(
             None,
-            history_value.3.clone(),
+            history_value.3,
             history_value.2,
             history_value.1,
             new_version,
@@ -548,10 +578,7 @@ pub(crate) fn restore_edge(
 
         let new_reverse_key = ReverseEdgeCfKey(mutation.dst_id, mutation.src_id, name_hash, now);
         let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
-        let new_reverse_value = ReverseEdgeCfValue(
-            None,
-            history_value.3.clone(),
-        );
+        let new_reverse_value = ReverseEdgeCfValue(None, history_value.3);
         let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
         txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
 
@@ -567,9 +594,16 @@ pub(crate) fn restore_edge(
             let index_cf = txn_db
                 .cf_handle(EdgeSummaryIndex::CF_NAME)
                 .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-            let index_key = EdgeSummaryIndexCfKey(hash, mutation.src_id, mutation.dst_id, name_hash, new_version);
+            let index_key = EdgeSummaryIndexCfKey(
+                hash,
+                mutation.src_id,
+                mutation.dst_id,
+                name_hash,
+                new_version,
+            );
             let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-            let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
+            let current_value_bytes =
+                EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
             txn.put_cf(index_cf, index_key_bytes, current_value_bytes)?;
         }
 
@@ -577,20 +611,29 @@ pub(crate) fn restore_edge(
             let index_cf = txn_db
                 .cf_handle(EdgeSummaryIndex::CF_NAME)
                 .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-            let index_key = EdgeSummaryIndexCfKey(old_hash, mutation.src_id, mutation.dst_id, name_hash, current_version);
+            let index_key = EdgeSummaryIndexCfKey(
+                old_hash,
+                mutation.src_id,
+                mutation.dst_id,
+                name_hash,
+                current_version,
+            );
             let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-            let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
+            let stale_value_bytes =
+                EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
             txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
         }
 
-        let history_key = EdgeVersionHistoryCfKey(mutation.src_id, mutation.dst_id, name_hash, now, new_version);
-        let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
-        let history_value = EdgeVersionHistoryCfValue(
+        let history_key = EdgeVersionHistoryCfKey(
+            mutation.src_id,
+            mutation.dst_id,
+            name_hash,
             now,
-            history_value.1,
-            history_value.2,
-            history_value.3,
+            new_version,
         );
+        let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
+        let history_value =
+            EdgeVersionHistoryCfValue(now, history_value.1, history_value.2, history_value.3);
         let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
         txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
@@ -620,7 +663,7 @@ pub(crate) fn restore_edge(
         let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
         let new_forward_value = ForwardEdgeCfValue(
             None,
-            history_value.3.clone(),
+            history_value.3,
             history_value.2,
             history_value.1,
             new_version,
@@ -631,10 +674,7 @@ pub(crate) fn restore_edge(
 
         let new_reverse_key = ReverseEdgeCfKey(mutation.dst_id, mutation.src_id, name_hash, now);
         let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
-        let new_reverse_value = ReverseEdgeCfValue(
-            None,
-            history_value.3.clone(),
-        );
+        let new_reverse_value = ReverseEdgeCfValue(None, history_value.3);
         let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
         txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
 
@@ -646,20 +686,29 @@ pub(crate) fn restore_edge(
             let index_cf = txn_db
                 .cf_handle(EdgeSummaryIndex::CF_NAME)
                 .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-            let index_key = EdgeSummaryIndexCfKey(hash, mutation.src_id, mutation.dst_id, name_hash, new_version);
+            let index_key = EdgeSummaryIndexCfKey(
+                hash,
+                mutation.src_id,
+                mutation.dst_id,
+                name_hash,
+                new_version,
+            );
             let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-            let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
+            let current_value_bytes =
+                EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
             txn.put_cf(index_cf, index_key_bytes, current_value_bytes)?;
         }
 
-        let history_key = EdgeVersionHistoryCfKey(mutation.src_id, mutation.dst_id, name_hash, now, new_version);
-        let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
-        let history_value = EdgeVersionHistoryCfValue(
+        let history_key = EdgeVersionHistoryCfKey(
+            mutation.src_id,
+            mutation.dst_id,
+            name_hash,
             now,
-            history_value.1,
-            history_value.2,
-            history_value.3,
+            new_version,
         );
+        let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
+        let history_value =
+            EdgeVersionHistoryCfValue(now, history_value.1, history_value.2, history_value.3);
         let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
         txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
@@ -673,7 +722,6 @@ pub(crate) fn restore_edge(
         Ok(new_version)
     }
 }
-
 
 fn find_current_forward_edge_version(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,

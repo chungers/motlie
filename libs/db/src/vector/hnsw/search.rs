@@ -83,11 +83,10 @@ fn beam_search_layer0(
     ef: usize,
     use_cache: bool,
 ) -> Result<Vec<(f32, VecId)>> {
-    beam_search(index, storage, query, entry, ef, 0, use_cache)
-        .map(|mut results| {
-            results.truncate(k);
-            results
-        })
+    beam_search(index, storage, query, entry, ef, 0, use_cache).map(|mut results| {
+        results.truncate(k);
+        results
+    })
 }
 
 /// Generic beam search at any layer.
@@ -131,10 +130,7 @@ pub(super) fn beam_search(
         let neighbors = get_neighbors(index, storage, node, layer, use_cache)?;
 
         // Collect unvisited neighbors
-        let unvisited: Vec<VecId> = neighbors
-            .iter()
-            .filter(|&n| !visited.contains(n))
-            .collect();
+        let unvisited: Vec<VecId> = neighbors.iter().filter(|&n| !visited.contains(n)).collect();
 
         // Mark as visited
         for &n in &unvisited {
@@ -152,11 +148,7 @@ pub(super) fn beam_search(
         } else {
             unvisited
                 .iter()
-                .filter_map(|&n| {
-                    distance(index, storage, query, n)
-                        .ok()
-                        .map(|d| (n, d))
-                })
+                .filter_map(|&n| distance(index, storage, query, n).ok().map(|d| (n, d)))
                 .collect()
         };
 
@@ -225,6 +217,10 @@ pub(super) fn beam_search(
 /// * `k` - Number of results to return
 /// * `ef` - Search beam width
 /// * `rerank_factor` - Multiplier for candidates to re-rank
+#[expect(
+    clippy::too_many_arguments,
+    reason = "RaBitQ search keeps search knobs explicit for hot-path callers"
+)]
 pub fn search_with_rabitq_cached(
     index: &Index,
     storage: &Storage,
@@ -296,9 +292,11 @@ pub fn search_with_rabitq_cached(
         .collect();
 
     // Parallel reranking - each worker has thread-safe RocksDB access
-    let exact_results = crate::vector::search::rerank_parallel(&vec_ids, |vec_id| {
-        distance(index, storage, query, vec_id).ok()
-    }, k);
+    let exact_results = crate::vector::search::rerank_parallel(
+        &vec_ids,
+        |vec_id| distance(index, storage, query, vec_id).ok(),
+        k,
+    );
 
     Ok(exact_results)
 }
@@ -326,6 +324,10 @@ pub fn search_with_rabitq_cached(
 /// * `code_cache` - In-memory cache of (binary_code, AdcCorrection) tuples
 /// * `entry` - Entry point for beam search
 /// * `ef` - Search beam width
+#[expect(
+    clippy::too_many_arguments,
+    reason = "ADC beam search keeps cache and search knobs explicit for hot-path callers"
+)]
 fn beam_search_layer0_adc_cached(
     index: &Index,
     storage: &Storage,
@@ -343,7 +345,12 @@ fn beam_search_layer0_adc_cached(
 
     // Get entry point's ADC distance from cache (fallback to exact if missing)
     let entry_dist = if let Some(entry_code) = code_cache.get(index.embedding(), entry) {
-        encoder.adc_distance(query_rotated, query_norm, &entry_code.code, &entry_code.correction)
+        encoder.adc_distance(
+            query_rotated,
+            query_norm,
+            &entry_code.code,
+            &entry_code.correction,
+        )
     } else {
         // Fallback to exact distance when code is not cached
         // This happens during incremental indexing or partial cache warmup
@@ -368,10 +375,7 @@ fn beam_search_layer0_adc_cached(
         let neighbors = get_neighbors(index, storage, current, 0, true)?;
 
         // Filter unvisited
-        let unvisited: Vec<VecId> = neighbors
-            .iter()
-            .filter(|n| !visited.contains(*n))
-            .collect();
+        let unvisited: Vec<VecId> = neighbors.iter().filter(|n| !visited.contains(*n)).collect();
 
         if unvisited.is_empty() {
             continue;

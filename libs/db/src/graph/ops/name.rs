@@ -88,8 +88,8 @@ pub(crate) fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<Str
         txn_db.get_cf(names_cf, &key_bytes)?
     };
 
-    let value_bytes = value_bytes
-        .ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
+    let value_bytes =
+        value_bytes.ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
 
     let value = Names::value_from_bytes(&value_bytes)?;
     let name = value.0;

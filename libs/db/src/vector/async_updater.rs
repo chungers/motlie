@@ -263,13 +263,9 @@ impl AsyncUpdaterConfig {
 /// idempotent: re-processing an item that was partially processed is safe.
 pub struct AsyncGraphUpdater {
     storage: Arc<Storage>,
-    registry: Arc<EmbeddingRegistry>,
-    nav_cache: Arc<NavigationCache>,
     config: AsyncUpdaterConfig,
     shutdown: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
-    /// Counter for round-robin embedding selection
-    embedding_counter: Arc<AtomicU64>,
     /// Metrics: total items processed
     items_processed: Arc<AtomicU64>,
     /// Metrics: total batches processed
@@ -301,9 +297,7 @@ impl AsyncGraphUpdater {
         // Drain pending queue on startup if configured
         if config.process_on_startup {
             info!("AsyncGraphUpdater: draining pending queue on startup");
-            if let Err(e) =
-                Self::drain_pending_static(&storage, &registry, &nav_cache, &config)
-            {
+            if let Err(e) = Self::drain_pending_static(&storage, &registry, &nav_cache, &config) {
                 error!(error = %e, "Failed to drain pending queue on startup");
             }
         }
@@ -344,12 +338,9 @@ impl AsyncGraphUpdater {
 
         Self {
             storage,
-            registry,
-            nav_cache,
             config,
             shutdown,
             workers,
-            embedding_counter,
             items_processed,
             batches_processed,
         }
@@ -440,6 +431,10 @@ impl AsyncGraphUpdater {
     // Worker Implementation
     // ========================================================================
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "worker loop receives shared worker state explicitly for thread spawn"
+    )]
     fn worker_loop(
         worker_id: usize,
         storage: Arc<Storage>,
@@ -488,11 +483,7 @@ impl AsyncGraphUpdater {
             }
 
             // Collect a batch of pending inserts using round-robin across embeddings
-            let batch = match Self::collect_batch(
-                &storage,
-                &config,
-                &embedding_counter,
-            ) {
+            let batch = match Self::collect_batch(&storage, &config, &embedding_counter) {
                 Ok(b) => b,
                 Err(e) => {
                     error!(worker_id, error = %e, "Failed to collect batch");
@@ -506,11 +497,7 @@ impl AsyncGraphUpdater {
                 continue;
             }
 
-            debug!(
-                worker_id,
-                batch_size = batch.len(),
-                "Processing batch"
-            );
+            debug!(worker_id, batch_size = batch.len(), "Processing batch");
 
             let start = Instant::now();
             let mut processed = 0;
@@ -520,13 +507,7 @@ impl AsyncGraphUpdater {
                 // process_insert handles idempotency (checks FLAG_PENDING/FLAG_DELETED)
                 // and deletes from pending CF within the same transaction
                 if let Err(e) = Self::process_insert(
-                    &storage,
-                    &registry,
-                    &nav_cache,
-                    &config,
-                    key,
-                    *embedding,
-                    *vec_id,
+                    &storage, &registry, &nav_cache, &config, key, *embedding, *vec_id,
                 ) {
                     warn!(
                         worker_id,
@@ -808,7 +789,7 @@ impl AsyncGraphUpdater {
         );
 
         // Call hnsw::insert to build edges
-        let cache_update = hnsw::insert(&index, &txn, &txn_db, storage, vec_id, &vector)?;
+        let cache_update = hnsw::insert(&index, &txn, txn_db, storage, vec_id, &vector)?;
 
         // Note: hnsw::insert already updates VecMeta with max_layer and flags=0
         // But we need to make sure FLAG_PENDING is cleared. The hnsw::insert
@@ -861,9 +842,9 @@ impl AsyncGraphUpdater {
 
             for (key, embedding, vec_id) in &batch {
                 // process_insert handles both graph building and pending deletion atomically
-                if let Err(e) =
-                    Self::process_insert(storage, registry, nav_cache, config, key, *embedding, *vec_id)
-                {
+                if let Err(e) = Self::process_insert(
+                    storage, registry, nav_cache, config, key, *embedding, *vec_id,
+                ) {
                     warn!(embedding, vec_id, error = %e, "Failed to process during drain");
                 }
             }
@@ -980,7 +961,7 @@ mod tests {
     #[test]
     fn test_insert_async_immediate_searchability() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
+        let (storage, registry, _) = setup_test_env(&temp_dir);
 
         // Register embedding
         let embedding = register_embedding(&registry, 64);
@@ -1112,7 +1093,10 @@ mod tests {
                 .expect("Drain after restart should succeed");
 
             let pending_count = count_pending_items(&storage, embedding_code);
-            assert_eq!(pending_count, 0, "Pending queue should be drained after recovery");
+            assert_eq!(
+                pending_count, 0,
+                "Pending queue should be drained after recovery"
+            );
 
             // Verify vector is indexed/searchable after recovery
             let query = test_vector(64, 42);
@@ -1159,7 +1143,10 @@ mod tests {
 
         // Verify pending queue is cleared
         let pending_count = count_pending_items(&storage, embedding.code());
-        assert_eq!(pending_count, 0, "Pending item should be removed after delete");
+        assert_eq!(
+            pending_count, 0,
+            "Pending item should be removed after delete"
+        );
 
         // Search should not find the deleted vector
         let config = SearchConfig::new(embedding.clone(), 10);

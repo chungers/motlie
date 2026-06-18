@@ -15,12 +15,15 @@
 /// - Key advantage: Low catch-up overhead (7-12ms vs 60-1600ms reopen)
 /// - Continuous read availability (no reopen downtime)
 mod common;
+#[path = "common/concurrent_writer.rs"]
+mod concurrent_writer;
 
-use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
+use common::concurrent_test_utils::{Metrics, TestContext};
+use concurrent_writer::writer_task;
 use motlie_db::graph::query::NodeById;
-use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{create_reader_with_storage, spawn_query_consumer, ReaderConfig};
 use motlie_db::graph::Storage;
+use motlie_db::reader::Runnable as QueryRunnable;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -326,11 +329,13 @@ async fn test_concurrent_read_write_with_secondary() {
 
     println!("\n--- Data Consistency ---");
     let final_node_count = context.node_count().await;
-    let _final_edge_count = context.edge_count().await;
     println!("  Nodes written: {}", final_node_count);
     println!("  Expected nodes: {}", num_nodes);
     println!("  Write operations: {}", write_metrics.success_count);
-    println!("  Expected operations: {}", num_nodes * (1 + num_edges_per_node));
+    println!(
+        "  Expected operations: {}",
+        num_nodes * (1 + num_edges_per_node)
+    );
 
     // Assertions
     assert_eq!(write_metrics.error_count, 0, "Writer should have no errors");

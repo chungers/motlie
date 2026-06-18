@@ -2,21 +2,18 @@ use anyhow::Result;
 
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 
+use super::super::mutation::{AddNode, DeleteNode, RestoreNode, UpdateNode};
+use super::super::name_hash::NameCache;
+use super::super::schema::{
+    self, NodeCfKey, NodeCfValue, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+    NodeVersionHistory, NodeVersionHistoryCfKey, NodeVersionHistoryCfValue, Nodes, VERSION_MAX,
+};
+use super::super::summary_hash::SummaryHash;
 use super::name::{write_name_to_cf, write_name_to_cf_cached};
 use super::summary::{
     ensure_node_summary, mark_node_summary_orphan_candidate, remove_summary_from_orphans,
     verify_node_summary_exists,
 };
-use super::super::mutation::{
-    AddNode, DeleteNode, RestoreNode, UpdateNode,
-};
-use super::super::name_hash::NameCache;
-use super::super::schema::{
-    self, NodeCfKey, NodeCfValue, NodeSummaryIndex, NodeSummaryIndexCfKey,
-    NodeSummaryIndexCfValue, NodeVersionHistory, NodeVersionHistoryCfKey,
-    NodeVersionHistoryCfValue, Nodes, VERSION_MAX,
-};
-use super::super::summary_hash::SummaryHash;
 use crate::Id;
 
 pub(crate) fn add_node(
@@ -36,12 +33,13 @@ pub(crate) fn add_node(
         if let Ok(summary_hash) = SummaryHash::from_summary(&mutation.summary) {
             ensure_node_summary(txn, txn_db, summary_hash, &mutation.summary)?;
 
-            let index_cf = txn_db
-                .cf_handle(NodeSummaryIndex::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaryIndex::CF_NAME))?;
+            let index_cf = txn_db.cf_handle(NodeSummaryIndex::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", NodeSummaryIndex::CF_NAME)
+            })?;
             let index_key = NodeSummaryIndexCfKey(summary_hash, mutation.id, 1);
             let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
-            let index_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+            let index_value_bytes =
+                NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
             txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
         }
     }
@@ -66,7 +64,7 @@ pub(crate) fn add_node(
         mutation.ts_millis,
         summary_hash,
         name_hash,
-        mutation.valid_range.clone(),
+        mutation.valid_range,
     );
     let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
     txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
@@ -110,7 +108,10 @@ pub(crate) fn update_node(
     let is_deleted = current.5;
 
     if is_deleted {
-        return Err(anyhow::anyhow!("Cannot update deleted node: {}", mutation.id));
+        return Err(anyhow::anyhow!(
+            "Cannot update deleted node: {}",
+            mutation.id
+        ));
     }
 
     if current_version != mutation.expected_version {
@@ -123,7 +124,10 @@ pub(crate) fn update_node(
     }
 
     if current_version == VERSION_MAX {
-        return Err(anyhow::anyhow!("Version overflow for node: {}", mutation.id));
+        return Err(anyhow::anyhow!(
+            "Version overflow for node: {}",
+            mutation.id
+        ));
     }
 
     let new_version = current_version + 1;
@@ -131,9 +135,9 @@ pub(crate) fn update_node(
 
     // Compute new active_period
     let new_active_period = match &mutation.new_active_period {
-        None => current.1.clone(),           // No change
-        Some(None) => None,                  // Reset/clear
-        Some(Some(p)) => Some(p.clone()),    // Set to specific period
+        None => current.1,         // No change
+        Some(None) => None,        // Reset/clear
+        Some(Some(p)) => Some(*p), // Set to specific period
     };
 
     // Compute new summary_hash
@@ -160,7 +164,8 @@ pub(crate) fn update_node(
                 .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
             let old_index_key = NodeSummaryIndexCfKey(old_h, mutation.id, current_version);
             let old_index_key_bytes = NodeSummaryIndex::key_to_bytes(&old_index_key);
-            let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
+            let stale_value_bytes =
+                NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
             txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
         }
 
@@ -170,7 +175,8 @@ pub(crate) fn update_node(
                 .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
             let new_index_key = NodeSummaryIndexCfKey(new_h, mutation.id, new_version);
             let new_index_key_bytes = NodeSummaryIndex::key_to_bytes(&new_index_key);
-            let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+            let current_value_bytes =
+                NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
             txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
         }
     }
@@ -178,7 +184,7 @@ pub(crate) fn update_node(
     // Mark old node version with superseded_at
     let old_node_value = NodeCfValue(
         Some(now),
-        current.1.clone(),
+        current.1,
         current.2,
         current.3,
         current.4,
@@ -193,7 +199,7 @@ pub(crate) fn update_node(
     let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
     let new_node_value = NodeCfValue(
         None,
-        new_active_period.clone(),
+        new_active_period,
         current.2,
         new_hash,
         new_version,
@@ -209,12 +215,7 @@ pub(crate) fn update_node(
         .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
     let history_key = NodeVersionHistoryCfKey(mutation.id, now, new_version);
     let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
-    let history_value = NodeVersionHistoryCfValue(
-        now,
-        new_hash,
-        current.2,
-        new_active_period,
-    );
+    let history_value = NodeVersionHistoryCfValue(now, new_hash, current.2, new_active_period);
     let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
     txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
@@ -264,7 +265,10 @@ pub(crate) fn delete_node(
     }
 
     if current_version == VERSION_MAX {
-        return Err(anyhow::anyhow!("Version overflow for node: {}", mutation.id));
+        return Err(anyhow::anyhow!(
+            "Version overflow for node: {}",
+            mutation.id
+        ));
     }
 
     let now = crate::TimestampMilli::now();
@@ -272,7 +276,7 @@ pub(crate) fn delete_node(
 
     let old_node_value = NodeCfValue(
         Some(now),
-        current.1.clone(),
+        current.1,
         current.2,
         current.3,
         current.4,
@@ -284,14 +288,7 @@ pub(crate) fn delete_node(
 
     let new_node_key = NodeCfKey(mutation.id, now);
     let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
-    let new_node_value = NodeCfValue(
-        None,
-        current.1,
-        current.2,
-        current.3,
-        new_version,
-        true,
-    );
+    let new_node_value = NodeCfValue(None, current.1, current.2, current.3, new_version, true);
     let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
         .map_err(|e| anyhow::anyhow!("Failed to serialize new node version: {}", e))?;
     txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
@@ -306,7 +303,8 @@ pub(crate) fn delete_node(
             .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
         let index_key = NodeSummaryIndexCfKey(hash, mutation.id, current_version);
         let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
-        let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
+        let stale_value_bytes =
+            NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
         txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
     }
 
@@ -347,19 +345,20 @@ pub(crate) fn restore_node(
         let key: NodeVersionHistoryCfKey = NodeVersionHistory::key_from_bytes(&key_bytes)?;
         let value: NodeVersionHistoryCfValue = NodeVersionHistory::value_from_bytes(&value_bytes)?;
 
-        if value.0 <= mutation.as_of {
-            if target_history.is_none() || value.0 > target_history.as_ref().unwrap().1.0 {
-                target_history = Some((key, value));
-            }
+        if value.0 <= mutation.as_of
+            && (target_history.is_none() || value.0 > target_history.as_ref().unwrap().1 .0)
+        {
+            target_history = Some((key, value));
         }
     }
 
-    let (_history_key, history_value) = target_history
-        .ok_or_else(|| anyhow::anyhow!(
+    let (_history_key, history_value) = target_history.ok_or_else(|| {
+        anyhow::anyhow!(
             "No version found in NodeVersionHistory at or before {} for node {}",
             mutation.as_of.0,
             mutation.id
-        ))?;
+        )
+    })?;
 
     if let Some(hash) = history_value.1 {
         let summary_exists = verify_node_summary_exists(txn, txn_db, hash)?;
@@ -376,7 +375,8 @@ pub(crate) fn restore_node(
         .cf_handle(Nodes::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
 
-    if let Some((current_key_bytes, current)) = find_current_node_version(txn, txn_db, mutation.id)? {
+    if let Some((current_key_bytes, current)) = find_current_node_version(txn, txn_db, mutation.id)?
+    {
         let current_version = current.4;
         let current_hash = current.3;
 
@@ -402,7 +402,7 @@ pub(crate) fn restore_node(
 
         let old_node_value = NodeCfValue(
             Some(now),
-            current.1.clone(),
+            current.1,
             current.2,
             current.3,
             current.4,
@@ -417,7 +417,7 @@ pub(crate) fn restore_node(
         let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
         let new_node_value = NodeCfValue(
             None,
-            history_value.3.clone(),
+            history_value.3,
             history_value.2,
             history_value.1,
             new_version,
@@ -441,7 +441,8 @@ pub(crate) fn restore_node(
                 .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
             let index_key = NodeSummaryIndexCfKey(hash, mutation.id, new_version);
             let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
-            let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+            let current_value_bytes =
+                NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
             txn.put_cf(index_cf, index_key_bytes, current_value_bytes)?;
         }
 
@@ -451,18 +452,15 @@ pub(crate) fn restore_node(
                 .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
             let index_key = NodeSummaryIndexCfKey(old_hash, mutation.id, current_version);
             let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
-            let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
+            let stale_value_bytes =
+                NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
             txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
         }
 
         let history_key = NodeVersionHistoryCfKey(mutation.id, now, new_version);
         let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
-        let history_value = NodeVersionHistoryCfValue(
-            now,
-            history_value.1,
-            history_value.2,
-            history_value.3,
-        );
+        let history_value =
+            NodeVersionHistoryCfValue(now, history_value.1, history_value.2, history_value.3);
         let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
         txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
@@ -490,7 +488,7 @@ pub(crate) fn restore_node(
         let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
         let new_node_value = NodeCfValue(
             None,
-            history_value.3.clone(),
+            history_value.3,
             history_value.2,
             history_value.1,
             new_version,
@@ -510,18 +508,15 @@ pub(crate) fn restore_node(
                 .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
             let index_key = NodeSummaryIndexCfKey(hash, mutation.id, new_version);
             let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
-            let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+            let current_value_bytes =
+                NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
             txn.put_cf(index_cf, index_key_bytes, current_value_bytes)?;
         }
 
         let history_key = NodeVersionHistoryCfKey(mutation.id, now, new_version);
         let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
-        let history_value = NodeVersionHistoryCfValue(
-            now,
-            history_value.1,
-            history_value.2,
-            history_value.3,
-        );
+        let history_value =
+            NodeVersionHistoryCfValue(now, history_value.1, history_value.2, history_value.3);
         let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
         txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 

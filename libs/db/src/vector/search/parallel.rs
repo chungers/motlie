@@ -43,8 +43,8 @@
 
 use rayon::prelude::*;
 
-use crate::vector::schema::VecId;
 use super::config::DEFAULT_PARALLEL_RERANK_THRESHOLD;
+use crate::vector::schema::VecId;
 
 /// Parallel reranking - compute exact distances for candidates.
 ///
@@ -56,7 +56,7 @@ use super::config::DEFAULT_PARALLEL_RERANK_THRESHOLD;
 ///
 /// * `candidates` - Vector IDs to compute distances for
 /// * `distance_fn` - Closure that computes distance for a single vector ID.
-///                   Returns `None` if vector not found (will be filtered out).
+///   Returns `None` if vector not found (will be filtered out).
 /// * `k` - Number of top results to return
 ///
 /// # Returns
@@ -96,7 +96,7 @@ where
 ///
 /// * `candidates` - Vector IDs to compute distances for
 /// * `distance_fn` - Closure that computes distance for a single vector ID.
-///                   Returns `None` if vector not found (will be filtered out).
+///   Returns `None` if vector not found (will be filtered out).
 /// * `k` - Number of top results to return
 ///
 /// # Returns
@@ -128,10 +128,10 @@ where
 ///
 /// * `candidates` - Vector IDs to compute distances for
 /// * `distance_fn` - Closure that computes distance for a single vector ID.
-///                   Returns `None` if vector not found (will be filtered out).
+///   Returns `None` if vector not found (will be filtered out).
 /// * `k` - Number of top results to return
 /// * `threshold` - Minimum candidate count to use parallel. Use
-///                 [`DEFAULT_PARALLEL_RERANK_THRESHOLD`] for the tuned default.
+///   [`DEFAULT_PARALLEL_RERANK_THRESHOLD`] for the tuned default.
 ///
 /// # Returns
 ///
@@ -193,7 +193,7 @@ where
 /// Adaptive reranking using the default threshold.
 ///
 /// Convenience wrapper for [`rerank_adaptive`] using
-/// [`DEFAULT_PARALLEL_RERANK_THRESHOLD`] (800).
+///   [`DEFAULT_PARALLEL_RERANK_THRESHOLD`] (800).
 ///
 /// # Example
 ///
@@ -204,7 +204,12 @@ pub fn rerank_auto<F>(candidates: &[VecId], distance_fn: F, k: usize) -> Vec<(f3
 where
     F: Fn(VecId) -> Option<f32> + Sync,
 {
-    rerank_adaptive(candidates, distance_fn, k, DEFAULT_PARALLEL_RERANK_THRESHOLD)
+    rerank_adaptive(
+        candidates,
+        distance_fn,
+        k,
+        DEFAULT_PARALLEL_RERANK_THRESHOLD,
+    )
 }
 
 /// Parallel batch distance computation.

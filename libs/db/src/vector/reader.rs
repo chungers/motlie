@@ -211,7 +211,10 @@ impl Consumer {
                 Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
             }
         } else {
-            request.payload.execute_with_processor(&self.processor).await
+            request
+                .payload
+                .execute_with_processor(&self.processor)
+                .await
         };
         request.respond(result);
     }
@@ -300,8 +303,8 @@ pub fn spawn_query_consumers_with_storage_autoreg(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::Storage;
+    use super::*;
     use tempfile::tempdir;
 
     fn create_test_storage() -> Arc<Storage> {

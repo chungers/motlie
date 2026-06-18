@@ -23,23 +23,46 @@ use anyhow::Result;
 use rocksdb::{Direction, IteratorMode};
 
 use super::name_hash::NameHash;
-use super::summary_hash::SummaryHash;
-use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use super::schema::{
-    self, is_active_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
-    EdgeWeight, FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries,
-    NodeSummaryCfKey, SrcId, ActivePeriod, Version,
-    // Scan: summary index CFs
-    NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
-    EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
-    // Scan: version history CFs
-    NodeVersionHistory, NodeVersionHistoryCfKey,
-    EdgeVersionHistory, EdgeVersionHistoryCfKey,
-    // Scan: orphan + meta CFs
-    OrphanSummaries, OrphanSummaryCfKey, SummaryKind,
+    self,
+    is_active_at_time,
+    ActivePeriod,
+    DstId,
+    EdgeName,
+    EdgeSummaries,
+    EdgeSummary,
+    EdgeSummaryCfKey,
+    EdgeSummaryIndex,
+    EdgeSummaryIndexCfKey,
+    EdgeSummaryIndexCfValue,
+    EdgeVersionHistory,
+    EdgeVersionHistoryCfKey,
+    EdgeWeight,
+    FragmentContent,
     GraphMeta,
+    NameCfKey,
+    Names,
+    NodeName,
+    NodeSummaries,
+    NodeSummary,
+    NodeSummaryCfKey,
+    // Scan: summary index CFs
+    NodeSummaryIndex,
+    NodeSummaryIndexCfKey,
+    NodeSummaryIndexCfValue,
+    // Scan: version history CFs
+    NodeVersionHistory,
+    NodeVersionHistoryCfKey,
+    // Scan: orphan + meta CFs
+    OrphanSummaries,
+    OrphanSummaryCfKey,
+    SrcId,
+    SummaryKind,
+    Version,
 };
+use super::summary_hash::SummaryHash;
 use super::Storage;
+use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::{ActiveTimeMillis, Id, TimestampMilli};
 
 // ============================================================================
@@ -74,8 +97,8 @@ fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
         txn_db.get_cf(names_cf, &key_bytes)?
     };
 
-    let value_bytes = value_bytes
-        .ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
+    let value_bytes =
+        value_bytes.ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
 
     let value = Names::value_from_bytes(&value_bytes)?;
     let name = value.0;
@@ -93,7 +116,10 @@ fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
 /// Resolve a SummaryHash to its full NodeSummary from the cold CF.
 ///
 /// Returns an empty summary if the hash is None or the summary is not found.
-fn resolve_node_summary(storage: &Storage, summary_hash: Option<SummaryHash>) -> Result<NodeSummary> {
+fn resolve_node_summary(
+    storage: &Storage,
+    summary_hash: Option<SummaryHash>,
+) -> Result<NodeSummary> {
     let Some(hash) = summary_hash else {
         return Ok(NodeSummary::from_text(""));
     };
@@ -125,7 +151,10 @@ fn resolve_node_summary(storage: &Storage, summary_hash: Option<SummaryHash>) ->
 /// Resolve a SummaryHash to its full EdgeSummary from the cold CF.
 ///
 /// Returns an empty summary if the hash is None or the summary is not found.
-fn resolve_edge_summary(storage: &Storage, summary_hash: Option<SummaryHash>) -> Result<EdgeSummary> {
+fn resolve_edge_summary(
+    storage: &Storage,
+    summary_hash: Option<SummaryHash>,
+) -> Result<EdgeSummary> {
     let Some(hash) = summary_hash else {
         return Ok(EdgeSummary::from_text(""));
     };
@@ -189,11 +218,8 @@ pub trait Visitable {
 
     /// Execute the scan, calling the visitor for each record.
     /// Returns the number of records visited.
-    fn accept<V: Visitor<Self::Record>>(
-        &self,
-        storage: &Storage,
-        visitor: &mut V,
-    ) -> Result<usize>;
+    fn accept<V: Visitor<Self::Record>>(&self, storage: &Storage, visitor: &mut V)
+        -> Result<usize>;
 }
 
 // ============================================================================
@@ -332,7 +358,6 @@ pub struct GraphMetaRecord {
     pub field: String,
     pub cursor_bytes_hex: String,
 }
-
 
 // ============================================================================
 // Scan Types
@@ -487,13 +512,16 @@ pub struct AllGraphMeta {
     pub reverse: bool,
 }
 
-
 // ============================================================================
 // Internal Helpers
 // ============================================================================
 
 /// Internal helper to run iteration over a column family.
 /// Handles both readonly and readwrite storage modes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "scan helper keeps storage, cursor, transform, and visitor dependencies explicit"
+)]
 fn iterate_and_visit<CF, R, V, F, G>(
     storage: &Storage,
     seek_key: Vec<u8>,
@@ -534,9 +562,9 @@ where
 
     // Handle readonly/secondary mode
     if let Ok(db) = storage.db() {
-        let cf = db.cf_handle(CF::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME)
-        })?;
+        let cf = db
+            .cf_handle(CF::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME))?;
 
         for item in db.iterator_cf(cf, mode) {
             if count >= limit {
@@ -577,9 +605,9 @@ where
     } else {
         // Handle readwrite mode (TransactionDB)
         let txn_db = storage.transaction_db()?;
-        let cf = txn_db.cf_handle(CF::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME)
-        })?;
+        let cf = txn_db
+            .cf_handle(CF::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME))?;
 
         for item in txn_db.iterator_cf(cf, mode) {
             if count >= limit {
@@ -624,6 +652,10 @@ where
 
 /// Internal helper to run iteration over a hot column family (rkyv serialized).
 /// Same as `iterate_and_visit` but for HotColumnFamilyRecord types.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "hot-CF scan helper keeps storage, cursor, transform, and visitor dependencies explicit"
+)]
 fn iterate_and_visit_hot<CF, R, V, F, G>(
     storage: &Storage,
     seek_key: Vec<u8>,
@@ -664,9 +696,9 @@ where
 
     // Handle readonly/secondary mode
     if let Ok(db) = storage.db() {
-        let cf = db.cf_handle(CF::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME)
-        })?;
+        let cf = db
+            .cf_handle(CF::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME))?;
 
         for item in db.iterator_cf(cf, mode) {
             if count >= limit {
@@ -707,9 +739,9 @@ where
     } else {
         // Handle readwrite mode (TransactionDB)
         let txn_db = storage.transaction_db()?;
-        let cf = txn_db.cf_handle(CF::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME)
-        })?;
+        let cf = txn_db
+            .cf_handle(CF::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME))?;
 
         for item in txn_db.iterator_cf(cf, mode) {
             if count >= limit {
@@ -765,7 +797,12 @@ impl Visitable for AllNodes {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
-        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllNodes scan");
+        tracing::debug!(
+            limit = self.limit,
+            reverse = self.reverse,
+            has_cursor = self.last.is_some(),
+            "Executing AllNodes scan"
+        );
 
         // With VERSIONING, key is (Id, ValidSince). For cursor positioning,
         // we seek past all versions of the cursor ID by using max timestamp.
@@ -844,7 +881,12 @@ impl Visitable for AllEdges {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
-        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdges scan");
+        tracing::debug!(
+            limit = self.limit,
+            reverse = self.reverse,
+            has_cursor = self.last.is_some(),
+            "Executing AllEdges scan"
+        );
 
         // With VERSIONING, key is (SrcId, DstId, NameHash, ValidSince). For cursor positioning,
         // we seek past all versions of the cursor edge by using max timestamp.
@@ -916,8 +958,8 @@ impl Visitable for AllEdges {
                     dst_id: key.1,
                     name,
                     summary,
-                    weight: value.2,           // Weight at index 2
-                    valid_range: value.1,      // ActivePeriod at index 1
+                    weight: value.2,      // Weight at index 2
+                    valid_range: value.1, // ActivePeriod at index 1
                     version: value.4,
                 })
             },
@@ -936,7 +978,12 @@ impl Visitable for AllReverseEdges {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
-        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllReverseEdges scan");
+        tracing::debug!(
+            limit = self.limit,
+            reverse = self.reverse,
+            has_cursor = self.last.is_some(),
+            "Executing AllReverseEdges scan"
+        );
 
         // With VERSIONING, key is (DstId, SrcId, NameHash, ValidSince). For cursor positioning,
         // we seek past all versions of the cursor edge by using max timestamp.
@@ -1018,13 +1065,16 @@ impl Visitable for AllNodeFragments {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
-        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllNodeFragments scan");
+        tracing::debug!(
+            limit = self.limit,
+            reverse = self.reverse,
+            has_cursor = self.last.is_some(),
+            "Executing AllNodeFragments scan"
+        );
 
         let seek_key = self
             .last
-            .map(|(id, ts)| {
-                schema::NodeFragments::key_to_bytes(&schema::NodeFragmentCfKey(id, ts))
-            })
+            .map(|(id, ts)| schema::NodeFragments::key_to_bytes(&schema::NodeFragmentCfKey(id, ts)))
             .unwrap_or_default();
 
         let last_cursor = self.last;
@@ -1038,9 +1088,8 @@ impl Visitable for AllNodeFragments {
             self.reference_ts_millis,
             |key_bytes| {
                 if let Some((id, ts)) = last_cursor {
-                    let cursor_key = schema::NodeFragments::key_to_bytes(
-                        &schema::NodeFragmentCfKey(id, ts),
-                    );
+                    let cursor_key =
+                        schema::NodeFragments::key_to_bytes(&schema::NodeFragmentCfKey(id, ts));
                     key_bytes == cursor_key.as_slice()
                 } else {
                     false
@@ -1070,7 +1119,12 @@ impl Visitable for AllEdgeFragments {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
-        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdgeFragments scan");
+        tracing::debug!(
+            limit = self.limit,
+            reverse = self.reverse,
+            has_cursor = self.last.is_some(),
+            "Executing AllEdgeFragments scan"
+        );
 
         // Convert String cursor to NameHash for key construction
         let seek_key = self
@@ -1079,10 +1133,7 @@ impl Visitable for AllEdgeFragments {
             .map(|(src, dst, name, ts)| {
                 let name_hash = NameHash::from_name(name);
                 schema::EdgeFragments::key_to_bytes(&schema::EdgeFragmentCfKey(
-                    *src,
-                    *dst,
-                    name_hash,
-                    *ts,
+                    *src, *dst, name_hash, *ts,
                 ))
             })
             .unwrap_or_default();
@@ -1165,7 +1216,9 @@ impl Visitable for AllNames {
             self.reverse,
             None,
             |key_bytes| {
-                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
             },
             |key_bytes, value_bytes| {
                 let key = Names::key_from_bytes(key_bytes)?;
@@ -1194,7 +1247,9 @@ impl Visitable for AllNodeSummaries {
             .map(|h| NodeSummaries::key_to_bytes(&NodeSummaryCfKey(h)))
             .unwrap_or_default();
 
-        let cursor_key = self.last.map(|h| NodeSummaries::key_to_bytes(&NodeSummaryCfKey(h)));
+        let cursor_key = self
+            .last
+            .map(|h| NodeSummaries::key_to_bytes(&NodeSummaryCfKey(h)));
 
         iterate_and_visit::<NodeSummaries, _, _, _, _>(
             storage,
@@ -1204,7 +1259,9 @@ impl Visitable for AllNodeSummaries {
             self.reverse,
             None,
             |key_bytes| {
-                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
             },
             |key_bytes, value_bytes| {
                 let key = NodeSummaries::key_from_bytes(key_bytes)?;
@@ -1233,7 +1290,9 @@ impl Visitable for AllEdgeSummaries {
             .map(|h| EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(h)))
             .unwrap_or_default();
 
-        let cursor_key = self.last.map(|h| EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(h)));
+        let cursor_key = self
+            .last
+            .map(|h| EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(h)));
 
         iterate_and_visit::<EdgeSummaries, _, _, _, _>(
             storage,
@@ -1243,7 +1302,9 @@ impl Visitable for AllEdgeSummaries {
             self.reverse,
             None,
             |key_bytes| {
-                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
             },
             |key_bytes, value_bytes| {
                 let key = EdgeSummaries::key_from_bytes(key_bytes)?;
@@ -1269,14 +1330,12 @@ impl Visitable for AllNodeSummaryIndex {
     ) -> Result<usize> {
         let seek_key = self
             .last
-            .map(|(h, id, v)| {
-                NodeSummaryIndex::key_to_bytes(&NodeSummaryIndexCfKey(h, id, v))
-            })
+            .map(|(h, id, v)| NodeSummaryIndex::key_to_bytes(&NodeSummaryIndexCfKey(h, id, v)))
             .unwrap_or_default();
 
-        let cursor_key = self.last.map(|(h, id, v)| {
-            NodeSummaryIndex::key_to_bytes(&NodeSummaryIndexCfKey(h, id, v))
-        });
+        let cursor_key = self
+            .last
+            .map(|(h, id, v)| NodeSummaryIndex::key_to_bytes(&NodeSummaryIndexCfKey(h, id, v)));
 
         iterate_and_visit::<NodeSummaryIndex, _, _, _, _>(
             storage,
@@ -1286,7 +1345,9 @@ impl Visitable for AllNodeSummaryIndex {
             self.reverse,
             None,
             |key_bytes| {
-                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
             },
             |key_bytes, value_bytes| {
                 let key = NodeSummaryIndex::key_from_bytes(key_bytes)?;
@@ -1336,7 +1397,9 @@ impl Visitable for AllEdgeSummaryIndex {
             self.reverse,
             None,
             |key_bytes| {
-                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
             },
             |key_bytes, value_bytes| {
                 let key = EdgeSummaryIndex::key_from_bytes(key_bytes)?;
@@ -1346,8 +1409,8 @@ impl Visitable for AllEdgeSummaryIndex {
                 } else {
                     "stale".to_string()
                 };
-                let edge_name = resolve_name(storage, key.3)
-                    .unwrap_or_else(|_| hash_to_hex(key.3.as_bytes()));
+                let edge_name =
+                    resolve_name(storage, key.3).unwrap_or_else(|_| hash_to_hex(key.3.as_bytes()));
                 Ok(EdgeSummaryIndexRecord {
                     hash: hash_to_hex(key.0.as_bytes()),
                     src_id: key.1,
@@ -1390,7 +1453,9 @@ impl Visitable for AllNodeVersionHistory {
             self.reverse,
             None,
             |key_bytes| {
-                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
             },
             |key_bytes, value_bytes| {
                 let key = NodeVersionHistory::key_from_bytes(key_bytes)?;
@@ -1424,7 +1489,9 @@ impl Visitable for AllEdgeVersionHistory {
         let seek_key = self
             .last
             .map(|(src, dst, name_hash, ts, v)| {
-                EdgeVersionHistory::key_to_bytes(&EdgeVersionHistoryCfKey(src, dst, name_hash, ts, v))
+                EdgeVersionHistory::key_to_bytes(&EdgeVersionHistoryCfKey(
+                    src, dst, name_hash, ts, v,
+                ))
             })
             .unwrap_or_default();
 
@@ -1440,13 +1507,15 @@ impl Visitable for AllEdgeVersionHistory {
             self.reverse,
             None,
             |key_bytes| {
-                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
             },
             |key_bytes, value_bytes| {
                 let key = EdgeVersionHistory::key_from_bytes(key_bytes)?;
                 let value = EdgeVersionHistory::value_from_bytes(value_bytes)?;
-                let edge_name = resolve_name(storage, key.2)
-                    .unwrap_or_else(|_| hash_to_hex(key.2.as_bytes()));
+                let edge_name =
+                    resolve_name(storage, key.2).unwrap_or_else(|_| hash_to_hex(key.2.as_bytes()));
                 Ok(EdgeVersionHistoryRecord {
                     src_id: key.0,
                     dst_id: key.1,
@@ -1475,14 +1544,12 @@ impl Visitable for AllOrphanSummaries {
     ) -> Result<usize> {
         let seek_key = self
             .last
-            .map(|(ts, h)| {
-                OrphanSummaries::key_to_bytes(&OrphanSummaryCfKey(ts, h))
-            })
+            .map(|(ts, h)| OrphanSummaries::key_to_bytes(&OrphanSummaryCfKey(ts, h)))
             .unwrap_or_default();
 
-        let cursor_key = self.last.map(|(ts, h)| {
-            OrphanSummaries::key_to_bytes(&OrphanSummaryCfKey(ts, h))
-        });
+        let cursor_key = self
+            .last
+            .map(|(ts, h)| OrphanSummaries::key_to_bytes(&OrphanSummaryCfKey(ts, h)));
 
         iterate_and_visit::<OrphanSummaries, _, _, _, _>(
             storage,
@@ -1492,7 +1559,9 @@ impl Visitable for AllOrphanSummaries {
             self.reverse,
             None,
             |key_bytes| {
-                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
             },
             |key_bytes, value_bytes| {
                 let key = OrphanSummaries::key_from_bytes(key_bytes)?;
@@ -1553,13 +1622,12 @@ impl Visitable for AllGraphMeta {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
+    use super::super::mutation::{AddEdge, AddNode};
+    use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use super::*;
     use crate::writer::Runnable;
-    use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
-    use super::super::mutation::{AddEdge, AddNode};
     use crate::DataUrl;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
@@ -1583,7 +1651,10 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 valid_range: None,
-                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(format!(
+                    "test summary {}",
+                    i
+                )),
             };
             node.run(&writer).await.unwrap();
         }
@@ -1637,7 +1708,10 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 valid_range: None,
-                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(format!(
+                    "test summary {}",
+                    i
+                )),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -1708,7 +1782,10 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 valid_range: None,
-                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(format!(
+                    "test summary {}",
+                    i
+                )),
             };
             node.run(&writer).await.unwrap();
         }
@@ -1762,7 +1839,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
                 valid_range: None,
-                summary: super::super::schema::NodeSummary::from_text(&format!("{} summary", name)),
+                summary: super::super::schema::NodeSummary::from_text(format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -1834,7 +1911,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
                 valid_range: None,
-                summary: super::super::schema::NodeSummary::from_text(&format!("{} summary", name)),
+                summary: super::super::schema::NodeSummary::from_text(format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -1911,7 +1988,10 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
                 valid_range: None,
-                summary: super::super::schema::NodeSummary::from_text(&format!("node {} summary", i)),
+                summary: super::super::schema::NodeSummary::from_text(format!(
+                    "node {} summary",
+                    i
+                )),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -2001,7 +2081,10 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 valid_range: None,
-                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(format!(
+                    "test summary {}",
+                    i
+                )),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -2074,7 +2157,10 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 valid_range: None,
-                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(format!(
+                    "test summary {}",
+                    i
+                )),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;

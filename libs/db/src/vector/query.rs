@@ -69,7 +69,6 @@ pub enum Query {
     // ─────────────────────────────────────────────────────────────
     /// K-nearest neighbor search via HNSW
     SearchKNN(SearchKNN),
-
     // ─────────────────────────────────────────────────────────────
     // Graph Introspection (Future)
     // ─────────────────────────────────────────────────────────────
@@ -82,7 +81,11 @@ impl std::fmt::Display for Query {
         match self {
             Query::GetVector(q) => write!(f, "GetVector: embedding={}, id={}", q.embedding, q.id),
             Query::GetInternalId(q) => {
-                write!(f, "GetInternalId: embedding={}, key={:?}", q.embedding, q.external_key)
+                write!(
+                    f,
+                    "GetInternalId: embedding={}, key={:?}",
+                    q.embedding, q.external_key
+                )
             }
             Query::GetExternalId(q) => write!(
                 f,
@@ -99,9 +102,7 @@ impl std::fmt::Display for Query {
             Query::FindEmbeddings(q) => write!(
                 f,
                 "FindEmbeddings: model={:?}, dim={:?}, distance={:?}",
-                q.filter.model,
-                q.filter.dim,
-                q.filter.distance
+                q.filter.model, q.filter.dim, q.filter.distance
             ),
             Query::SearchKNN(q) => write!(
                 f,
@@ -224,10 +225,12 @@ pub struct GetInternalId {
 impl GetInternalId {
     /// Create a new GetInternalId query.
     pub fn new(embedding: EmbeddingCode, external_key: ExternalKey) -> Self {
-        Self { embedding, external_key }
+        Self {
+            embedding,
+            external_key,
+        }
     }
 }
-
 
 #[async_trait::async_trait]
 impl QueryExecutor for GetInternalId {
@@ -260,7 +263,6 @@ impl GetExternalId {
         Self { embedding, vec_id }
     }
 }
-
 
 #[async_trait::async_trait]
 impl QueryExecutor for GetExternalId {
@@ -391,7 +393,10 @@ impl QueryExecutor for FindEmbeddings {
     type Output = Vec<Embedding>;
 
     async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
-        Ok(super::ops::read::find_embeddings(processor.registry(), &self.filter))
+        Ok(super::ops::read::find_embeddings(
+            processor.registry(),
+            &self.filter,
+        ))
     }
 }
 
@@ -491,7 +496,10 @@ impl SearchKNN {
     /// Strategy selection:
     /// - If `exact=true`: Uses `processor.search()` with exact distances
     /// - If `exact=false`: Constructs `SearchConfig` for auto-strategy selection
-    pub(crate) fn execute_with_processor(&self, processor: &Processor) -> Result<Vec<SearchResult>> {
+    pub(crate) fn execute_with_processor(
+        &self,
+        processor: &Processor,
+    ) -> Result<Vec<SearchResult>> {
         if self.exact {
             // Exact search - always use precise distance computation
             processor.search(&self.embedding, &self.query, self.k, self.ef)

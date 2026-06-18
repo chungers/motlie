@@ -14,9 +14,9 @@ use motlie_core::telemetry::SubsystemInfo;
 use super::gc::{GraphGarbageCollector, GraphGcConfig};
 use super::name_hash::{NameCache, NameHash};
 use super::processor::Processor as GraphProcessor;
-use super::reader::{spawn_query_consumers_with_processor, ReaderConfig, Reader};
+use super::reader::{spawn_query_consumers_with_processor, Reader, ReaderConfig};
 use super::schema::{self, ALL_COLUMN_FAMILIES};
-use super::writer::{spawn_mutation_consumer_with_processor, WriterConfig, Writer};
+use super::writer::{spawn_mutation_consumer_with_processor, Writer, WriterConfig};
 use super::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, Storage};
 
 // ============================================================================
@@ -208,26 +208,25 @@ impl Subsystem {
         let processor = Arc::new(GraphProcessor::new(storage.clone()));
 
         // Spawn mutation consumer with shared processor
-        let (writer, mutation_handle) = spawn_mutation_consumer_with_processor(
-            processor.clone(),
-            writer_config,
-        );
+        let (writer, mutation_handle) =
+            spawn_mutation_consumer_with_processor(processor.clone(), writer_config);
 
         // Spawn query consumers with shared processor
-        let (reader, query_handles) = spawn_query_consumers_with_processor(
-            processor,
-            reader_config,
-            num_query_workers,
-        );
+        let (reader, query_handles) =
+            spawn_query_consumers_with_processor(processor, reader_config, num_query_workers);
 
         // Store consumer handles for graceful shutdown
         {
-            let mut handles = self.consumer_handles.write().expect("consumer_handles lock poisoned");
+            let mut handles = self
+                .consumer_handles
+                .write()
+                .expect("consumer_handles lock poisoned");
             handles.push(mutation_handle);
             // Convert Vec<JoinHandle<()>> to Vec<JoinHandle<Result<()>>>
             handles.extend(query_handles.into_iter().map(|h| {
                 tokio::spawn(async move {
-                    h.await.map_err(|e| anyhow::anyhow!("Query consumer panicked: {}", e))?;
+                    h.await
+                        .map_err(|e| anyhow::anyhow!("Query consumer panicked: {}", e))?;
                     Ok(())
                 })
             }));
@@ -267,7 +266,11 @@ impl Subsystem {
     }
 
     /// Internal method to prewarm the name cache.
-    fn prewarm_impl(db: &dyn DbAccess, cache: &NameCache, config: &NameCacheConfig) -> Result<usize> {
+    fn prewarm_impl(
+        db: &dyn DbAccess,
+        cache: &NameCache,
+        config: &NameCacheConfig,
+    ) -> Result<usize> {
         if config.prewarm_limit == 0 {
             return Ok(0);
         }
@@ -398,7 +401,10 @@ impl SubsystemInfo for Subsystem {
 
     fn info_lines(&self) -> Vec<(&'static str, String)> {
         vec![
-            ("Prewarm Limit", self.prewarm_config.prewarm_limit.to_string()),
+            (
+                "Prewarm Limit",
+                self.prewarm_config.prewarm_limit.to_string(),
+            ),
             ("Column Families", ALL_COLUMN_FAMILIES.len().to_string()),
         ]
     }
@@ -450,16 +456,35 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
 
         // 2. Join consumer tasks (cooperative shutdown - channels are closed)
         // Consumers exit naturally when recv() returns None, so joins should complete quickly.
-        let handles = std::mem::take(&mut *self.consumer_handles.write().expect("consumer_handles lock poisoned"));
+        let handles = std::mem::take(
+            &mut *self
+                .consumer_handles
+                .write()
+                .expect("consumer_handles lock poisoned"),
+        );
         if !handles.is_empty() {
-            tracing::debug!(subsystem = "graph", count = handles.len(), "Joining consumer tasks");
+            tracing::debug!(
+                subsystem = "graph",
+                count = handles.len(),
+                "Joining consumer tasks"
+            );
             match tokio::runtime::Handle::try_current() {
                 Ok(runtime_handle) => {
                     for (i, handle) in handles.into_iter().enumerate() {
                         match runtime_handle.block_on(handle) {
-                            Ok(Ok(())) => tracing::debug!(subsystem = "graph", consumer = i, "Consumer joined"),
-                            Ok(Err(e)) => tracing::warn!(subsystem = "graph", consumer = i, error = %e, "Consumer returned error"),
-                            Err(_) => tracing::warn!(subsystem = "graph", consumer = i, "Consumer task panicked"),
+                            Ok(Ok(())) => tracing::debug!(
+                                subsystem = "graph",
+                                consumer = i,
+                                "Consumer joined"
+                            ),
+                            Ok(Err(e)) => {
+                                tracing::warn!(subsystem = "graph", consumer = i, error = %e, "Consumer returned error")
+                            }
+                            Err(_) => tracing::warn!(
+                                subsystem = "graph",
+                                consumer = i,
+                                "Consumer task panicked"
+                            ),
                         }
                     }
                 }
@@ -552,7 +577,9 @@ pub struct NameCacheConfig {
 
 impl Default for NameCacheConfig {
     fn default() -> Self {
-        Self { prewarm_limit: 1000 }
+        Self {
+            prewarm_limit: 1000,
+        }
     }
 }
 
@@ -612,8 +639,8 @@ mod tests {
 
     #[test]
     fn test_subsystem_with_config() {
-        let subsystem = Subsystem::new()
-            .with_prewarm_config(NameCacheConfig { prewarm_limit: 500 });
+        let subsystem =
+            Subsystem::new().with_prewarm_config(NameCacheConfig { prewarm_limit: 500 });
         assert_eq!(subsystem.prewarm_config().prewarm_limit, 500);
     }
 
@@ -626,8 +653,14 @@ mod tests {
         let cfs: std::collections::HashSet<_> = cf_names.iter().copied().collect();
         assert!(cfs.contains("graph/names"), "Should have graph/names CF");
         assert!(cfs.contains("graph/nodes"), "Should have graph/nodes CF");
-        assert!(cfs.contains("graph/forward_edges"), "Should have graph/forward_edges CF");
-        assert!(cfs.contains("graph/reverse_edges"), "Should have graph/reverse_edges CF");
+        assert!(
+            cfs.contains("graph/forward_edges"),
+            "Should have graph/forward_edges CF"
+        );
+        assert!(
+            cfs.contains("graph/reverse_edges"),
+            "Should have graph/reverse_edges CF"
+        );
     }
 
     #[test]

@@ -27,10 +27,9 @@ use std::time::Duration;
 
 use motlie_db::vector::benchmark::{LAION_EMBEDDING_DIM, SIFT_EMBEDDING_DIM};
 use motlie_db::vector::{
-    create_reader_with_storage, create_writer,
-    spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
-    Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable,
-    SearchKNN, Storage, WriterConfig,
+    create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+    spawn_query_consumers_with_storage_autoreg, Distance, EmbeddingBuilder, ExternalKey,
+    InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN, Storage, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -122,9 +121,7 @@ async fn test_cosine_2bit_rabitq() {
 
     // Register LAION-style embedding (Cosine for RaBitQ)
     let builder = EmbeddingBuilder::new("laion-2bit", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
-    let embedding = registry
-        .register(builder)
-        .expect("register embedding");
+    let embedding = registry.register(builder).expect("register embedding");
 
     println!(
         "Registered: model={}, dim={}, distance={:?}",
@@ -192,7 +189,11 @@ async fn test_cosine_2bit_rabitq() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -214,7 +215,11 @@ async fn test_cosine_2bit_rabitq() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -260,9 +265,7 @@ async fn test_cosine_4bit_rabitq() {
 
     // Register LAION-style embedding
     let builder = EmbeddingBuilder::new("laion-4bit", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
-    let embedding = registry
-        .register(builder)
-        .expect("register embedding");
+    let embedding = registry.register(builder).expect("register embedding");
 
     println!(
         "Registered: model={}, dim={}, distance={:?}",
@@ -330,7 +333,11 @@ async fn test_cosine_4bit_rabitq() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -352,7 +359,11 @@ async fn test_cosine_4bit_rabitq() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -409,11 +420,12 @@ async fn test_multi_embedding_non_interference() {
     // =========================================================================
 
     // Embedding 1: LAION-style (512D, Cosine)
-    let laion_builder =
-        EmbeddingBuilder::new("laion-clip-vit-b32", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
-    let laion_embedding = registry
-        .register(laion_builder)
-        .expect("register laion");
+    let laion_builder = EmbeddingBuilder::new(
+        "laion-clip-vit-b32",
+        LAION_EMBEDDING_DIM as u32,
+        Distance::Cosine,
+    );
+    let laion_embedding = registry.register(laion_builder).expect("register laion");
     println!(
         "Registered LAION: code={}, model={}, dim={}, distance={:?}",
         laion_embedding.code(),
@@ -425,9 +437,7 @@ async fn test_multi_embedding_non_interference() {
     // Embedding 2: SIFT-style (128D, L2)
     let sift_builder =
         EmbeddingBuilder::new("sift-descriptors", SIFT_EMBEDDING_DIM as u32, Distance::L2);
-    let sift_embedding = registry
-        .register(sift_builder)
-        .expect("register sift");
+    let sift_embedding = registry.register(sift_builder).expect("register sift");
     println!(
         "Registered SIFT: code={}, model={}, dim={}, distance={:?}",
         sift_embedding.code(),
@@ -438,9 +448,7 @@ async fn test_multi_embedding_non_interference() {
 
     // Embedding 3: Custom 768D (like BERT, Cosine)
     let custom_builder = EmbeddingBuilder::new("bert-base-uncased", 768, Distance::Cosine);
-    let custom_embedding = registry
-        .register(custom_builder)
-        .expect("register custom");
+    let custom_embedding = registry.register(custom_builder).expect("register custom");
     println!(
         "Registered Custom: code={}, model={}, dim={}, distance={:?}",
         custom_embedding.code(),
@@ -672,7 +680,11 @@ async fn test_multi_embedding_non_interference() {
             .expect("laion search");
         let indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| laion_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                laion_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
         laion_recall_sum += compute_recall(&laion_gt[qi], &indices);
     }
@@ -691,7 +703,11 @@ async fn test_multi_embedding_non_interference() {
             .expect("sift search");
         let indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| sift_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                sift_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
         sift_recall_sum += compute_recall(&sift_gt[qi], &indices);
     }
@@ -709,7 +725,11 @@ async fn test_multi_embedding_non_interference() {
             .expect("custom search");
         let indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| custom_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                custom_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
         custom_recall_sum += compute_recall(&custom_gt[qi], &indices);
     }
@@ -774,10 +794,7 @@ async fn test_embedding_registration_idempotent() {
     assert_eq!(embedding1.model(), embedding2.model());
     assert_eq!(embedding1.dim(), embedding2.dim());
 
-    println!(
-        "Re-registration returned same code: {}",
-        embedding1.code()
-    );
+    println!("Re-registration returned same code: {}", embedding1.code());
 
     // Register different model - should get different code
     let builder3 = EmbeddingBuilder::new("different-model", 256, Distance::Cosine);
@@ -821,7 +838,11 @@ async fn test_exact_vs_rabitq_search_paths() {
     registry.set_storage(storage.clone()).expect("set storage");
 
     // Register Cosine embedding (RaBitQ eligible)
-    let builder = EmbeddingBuilder::new("search-path-test", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
+    let builder = EmbeddingBuilder::new(
+        "search-path-test",
+        LAION_EMBEDDING_DIM as u32,
+        Distance::Cosine,
+    );
     let embedding = registry.register(builder).expect("register");
 
     // Create writer and reader

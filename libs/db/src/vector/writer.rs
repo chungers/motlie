@@ -33,9 +33,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::hnsw::CacheUpdate;
 use super::mutation::{FlushMarker, Mutation, MutationOutcome, MutationResult};
-use crate::request::{new_request_id, ReplyEnvelope, RequestEnvelope};
 use super::processor::Processor;
 use super::schema::{AdcCorrection, EmbeddingCode, VecId};
+use crate::request::{new_request_id, ReplyEnvelope, RequestEnvelope};
 
 // ============================================================================
 // MutationCacheUpdate
@@ -127,12 +127,14 @@ impl MutationCacheUpdate {
         }
 
         // Add code-only updates for vectors without nav updates
-        let nav_vec_ids: std::collections::HashSet<_> =
-            updates.iter().filter_map(|u| match u {
+        let nav_vec_ids: std::collections::HashSet<_> = updates
+            .iter()
+            .filter_map(|u| match u {
                 Self::Nav(n) => Some(n.vec_id),
                 Self::Both { vec_id, .. } => Some(*vec_id),
                 _ => None,
-            }).collect();
+            })
+            .collect();
 
         for (vec_id, code, correction) in code_updates {
             if !nav_vec_ids.contains(&vec_id) {
@@ -509,7 +511,7 @@ impl Consumer {
         let mut results: Vec<MutationResult> = Vec::with_capacity(mutations.len());
 
         for mutation in mutations {
-            let outcome = self.execute_single(&txn, &txn_db, mutation)?;
+            let outcome = self.execute_single(&txn, txn_db, mutation)?;
             if let Some(update) = outcome.cache_update {
                 cache_updates.push(update);
             }
@@ -619,26 +621,6 @@ pub fn spawn_mutation_consumer_with_storage_autoreg(
     spawn_mutation_consumer_with_storage(receiver, config, storage, registry)
 }
 
-/// Spawn a mutation consumer with an explicit Processor.
-///
-/// This is a lower-level API for cases where you need direct Processor access
-/// (e.g., for search operations). For simple mutation handling, prefer
-/// `spawn_mutation_consumer_with_storage()`.
-///
-/// # Note
-///
-/// This function is `pub(crate)` to encourage use of the storage-based API
-/// which hides the Processor abstraction.
-#[allow(dead_code)] // Available for advanced use cases requiring custom processors
-pub(crate) fn spawn_mutation_consumer_with_processor(
-    receiver: mpsc::Receiver<MutationRequest>,
-    config: WriterConfig,
-    processor: Arc<Processor>,
-) -> tokio::task::JoinHandle<Result<()>> {
-    let consumer = Consumer::new(receiver, config, processor);
-    spawn_consumer(consumer)
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -683,7 +665,11 @@ mod tests {
             rabitq_seed: 42,
         });
         let embedding = Embedding::new(spec, None);
-        let mutation = super::super::mutation::InsertVector::new(&embedding, ExternalKey::NodeId(id), vec![1.0, 2.0, 3.0]);
+        let mutation = super::super::mutation::InsertVector::new(
+            &embedding,
+            ExternalKey::NodeId(id),
+            vec![1.0, 2.0, 3.0],
+        );
         writer.send(vec![mutation.into()]).await.unwrap();
 
         // Should receive it

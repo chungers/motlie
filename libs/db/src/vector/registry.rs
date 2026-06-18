@@ -16,11 +16,11 @@ use dashmap::DashMap;
 use rocksdb::{IteratorMode, TransactionDB};
 use std::sync::OnceLock;
 
-use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, MutationCodec};
 use super::distance::Distance;
 use super::embedding::{Embedder, Embedding, EmbeddingBuilder};
 use super::mutation::AddEmbeddingSpec;
 use super::schema::{EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, VectorElementType};
+use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, MutationCodec};
 
 // ============================================================================
 // EmbeddingFilter
@@ -364,7 +364,9 @@ impl EmbeddingRegistry {
     /// First checks cache, then falls back to RocksDB if not found.
     pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding> {
         let spec_key = (model.to_string(), dim, distance);
-        self.by_spec.get(&spec_key).map(|e| self.make_embedding(e.clone()))
+        self.by_spec
+            .get(&spec_key)
+            .map(|e| self.make_embedding(e.clone()))
     }
 
     /// Get embedding by code (for deserialization from storage).
@@ -377,7 +379,8 @@ impl EmbeddingRegistry {
         }
 
         // Slow path: lazy load from RocksDB
-        self.load_from_storage(code).map(|spec| self.make_embedding(spec))
+        self.load_from_storage(code)
+            .map(|spec| self.make_embedding(spec))
     }
 
     /// Load spec from RocksDB and cache it (lazy load).
@@ -554,8 +557,12 @@ mod tests {
         assert!(!EmbeddingFilter::default().dim(1024).matches(&emb));
 
         // Distance filter
-        assert!(EmbeddingFilter::default().distance(Distance::Cosine).matches(&emb));
-        assert!(!EmbeddingFilter::default().distance(Distance::L2).matches(&emb));
+        assert!(EmbeddingFilter::default()
+            .distance(Distance::Cosine)
+            .matches(&emb));
+        assert!(!EmbeddingFilter::default()
+            .distance(Distance::L2)
+            .matches(&emb));
 
         // Combined filter
         let filter = EmbeddingFilter::default()
@@ -564,9 +571,7 @@ mod tests {
             .distance(Distance::Cosine);
         assert!(filter.matches(&emb));
 
-        let filter = EmbeddingFilter::default()
-            .model("gemma")
-            .dim(1024); // Wrong dim
+        let filter = EmbeddingFilter::default().model("gemma").dim(1024); // Wrong dim
         assert!(!filter.matches(&emb));
     }
 

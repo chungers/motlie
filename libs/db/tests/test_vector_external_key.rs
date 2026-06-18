@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use motlie_db::graph::{NameHash, SummaryHash};
 use motlie_db::vector::{
-    create_reader_with_storage, create_writer,
-    spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
-    DeleteVector, Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable,
-    ReaderConfig, Runnable, SearchKNN, Storage, WriterConfig,
+    create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+    spawn_query_consumers_with_storage_autoreg, DeleteVector, Distance, EmbeddingBuilder,
+    ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN, Storage,
+    WriterConfig,
 };
 use motlie_db::{Id, TimestampMilli};
 use rand::prelude::*;
@@ -58,8 +58,7 @@ async fn test_mixed_external_key_types() {
     );
 
     // Create reader and consumers
-    let (search_reader, search_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, search_rx) = create_reader_with_storage(ReaderConfig::default());
     let _query_handles = spawn_query_consumers_with_storage_autoreg(
         search_rx,
         ReaderConfig::default(),
@@ -127,7 +126,7 @@ async fn test_mixed_external_key_types() {
             .immediate()
             .run(&writer)
             .await
-            .expect(&format!("insert {:?}", key.variant_name()));
+            .unwrap_or_else(|_| panic!("insert {:?}", key.variant_name()));
     }
 
     writer.flush().await.expect("flush");
@@ -139,7 +138,7 @@ async fn test_mixed_external_key_types() {
         let results = SearchKNN::new(&embedding, query_vec.clone(), 10)
             .run(&search_reader, SEARCH_TIMEOUT)
             .await
-            .expect(&format!("search for {:?}", query_key.variant_name()));
+            .unwrap_or_else(|_| panic!("search for {:?}", query_key.variant_name()));
 
         // The exact match should be in the results
         let found = results.iter().any(|r| &r.external_key == query_key);
@@ -147,10 +146,7 @@ async fn test_mixed_external_key_types() {
             found,
             "Expected to find {:?} in search results, got: {:?}",
             query_key,
-            results
-                .iter()
-                .map(|r| &r.external_key)
-                .collect::<Vec<_>>()
+            results.iter().map(|r| &r.external_key).collect::<Vec<_>>()
         );
 
         // Verify variant_name() method works correctly
@@ -219,9 +215,7 @@ async fn test_mixed_external_key_types() {
         .await
         .expect("search after delete");
 
-    let found = results
-        .iter()
-        .any(|r| &r.external_key == &node_fragment_key);
+    let found = results.iter().any(|r| r.external_key == node_fragment_key);
     assert!(
         !found,
         "Deleted NodeFragment key should not appear in results"
@@ -280,17 +274,16 @@ async fn test_external_key_serialization_roundtrip() {
     for key in test_keys {
         // Test binary serialization
         let bytes = key.to_bytes();
-        let parsed = ExternalKey::from_bytes(&bytes).expect(&format!(
-            "from_bytes should succeed for {:?}",
-            key.variant_name()
-        ));
+        let parsed = ExternalKey::from_bytes(&bytes)
+            .unwrap_or_else(|_| panic!("from_bytes should succeed for {:?}", key.variant_name()));
         assert_eq!(key, parsed, "Binary roundtrip for {:?}", key.variant_name());
 
         // Test JSON serialization (via serde)
         let json = serde_json::to_string(&key).expect("JSON serialize");
         let from_json: ExternalKey = serde_json::from_str(&json).expect("JSON deserialize");
         assert_eq!(
-            key, from_json,
+            key,
+            from_json,
             "JSON roundtrip for {:?}",
             key.variant_name()
         );

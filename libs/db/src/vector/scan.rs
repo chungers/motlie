@@ -22,16 +22,10 @@ use anyhow::Result;
 use rocksdb::{Direction, IteratorMode};
 
 use super::schema::{
-    BinaryCodeCfKey, BinaryCodes, EmbeddingCode, EmbeddingSpecCfKey, EmbeddingSpecs,
-    Edges, EdgeCfKey,
-    ExternalKey, GraphMeta, GraphMetaField,
-    IdAlloc, IdAllocField,
-    IdForward,
-    IdReverse, IdReverseCfKey,
-    LifecycleCounts, LifecycleCountsCfKey,
-    Pending, PendingCfKey,
-    VecId, VecMeta, VecMetaCfKey,
-    Vectors, VectorCfKey,
+    BinaryCodeCfKey, BinaryCodes, EdgeCfKey, Edges, EmbeddingCode, EmbeddingSpecCfKey,
+    EmbeddingSpecs, ExternalKey, GraphMeta, GraphMetaField, IdAlloc, IdAllocField, IdForward,
+    IdReverse, IdReverseCfKey, LifecycleCounts, LifecycleCountsCfKey, Pending, PendingCfKey, VecId,
+    VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
 use super::Storage;
 use crate::rocksdb::ColumnFamily;
@@ -65,11 +59,8 @@ where
 pub trait Visitable {
     type Record;
 
-    fn accept<V: Visitor<Self::Record>>(
-        &self,
-        storage: &Storage,
-        visitor: &mut V,
-    ) -> Result<usize>;
+    fn accept<V: Visitor<Self::Record>>(&self, storage: &Storage, visitor: &mut V)
+        -> Result<usize>;
 }
 
 // ============================================================================
@@ -336,9 +327,9 @@ where
     let mut count = 0;
 
     if let Ok(db) = storage.db() {
-        let cf = db.cf_handle(CF::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME)
-        })?;
+        let cf = db
+            .cf_handle(CF::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME))?;
 
         for item in db.iterator_cf(cf, mode) {
             if count >= limit {
@@ -365,9 +356,9 @@ where
         }
     } else {
         let txn_db = storage.transaction_db()?;
-        let cf = txn_db.cf_handle(CF::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME)
-        })?;
+        let cf = txn_db
+            .cf_handle(CF::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME))?;
 
         for item in txn_db.iterator_cf(cf, mode) {
             if count >= limit {
@@ -425,7 +416,11 @@ impl Visitable for AllEmbeddingSpecs {
             seek_key,
             self.limit,
             self.reverse,
-            |key_bytes| cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice()),
+            |key_bytes| {
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
+            },
             |key_bytes, value_bytes| {
                 let key = EmbeddingSpecs::key_from_bytes(key_bytes)?;
                 let value = EmbeddingSpecs::value_from_bytes(value_bytes)?;
@@ -468,7 +463,11 @@ impl Visitable for AllVectors {
             seek_key,
             self.limit,
             self.reverse,
-            |key_bytes| cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice()),
+            |key_bytes| {
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
+            },
             |key_bytes, value_bytes| {
                 let key = Vectors::key_from_bytes(key_bytes)?;
                 // Don't deserialize full vector — just report dimensions
@@ -508,7 +507,11 @@ impl Visitable for AllHnswEdges {
             seek_key,
             self.limit,
             self.reverse,
-            |key_bytes| cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice()),
+            |key_bytes| {
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
+            },
             |key_bytes, value_bytes| {
                 let key = Edges::key_from_bytes(key_bytes)?;
                 Ok(HnswEdgeRecord {
@@ -545,7 +548,11 @@ impl Visitable for AllBinaryCodes {
             seek_key,
             self.limit,
             self.reverse,
-            |key_bytes| cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice()),
+            |key_bytes| {
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
+            },
             |key_bytes, value_bytes| {
                 let key = BinaryCodes::key_from_bytes(key_bytes)?;
                 let value = BinaryCodes::value_from_bytes(value_bytes)?;
@@ -586,7 +593,11 @@ impl Visitable for AllVecMeta {
             seek_key,
             self.limit,
             self.reverse,
-            |key_bytes| cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice()),
+            |key_bytes| {
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
+            },
             |key_bytes, value_bytes| {
                 let key = VecMeta::key_from_bytes(key_bytes)?;
                 // Use rkyv zero-copy deserialization
@@ -708,7 +719,11 @@ impl Visitable for AllIdReverse {
             seek_key,
             self.limit,
             self.reverse,
-            |key_bytes| cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice()),
+            |key_bytes| {
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
+            },
             |key_bytes, value_bytes| {
                 let key = IdReverse::key_from_bytes(key_bytes)?;
                 let value = IdReverse::value_from_bytes(value_bytes)?;
@@ -783,21 +798,23 @@ impl Visitable for AllPending {
 
         let seek_key = self
             .last
-            .map(|(ec, ts, vid)| {
-                Pending::key_to_bytes(&PendingCfKey(ec, TimestampMilli(ts), vid))
-            })
+            .map(|(ec, ts, vid)| Pending::key_to_bytes(&PendingCfKey(ec, TimestampMilli(ts), vid)))
             .unwrap_or_default();
 
-        let cursor_key = self.last.map(|(ec, ts, vid)| {
-            Pending::key_to_bytes(&PendingCfKey(ec, TimestampMilli(ts), vid))
-        });
+        let cursor_key = self
+            .last
+            .map(|(ec, ts, vid)| Pending::key_to_bytes(&PendingCfKey(ec, TimestampMilli(ts), vid)));
 
         iterate_and_visit::<Pending, _, _, _>(
             storage,
             seek_key,
             self.limit,
             self.reverse,
-            |key_bytes| cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice()),
+            |key_bytes| {
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
+            },
             |key_bytes, _value_bytes| {
                 let key = Pending::key_from_bytes(key_bytes)?;
                 Ok(PendingRecord {
@@ -833,7 +850,11 @@ impl Visitable for AllLifecycleCounts {
             seek_key,
             self.limit,
             self.reverse,
-            |key_bytes| cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice()),
+            |key_bytes| {
+                cursor_key
+                    .as_ref()
+                    .is_some_and(|ck| key_bytes == ck.as_slice())
+            },
             |key_bytes, value_bytes| {
                 let key = LifecycleCounts::key_from_bytes(key_bytes)?;
                 let value = LifecycleCounts::value_from_bytes(value_bytes)?;

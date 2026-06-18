@@ -26,18 +26,20 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+use motlie_db::rocksdb::ColumnFamily;
 use motlie_db::vector::benchmark::ConcurrentMetrics;
 use motlie_db::vector::hnsw;
-use motlie_db::vector::schema::{EmbeddingCode, EmbeddingSpec, VectorCfKey, VectorCfValue, Vectors};
 use motlie_db::vector::reader::{
     create_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig,
+};
+use motlie_db::vector::schema::{
+    EmbeddingCode, EmbeddingSpec, VectorCfKey, VectorCfValue, Vectors,
 };
 use motlie_db::vector::{
     cache::NavigationCache, create_writer, spawn_mutation_consumer_with_storage_autoreg,
     DeleteVector, Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, Storage,
     VectorElementType, WriterConfig,
 };
-use motlie_db::rocksdb::ColumnFamily;
 use motlie_db::Id;
 use rand::prelude::*;
 use tempfile::TempDir;
@@ -205,7 +207,10 @@ fn test_snapshot_isolation_delete_during_search() {
     let initial_count: usize = txn_db
         .iterator_cf(&reverse_cf, rocksdb::IteratorMode::Start)
         .count();
-    assert_eq!(initial_count, num_vectors as usize, "Should have all vectors before delete");
+    assert_eq!(
+        initial_count, num_vectors as usize,
+        "Should have all vectors before delete"
+    );
 
     // Step 3: Concurrent delete of 500 vectors (ids 0-499)
     let delete_count = 500u32;
@@ -279,7 +284,8 @@ fn test_snapshot_isolation_delete_during_search() {
     assert!(
         current_count < num_vectors as usize,
         "Current view should see fewer vectors after delete: expected < {}, got {}",
-        num_vectors, current_count
+        num_vectors,
+        current_count
     );
 
     println!(
@@ -342,7 +348,13 @@ fn test_snapshot_isolation_insert_during_search() {
         let mut inserted = 0u32;
         for vec_id in initial_count..(initial_count + 500) {
             let vector = seeded_vector(DIM, vec_id as u64);
-            match insert_vector_atomic(&storage_clone, &index_clone, TEST_EMBEDDING, vec_id, &vector) {
+            match insert_vector_atomic(
+                &storage_clone,
+                &index_clone,
+                TEST_EMBEDDING,
+                vec_id,
+                &vector,
+            ) {
                 InsertResult::Success(cache_update) => {
                     cache_update.apply(index_clone.nav_cache());
                     inserted += 1;
@@ -567,7 +579,10 @@ fn test_transaction_conflict_resolution() {
                 let vector = vec![(thread_id * 1000 + i) as f32; DIM];
                 let value = VectorCfValue(vector);
 
-                if txn.put_cf(&vectors_cf, &key_bytes, Vectors::value_to_bytes(&value)).is_ok() {
+                if txn
+                    .put_cf(&vectors_cf, &key_bytes, Vectors::value_to_bytes(&value))
+                    .is_ok()
+                {
                     if txn.commit().is_ok() {
                         commit_count.fetch_add(1, Ordering::Relaxed);
                         successes += 1;
@@ -647,7 +662,10 @@ fn test_transaction_conflict_stress() {
                 let value = VectorCfValue(vector);
 
                 let start = Instant::now();
-                if txn.put_cf(&vectors_cf, &key_bytes, Vectors::value_to_bytes(&value)).is_ok() {
+                if txn
+                    .put_cf(&vectors_cf, &key_bytes, Vectors::value_to_bytes(&value))
+                    .is_ok()
+                {
                     match txn.commit() {
                         Ok(_) => {
                             metrics.record_insert(start.elapsed());
@@ -716,7 +734,10 @@ fn test_transaction_conflict_stress() {
     }
 
     println!("Valid keys after stress: {}/{}", valid_reads, key_space);
-    assert!(valid_reads > 0, "Should have some valid keys after stress test");
+    assert!(
+        valid_reads > 0,
+        "Should have some valid keys after stress test"
+    );
 
     println!("High-contention stress test passed");
 }

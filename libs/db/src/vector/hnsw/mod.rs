@@ -82,10 +82,6 @@ pub struct Index {
     dim: usize,
     /// Number of bidirectional links per node (M parameter)
     m: usize,
-    /// Maximum links per node at layers > 0 (typically 2*M)
-    m_max: usize,
-    /// Maximum links per node at layer 0 (typically 2*M)
-    m_max_0: usize,
     /// Search beam width during index construction
     ef_construction: usize,
     /// Probability multiplier for layer assignment: P(layer = L) = exp(-L * m_l)
@@ -118,8 +114,6 @@ impl Index {
             nav_cache,
             dim: spec.dim as usize,
             m: spec.m(),
-            m_max: spec.m_max(),
-            m_max_0: spec.m_max_0(),
             ef_construction: spec.ef_construction(),
             m_l: spec.m_l(),
             batch_threshold,
@@ -218,6 +212,10 @@ impl Index {
     /// * `k` - Number of results to return
     /// * `ef` - Search beam width
     /// * `rerank_factor` - Multiplier for candidates to re-rank
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "method forwards explicit RaBitQ search knobs to the hot-path implementation"
+    )]
     pub fn search_with_rabitq_cached(
         &self,
         storage: &Storage,
@@ -332,7 +330,12 @@ mod tests {
     }
 
     /// Helper: Create an EmbeddingSpec for testing with customizable HNSW parameters
-    fn make_test_spec(dim: usize, m: u16, ef_construction: u16, distance: Distance) -> EmbeddingSpec {
+    fn make_test_spec(
+        dim: usize,
+        m: u16,
+        ef_construction: u16,
+        distance: Distance,
+    ) -> EmbeddingSpec {
         EmbeddingSpec {
             code: 0,
             model: "test".to_string(),
@@ -421,8 +424,7 @@ mod tests {
         for (i, vector) in vectors.iter().enumerate() {
             let key = Vectors::key_to_bytes(&VectorCfKey(embedding, i as VecId));
             let value = Vectors::value_to_bytes(&VectorCfValue(vector.clone()));
-            txn.put_cf(&cf, key, value)
-                .expect("Failed to store vector");
+            txn.put_cf(&cf, key, value).expect("Failed to store vector");
         }
         txn.commit().expect("Failed to commit vectors");
     }
@@ -444,8 +446,8 @@ mod tests {
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         for (i, vector) in vectors.iter().enumerate() {
             let txn = txn_db.transaction();
-            let cache_update = insert(&index, &txn, &txn_db, storage, i as VecId, vector)
-                .expect("Insert failed");
+            let cache_update =
+                insert(&index, &txn, txn_db, storage, i as VecId, vector).expect("Insert failed");
             txn.commit().expect("Commit failed");
             cache_update.apply(index.nav_cache());
         }

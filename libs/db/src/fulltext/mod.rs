@@ -25,8 +25,8 @@ mod tantivy_behavior_test;
 // Re-export commonly used types (no prefixes - use module path for disambiguation)
 // Note: Runnable is now generic: Runnable<R> where R is the reader type
 // Search enum is public for reader APIs but has #[doc(hidden)] variants
-pub use query::{Edges, Facets, FuzzyLevel, Nodes, Search};
 pub use crate::reader::Runnable;
+pub use query::{Edges, Facets, FuzzyLevel, Nodes, Search};
 pub use reader::{
     create_query_consumer, create_query_reader, spawn_query_consumer,
     spawn_query_consumer_pool_readonly, spawn_query_consumer_pool_shared, Consumer, Processor,
@@ -38,11 +38,9 @@ pub use storage::Storage;
 pub use writer::{
     create_mutation_consumer, create_mutation_consumer_with_next,
     create_mutation_consumer_with_params, create_mutation_consumer_with_params_and_next,
-    spawn_mutation_consumer, spawn_mutation_consumer_with_next,
-    spawn_mutation_consumer_with_params, spawn_mutation_consumer_with_params_and_next,
-    spawn_consumer as spawn_mutation_consumer_task,
-    Consumer as MutationConsumer,
-    MutationExecutor,
+    spawn_consumer as spawn_mutation_consumer_task, spawn_mutation_consumer,
+    spawn_mutation_consumer_with_next, spawn_mutation_consumer_with_params,
+    spawn_mutation_consumer_with_params_and_next, Consumer as MutationConsumer, MutationExecutor,
 };
 
 // ============================================================================
@@ -603,9 +601,9 @@ mod tests {
 
         // Create nodes with different timestamps
         let now = TimestampMilli::now().0;
-        let one_hour_ago = now - 3600_000;
-        let one_day_ago = now - 86400_000;
-        let one_week_ago = now - 604800_000;
+        let one_hour_ago = now - 3_600_000;
+        let one_day_ago = now - 86_400_000;
+        let one_week_ago = now - 604_800_000;
 
         let mutations = vec![
             Mutation::AddNode(AddNode {
@@ -644,7 +642,7 @@ mod tests {
         let searcher = reader.searcher();
 
         // Query: Find nodes created in the last 2 hours (two_hours_ago <= ts < now+1)
-        let two_hours_ago = now - 7200_000;
+        let two_hours_ago = now - 7_200_000;
         let range_query =
             RangeQuery::new_u64("creation_timestamp".to_string(), two_hours_ago..(now + 1));
         let top_docs = searcher
@@ -653,7 +651,7 @@ mod tests {
         assert_eq!(top_docs.len(), 2, "Should find recent_node and hourly_node");
 
         // Query: Find nodes created more than 12 hours ago (0 <= ts <= twelve_hours_ago)
-        let twelve_hours_ago = now - 43200_000;
+        let twelve_hours_ago = now - 43_200_000;
         let range_query =
             RangeQuery::new_u64("creation_timestamp".to_string(), 0..(twelve_hours_ago + 1));
         let top_docs = searcher
@@ -662,8 +660,8 @@ mod tests {
         assert_eq!(top_docs.len(), 2, "Should find daily_node and weekly_node");
 
         // Query: Find nodes created between 6 hours ago and 2 days ago
-        let six_hours_ago = now - 21600_000;
-        let two_days_ago = now - 172800_000;
+        let six_hours_ago = now - 21_600_000;
+        let two_days_ago = now - 172_800_000;
         let range_query = RangeQuery::new_u64(
             "creation_timestamp".to_string(),
             two_days_ago..(six_hours_ago + 1),
@@ -683,8 +681,8 @@ mod tests {
         let processor = writer::create_readwrite_index(&index_path);
 
         let now = TimestampMilli::now().0;
-        let one_hour_ago = now - 3600_000;
-        let one_week_ago = now - 604800_000;
+        let one_hour_ago = now - 3_600_000;
+        let one_week_ago = now - 604_800_000;
 
         let mutations = vec![
             Mutation::AddNodeFragment(AddNodeFragment {
@@ -718,7 +716,7 @@ mod tests {
             QueryParser::for_index(processor.tantivy_index(), vec![fields.content_field]);
         let text_query = query_parser.parse_query("Rust").unwrap();
 
-        let two_hours_ago = now - 7200_000;
+        let two_hours_ago = now - 7_200_000;
         let time_query =
             RangeQuery::new_u64("creation_timestamp".to_string(), two_hours_ago..(now + 1));
 
@@ -746,8 +744,8 @@ mod tests {
         let processor = writer::create_readwrite_index(&index_path);
 
         let now = TimestampMilli::now().0;
-        let past = now - 86400_000; // 1 day ago
-        let future = now + 86400_000; // 1 day from now
+        let past = now - 86_400_000; // 1 day ago
+        let future = now + 86_400_000; // 1 day from now
 
         let mutations = vec![
             // Always valid (no temporal range)
@@ -775,7 +773,7 @@ mod tests {
                 ts_millis: TimestampMilli(now),
                 name: "expired".to_string(),
                 valid_range: Some(crate::ActivePeriod(
-                    Some(TimestampMilli(past - 86400_000)),
+                    Some(TimestampMilli(past - 86_400_000)),
                     Some(TimestampMilli(past)),
                 )),
                 summary: crate::graph::schema::NodeSummary::from_text("no longer valid"),

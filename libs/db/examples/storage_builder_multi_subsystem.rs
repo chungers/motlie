@@ -3,10 +3,8 @@ use motlie_db::storage_builder::StorageBuilder;
 use motlie_db::{fulltext, graph, vector, Id};
 
 fn main() -> Result<()> {
-    let base_path = std::env::temp_dir().join(format!(
-        "motlie-db-storage-builder-example-{}",
-        Id::new()
-    ));
+    let base_path =
+        std::env::temp_dir().join(format!("motlie-db-storage-builder-example-{}", Id::new()));
 
     let storage = StorageBuilder::new(&base_path)
         .with_rocksdb(Box::new(graph::Subsystem::new()))

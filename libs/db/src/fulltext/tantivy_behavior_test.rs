@@ -62,7 +62,11 @@ fn test_tantivy_append_only_behavior() {
     let searcher = reader.searcher();
 
     // Verify ALL 5 documents are in the index
-    assert_eq!(searcher.num_docs(), 5, "All 5 fragments should be in the index");
+    assert_eq!(
+        searcher.num_docs(),
+        5,
+        "All 5 fragments should be in the index"
+    );
 
     // Search for each fragment's unique content - each should be found
     let query_parser = QueryParser::for_index(&index, vec![content_field]);
@@ -70,17 +74,29 @@ fn test_tantivy_append_only_behavior() {
     // Search for "rust" - should find first fragment
     let query = query_parser.parse_query("rust").unwrap();
     let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
-    assert_eq!(top_docs.len(), 1, "Should find exactly 1 document containing 'rust'");
+    assert_eq!(
+        top_docs.len(),
+        1,
+        "Should find exactly 1 document containing 'rust'"
+    );
 
     // Search for "programming" - should find second fragment
     let query = query_parser.parse_query("programming").unwrap();
     let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
-    assert_eq!(top_docs.len(), 1, "Should find exactly 1 document containing 'programming'");
+    assert_eq!(
+        top_docs.len(),
+        1,
+        "Should find exactly 1 document containing 'programming'"
+    );
 
     // Search for "fragment" - should find ALL 5 documents (common word)
     let query = query_parser.parse_query("fragment").unwrap();
     let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
-    assert_eq!(top_docs.len(), 5, "Should find all 5 documents containing 'fragment'");
+    assert_eq!(
+        top_docs.len(),
+        5,
+        "Should find all 5 documents containing 'fragment'"
+    );
 
     // Verify we can retrieve ID and timestamp from each document
     for (_score, doc_address) in &top_docs {
@@ -94,9 +110,11 @@ fn test_tantivy_append_only_behavior() {
         // Get the stored timestamp
         let ts_value = doc.get_first(timestamp_field).unwrap();
         let stored_ts = ts_value.as_u64().unwrap();
-        assert!(stored_ts >= 1000 && stored_ts <= 5000, "Timestamp should be in expected range");
+        assert!(
+            (1000..=5000).contains(&stored_ts),
+            "Timestamp should be in expected range"
+        );
     }
-
 }
 
 /// Test that we can reconstruct RocksDB keys from Tantivy search results.
@@ -115,12 +133,14 @@ fn test_can_reconstruct_rocksdb_keys() {
     let mut writer: IndexWriter = index.writer(50_000_000).unwrap();
 
     // Create test data simulating node fragments
-    let node_id: Vec<u8> = vec![0x01, 0x8D, 0x9B, 0xC4, 0x5E, 0xF2, 0x00, 0x00,
-                                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]; // 16 bytes like ULID
+    let node_id: Vec<u8> = vec![
+        0x01, 0x8D, 0x9B, 0xC4, 0x5E, 0xF2, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08,
+    ]; // 16 bytes like ULID
 
     let fragment_data = vec![
-        (1701619200000u64, "First observation about the subject"),  // specific timestamp
-        (1701619260000u64, "Second observation with more detail"),  // 1 minute later
+        (1701619200000u64, "First observation about the subject"), // specific timestamp
+        (1701619260000u64, "Second observation with more detail"), // 1 minute later
         (1701619320000u64, "Third observation concluding thoughts"), // 2 minutes later
     ];
 
@@ -152,9 +172,19 @@ fn test_can_reconstruct_rocksdb_keys() {
     for (_score, doc_address) in &top_docs {
         let doc: TantivyDocument = searcher.doc(*doc_address).unwrap();
 
-        let id_bytes = doc.get_first(id_field).unwrap().as_bytes().unwrap().to_vec();
+        let id_bytes = doc
+            .get_first(id_field)
+            .unwrap()
+            .as_bytes()
+            .unwrap()
+            .to_vec();
         let timestamp = doc.get_first(timestamp_field).unwrap().as_u64().unwrap();
-        let doc_type = doc.get_first(doc_type_field).unwrap().as_str().unwrap().to_string();
+        let doc_type = doc
+            .get_first(doc_type_field)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
 
         reconstructed_keys.push((id_bytes, timestamp, doc_type));
     }
@@ -174,7 +204,6 @@ fn test_can_reconstruct_rocksdb_keys() {
         assert_eq!(key.0, node_id);
         assert_eq!(key.2, "node_fragments");
     }
-
 }
 
 /// Test edge fragments with composite key (src_id, dst_id, edge_name, timestamp)
@@ -238,9 +267,8 @@ fn test_edge_fragments_composite_key() {
         assert_eq!(src, src_id.as_slice());
         assert_eq!(dst, dst_id.as_slice());
         assert_eq!(name, edge_name);
-        assert!(ts >= 1000 && ts <= 3000);
+        assert!((1000..=3000).contains(&ts));
     }
-
 }
 
 /// Demonstrate that Tantivy has no built-in document ID - delete_term works on INDEXED fields
@@ -268,19 +296,23 @@ fn test_tantivy_delete_by_term() {
 
     // Add fragments for two different nodes
     for ts in [1000u64, 2000, 3000] {
-        writer.add_document(doc!(
-            id_field => node_id_a.clone(),
-            timestamp_field => ts,
-            content_field => format!("Fragment for node A at {}", ts),
-        )).unwrap();
+        writer
+            .add_document(doc!(
+                id_field => node_id_a.clone(),
+                timestamp_field => ts,
+                content_field => format!("Fragment for node A at {}", ts),
+            ))
+            .unwrap();
     }
 
     for ts in [1000u64, 2000] {
-        writer.add_document(doc!(
-            id_field => node_id_b.clone(),
-            timestamp_field => ts,
-            content_field => format!("Fragment for node B at {}", ts),
-        )).unwrap();
+        writer
+            .add_document(doc!(
+                id_field => node_id_b.clone(),
+                timestamp_field => ts,
+                content_field => format!("Fragment for node B at {}", ts),
+            ))
+            .unwrap();
     }
 
     writer.commit().unwrap();
@@ -291,7 +323,11 @@ fn test_tantivy_delete_by_term() {
         .reload_policy(ReloadPolicy::OnCommitWithDelay)
         .try_into()
         .unwrap();
-    assert_eq!(reader.searcher().num_docs(), 5, "Should have 5 documents total");
+    assert_eq!(
+        reader.searcher().num_docs(),
+        5,
+        "Should have 5 documents total"
+    );
 
     // Delete all documents for node A using delete_term
     let term = tantivy::Term::from_field_bytes(id_field, &node_id_a);
@@ -304,6 +340,9 @@ fn test_tantivy_delete_by_term() {
     let searcher = reader.searcher();
 
     // Only node B's fragments should remain
-    assert_eq!(searcher.num_docs(), 2, "Should have 2 documents remaining (node B only)");
-
+    assert_eq!(
+        searcher.num_docs(),
+        2,
+        "Should have 2 documents remaining (node B only)"
+    );
 }

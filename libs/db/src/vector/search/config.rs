@@ -188,7 +188,7 @@ impl SearchConfig {
             embedding,
             strategy,
             k,
-            ef: 100,          // sensible default
+            ef: 100,           // sensible default
             rerank_factor: 10, // 10x re-ranking for ~90% recall at 10K scale
             parallel_rerank_threshold: DEFAULT_PARALLEL_RERANK_THRESHOLD,
             pending_scan_limit: DEFAULT_PENDING_SCAN_LIMIT,
@@ -538,7 +538,9 @@ mod tests {
     #[test]
     fn test_builder_ef_and_rerank() {
         let emb = make_embedding(Distance::Cosine);
-        let config = SearchConfig::new(emb, 10).with_ef(200).with_rerank_factor(8);
+        let config = SearchConfig::new(emb, 10)
+            .with_ef(200)
+            .with_rerank_factor(8);
 
         assert_eq!(config.ef(), 200);
         assert_eq!(config.rerank_factor(), 8);

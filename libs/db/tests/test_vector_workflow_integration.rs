@@ -25,10 +25,10 @@ use std::time::Duration;
 
 use motlie_db::vector::benchmark::LAION_EMBEDDING_DIM;
 use motlie_db::vector::{
-    create_reader_with_storage, create_writer,
-    spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
-    DeleteVector, Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable,
-    ReaderConfig, Runnable, SearchKNN, Storage, WriterConfig,
+    create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+    spawn_query_consumers_with_storage_autoreg, DeleteVector, Distance, EmbeddingBuilder,
+    ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN, Storage,
+    WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -104,9 +104,7 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
     // Register embedding with Cosine distance (required for RaBitQ)
     let builder =
         EmbeddingBuilder::new("clip-vit-b32", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
-    let embedding = registry
-        .register(builder)
-        .expect("register embedding");
+    let embedding = registry.register(builder).expect("register embedding");
 
     println!(
         "Registered embedding: code={}, model={}, dim={}, distance={:?}",
@@ -197,7 +195,11 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
         // Convert results to indices via external_ids
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -206,7 +208,12 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
         if qi == 0 {
             println!("  Query 0 top-{} results:", K);
             for (i, r) in results.iter().take(5).enumerate() {
-                println!("    {}. id={}, distance={:.4}", i + 1, r.node_id().expect("expected NodeId"), r.distance);
+                println!(
+                    "    {}. id={}, distance={:.4}",
+                    i + 1,
+                    r.node_id().expect("expected NodeId"),
+                    r.distance
+                );
             }
         }
     }
@@ -237,7 +244,11 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -246,7 +257,12 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
         if qi == 0 {
             println!("  Query 0 top-{} results:", K);
             for (i, r) in results.iter().take(5).enumerate() {
-                println!("    {}. id={}, distance={:.4}", i + 1, r.node_id().expect("expected NodeId"), r.distance);
+                println!(
+                    "    {}. id={}, distance={:.4}",
+                    i + 1,
+                    r.node_id().expect("expected NodeId"),
+                    r.distance
+                );
             }
         }
     }

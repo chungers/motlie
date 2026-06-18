@@ -14,7 +14,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 /// Helper to create a test storage with writer configured for transactions.
-fn setup_test_storage(db_path: &std::path::Path) -> (Arc<Storage>, motlie_db::graph::writer::Writer) {
+fn setup_test_storage(
+    db_path: &std::path::Path,
+) -> (Arc<Storage>, motlie_db::graph::writer::Writer) {
     let mut storage = Storage::readwrite(db_path);
     storage.ready().unwrap();
     let storage = Arc::new(storage);
@@ -68,7 +70,10 @@ async fn test_transaction_write_then_read() {
     // Read the node back - should see uncommitted write!
     let (name, _summary, _version) = txn.read(NodeById::new(node_id, None)).unwrap();
     assert_eq!(name, node_name);
-    println!("  Read node back: name='{}' (read-your-writes works!)", name);
+    println!(
+        "  Read node back: name='{}' (read-your-writes works!)",
+        name
+    );
 
     // Before commit, external readers should NOT see the node
     // (We can't easily test this without a separate reader, but the commit test below verifies)
@@ -80,7 +85,10 @@ async fn test_transaction_write_then_read() {
     // After commit, verify data is visible in a new transaction
     let verify_txn = writer.transaction().unwrap();
     let (verify_name, _, _version) = verify_txn.read(NodeById::new(node_id, None)).unwrap();
-    assert_eq!(verify_name, node_name, "Node should be visible after commit");
+    assert_eq!(
+        verify_name, node_name,
+        "Node should be visible after commit"
+    );
     verify_txn.rollback().unwrap();
     println!("  Verified node is visible after commit");
 
@@ -113,7 +121,7 @@ async fn test_transaction_interleaved_writes_reads() {
             id: *neighbor_id,
             ts_millis: TimestampMilli::now(),
             name: format!("Neighbor_{}", i),
-            summary: NodeSummary::from_text(&format!("Neighbor node {}", i)),
+            summary: NodeSummary::from_text(format!("Neighbor node {}", i)),
             valid_range: None,
         })
         .unwrap();
@@ -252,7 +260,10 @@ async fn test_transaction_auto_rollback_on_drop() {
             valid_range: None,
         })
         .unwrap();
-        println!("  Written node {} (will be dropped without commit)", node_id);
+        println!(
+            "  Written node {} (will be dropped without commit)",
+            node_id
+        );
 
         // Transaction is dropped here without commit
     }
@@ -296,7 +307,7 @@ async fn test_transaction_all_query_types() {
             id,
             ts_millis: TimestampMilli::now(),
             name: name.to_string(),
-            summary: NodeSummary::from_text(&format!("{} summary", name)),
+            summary: NodeSummary::from_text(format!("{} summary", name)),
             valid_range: None,
         })
         .unwrap();
@@ -324,7 +335,7 @@ async fn test_transaction_all_query_types() {
             target_node_id: dst,
             ts_millis: TimestampMilli::now(),
             name: name.to_string(),
-            summary: EdgeSummary::from_text(&format!("{} edge", name)),
+            summary: EdgeSummary::from_text(format!("{} edge", name)),
             weight: Some(1.0),
             valid_range: None,
         })
@@ -509,7 +520,7 @@ async fn test_transaction_commit_visibility() {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: format!("ExistingNode_{}", i),
-            summary: NodeSummary::from_text(&format!("Existing node {}", i)),
+            summary: NodeSummary::from_text(format!("Existing node {}", i)),
             valid_range: None,
         })
         .unwrap();
@@ -530,7 +541,10 @@ async fn test_transaction_commit_visibility() {
 
         txn.commit().unwrap();
     }
-    println!("  Setup: Created {} existing nodes with edges", existing_nodes.len());
+    println!(
+        "  Setup: Created {} existing nodes with edges",
+        existing_nodes.len()
+    );
 
     // Create a new node with complex write pattern
     let new_node_id = Id::new();
@@ -564,7 +578,10 @@ async fn test_transaction_commit_visibility() {
 
     // Step 3: Select nodes to connect to
     let neighbors = &existing_nodes[0..num_edges];
-    println!("  Step 3: Selected {} neighbors to connect", neighbors.len());
+    println!(
+        "  Step 3: Selected {} neighbors to connect",
+        neighbors.len()
+    );
 
     // Step 4: Add bidirectional edges to neighbors
     for neighbor_id in neighbors {
@@ -601,7 +618,7 @@ async fn test_transaction_commit_visibility() {
     for neighbor_id in neighbors {
         let edges = txn.read(OutgoingEdges::new(*neighbor_id, None)).unwrap();
         // Each neighbor should have 2 edges: one from setup + one to new_node
-        assert!(edges.len() >= 1, "Neighbor should have edges");
+        assert!(!edges.is_empty(), "Neighbor should have edges");
     }
     println!("  Step 5: Read-your-writes OK (uncommitted edges readable)");
 
@@ -611,14 +628,18 @@ async fn test_transaction_commit_visibility() {
 
     // Step 7: Verify commit visibility - new transaction sees committed data
     let verify_txn = writer.transaction().unwrap();
-    let outgoing = verify_txn.read(OutgoingEdges::new(new_node_id, None)).unwrap();
+    let outgoing = verify_txn
+        .read(OutgoingEdges::new(new_node_id, None))
+        .unwrap();
     assert_eq!(
         outgoing.len(),
         num_edges,
         "New node should have {} outgoing edges after commit",
         num_edges
     );
-    let incoming = verify_txn.read(IncomingEdges::new(new_node_id, None)).unwrap();
+    let incoming = verify_txn
+        .read(IncomingEdges::new(new_node_id, None))
+        .unwrap();
     assert_eq!(
         incoming.len(),
         num_edges,

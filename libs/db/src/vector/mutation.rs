@@ -152,7 +152,11 @@ macro_rules! impl_request_meta {
 impl_request_meta!(AddEmbeddingSpec, (), "add_embedding_spec");
 impl_request_meta!(InsertVector, super::ops::InsertResult, "insert_vector");
 impl_request_meta!(DeleteVector, super::ops::DeleteResult, "delete_vector");
-impl_request_meta!(InsertVectorBatch, super::ops::InsertBatchResult, "insert_vector_batch");
+impl_request_meta!(
+    InsertVectorBatch,
+    super::ops::InsertBatchResult,
+    "insert_vector_batch"
+);
 
 // ============================================================================
 // MutationCodec Implementations
@@ -471,8 +475,13 @@ impl MutationExecutor for DeleteVector {
         processor: &Processor,
     ) -> Result<MutationOutcome> {
         // Delegate to shared ops helper (handles soft-delete when HNSW enabled)
-        let result =
-            super::ops::delete::vector(txn, txn_db, processor, self.embedding, self.external_key.clone())?;
+        let result = super::ops::delete::vector(
+            txn,
+            txn_db,
+            processor,
+            self.embedding,
+            self.external_key.clone(),
+        )?;
 
         // Log soft-delete if it occurred
         if result.is_soft_delete() {
@@ -546,10 +555,7 @@ pub trait Runnable {
 
 #[async_trait::async_trait]
 pub trait RunnableWithResult<R> {
-    async fn run_with_result(
-        self,
-        writer: &super::writer::Writer,
-    ) -> Result<ReplyEnvelope<R>>;
+    async fn run_with_result(self, writer: &super::writer::Writer) -> Result<ReplyEnvelope<R>>;
 }
 
 pub trait MutationReply: Into<Mutation> + Send {
@@ -728,7 +734,11 @@ mod tests {
     #[test]
     fn test_insert_vector_builder() {
         let embedding = test_embedding(1);
-        let mutation = InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vec![1.0, 2.0, 3.0]);
+        let mutation = InsertVector::new(
+            &embedding,
+            ExternalKey::NodeId(Id::new()),
+            vec![1.0, 2.0, 3.0],
+        );
         assert_eq!(mutation.embedding, 1);
         assert!(!mutation.immediate_index);
 
@@ -767,7 +777,10 @@ mod tests {
         let delete = DeleteVector::new(&embedding, ExternalKey::NodeId(Id::new()));
         let _: Mutation = delete.into();
 
-        let batch = InsertVectorBatch::new(&embedding, vec![(ExternalKey::NodeId(Id::new()), vec![1.0])]);
+        let batch = InsertVectorBatch::new(
+            &embedding,
+            vec![(ExternalKey::NodeId(Id::new()), vec![1.0])],
+        );
         let _: Mutation = batch.into();
     }
 

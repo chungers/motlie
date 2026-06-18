@@ -64,7 +64,11 @@ async fn setup_test_env(
 
     // Register embedding
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-delete", DIM as u32, Distance::L2))
+        .register(EmbeddingBuilder::new(
+            "test-delete",
+            DIM as u32,
+            Distance::L2,
+        ))
         .expect("register");
 
     // Create writer and consumer
@@ -241,11 +245,14 @@ async fn test_delete_id_recycling() {
     // Verify bitmap exists and has entries
     assert!(bitmap_result.is_some(), "Free bitmap should exist");
 
-    let bitmap =
-        RoaringBitmap::deserialize_from(&bitmap_result.unwrap()[..]).expect("deserialize");
+    let bitmap = RoaringBitmap::deserialize_from(&bitmap_result.unwrap()[..]).expect("deserialize");
 
     // Should have 10 IDs in free bitmap
-    assert_eq!(bitmap.len(), 10, "Should have 10 recycled IDs in free bitmap");
+    assert_eq!(
+        bitmap.len(),
+        10,
+        "Should have 10 recycled IDs in free bitmap"
+    );
 
     // Verify metrics
     let metrics = gc.metrics();
@@ -392,7 +399,9 @@ async fn test_async_updater_delete_race() {
     let txn_db = storage.transaction_db().expect("txn_db");
 
     // Capture vec_ids via IdForward before deletes (IdForward removed on delete)
-    let id_forward_cf = txn_db.cf_handle("vector/id_forward").expect("id_forward cf");
+    let id_forward_cf = txn_db
+        .cf_handle("vector/id_forward")
+        .expect("id_forward cf");
     let mut vec_ids = Vec::new();
     for id in &ids {
         // Key format: [embedding: u64] + [ExternalKey bytes]
@@ -469,7 +478,9 @@ async fn test_async_updater_delete_race() {
     // and removed during soft delete. We verify:
     // 1. IdForward is gone for deleted vectors (they can't be resolved to vec_id)
     // 2. After GC, only non-deleted VecMeta entries remain
-    let id_forward_cf = txn_db.cf_handle("vector/id_forward").expect("id_forward cf");
+    let id_forward_cf = txn_db
+        .cf_handle("vector/id_forward")
+        .expect("id_forward cf");
 
     // Check that deleted ids (0-9) have no IdForward mapping
     let mut deleted_found_in_forward = 0;
@@ -508,7 +519,9 @@ async fn test_async_updater_delete_race() {
     // IdReverse key format: [external_id: 16 bytes] -> (embedding_code, vec_id)
     // Note: In async insert mode, IdReverse may be created during async indexing, not Phase 1.
     // We verify deleted vectors have no IdReverse (soft delete removes it if present).
-    let id_reverse_cf = txn_db.cf_handle("vector/id_reverse").expect("id_reverse cf");
+    let id_reverse_cf = txn_db
+        .cf_handle("vector/id_reverse")
+        .expect("id_reverse cf");
 
     // Check that deleted ids (0-9) have no IdReverse mapping
     let mut deleted_found_in_reverse = 0;

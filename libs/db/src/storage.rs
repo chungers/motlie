@@ -648,7 +648,10 @@ mod tests {
         let storage = Storage::readonly(Path::new("/tmp/motlie_db"));
         assert_eq!(storage.path(), Path::new("/tmp/motlie_db"));
         assert_eq!(storage.graph_path(), Path::new("/tmp/motlie_db/graph"));
-        assert_eq!(storage.fulltext_path(), Path::new("/tmp/motlie_db/fulltext"));
+        assert_eq!(
+            storage.fulltext_path(),
+            Path::new("/tmp/motlie_db/fulltext")
+        );
     }
 
     #[test]
@@ -656,6 +659,9 @@ mod tests {
         let storage = Storage::readwrite(Path::new("/tmp/motlie_db"));
         assert_eq!(storage.path(), Path::new("/tmp/motlie_db"));
         assert_eq!(storage.graph_path(), Path::new("/tmp/motlie_db/graph"));
-        assert_eq!(storage.fulltext_path(), Path::new("/tmp/motlie_db/fulltext"));
+        assert_eq!(
+            storage.fulltext_path(),
+            Path::new("/tmp/motlie_db/fulltext")
+        );
     }
 }

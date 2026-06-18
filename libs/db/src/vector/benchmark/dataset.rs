@@ -100,7 +100,10 @@ impl LaionDataset {
 
     /// Load LAION dataset from data directory.
     pub fn load(data_dir: &Path, max_vectors: usize) -> Result<Self> {
-        Self::load_with_config(data_dir, DatasetConfig::default().with_max_vectors(max_vectors))
+        Self::load_with_config(
+            data_dir,
+            DatasetConfig::default().with_max_vectors(max_vectors),
+        )
     }
 
     /// Load LAION dataset with custom configuration.
@@ -750,9 +753,10 @@ pub fn load_parquet_embeddings(
             }
 
             let values = list_array.value(i);
-            let float_array = values.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
-                anyhow::anyhow!("Expected Float32Array inside FixedSizeList")
-            })?;
+            let float_array = values
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| anyhow::anyhow!("Expected Float32Array inside FixedSizeList"))?;
 
             let vec: Vec<f32> = float_array.values().to_vec();
             vectors.push(vec);
@@ -850,7 +854,8 @@ impl CohereWikipediaDataset {
 
         // Compute brute-force ground truth using cosine distance
         println!("Computing ground truth (top-100)...");
-        let ground_truth = compute_ground_truth_batch(db_vectors, query_vectors, 100, Distance::Cosine);
+        let ground_truth =
+            compute_ground_truth_batch(db_vectors, query_vectors, 100, Distance::Cosine);
         println!("  Ground truth computed for {} queries", ground_truth.len());
 
         Ok(Self {
@@ -999,11 +1004,7 @@ pub fn load_hdf5_embeddings(
         .context("Failed to read HDF5 dataset")?;
 
     // Convert to Vec<Vec<f32>>
-    let vectors: Vec<Vec<f32>> = data
-        .rows()
-        .into_iter()
-        .map(|row| row.to_vec())
-        .collect();
+    let vectors: Vec<Vec<f32>> = data.rows().into_iter().map(|row| row.to_vec()).collect();
 
     println!(
         "  Loaded {} vectors ({}D) from HDF5 '{}'",
@@ -1469,7 +1470,7 @@ mod tests {
         assert_eq!(gt.len(), 5); // One per query
         for topk in &gt {
             assert_eq!(topk.len(), 10); // k=10
-            // All indices should be in range
+                                        // All indices should be in range
             for &idx in topk {
                 assert!(idx < 50);
             }

@@ -26,10 +26,10 @@ use motlie_db::vector::benchmark::{
 };
 use motlie_db::vector::search::rerank_adaptive;
 use motlie_db::vector::{
-    create_reader_with_storage, create_writer,
-    spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
-    Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable,
-    SearchKNN, Storage, VecId, VectorElementType, WriterConfig,
+    create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+    spawn_query_consumers_with_storage_autoreg, Distance, EmbeddingBuilder, ExternalKey,
+    InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN, Storage, VecId,
+    VectorElementType, WriterConfig,
 };
 use motlie_db::Id;
 
@@ -165,8 +165,7 @@ async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
     );
 
     // Create search reader and spawn query consumers
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -175,7 +174,10 @@ async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
     );
 
     // Insert vectors using InsertVector::run()
-    println!("Inserting {} vectors via Runnable API...", subset.db_vectors.len());
+    println!(
+        "Inserting {} vectors via Runnable API...",
+        subset.db_vectors.len()
+    );
     let mut external_ids: Vec<Id> = Vec::with_capacity(subset.db_vectors.len());
     for (i, vector) in subset.db_vectors.iter().enumerate() {
         let id = Id::new();
@@ -207,7 +209,11 @@ async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
         // Map external IDs back to original indices for recall computation
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
         search_results.push(result_indices);
     }
@@ -264,10 +270,13 @@ async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()>
     // Register embedding with higher M and ef_construction for 512D
     let registry = storage.cache().clone();
     registry.set_storage(storage.clone())?;
-    let builder =
-        EmbeddingBuilder::new("laion-clip-test", LAION_EMBEDDING_DIM as u32, Distance::Cosine)
-            .with_hnsw_m(32)
-            .with_hnsw_ef_construction(200);
+    let builder = EmbeddingBuilder::new(
+        "laion-clip-test",
+        LAION_EMBEDDING_DIM as u32,
+        Distance::Cosine,
+    )
+    .with_hnsw_m(32)
+    .with_hnsw_ef_construction(200);
     let embedding = registry.register(builder)?;
 
     // Create writer and spawn mutation consumer
@@ -279,8 +288,7 @@ async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()>
     );
 
     // Create search reader and spawn query consumers
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -323,7 +331,11 @@ async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()>
         // Map external IDs back to original indices
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
         search_results.push(result_indices);
     }
@@ -400,8 +412,7 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
     );
 
     // Create search reader and spawn query consumers
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -427,7 +438,10 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
         }
     }
     writer.flush().await?;
-    println!("  Inserted all {} vectors + BinaryCodeCache populated", subset.db_vectors.len());
+    println!(
+        "  Inserted all {} vectors + BinaryCodeCache populated",
+        subset.db_vectors.len()
+    );
 
     // Run two-phase RaBitQ search using SearchKNN (auto-selects RaBitQ for Cosine)
     let k = 10;
@@ -446,7 +460,11 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
         // Map external IDs back to original indices
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
             .collect();
         search_results.push(result_indices);
     }
@@ -540,7 +558,12 @@ fn test_adaptive_parallel_rerank_threshold() {
 
     // Test with large candidate set (above threshold - uses parallel)
     let candidates: Vec<VecId> = (0..5000).collect();
-    let results = rerank_adaptive(&candidates, |id| Some(id as f32), 10, DEFAULT_PARALLEL_RERANK_THRESHOLD);
+    let results = rerank_adaptive(
+        &candidates,
+        |id| Some(id as f32),
+        10,
+        DEFAULT_PARALLEL_RERANK_THRESHOLD,
+    );
 
     assert_eq!(results.len(), 10);
     assert_eq!(results[0].1, 0);
@@ -641,8 +664,7 @@ async fn run_storage_type_pipeline(
         WriterConfig::default(),
         storage.clone(),
     );
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -690,14 +712,8 @@ async fn run_storage_type_pipeline(
 /// insert and search with correct recall.
 #[tokio::test]
 async fn test_storage_type_f16_end_to_end() -> anyhow::Result<()> {
-    let (recall, observed_type) = run_storage_type_pipeline(
-        VectorElementType::F16,
-        Distance::Cosine,
-        128,
-        500,
-        50,
-    )
-    .await?;
+    let (recall, observed_type) =
+        run_storage_type_pipeline(VectorElementType::F16, Distance::Cosine, 128, 500, 50).await?;
 
     assert_eq!(observed_type, VectorElementType::F16);
     assert!(
@@ -713,14 +729,8 @@ async fn test_storage_type_f16_end_to_end() -> anyhow::Result<()> {
 /// insert and search with correct recall.
 #[tokio::test]
 async fn test_storage_type_f32_end_to_end() -> anyhow::Result<()> {
-    let (recall, observed_type) = run_storage_type_pipeline(
-        VectorElementType::F32,
-        Distance::Cosine,
-        128,
-        500,
-        50,
-    )
-    .await?;
+    let (recall, observed_type) =
+        run_storage_type_pipeline(VectorElementType::F32, Distance::Cosine, 128, 500, 50).await?;
 
     assert_eq!(observed_type, VectorElementType::F32);
     assert!(

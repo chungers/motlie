@@ -46,8 +46,18 @@ use xxhash_rust::xxh64::xxh64;
 /// ```
 /// 8-byte name hash (xxHash64).
 /// Has rkyv derives for use in hot CF values.
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
 #[archive(check_bytes)]
 #[archive_attr(derive(Clone, Copy, PartialEq, Eq, Hash, Debug))]
 pub struct NameHash([u8; 8]);
@@ -352,9 +362,18 @@ mod tests {
         assert_ne!(hash2, hash3);
         assert_eq!(cache.len(), 3);
 
-        assert_eq!(cache.get(&hash1).as_deref().map(|s| s.as_str()), Some("FOLLOWS"));
-        assert_eq!(cache.get(&hash2).as_deref().map(|s| s.as_str()), Some("LIKES"));
-        assert_eq!(cache.get(&hash3).as_deref().map(|s| s.as_str()), Some("KNOWS"));
+        assert_eq!(
+            cache.get(&hash1).as_deref().map(|s| s.as_str()),
+            Some("FOLLOWS")
+        );
+        assert_eq!(
+            cache.get(&hash2).as_deref().map(|s| s.as_str()),
+            Some("LIKES")
+        );
+        assert_eq!(
+            cache.get(&hash3).as_deref().map(|s| s.as_str()),
+            Some("KNOWS")
+        );
     }
 
     #[test]
@@ -365,7 +384,10 @@ mod tests {
         cache.insert(hash, "FOLLOWS".to_string());
 
         assert!(cache.contains(&hash));
-        assert_eq!(cache.get(&hash).as_deref().map(|s| s.as_str()), Some("FOLLOWS"));
+        assert_eq!(
+            cache.get(&hash).as_deref().map(|s| s.as_str()),
+            Some("FOLLOWS")
+        );
     }
 
     #[test]
@@ -442,7 +464,10 @@ mod tests {
         let cache = NameCache::new();
         let cached = cache.intern("関係");
         assert_eq!(hash1, cached);
-        assert_eq!(cache.get(&cached).as_deref().map(|s| s.as_str()), Some("関係"));
+        assert_eq!(
+            cache.get(&cached).as_deref().map(|s| s.as_str()),
+            Some("関係")
+        );
     }
 
     #[test]

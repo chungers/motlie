@@ -62,7 +62,9 @@ use motlie_db::vector::benchmark::{
     save_benchmark_results_csv, BenchConfig, BenchResult, ConcurrentBenchmark, ConcurrentMetrics,
 };
 use motlie_db::vector::hnsw;
-use motlie_db::vector::schema::{EmbeddingCode, EmbeddingSpec, VectorCfKey, VectorCfValue, Vectors};
+use motlie_db::vector::schema::{
+    EmbeddingCode, EmbeddingSpec, VectorCfKey, VectorCfValue, Vectors,
+};
 use motlie_db::vector::{cache::NavigationCache, Distance, Storage, VectorElementType};
 use rand::prelude::*;
 use tempfile::TempDir;
@@ -226,10 +228,7 @@ fn test_concurrent_insert_search() {
                 }
             }
 
-            println!(
-                "Writer {} finished: {} inserts",
-                thread_id, local_count
-            );
+            println!("Writer {} finished: {} inserts", thread_id, local_count);
         }));
     }
 
@@ -266,10 +265,7 @@ fn test_concurrent_insert_search() {
                 }
             }
 
-            println!(
-                "Reader {} finished: {} searches",
-                thread_id, search_count
-            );
+            println!("Reader {} finished: {} searches", thread_id, search_count);
         }));
     }
 
@@ -405,7 +401,9 @@ fn test_concurrent_batch_insert() {
 
     // Validation: Search should find vectors
     let query = random_vector(DIM);
-    let results = index.search(&storage, &query, 10, 100).expect("Search failed");
+    let results = index
+        .search(&storage, &query, 10, 100)
+        .expect("Search failed");
     assert!(
         !results.is_empty() || total_inserted == 0,
         "Search should return results if vectors were inserted"
@@ -535,18 +533,9 @@ fn test_high_thread_count_stress() {
     println!("{}", summary);
 
     // Validation criteria
-    assert_eq!(
-        panic_count, 0,
-        "No threads should have panicked"
-    );
-    assert!(
-        summary.insert_count > 0,
-        "Should have completed inserts"
-    );
-    assert!(
-        summary.search_count > 0,
-        "Should have completed searches"
-    );
+    assert_eq!(panic_count, 0, "No threads should have panicked");
+    assert!(summary.insert_count > 0, "Should have completed inserts");
+    assert!(summary.search_count > 0, "Should have completed searches");
 
     // Task 8.2.3: Tightened error budget from 10% to 1%
     // With pre-populated graph, "empty graph" errors are eliminated
@@ -555,7 +544,9 @@ fn test_high_thread_count_stress() {
     let error_rate = summary.error_count as f64 / total_ops as f64;
     println!(
         "\nError rate: {:.2}% ({} errors / {} ops)",
-        error_rate * 100.0, summary.error_count, total_ops
+        error_rate * 100.0,
+        summary.error_count,
+        total_ops
     );
     assert!(
         error_rate < 0.01,
@@ -671,7 +662,9 @@ fn test_writer_contention() {
 
     // Verify data integrity: vectors that were inserted should be searchable
     let query = random_vector(DIM);
-    let results = index.search(&storage, &query, 10, 100).expect("Search failed");
+    let results = index
+        .search(&storage, &query, 10, 100)
+        .expect("Search failed");
     println!("Search returned {} results", results.len());
 }
 
@@ -901,16 +894,24 @@ fn test_cache_isolation_under_load() {
         let vec_id_a = ((EMBEDDING_A as u32) << 16) | i;
         let vec_id_b = ((EMBEDDING_B as u32) << 16) | i;
 
-        if let InsertResult::Success(cache_update) =
-            insert_vector_atomic(&storage, &index_a, EMBEDDING_A, vec_id_a, &random_vector(DIM))
-        {
+        if let InsertResult::Success(cache_update) = insert_vector_atomic(
+            &storage,
+            &index_a,
+            EMBEDDING_A,
+            vec_id_a,
+            &random_vector(DIM),
+        ) {
             cache_update.apply(index_a.nav_cache());
             vec_ids_a.lock().unwrap().insert(vec_id_a);
         }
 
-        if let InsertResult::Success(cache_update) =
-            insert_vector_atomic(&storage, &index_b, EMBEDDING_B, vec_id_b, &random_vector(DIM))
-        {
+        if let InsertResult::Success(cache_update) = insert_vector_atomic(
+            &storage,
+            &index_b,
+            EMBEDDING_B,
+            vec_id_b,
+            &random_vector(DIM),
+        ) {
             cache_update.apply(index_b.nav_cache());
             vec_ids_b.lock().unwrap().insert(vec_id_b);
         }
@@ -1043,15 +1044,23 @@ async fn benchmark_quick_validation() {
 
     println!("\n=== Quick Benchmark Validation (2 producers, 2 workers, 5s) ===\n");
 
-    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
+    let result = bench
+        .run(storage, TEST_EMBEDDING)
+        .await
+        .expect("benchmark run");
 
     println!("{}", result);
 
     // Basic validation: should complete without errors
-    assert!(result.insert_throughput > 0.0, "Should have non-zero insert throughput");
-    assert!(result.search_throughput > 0.0, "Should have non-zero search throughput");
+    assert!(
+        result.insert_throughput > 0.0,
+        "Should have non-zero insert throughput"
+    );
+    assert!(
+        result.search_throughput > 0.0,
+        "Should have non-zero search throughput"
+    );
 }
-
 
 // ============================================================================
 // Multi-Embedding Baseline Benchmarks (Meeting Minimum Requirements)
@@ -1136,14 +1145,20 @@ async fn baseline_full_balanced() {
     println!("--- Embedding A ---\n");
     let metrics_a = Arc::new(ConcurrentMetrics::new());
     let bench_a = ConcurrentBenchmark::new(config.clone(), metrics_a);
-    let result_a = bench_a.run(Arc::clone(&storage), EMBEDDING_BASELINE_A).await.expect("benchmark A");
+    let result_a = bench_a
+        .run(Arc::clone(&storage), EMBEDDING_BASELINE_A)
+        .await
+        .expect("benchmark A");
     println!("{}", result_a);
 
     // Run benchmark on embedding B
     println!("\n--- Embedding B ---\n");
     let metrics_b = Arc::new(ConcurrentMetrics::new());
     let bench_b = ConcurrentBenchmark::new(config.clone(), metrics_b);
-    let result_b = bench_b.run(Arc::clone(&storage), EMBEDDING_BASELINE_B).await.expect("benchmark B");
+    let result_b = bench_b
+        .run(Arc::clone(&storage), EMBEDDING_BASELINE_B)
+        .await
+        .expect("benchmark B");
     println!("{}", result_b);
 
     // Aggregate summary
@@ -1151,16 +1166,26 @@ async fn baseline_full_balanced() {
     println!("=== AGGREGATE SUMMARY ===");
     println!("{}", "=".repeat(70));
     println!("Embeddings: 2");
-    println!("Total vectors: {} (A) + {} (B)",
-             result_a.metrics.insert_count, result_b.metrics.insert_count);
-    println!("Combined insert throughput: {:.1} ops/sec",
-             result_a.insert_throughput + result_b.insert_throughput);
-    println!("Combined search throughput: {:.1} ops/sec",
-             result_a.search_throughput + result_b.search_throughput);
-    println!("Avg insert P99: {:?}",
-             (result_a.metrics.insert_p99 + result_b.metrics.insert_p99) / 2);
-    println!("Avg search P99: {:?}",
-             (result_a.metrics.search_p99 + result_b.metrics.search_p99) / 2);
+    println!(
+        "Total vectors: {} (A) + {} (B)",
+        result_a.metrics.insert_count, result_b.metrics.insert_count
+    );
+    println!(
+        "Combined insert throughput: {:.1} ops/sec",
+        result_a.insert_throughput + result_b.insert_throughput
+    );
+    println!(
+        "Combined search throughput: {:.1} ops/sec",
+        result_a.search_throughput + result_b.search_throughput
+    );
+    println!(
+        "Avg insert P99: {:?}",
+        (result_a.metrics.insert_p99 + result_b.metrics.insert_p99) / 2
+    );
+    println!(
+        "Avg search P99: {:?}",
+        (result_a.metrics.search_p99 + result_b.metrics.search_p99) / 2
+    );
     println!("{}\n", "=".repeat(70));
 
     // Save CSV
@@ -1181,7 +1206,7 @@ async fn baseline_full_read_heavy() {
         search_producers: 4,
         query_workers: 4,
         duration: Duration::from_secs(30),
-        vectors_per_producer: 10000,  // Single producer needs full 10k
+        vectors_per_producer: 10000, // Single producer needs full 10k
         vector_dim: 128,
         hnsw_m: 16,
         hnsw_ef_construction: 100,
@@ -1197,18 +1222,26 @@ async fn baseline_full_read_heavy() {
     println!("--- Embedding A ---\n");
     let metrics_a = Arc::new(ConcurrentMetrics::new());
     let bench_a = ConcurrentBenchmark::new(config.clone(), metrics_a);
-    let result_a = bench_a.run(Arc::clone(&storage), EMBEDDING_BASELINE_A).await.expect("benchmark A");
+    let result_a = bench_a
+        .run(Arc::clone(&storage), EMBEDDING_BASELINE_A)
+        .await
+        .expect("benchmark A");
     println!("{}", result_a);
 
     println!("\n--- Embedding B ---\n");
     let metrics_b = Arc::new(ConcurrentMetrics::new());
     let bench_b = ConcurrentBenchmark::new(config.clone(), metrics_b);
-    let result_b = bench_b.run(Arc::clone(&storage), EMBEDDING_BASELINE_B).await.expect("benchmark B");
+    let result_b = bench_b
+        .run(Arc::clone(&storage), EMBEDDING_BASELINE_B)
+        .await
+        .expect("benchmark B");
     println!("{}", result_b);
 
-    println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
-             result_a.insert_throughput + result_b.insert_throughput,
-             result_a.search_throughput + result_b.search_throughput);
+    println!(
+        "\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
+        result_a.insert_throughput + result_b.insert_throughput,
+        result_a.search_throughput + result_b.search_throughput
+    );
 
     // Save CSV
     save_scenario_csv("read_heavy", &result_a, &result_b);
@@ -1228,7 +1261,7 @@ async fn baseline_full_write_heavy() {
         search_producers: 1,
         query_workers: 1,
         duration: Duration::from_secs(30),
-        vectors_per_producer: 2500,  // 4 producers * 2500 = 10k
+        vectors_per_producer: 2500, // 4 producers * 2500 = 10k
         vector_dim: 128,
         hnsw_m: 16,
         hnsw_ef_construction: 100,
@@ -1244,18 +1277,26 @@ async fn baseline_full_write_heavy() {
     println!("--- Embedding A ---\n");
     let metrics_a = Arc::new(ConcurrentMetrics::new());
     let bench_a = ConcurrentBenchmark::new(config.clone(), metrics_a);
-    let result_a = bench_a.run(Arc::clone(&storage), EMBEDDING_BASELINE_A).await.expect("benchmark A");
+    let result_a = bench_a
+        .run(Arc::clone(&storage), EMBEDDING_BASELINE_A)
+        .await
+        .expect("benchmark A");
     println!("{}", result_a);
 
     println!("\n--- Embedding B ---\n");
     let metrics_b = Arc::new(ConcurrentMetrics::new());
     let bench_b = ConcurrentBenchmark::new(config.clone(), metrics_b);
-    let result_b = bench_b.run(Arc::clone(&storage), EMBEDDING_BASELINE_B).await.expect("benchmark B");
+    let result_b = bench_b
+        .run(Arc::clone(&storage), EMBEDDING_BASELINE_B)
+        .await
+        .expect("benchmark B");
     println!("{}", result_b);
 
-    println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
-             result_a.insert_throughput + result_b.insert_throughput,
-             result_a.search_throughput + result_b.search_throughput);
+    println!(
+        "\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
+        result_a.insert_throughput + result_b.insert_throughput,
+        result_a.search_throughput + result_b.search_throughput
+    );
 
     // Save CSV
     save_scenario_csv("write_heavy", &result_a, &result_b);
@@ -1276,7 +1317,7 @@ async fn baseline_full_stress() {
         search_producers: 8,
         query_workers: 8,
         duration: Duration::from_secs(60),
-        vectors_per_producer: 1250,  // 8 producers * 1250 = 10k
+        vectors_per_producer: 1250, // 8 producers * 1250 = 10k
         vector_dim: 128,
         hnsw_m: 16,
         hnsw_ef_construction: 100,
@@ -1292,18 +1333,26 @@ async fn baseline_full_stress() {
     println!("--- Embedding A ---\n");
     let metrics_a = Arc::new(ConcurrentMetrics::new());
     let bench_a = ConcurrentBenchmark::new(config.clone(), metrics_a);
-    let result_a = bench_a.run(Arc::clone(&storage), EMBEDDING_BASELINE_A).await.expect("benchmark A");
+    let result_a = bench_a
+        .run(Arc::clone(&storage), EMBEDDING_BASELINE_A)
+        .await
+        .expect("benchmark A");
     println!("{}", result_a);
 
     println!("\n--- Embedding B ---\n");
     let metrics_b = Arc::new(ConcurrentMetrics::new());
     let bench_b = ConcurrentBenchmark::new(config.clone(), metrics_b);
-    let result_b = bench_b.run(Arc::clone(&storage), EMBEDDING_BASELINE_B).await.expect("benchmark B");
+    let result_b = bench_b
+        .run(Arc::clone(&storage), EMBEDDING_BASELINE_B)
+        .await
+        .expect("benchmark B");
     println!("{}", result_b);
 
-    println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
-             result_a.insert_throughput + result_b.insert_throughput,
-             result_a.search_throughput + result_b.search_throughput);
+    println!(
+        "\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
+        result_a.insert_throughput + result_b.insert_throughput,
+        result_a.search_throughput + result_b.search_throughput
+    );
 
     // Save CSV
     save_scenario_csv("stress", &result_a, &result_b);
@@ -1581,14 +1630,26 @@ fn test_failure_injection_writer_crash() {
 
     // Validate results
     assert_eq!(crashed_count, 2, "Should have 2 crashed writer threads");
-    assert!(completed_count >= 2, "Should have at least 2 completed threads");
-    assert!(summary.insert_count > 0, "Should have some successful inserts");
-    assert!(summary.search_count > 0, "Should have some successful searches");
+    assert!(
+        completed_count >= 2,
+        "Should have at least 2 completed threads"
+    );
+    assert!(
+        summary.insert_count > 0,
+        "Should have some successful inserts"
+    );
+    assert!(
+        summary.search_count > 0,
+        "Should have some successful searches"
+    );
 
     // Verify index integrity by searching
     let query = random_vector(DIM);
     let result = index.search(&storage, &query, 10, 50);
-    assert!(result.is_ok(), "Index should remain searchable after crashes");
+    assert!(
+        result.is_ok(),
+        "Index should remain searchable after crashes"
+    );
 
     println!("Failure injection test passed");
 }
@@ -1768,7 +1829,9 @@ fn test_backpressure_throughput_impact() {
 
     // Register embedding using storage's internal registry (cache)
     // This is required because measure_backpressure_impact uses storage.cache()
-    let txn_db = storage.transaction_db().expect("Failed to get transaction DB");
+    let txn_db = storage
+        .transaction_db()
+        .expect("Failed to get transaction DB");
     let embedding = storage
         .cache()
         .register(
@@ -1786,9 +1849,9 @@ fn test_backpressure_throughput_impact() {
         measure_backpressure_impact(
             storage.clone(),
             embedding.code(),
-            200,               // vectors per test (smaller for fast CI)
-            DIM,               // dimension
-            4,                 // producers
+            200,                       // vectors per test (smaller for fast CI)
+            DIM,                       // dimension
+            4,                         // producers
             &[10, 50, 100, 500, 1000], // buffer sizes to test
         )
         .await

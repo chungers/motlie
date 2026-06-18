@@ -49,8 +49,18 @@ use xxhash_rust::xxh64::xxh64;
 /// ```
 /// 8-byte summary content hash (xxHash64).
 /// Has rkyv derives for use in hot CF values.
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
 #[archive(check_bytes)]
 #[archive_attr(derive(Clone, Copy, PartialEq, Eq, Hash, Debug))]
 pub struct SummaryHash([u8; 8]);

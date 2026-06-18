@@ -30,12 +30,16 @@ use serde::Serialize;
 
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::schema::{
-    BinaryCodes, BinaryCodeCfKey, Edges, EdgeCfKey, EmbeddingCode, EmbeddingSpecCfKey,
+    BinaryCodeCfKey, BinaryCodes, EdgeCfKey, Edges, EmbeddingCode, EmbeddingSpecCfKey,
     EmbeddingSpecs, ExternalKey, GraphMeta, GraphMetaCfKey, GraphMetaField, IdAlloc, IdAllocCfKey,
     IdAllocField, IdForward, IdReverse, IdReverseCfKey, LifecycleCounts, LifecycleCountsCfKey,
     LifecycleCountsValue, Pending, VecId, VecMeta, VecMetaCfKey, ALL_COLUMN_FAMILIES,
 };
 use crate::vector::{EmbeddingSpec, Storage};
+
+type AdminCfItem = std::result::Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
+type AdminCfIterator<'a> = Box<dyn Iterator<Item = AdminCfItem> + 'a>;
+type GraphMetaSnapshot = (Option<VecId>, u8, Option<u32>, Option<u64>);
 
 // ============================================================================
 // DB Access Abstraction (ADMIN.md ADMIN-1 / Read-Only Mode)
@@ -53,12 +57,16 @@ use crate::vector::{EmbeddingSpec, Storage};
 /// with either backend without code duplication.
 pub(crate) trait AdminDb {
     fn cf_handle(&self, name: &str) -> Option<&rocksdb::ColumnFamily>;
-    fn get_cf(&self, cf: &rocksdb::ColumnFamily, key: &[u8]) -> std::result::Result<Option<Vec<u8>>, rocksdb::Error>;
+    fn get_cf(
+        &self,
+        cf: &rocksdb::ColumnFamily,
+        key: &[u8],
+    ) -> std::result::Result<Option<Vec<u8>>, rocksdb::Error>;
     fn iterator_cf<'a>(
         &'a self,
         cf: &rocksdb::ColumnFamily,
         mode: IteratorMode<'_>,
-    ) -> Box<dyn Iterator<Item = std::result::Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>> + 'a>;
+    ) -> AdminCfIterator<'a>;
     fn property_int_value_cf(
         &self,
         cf: &rocksdb::ColumnFamily,
@@ -70,14 +78,18 @@ impl AdminDb for rocksdb::DB {
     fn cf_handle(&self, name: &str) -> Option<&rocksdb::ColumnFamily> {
         self.cf_handle(name)
     }
-    fn get_cf(&self, cf: &rocksdb::ColumnFamily, key: &[u8]) -> std::result::Result<Option<Vec<u8>>, rocksdb::Error> {
+    fn get_cf(
+        &self,
+        cf: &rocksdb::ColumnFamily,
+        key: &[u8],
+    ) -> std::result::Result<Option<Vec<u8>>, rocksdb::Error> {
         self.get_cf(cf, key)
     }
     fn iterator_cf<'a>(
         &'a self,
         cf: &rocksdb::ColumnFamily,
         mode: IteratorMode<'_>,
-    ) -> Box<dyn Iterator<Item = std::result::Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>> + 'a> {
+    ) -> AdminCfIterator<'a> {
         Box::new(rocksdb::DB::iterator_cf(self, cf, mode))
     }
     fn property_int_value_cf(
@@ -93,14 +105,18 @@ impl AdminDb for rocksdb::TransactionDB {
     fn cf_handle(&self, name: &str) -> Option<&rocksdb::ColumnFamily> {
         self.cf_handle(name)
     }
-    fn get_cf(&self, cf: &rocksdb::ColumnFamily, key: &[u8]) -> std::result::Result<Option<Vec<u8>>, rocksdb::Error> {
+    fn get_cf(
+        &self,
+        cf: &rocksdb::ColumnFamily,
+        key: &[u8],
+    ) -> std::result::Result<Option<Vec<u8>>, rocksdb::Error> {
         self.get_cf(cf, key)
     }
     fn iterator_cf<'a>(
         &'a self,
         cf: &rocksdb::ColumnFamily,
         mode: IteratorMode<'_>,
-    ) -> Box<dyn Iterator<Item = std::result::Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>> + 'a> {
+    ) -> AdminCfIterator<'a> {
         Box::new(rocksdb::TransactionDB::iterator_cf(self, cf, mode))
     }
     fn property_int_value_cf(
@@ -446,7 +462,7 @@ fn get_all_stats_impl(db: &dyn AdminDb) -> Result<Vec<EmbeddingStats>> {
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
 
     let mut stats = Vec::new();
-    let iter = db.iterator_cf(&specs_cf, IteratorMode::Start);
+    let iter = db.iterator_cf(specs_cf, IteratorMode::Start);
 
     for item in iter {
         let (key_bytes, _) = item?;
@@ -471,7 +487,10 @@ pub fn get_key_type_stats(storage: &Storage, code: EmbeddingCode) -> Result<KeyT
 }
 
 /// Get key type statistics using secondary (read-only) mode.
-pub fn get_key_type_stats_secondary(storage: &Storage, code: EmbeddingCode) -> Result<KeyTypeStats> {
+pub fn get_key_type_stats_secondary(
+    storage: &Storage,
+    code: EmbeddingCode,
+) -> Result<KeyTypeStats> {
     get_key_type_stats_impl(storage.db()?, code)
 }
 
@@ -482,7 +501,7 @@ fn get_key_type_stats_impl(db: &dyn AdminDb, code: EmbeddingCode) -> Result<KeyT
 
     let prefix = code.to_be_bytes();
     let iter = db.iterator_cf(
-        &reverse_cf,
+        reverse_cf,
         IteratorMode::From(&prefix, rocksdb::Direction::Forward),
     );
 
@@ -531,7 +550,7 @@ fn get_all_key_type_stats_impl(db: &dyn AdminDb) -> Result<Vec<KeyTypeStats>> {
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
 
     let mut stats = Vec::new();
-    let iter = db.iterator_cf(&specs_cf, IteratorMode::Start);
+    let iter = db.iterator_cf(specs_cf, IteratorMode::Start);
 
     for item in iter {
         let (key_bytes, _) = item?;
@@ -555,7 +574,10 @@ pub fn inspect_embedding(storage: &Storage, code: EmbeddingCode) -> Result<Embed
 }
 
 /// Deep inspection using secondary (read-only) mode.
-pub fn inspect_embedding_secondary(storage: &Storage, code: EmbeddingCode) -> Result<EmbeddingInspection> {
+pub fn inspect_embedding_secondary(
+    storage: &Storage,
+    code: EmbeddingCode,
+) -> Result<EmbeddingInspection> {
     inspect_embedding_impl(storage.db()?, code)
 }
 
@@ -596,13 +618,17 @@ pub fn get_vector_info_secondary(
     get_vector_info_impl(storage.db()?, code, vec_id)
 }
 
-fn get_vector_info_impl(db: &dyn AdminDb, code: EmbeddingCode, vec_id: VecId) -> Result<Option<VectorInfo>> {
+fn get_vector_info_impl(
+    db: &dyn AdminDb,
+    code: EmbeddingCode,
+    vec_id: VecId,
+) -> Result<Option<VectorInfo>> {
     let meta_cf = db
         .cf_handle(VecMeta::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
 
     let meta_key = VecMetaCfKey(code, vec_id);
-    let meta_bytes = match db.get_cf(&meta_cf, &VecMeta::key_to_bytes(&meta_key))? {
+    let meta_bytes = match db.get_cf(meta_cf, &VecMeta::key_to_bytes(&meta_key))? {
         Some(b) => b,
         None => return Ok(None),
     };
@@ -658,7 +684,7 @@ fn list_vectors_by_state_impl(
 
     let prefix = code.to_be_bytes();
     let iter = db.iterator_cf(
-        &meta_cf,
+        meta_cf,
         IteratorMode::From(&prefix, rocksdb::Direction::Forward),
     );
 
@@ -732,6 +758,10 @@ pub fn sample_vectors_secondary(
     sample_vectors_impl(storage.db()?, code, count, seed)
 }
 
+#[expect(
+    clippy::explicit_counter_loop,
+    reason = "reservoir sampling needs a total seen counter independent of sampled rows"
+)]
 fn sample_vectors_impl(
     db: &dyn AdminDb,
     code: EmbeddingCode,
@@ -747,7 +777,7 @@ fn sample_vectors_impl(
 
     let prefix = code.to_be_bytes();
     let iter = db.iterator_cf(
-        &meta_cf,
+        meta_cf,
         IteratorMode::From(&prefix, rocksdb::Direction::Forward),
     );
 
@@ -817,17 +847,26 @@ pub fn validate_embedding(storage: &Storage, code: EmbeddingCode) -> Result<Vali
 ///
 /// ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
 /// Added --strict option for full-scan validation without sampling.
-pub fn validate_embedding_strict(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
+pub fn validate_embedding_strict(
+    storage: &Storage,
+    code: EmbeddingCode,
+) -> Result<ValidationResult> {
     validate_embedding_with_opts(storage, code, ValidationOptions::default_strict())
 }
 
 /// Run validation checks using secondary (read-only) mode.
-pub fn validate_embedding_secondary(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
+pub fn validate_embedding_secondary(
+    storage: &Storage,
+    code: EmbeddingCode,
+) -> Result<ValidationResult> {
     validate_embedding_secondary_with_opts(storage, code, ValidationOptions::default_sampled())
 }
 
 /// Run strict validation checks using secondary (read-only) mode.
-pub fn validate_embedding_strict_secondary(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
+pub fn validate_embedding_strict_secondary(
+    storage: &Storage,
+    code: EmbeddingCode,
+) -> Result<ValidationResult> {
     validate_embedding_secondary_with_opts(storage, code, ValidationOptions::default_strict())
 }
 
@@ -865,7 +904,11 @@ fn validate_embedding_with_options_impl(
     let mut error_count = 0u32;
 
     // Sample limit: None for full scan (sample_size=0), Some(N) for sampling
-    let sample_limit = if opts.sample_size == 0 { None } else { Some(opts.sample_size) };
+    let sample_limit = if opts.sample_size == 0 {
+        None
+    } else {
+        Some(opts.sample_size)
+    };
 
     // Helper to check if we should stop early
     let should_stop = |checks: &[ValidationCheck], error_count: &mut u32| -> bool {
@@ -884,65 +927,120 @@ fn validate_embedding_with_options_impl(
     // 1. Spec hash validation
     let (_, _, _, spec_hash) = load_graph_meta(db, code)?;
     checks.push(validate_spec_hash(&spec, spec_hash));
-    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+    if should_stop(&checks[checks.len() - 1..], &mut error_count) {
         stopped_early = true;
-        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+        return Ok(ValidationResult {
+            code,
+            model: spec.model,
+            checks,
+            stopped_early,
+        });
     }
 
     // 2. Entry point validation
     checks.push(validate_entry_point(db, code)?);
-    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+    if should_stop(&checks[checks.len() - 1..], &mut error_count) {
         stopped_early = true;
-        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+        return Ok(ValidationResult {
+            code,
+            model: spec.model,
+            checks,
+            stopped_early,
+        });
     }
 
     // 3. ID mapping consistency (forward -> reverse)
     checks.push(validate_id_mappings(db, code)?);
-    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+    if should_stop(&checks[checks.len() - 1..], &mut error_count) {
         stopped_early = true;
-        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+        return Ok(ValidationResult {
+            code,
+            model: spec.model,
+            checks,
+            stopped_early,
+        });
     }
 
     // 4. Count accuracy
     checks.push(validate_count_accuracy(db, code)?);
-    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+    if should_stop(&checks[checks.len() - 1..], &mut error_count) {
         stopped_early = true;
-        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+        return Ok(ValidationResult {
+            code,
+            model: spec.model,
+            checks,
+            stopped_early,
+        });
     }
 
     // 5. Pending queue staleness
     checks.push(validate_pending_queue(db, code)?);
-    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+    if should_stop(&checks[checks.len() - 1..], &mut error_count) {
         stopped_early = true;
-        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+        return Ok(ValidationResult {
+            code,
+            model: spec.model,
+            checks,
+            stopped_early,
+        });
     }
 
     // 6. Orphaned vectors check
     checks.push(validate_no_orphaned_vectors(db, code)?);
-    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+    if should_stop(&checks[checks.len() - 1..], &mut error_count) {
         stopped_early = true;
-        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+        return Ok(ValidationResult {
+            code,
+            model: spec.model,
+            checks,
+            stopped_early,
+        });
     }
 
     // ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
     // Additional checks for data integrity.
 
     // 7. Reverse ID mapping consistency (reverse -> forward)
-    checks.push(validate_reverse_id_mappings(db, code, sample_limit, opts.max_entries)?);
-    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+    checks.push(validate_reverse_id_mappings(
+        db,
+        code,
+        sample_limit,
+        opts.max_entries,
+    )?);
+    if should_stop(&checks[checks.len() - 1..], &mut error_count) {
         stopped_early = true;
-        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+        return Ok(ValidationResult {
+            code,
+            model: spec.model,
+            checks,
+            stopped_early,
+        });
     }
 
     // 8. VecMeta presence for all IdReverse entries
-    checks.push(validate_vec_meta_presence(db, code, sample_limit, opts.max_entries)?);
-    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+    checks.push(validate_vec_meta_presence(
+        db,
+        code,
+        sample_limit,
+        opts.max_entries,
+    )?);
+    if should_stop(&checks[checks.len() - 1..], &mut error_count) {
         stopped_early = true;
-        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+        return Ok(ValidationResult {
+            code,
+            model: spec.model,
+            checks,
+            stopped_early,
+        });
     }
 
     // 9. Vector payload existence for indexed vectors
-    checks.push(validate_vector_payloads(db, code, sample_limit, opts.max_entries)?);
+    checks.push(validate_vector_payloads(
+        db,
+        code,
+        sample_limit,
+        opts.max_entries,
+    )?);
 
     Ok(ValidationResult {
         code,
@@ -973,22 +1071,31 @@ pub fn validate_all_strict_secondary(storage: &Storage) -> Result<Vec<Validation
 }
 
 /// Run validation checks on all embeddings with custom options.
-pub fn validate_all_with_opts(storage: &Storage, opts: ValidationOptions) -> Result<Vec<ValidationResult>> {
+pub fn validate_all_with_opts(
+    storage: &Storage,
+    opts: ValidationOptions,
+) -> Result<Vec<ValidationResult>> {
     validate_all_with_options_impl(storage.transaction_db()?, opts)
 }
 
 /// Run validation checks on all embeddings with custom options using secondary mode.
-pub fn validate_all_secondary_with_opts(storage: &Storage, opts: ValidationOptions) -> Result<Vec<ValidationResult>> {
+pub fn validate_all_secondary_with_opts(
+    storage: &Storage,
+    opts: ValidationOptions,
+) -> Result<Vec<ValidationResult>> {
     validate_all_with_options_impl(storage.db()?, opts)
 }
 
-fn validate_all_with_options_impl(db: &dyn AdminDb, opts: ValidationOptions) -> Result<Vec<ValidationResult>> {
+fn validate_all_with_options_impl(
+    db: &dyn AdminDb,
+    opts: ValidationOptions,
+) -> Result<Vec<ValidationResult>> {
     let specs_cf = db
         .cf_handle(EmbeddingSpecs::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
 
     let mut results = Vec::new();
-    let iter = db.iterator_cf(&specs_cf, IteratorMode::Start);
+    let iter = db.iterator_cf(specs_cf, IteratorMode::Start);
 
     for item in iter {
         let (key_bytes, _) = item?;
@@ -1036,22 +1143,20 @@ fn get_rocksdb_stats_impl(db: &dyn AdminDb) -> Result<RocksDbStats> {
     for cf_name in ALL_COLUMN_FAMILIES {
         if let Some(cf) = db.cf_handle(cf_name) {
             let estimated_num_keys = db
-                .property_int_value_cf(&cf, "rocksdb.estimate-num-keys")
+                .property_int_value_cf(cf, "rocksdb.estimate-num-keys")
                 .ok()
                 .flatten();
 
-            let iter = db.iterator_cf(&cf, IteratorMode::Start);
+            let iter = db.iterator_cf(cf, IteratorMode::Start);
             let mut entry_count = 0u64;
             let mut size_bytes = 0u64;
             let sample_limit = 10000u64;
 
-            for item in iter {
-                if let Ok((key, value)) = item {
-                    entry_count += 1;
-                    size_bytes += key.len() as u64 + value.len() as u64;
-                    if entry_count >= sample_limit {
-                        break;
-                    }
+            for (key, value) in iter.flatten() {
+                entry_count += 1;
+                size_bytes += key.len() as u64 + value.len() as u64;
+                if entry_count >= sample_limit {
+                    break;
                 }
             }
 
@@ -1126,7 +1231,8 @@ fn migrate_lifecycle_counts_impl(
     code: EmbeddingCode,
 ) -> Result<MigrateCountsResult> {
     // Scan VecMeta to count vectors by lifecycle state
-    let (indexed, pending, deleted, pending_deleted) = count_vectors_by_lifecycle_scan(txn_db, code)?;
+    let (indexed, pending, deleted, pending_deleted) =
+        count_vectors_by_lifecycle_scan(txn_db, code)?;
 
     // Write counts to LifecycleCounts CF
     let lifecycle_cf = txn_db
@@ -1141,7 +1247,11 @@ fn migrate_lifecycle_counts_impl(
         pending_deleted: pending_deleted as u64,
     };
 
-    txn_db.put_cf(&lifecycle_cf, LifecycleCounts::key_to_bytes(&key), value.to_bytes())?;
+    txn_db.put_cf(
+        &lifecycle_cf,
+        LifecycleCounts::key_to_bytes(&key),
+        value.to_bytes(),
+    )?;
 
     Ok(MigrateCountsResult {
         code,
@@ -1163,7 +1273,7 @@ fn list_embedding_codes(db: &dyn AdminDb) -> Result<Vec<EmbeddingCode>> {
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
 
     let mut codes = Vec::new();
-    let iter = db.iterator_cf(&specs_cf, IteratorMode::Start);
+    let iter = db.iterator_cf(specs_cf, IteratorMode::Start);
 
     for item in iter {
         let (key_bytes, _) = item?;
@@ -1176,10 +1286,7 @@ fn list_embedding_codes(db: &dyn AdminDb) -> Result<Vec<EmbeddingCode>> {
     Ok(codes)
 }
 
-fn load_embedding_spec(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-) -> Result<Option<EmbeddingSpec>> {
+fn load_embedding_spec(db: &dyn AdminDb, code: EmbeddingCode) -> Result<Option<EmbeddingSpec>> {
     use crate::rocksdb::ColumnFamilySerde;
 
     let cf = db
@@ -1189,7 +1296,7 @@ fn load_embedding_spec(
     let key = EmbeddingSpecCfKey(code);
     let key_bytes = EmbeddingSpecs::key_to_bytes(&key);
 
-    match db.get_cf(&cf, &key_bytes)? {
+    match db.get_cf(cf, &key_bytes)? {
         Some(value_bytes) => {
             let value = EmbeddingSpecs::value_from_bytes(&value_bytes)?;
             Ok(Some(value.0))
@@ -1198,17 +1305,14 @@ fn load_embedding_spec(
     }
 }
 
-fn load_graph_meta(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-) -> Result<(Option<VecId>, u8, Option<u32>, Option<u64>)> {
+fn load_graph_meta(db: &dyn AdminDb, code: EmbeddingCode) -> Result<GraphMetaSnapshot> {
     let cf = db
         .cf_handle(GraphMeta::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", GraphMeta::CF_NAME))?;
 
     // Entry point
     let ep_key = GraphMetaCfKey::entry_point(code);
-    let entry_point = match db.get_cf(&cf, &GraphMeta::key_to_bytes(&ep_key))? {
+    let entry_point = match db.get_cf(cf, &GraphMeta::key_to_bytes(&ep_key))? {
         Some(bytes) => {
             let val = GraphMeta::value_from_bytes(&ep_key, &bytes)?;
             match val.0 {
@@ -1221,7 +1325,7 @@ fn load_graph_meta(
 
     // Max level
     let level_key = GraphMetaCfKey::max_level(code);
-    let max_level = match db.get_cf(&cf, &GraphMeta::key_to_bytes(&level_key))? {
+    let max_level = match db.get_cf(cf, &GraphMeta::key_to_bytes(&level_key))? {
         Some(bytes) => {
             let val = GraphMeta::value_from_bytes(&level_key, &bytes)?;
             match val.0 {
@@ -1234,7 +1338,7 @@ fn load_graph_meta(
 
     // Count
     let count_key = GraphMetaCfKey::count(code);
-    let count = match db.get_cf(&cf, &GraphMeta::key_to_bytes(&count_key))? {
+    let count = match db.get_cf(cf, &GraphMeta::key_to_bytes(&count_key))? {
         Some(bytes) => {
             let val = GraphMeta::value_from_bytes(&count_key, &bytes)?;
             match val.0 {
@@ -1247,7 +1351,7 @@ fn load_graph_meta(
 
     // Spec hash
     let hash_key = GraphMetaCfKey::spec_hash(code);
-    let spec_hash = match db.get_cf(&cf, &GraphMeta::key_to_bytes(&hash_key))? {
+    let spec_hash = match db.get_cf(cf, &GraphMeta::key_to_bytes(&hash_key))? {
         Some(bytes) => {
             let val = GraphMeta::value_from_bytes(&hash_key, &bytes)?;
             match val.0 {
@@ -1299,7 +1403,7 @@ fn read_lifecycle_counts(
     };
 
     let key = LifecycleCountsCfKey(code);
-    match db.get_cf(&cf, &LifecycleCounts::key_to_bytes(&key))? {
+    match db.get_cf(cf, &LifecycleCounts::key_to_bytes(&key))? {
         Some(bytes) => Ok(Some(LifecycleCountsValue::from_bytes(&bytes)?)),
         None => Ok(None),
     }
@@ -1315,10 +1419,7 @@ fn count_vectors_by_lifecycle_scan(
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
 
     let prefix = code.to_be_bytes();
-    let iter = db.iterator_cf(
-        &cf,
-        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-    );
+    let iter = db.iterator_cf(cf, IteratorMode::From(&prefix, rocksdb::Direction::Forward));
 
     let mut indexed = 0u32;
     let mut pending = 0u32;
@@ -1346,17 +1447,14 @@ fn count_vectors_by_lifecycle_scan(
     Ok((indexed, pending, deleted, pending_deleted))
 }
 
-fn load_id_alloc_state(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-) -> Result<(u32, u64)> {
+fn load_id_alloc_state(db: &dyn AdminDb, code: EmbeddingCode) -> Result<(u32, u64)> {
     let cf = db
         .cf_handle(IdAlloc::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdAlloc::CF_NAME))?;
 
     // Next ID
     let next_key = IdAllocCfKey::next_id(code);
-    let next_id = match db.get_cf(&cf, &IdAlloc::key_to_bytes(&next_key))? {
+    let next_id = match db.get_cf(cf, &IdAlloc::key_to_bytes(&next_key))? {
         Some(bytes) => {
             let val = IdAlloc::value_from_bytes(&next_key, &bytes)?;
             match val.0 {
@@ -1369,7 +1467,7 @@ fn load_id_alloc_state(
 
     // Free bitmap
     let bitmap_key = IdAllocCfKey::free_bitmap(code);
-    let free_count = match db.get_cf(&cf, &IdAlloc::key_to_bytes(&bitmap_key))? {
+    let free_count = match db.get_cf(cf, &IdAlloc::key_to_bytes(&bitmap_key))? {
         Some(bytes) => {
             let bitmap = RoaringBitmap::deserialize_from(&bytes[..])?;
             bitmap.len()
@@ -1390,10 +1488,7 @@ fn compute_layer_distribution(
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
 
     let prefix = code.to_be_bytes();
-    let iter = db.iterator_cf(
-        &cf,
-        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-    );
+    let iter = db.iterator_cf(cf, IteratorMode::From(&prefix, rocksdb::Direction::Forward));
 
     let mut counts: Vec<u32> = Vec::new();
     let mut processed = 0usize;
@@ -1428,19 +1523,13 @@ fn compute_layer_distribution(
     Ok(LayerDistribution { counts })
 }
 
-fn get_pending_queue_info(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-) -> Result<(usize, Option<u64>)> {
+fn get_pending_queue_info(db: &dyn AdminDb, code: EmbeddingCode) -> Result<(usize, Option<u64>)> {
     let cf = db
         .cf_handle(Pending::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", Pending::CF_NAME))?;
 
     let prefix = Pending::prefix_for_embedding(code);
-    let iter = db.iterator_cf(
-        &cf,
-        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-    );
+    let iter = db.iterator_cf(cf, IteratorMode::From(&prefix, rocksdb::Direction::Forward));
 
     let mut count = 0usize;
     let mut oldest_timestamp: Option<u64> = None;
@@ -1476,7 +1565,7 @@ fn resolve_external_key(
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdReverse::CF_NAME))?;
 
     let key = IdReverseCfKey(code, vec_id);
-    match db.get_cf(&cf, &IdReverse::key_to_bytes(&key))? {
+    match db.get_cf(cf, &IdReverse::key_to_bytes(&key))? {
         Some(bytes) => {
             let val = IdReverse::value_from_bytes(&bytes)?;
             Ok(Some(val.0))
@@ -1499,7 +1588,7 @@ fn count_edges_per_layer(
 
     for layer in 0..=max_layer {
         let key = EdgeCfKey(code, vec_id, layer);
-        let count = match db.get_cf(&cf, &Edges::key_to_bytes(&key))? {
+        let count = match db.get_cf(cf, &Edges::key_to_bytes(&key))? {
             Some(bytes) => {
                 let bitmap = RoaringBitmap::deserialize_from(&bytes[..])?;
                 bitmap.len() as usize
@@ -1512,17 +1601,13 @@ fn count_edges_per_layer(
     Ok(counts)
 }
 
-fn has_binary_code(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-    vec_id: VecId,
-) -> Result<bool> {
+fn has_binary_code(db: &dyn AdminDb, code: EmbeddingCode, vec_id: VecId) -> Result<bool> {
     let cf = db
         .cf_handle(BinaryCodes::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", BinaryCodes::CF_NAME))?;
 
     let key = BinaryCodeCfKey(code, vec_id);
-    Ok(db.get_cf(&cf, &BinaryCodes::key_to_bytes(&key))?.is_some())
+    Ok(db.get_cf(cf, &BinaryCodes::key_to_bytes(&key))?.is_some())
 }
 
 // ============================================================================
@@ -1569,7 +1654,7 @@ fn validate_entry_point(db: &dyn AdminDb, code: EmbeddingCode) -> Result<Validat
                 .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
 
             let key = VecMetaCfKey(code, ep);
-            if db.get_cf(&meta_cf, &VecMeta::key_to_bytes(&key))?.is_some() {
+            if db.get_cf(meta_cf, &VecMeta::key_to_bytes(&key))?.is_some() {
                 Ok(ValidationCheck {
                     name: "entry_point",
                     status: ValidationStatus::Pass,
@@ -1602,15 +1687,15 @@ fn validate_entry_point(db: &dyn AdminDb, code: EmbeddingCode) -> Result<Validat
         (ep, count) => Ok(ValidationCheck {
             name: "entry_point",
             status: ValidationStatus::Warning,
-            message: format!("Unexpected entry point state: ep={:?}, count={:?}", ep, count),
+            message: format!(
+                "Unexpected entry point state: ep={:?}, count={:?}",
+                ep, count
+            ),
         }),
     }
 }
 
-fn validate_id_mappings(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-) -> Result<ValidationCheck> {
+fn validate_id_mappings(db: &dyn AdminDb, code: EmbeddingCode) -> Result<ValidationCheck> {
     let forward_cf = db
         .cf_handle(IdForward::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdForward::CF_NAME))?;
@@ -1623,7 +1708,7 @@ fn validate_id_mappings(
 
     // Check a sample of forward mappings
     let forward_iter = db.iterator_cf(
-        &forward_cf,
+        forward_cf,
         IteratorMode::From(&prefix, rocksdb::Direction::Forward),
     );
 
@@ -1643,7 +1728,9 @@ fn validate_id_mappings(
 
         // Check reverse mapping
         let reverse_key = IdReverseCfKey(code, forward_val.0);
-        if let Some(reverse_bytes) = db.get_cf(&reverse_cf, &IdReverse::key_to_bytes(&reverse_key))? {
+        if let Some(reverse_bytes) =
+            db.get_cf(reverse_cf, &IdReverse::key_to_bytes(&reverse_key))?
+        {
             let reverse_val = IdReverse::value_from_bytes(&reverse_bytes)?;
             if reverse_val.0 != forward_key.1 {
                 mismatches += 1;
@@ -1662,7 +1749,10 @@ fn validate_id_mappings(
         Ok(ValidationCheck {
             name: "id_mappings",
             status: ValidationStatus::Pass,
-            message: format!("ID forward/reverse mappings consistent ({} checked)", checked),
+            message: format!(
+                "ID forward/reverse mappings consistent ({} checked)",
+                checked
+            ),
         })
     } else {
         Ok(ValidationCheck {
@@ -1676,10 +1766,7 @@ fn validate_id_mappings(
     }
 }
 
-fn validate_count_accuracy(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-) -> Result<ValidationCheck> {
+fn validate_count_accuracy(db: &dyn AdminDb, code: EmbeddingCode) -> Result<ValidationCheck> {
     // ADMIN.md Issue #3 (chungers, 2025-01-27, FIXED):
     // GraphMeta::Count tracks indexed vectors only. Compare against indexed count,
     // not total (indexed + pending + deleted). Report pending/deleted separately.
@@ -1723,10 +1810,7 @@ fn validate_count_accuracy(
     }
 }
 
-fn validate_pending_queue(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-) -> Result<ValidationCheck> {
+fn validate_pending_queue(db: &dyn AdminDb, code: EmbeddingCode) -> Result<ValidationCheck> {
     let (depth, oldest_timestamp) = get_pending_queue_info(db, code)?;
 
     if depth == 0 {
@@ -1770,10 +1854,7 @@ fn validate_pending_queue(
     }
 }
 
-fn validate_no_orphaned_vectors(
-    db: &dyn AdminDb,
-    code: EmbeddingCode,
-) -> Result<ValidationCheck> {
+fn validate_no_orphaned_vectors(db: &dyn AdminDb, code: EmbeddingCode) -> Result<ValidationCheck> {
     let meta_cf = db
         .cf_handle(VecMeta::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
@@ -1784,7 +1865,7 @@ fn validate_no_orphaned_vectors(
 
     let prefix = code.to_be_bytes();
     let iter = db.iterator_cf(
-        &meta_cf,
+        meta_cf,
         IteratorMode::From(&prefix, rocksdb::Direction::Forward),
     );
 
@@ -1807,7 +1888,10 @@ fn validate_no_orphaned_vectors(
         if meta.lifecycle() == crate::vector::schema::VecLifecycle::Indexed {
             // Check if vector has edges at layer 0
             let edge_key = EdgeCfKey(code, key.1, 0);
-            if db.get_cf(&edges_cf, &Edges::key_to_bytes(&edge_key))?.is_none() {
+            if db
+                .get_cf(edges_cf, &Edges::key_to_bytes(&edge_key))?
+                .is_none()
+            {
                 orphaned += 1;
             }
         }
@@ -1859,7 +1943,7 @@ fn validate_reverse_id_mappings(
 
     // Check reverse mappings point back to valid forward mappings
     let reverse_iter = db.iterator_cf(
-        &reverse_cf,
+        reverse_cf,
         IteratorMode::From(&prefix, rocksdb::Direction::Forward),
     );
 
@@ -1879,7 +1963,9 @@ fn validate_reverse_id_mappings(
 
         // Check forward mapping exists and points back
         let forward_key = IdForwardCfKey(code, reverse_val.0);
-        if let Some(forward_bytes) = db.get_cf(&forward_cf, &IdForward::key_to_bytes(&forward_key))? {
+        if let Some(forward_bytes) =
+            db.get_cf(forward_cf, &IdForward::key_to_bytes(&forward_key))?
+        {
             let forward_val: IdForwardCfValue = IdForward::value_from_bytes(&forward_bytes)?;
             if forward_val.0 != reverse_key.1 {
                 mismatches += 1;
@@ -1890,7 +1976,7 @@ fn validate_reverse_id_mappings(
 
         checked += 1;
         // Progress reporting for strict mode (full scan)
-        if sample_limit.is_none() && checked % 10_000 == 0 {
+        if sample_limit.is_none() && checked.is_multiple_of(10_000) {
             eprintln!("  [reverse_id_mappings] checked {} entries...", checked);
         }
         // Stop at sample limit or max entries
@@ -1914,7 +2000,10 @@ fn validate_reverse_id_mappings(
         Ok(ValidationCheck {
             name: "reverse_id_mappings",
             status: ValidationStatus::Pass,
-            message: format!("Reverse ID mappings consistent ({} checked{})", checked, sampled_note),
+            message: format!(
+                "Reverse ID mappings consistent ({} checked{})",
+                checked, sampled_note
+            ),
         })
     } else {
         Ok(ValidationCheck {
@@ -1945,7 +2034,7 @@ fn validate_vec_meta_presence(
     let prefix = code.to_be_bytes();
 
     let reverse_iter = db.iterator_cf(
-        &reverse_cf,
+        reverse_cf,
         IteratorMode::From(&prefix, rocksdb::Direction::Forward),
     );
 
@@ -1965,13 +2054,16 @@ fn validate_vec_meta_presence(
 
         // Check VecMeta exists for this vector
         let meta_key = VecMetaCfKey(code, vec_id);
-        if db.get_cf(&meta_cf, &VecMeta::key_to_bytes(&meta_key))?.is_none() {
+        if db
+            .get_cf(meta_cf, &VecMeta::key_to_bytes(&meta_key))?
+            .is_none()
+        {
             missing += 1;
         }
 
         checked += 1;
         // Progress reporting for strict mode (full scan)
-        if sample_limit.is_none() && checked % 10_000 == 0 {
+        if sample_limit.is_none() && checked.is_multiple_of(10_000) {
             eprintln!("  [vec_meta_presence] checked {} entries...", checked);
         }
         // Stop at sample limit or max entries
@@ -1995,7 +2087,10 @@ fn validate_vec_meta_presence(
         Ok(ValidationCheck {
             name: "vec_meta_presence",
             status: ValidationStatus::Pass,
-            message: format!("VecMeta present for all IdReverse entries ({} checked{})", checked, sampled_note),
+            message: format!(
+                "VecMeta present for all IdReverse entries ({} checked{})",
+                checked, sampled_note
+            ),
         })
     } else {
         Ok(ValidationCheck {
@@ -2027,7 +2122,7 @@ fn validate_vector_payloads(
 
     let prefix = code.to_be_bytes();
     let iter = db.iterator_cf(
-        &meta_cf,
+        meta_cf,
         IteratorMode::From(&prefix, rocksdb::Direction::Forward),
     );
 
@@ -2049,12 +2144,15 @@ fn validate_vector_payloads(
         // Only check indexed vectors - they must have vector data
         if meta.lifecycle() == crate::vector::schema::VecLifecycle::Indexed {
             let vector_key = VectorCfKey(code, key.1);
-            if db.get_cf(&vectors_cf, &Vectors::key_to_bytes(&vector_key))?.is_none() {
+            if db
+                .get_cf(vectors_cf, &Vectors::key_to_bytes(&vector_key))?
+                .is_none()
+            {
                 missing += 1;
             }
             checked += 1;
             // Progress reporting for strict mode (full scan)
-            if sample_limit.is_none() && checked % 10_000 == 0 {
+            if sample_limit.is_none() && checked.is_multiple_of(10_000) {
                 eprintln!("  [vector_payloads] checked {} indexed vectors...", checked);
             }
         }
@@ -2080,7 +2178,10 @@ fn validate_vector_payloads(
         Ok(ValidationCheck {
             name: "vector_payloads",
             status: ValidationStatus::Pass,
-            message: format!("Vector data present for all indexed vectors ({} checked{})", checked, sampled_note),
+            message: format!(
+                "Vector data present for all indexed vectors ({} checked{})",
+                checked, sampled_note
+            ),
         })
     } else {
         Ok(ValidationCheck {

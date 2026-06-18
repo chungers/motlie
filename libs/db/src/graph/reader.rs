@@ -191,12 +191,10 @@ impl Consumer {
 
         let exec = request.payload.execute_with_processor(&self.processor);
         let result = match request.timeout {
-            Some(timeout) => {
-                match tokio::time::timeout(timeout, exec).await {
-                    Ok(r) => r,
-                    Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-                }
-            }
+            Some(timeout) => match tokio::time::timeout(timeout, exec).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+            },
             None => exec.await,
         };
 
@@ -246,33 +244,13 @@ pub fn spawn_query_consumer(
     spawn_consumer(consumer)
 }
 
-/// Spawn a query consumer pool with shared Processor.
-///
-/// Convenience function that matches the old API signature.
-/// Creates multiple consumers sharing a Processor.
-///
-/// # Arguments
-/// * `receiver` - Query receiver from create_reader_with_storage
-/// * `processor` - Shared GraphProcessor instance
-/// * `num_workers` - Number of query workers to spawn
-///
-/// # Returns
-/// Vec of JoinHandles for spawned workers
-pub(crate) fn spawn_query_consumer_pool_shared(
-    receiver: flume::Receiver<QueryRequest>,
-    processor: Arc<GraphProcessor>,
-    num_workers: usize,
-) -> Vec<JoinHandle<()>> {
-    spawn_consumer_pool_with_processor(receiver, processor, num_workers)
-}
-
 /// Spawn a pool of query consumers, each with its own readonly storage.
 ///
 /// Each worker creates its own readonly Storage and Processor instance.
 /// This provides isolation between workers at the cost of memory.
 ///
-/// Note: For most use cases, `spawn_query_consumer_pool_shared` is preferred
-/// since it shares memory more efficiently via Arc.
+/// Note: For most use cases, `spawn_query_consumers_with_storage` is preferred
+/// since it shares one processor across workers via `Arc`.
 // (claude, 2026-02-07, ADDED: Fill gap - README documented but function was missing)
 #[doc(hidden)]
 pub fn spawn_query_consumer_pool_readonly(
@@ -323,27 +301,6 @@ pub fn spawn_query_consumer_pool_readonly(
     handles
 }
 
-/// Spawn a single query consumer with shared Processor.
-///
-/// Convenience function that matches the old `spawn_query_consumer_with_graph` signature.
-/// Uses the Processor to process queries.
-///
-/// # Arguments
-/// * `receiver` - Query receiver from create_reader_with_storage
-/// * `config` - Reader configuration
-/// * `processor` - Shared GraphProcessor instance
-///
-/// # Returns
-/// JoinHandle for the spawned consumer task
-pub(crate) fn spawn_query_consumer_with_processor(
-    receiver: flume::Receiver<QueryRequest>,
-    config: ReaderConfig,
-    processor: Arc<GraphProcessor>,
-) -> JoinHandle<Result<()>> {
-    let consumer = Consumer::new(receiver, config, processor);
-    spawn_consumer(consumer)
-}
-
 // ============================================================================
 // Processor-based Consumer Functions (ARCH2 Pattern)
 // (claude, 2026-02-07, FIXED: P2.4 - Construction helpers)
@@ -359,7 +316,10 @@ pub(crate) fn spawn_query_consumer_with_processor(
 ///
 /// # Returns
 /// Reader with embedded Processor
-pub fn create_reader_with_storage(storage: Arc<Storage>, config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
+pub fn create_reader_with_storage(
+    storage: Arc<Storage>,
+    config: ReaderConfig,
+) -> (Reader, flume::Receiver<QueryRequest>) {
     let processor = Arc::new(GraphProcessor::new(storage));
     create_reader_with_processor(processor, config)
 }
@@ -374,7 +334,10 @@ pub fn create_reader_with_storage(storage: Arc<Storage>, config: ReaderConfig) -
 ///
 /// # Returns
 /// Reader with Processor reference
-pub(crate) fn create_reader_with_processor(processor: Arc<GraphProcessor>, config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
+pub(crate) fn create_reader_with_processor(
+    processor: Arc<GraphProcessor>,
+    config: ReaderConfig,
+) -> (Reader, flume::Receiver<QueryRequest>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::new(sender, processor);
     (reader, receiver)
@@ -485,10 +448,7 @@ pub(crate) fn spawn_consumer_pool_with_processor(
         handles.push(handle);
     }
 
-    tracing::info!(
-        num_workers,
-        "Spawned query consumer pool (processor mode)"
-    );
+    tracing::info!(num_workers, "Spawned query consumer pool (processor mode)");
 
     handles
 }

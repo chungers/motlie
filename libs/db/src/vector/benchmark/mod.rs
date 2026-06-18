@@ -99,23 +99,21 @@ pub mod sift;
 pub use dataset::{DatasetConfig, LaionDataset, LaionSubset, NpyLoader, LAION_EMBEDDING_DIM};
 
 // Re-exports for public API - GIST
-pub use dataset::{
-    GistDataset, GistSubset, GIST_BASE_VECTORS, GIST_EMBEDDING_DIM, GIST_QUERIES,
-};
+pub use dataset::{GistDataset, GistSubset, GIST_BASE_VECTORS, GIST_EMBEDDING_DIM, GIST_QUERIES};
 
 // Re-exports for public API - Random (synthetic)
 pub use dataset::{compute_ground_truth_parallel, RandomDataset};
 
 // Re-exports for public API - Parquet datasets (Cohere Wikipedia)
 pub use dataset::{
-    load_parquet_embeddings, CohereWikipediaDataset, CohereWikipediaSubset,
-    COHERE_WIKI_DIM, COHERE_WIKI_VECTORS,
+    load_parquet_embeddings, CohereWikipediaDataset, CohereWikipediaSubset, COHERE_WIKI_DIM,
+    COHERE_WIKI_VECTORS,
 };
 
 // Re-exports for public API - HDF5 datasets (GloVe)
 pub use dataset::{
-    load_hdf5_embeddings, load_hdf5_ground_truth, GloveDataset, GloveSubset,
-    GLOVE_DIM, GLOVE_QUERIES, GLOVE_VECTORS,
+    load_hdf5_embeddings, load_hdf5_ground_truth, GloveDataset, GloveSubset, GLOVE_DIM,
+    GLOVE_QUERIES, GLOVE_VECTORS,
 };
 
 // Re-exports for public API - SIFT

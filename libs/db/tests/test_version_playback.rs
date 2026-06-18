@@ -3,13 +3,11 @@
 //! Tests the full async pipeline: Writer (mutations) → Reader (queries)
 //! using the public `Runnable` trait for both.
 
-use motlie_db::graph::writer::{spawn_mutation_consumer_with_storage, WriterConfig};
-use motlie_db::graph::reader::{spawn_query_consumers_with_storage, ReaderConfig};
 use motlie_db::graph::mutation::{AddEdge, AddNode, UpdateEdge, UpdateNode};
-use motlie_db::graph::query::{
-    EdgeAtVersion, EdgeVersions, NodeAtVersion, NodeVersions,
-};
+use motlie_db::graph::query::{EdgeAtVersion, EdgeVersions, NodeAtVersion, NodeVersions};
+use motlie_db::graph::reader::{spawn_query_consumers_with_storage, ReaderConfig};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{spawn_mutation_consumer_with_storage, WriterConfig};
 use motlie_db::graph::Storage;
 use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::writer::Runnable as MutRunnable;
@@ -33,7 +31,9 @@ async fn test_node_version_playback_e2e() {
     let db_path = temp_dir.path().join("graph_db");
     let storage = setup_storage(&db_path);
 
-    let config = WriterConfig { channel_buffer_size: 100 };
+    let config = WriterConfig {
+        channel_buffer_size: 100,
+    };
 
     // === Mutation phase ===
     let (writer, writer_handle) = spawn_mutation_consumer_with_storage(storage.clone(), config);
@@ -85,11 +85,8 @@ async fn test_node_version_playback_e2e() {
     writer_handle.await.unwrap().unwrap();
 
     // === Query phase ===
-    let (reader, reader_handles) = spawn_query_consumers_with_storage(
-        storage,
-        ReaderConfig::default(),
-        2,
-    );
+    let (reader, reader_handles) =
+        spawn_query_consumers_with_storage(storage, ReaderConfig::default(), 2);
     let timeout = Duration::from_secs(5);
 
     // HEAD (versions_back=0) → v3
@@ -117,9 +114,7 @@ async fn test_node_version_playback_e2e() {
     assert_eq!(snap.payload.1, NodeSummary::from_text("Version 1"));
 
     // HEAD~3 → error
-    let result = NodeAtVersion::new(node_id, 3)
-        .run(&reader, timeout)
-        .await;
+    let result = NodeAtVersion::new(node_id, 3).run(&reader, timeout).await;
     assert!(result.is_err(), "HEAD~3 should fail for 3-version node");
 
     // Shutdown reader
@@ -136,7 +131,9 @@ async fn test_edge_version_playback_e2e() {
     let db_path = temp_dir.path().join("graph_db");
     let storage = setup_storage(&db_path);
 
-    let config = WriterConfig { channel_buffer_size: 100 };
+    let config = WriterConfig {
+        channel_buffer_size: 100,
+    };
     let (writer, writer_handle) = spawn_mutation_consumer_with_storage(storage.clone(), config);
 
     let src_id = Id::new();
@@ -179,11 +176,8 @@ async fn test_edge_version_playback_e2e() {
     writer_handle.await.unwrap().unwrap();
 
     // === Query phase ===
-    let (reader, reader_handles) = spawn_query_consumers_with_storage(
-        storage,
-        ReaderConfig::default(),
-        2,
-    );
+    let (reader, reader_handles) =
+        spawn_query_consumers_with_storage(storage, ReaderConfig::default(), 2);
     let timeout = Duration::from_secs(5);
 
     // HEAD → v2
@@ -223,7 +217,9 @@ async fn test_node_versions_listing_e2e() {
     let db_path = temp_dir.path().join("graph_db");
     let storage = setup_storage(&db_path);
 
-    let config = WriterConfig { channel_buffer_size: 100 };
+    let config = WriterConfig {
+        channel_buffer_size: 100,
+    };
     let (writer, writer_handle) = spawn_mutation_consumer_with_storage(storage.clone(), config);
 
     let node_id = Id::new();
@@ -270,11 +266,8 @@ async fn test_node_versions_listing_e2e() {
     writer_handle.await.unwrap().unwrap();
 
     // === Query phase ===
-    let (reader, reader_handles) = spawn_query_consumers_with_storage(
-        storage,
-        ReaderConfig::default(),
-        2,
-    );
+    let (reader, reader_handles) =
+        spawn_query_consumers_with_storage(storage, ReaderConfig::default(), 2);
     let timeout = Duration::from_secs(5);
 
     // List all versions
@@ -311,7 +304,9 @@ async fn test_edge_versions_listing_e2e() {
     let db_path = temp_dir.path().join("graph_db");
     let storage = setup_storage(&db_path);
 
-    let config = WriterConfig { channel_buffer_size: 100 };
+    let config = WriterConfig {
+        channel_buffer_size: 100,
+    };
     let (writer, writer_handle) = spawn_mutation_consumer_with_storage(storage.clone(), config);
 
     let src_id = Id::new();
@@ -352,11 +347,8 @@ async fn test_edge_versions_listing_e2e() {
     writer_handle.await.unwrap().unwrap();
 
     // === Query phase ===
-    let (reader, reader_handles) = spawn_query_consumers_with_storage(
-        storage,
-        ReaderConfig::default(),
-        2,
-    );
+    let (reader, reader_handles) =
+        spawn_query_consumers_with_storage(storage, ReaderConfig::default(), 2);
     let timeout = Duration::from_secs(5);
 
     let versions = EdgeVersions::new(src_id, dst_id, edge_name, 10)

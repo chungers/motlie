@@ -7,7 +7,10 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use rocksdb::{Cache, ColumnFamilyDescriptor, TransactionDB};
 
-use crate::rocksdb::{prewarm_cf, BlockCacheConfig, ColumnFamily, ColumnFamilyConfig, DbAccess, RocksdbSubsystem, StorageSubsystem};
+use crate::rocksdb::{
+    prewarm_cf, BlockCacheConfig, ColumnFamily, ColumnFamilyConfig, DbAccess, RocksdbSubsystem,
+    StorageSubsystem,
+};
 use crate::SubsystemProvider;
 use motlie_core::telemetry::SubsystemInfo;
 
@@ -15,9 +18,9 @@ use super::async_updater::{AsyncGraphUpdater, AsyncUpdaterConfig};
 use super::cache::NavigationCache;
 use super::gc::{GarbageCollector, GcConfig};
 use super::processor::Processor;
-use super::reader::{create_reader, ReaderConfig, Reader, spawn_consumers};
+use super::reader::{create_reader, spawn_consumers, Reader, ReaderConfig};
 use super::registry::EmbeddingRegistry;
-use super::schema::{self, ALL_COLUMN_FAMILIES, EmbeddingSpecs};
+use super::schema::{self, EmbeddingSpecs, ALL_COLUMN_FAMILIES};
 use super::writer::{create_writer, spawn_consumer, Consumer, Writer, WriterConfig};
 
 // ============================================================================
@@ -198,7 +201,14 @@ impl Subsystem {
         reader_config: ReaderConfig,
         num_query_workers: usize,
     ) -> (Writer, Reader) {
-        self.start_with_async(storage, writer_config, reader_config, num_query_workers, None, None)
+        self.start_with_async(
+            storage,
+            writer_config,
+            reader_config,
+            num_query_workers,
+            None,
+            None,
+        )
     }
 
     /// Start the vector subsystem with async graph updater for two-phase inserts.
@@ -302,16 +312,15 @@ impl Subsystem {
 
         // Create and spawn query consumers
         let (reader, query_receiver) = create_reader(reader_config.clone());
-        let query_handles = spawn_consumers(
-            query_receiver,
-            reader_config,
-            processor,
-            num_query_workers,
-        );
+        let query_handles =
+            spawn_consumers(query_receiver, reader_config, processor, num_query_workers);
 
         // Store consumer handles for graceful shutdown
         {
-            let mut handles = self.consumer_handles.write().expect("consumer_handles lock poisoned");
+            let mut handles = self
+                .consumer_handles
+                .write()
+                .expect("consumer_handles lock poisoned");
             handles.push(mutation_handle);
             handles.extend(query_handles);
         }
@@ -327,16 +336,15 @@ impl Subsystem {
                 self.nav_cache.clone(),
                 config,
             );
-            *self.async_updater.write().expect("async_updater lock poisoned") = Some(updater);
+            *self
+                .async_updater
+                .write()
+                .expect("async_updater lock poisoned") = Some(updater);
         }
 
         // Start garbage collector if configured
         if let Some(config) = gc_config {
-            let gc = GarbageCollector::start(
-                storage,
-                self.cache.clone(),
-                config,
-            );
+            let gc = GarbageCollector::start(storage, self.cache.clone(), config);
             *self.gc.write().expect("gc lock poisoned") = Some(gc);
         }
 
@@ -413,47 +421,80 @@ impl Subsystem {
         vec![
             ColumnFamilyDescriptor::new(
                 <schema::EmbeddingSpecs as ColumnFamily>::CF_NAME,
-                <schema::EmbeddingSpecs as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::EmbeddingSpecs as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::Vectors as ColumnFamily>::CF_NAME,
-                <schema::Vectors as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::Vectors as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::Edges as ColumnFamily>::CF_NAME,
-                <schema::Edges as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::Edges as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::BinaryCodes as ColumnFamily>::CF_NAME,
-                <schema::BinaryCodes as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::BinaryCodes as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::VecMeta as ColumnFamily>::CF_NAME,
-                <schema::VecMeta as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::VecMeta as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::GraphMeta as ColumnFamily>::CF_NAME,
-                <schema::GraphMeta as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::GraphMeta as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::IdForward as ColumnFamily>::CF_NAME,
-                <schema::IdForward as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::IdForward as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::IdReverse as ColumnFamily>::CF_NAME,
-                <schema::IdReverse as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::IdReverse as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::IdAlloc as ColumnFamily>::CF_NAME,
-                <schema::IdAlloc as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::IdAlloc as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::Pending as ColumnFamily>::CF_NAME,
-                <schema::Pending as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::Pending as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::LifecycleCounts as ColumnFamily>::CF_NAME,
-                <schema::LifecycleCounts as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+                <schema::LifecycleCounts as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(
+                    block_cache,
+                    &vector_config,
+                ),
             ),
         ]
     }
@@ -476,7 +517,10 @@ impl SubsystemInfo for Subsystem {
 
     fn info_lines(&self) -> Vec<(&'static str, String)> {
         vec![
-            ("Prewarm Limit", self.prewarm_config.prewarm_limit.to_string()),
+            (
+                "Prewarm Limit",
+                self.prewarm_config.prewarm_limit.to_string(),
+            ),
             ("Column Families", ALL_COLUMN_FAMILIES.len().to_string()),
         ]
     }
@@ -488,11 +532,21 @@ impl SubsystemInfo for Subsystem {
 
 impl SubsystemProvider<TransactionDB> for Subsystem {
     fn on_ready(&self, db: &TransactionDB) -> Result<()> {
-        let count = prewarm_cf::<EmbeddingSpecs, _>(db, self.prewarm_config.prewarm_limit, |key, value| {
-            let spec = &value.0;
-            self.cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance, spec.storage_type);
-            Ok(())
-        })?;
+        let count = prewarm_cf::<EmbeddingSpecs, _>(
+            db,
+            self.prewarm_config.prewarm_limit,
+            |key, value| {
+                let spec = &value.0;
+                self.cache.register_from_db(
+                    key.0,
+                    &spec.model,
+                    spec.dim,
+                    spec.distance,
+                    spec.storage_type,
+                );
+                Ok(())
+            },
+        )?;
         tracing::info!(subsystem = "vector", count, "Pre-warmed embedding registry");
         Ok(())
     }
@@ -534,7 +588,12 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
 
         // 2. Shutdown async graph updater (graceful - waits for in-flight batches)
         // Now that all mutations are flushed, AsyncUpdater can drain the pending queue.
-        if let Some(updater) = self.async_updater.write().expect("async_updater lock poisoned").take() {
+        if let Some(updater) = self
+            .async_updater
+            .write()
+            .expect("async_updater lock poisoned")
+            .take()
+        {
             tracing::debug!(subsystem = "vector", "Shutting down async graph updater");
             updater.shutdown();
             tracing::debug!(subsystem = "vector", "Async graph updater shut down");
@@ -542,16 +601,35 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
 
         // 3. Join consumer tasks (cooperative shutdown - channels are closed)
         // Consumers exit naturally when recv() returns None, so joins should complete quickly.
-        let handles = std::mem::take(&mut *self.consumer_handles.write().expect("consumer_handles lock poisoned"));
+        let handles = std::mem::take(
+            &mut *self
+                .consumer_handles
+                .write()
+                .expect("consumer_handles lock poisoned"),
+        );
         if !handles.is_empty() {
-            tracing::debug!(subsystem = "vector", count = handles.len(), "Joining consumer tasks");
+            tracing::debug!(
+                subsystem = "vector",
+                count = handles.len(),
+                "Joining consumer tasks"
+            );
             match tokio::runtime::Handle::try_current() {
                 Ok(runtime_handle) => {
                     for (i, handle) in handles.into_iter().enumerate() {
                         match runtime_handle.block_on(handle) {
-                            Ok(Ok(())) => tracing::debug!(subsystem = "vector", consumer = i, "Consumer joined"),
-                            Ok(Err(e)) => tracing::warn!(subsystem = "vector", consumer = i, error = %e, "Consumer returned error"),
-                            Err(_) => tracing::warn!(subsystem = "vector", consumer = i, "Consumer task panicked"),
+                            Ok(Ok(())) => tracing::debug!(
+                                subsystem = "vector",
+                                consumer = i,
+                                "Consumer joined"
+                            ),
+                            Ok(Err(e)) => {
+                                tracing::warn!(subsystem = "vector", consumer = i, error = %e, "Consumer returned error")
+                            }
+                            Err(_) => tracing::warn!(
+                                subsystem = "vector",
+                                consumer = i,
+                                "Consumer task panicked"
+                            ),
                         }
                     }
                 }
@@ -626,7 +704,13 @@ impl StorageSubsystem for Subsystem {
     ) -> Result<usize> {
         prewarm_cf::<EmbeddingSpecs, _>(db, config.prewarm_limit, |key, value| {
             let spec = &value.0;
-            cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance, spec.storage_type);
+            cache.register_from_db(
+                key.0,
+                &spec.model,
+                spec.dim,
+                spec.distance,
+                spec.storage_type,
+            );
             Ok(())
         })
     }
@@ -647,7 +731,9 @@ pub struct EmbeddingRegistryConfig {
 
 impl Default for EmbeddingRegistryConfig {
     fn default() -> Self {
-        Self { prewarm_limit: 1000 }
+        Self {
+            prewarm_limit: 1000,
+        }
     }
 }
 
@@ -701,8 +787,8 @@ mod tests {
 
     #[test]
     fn test_subsystem_with_config() {
-        let subsystem = Subsystem::new()
-            .with_prewarm_config(EmbeddingRegistryConfig { prewarm_limit: 500 });
+        let subsystem =
+            Subsystem::new().with_prewarm_config(EmbeddingRegistryConfig { prewarm_limit: 500 });
         assert_eq!(subsystem.prewarm_config().prewarm_limit, 500);
     }
 
@@ -713,7 +799,11 @@ mod tests {
         assert!(!cf_names.is_empty());
         // Verify all CFs have vector/ prefix
         for cf in cf_names {
-            assert!(cf.starts_with("vector/"), "CF {} should have vector/ prefix", cf);
+            assert!(
+                cf.starts_with("vector/"),
+                "CF {} should have vector/ prefix",
+                cf
+            );
         }
     }
 

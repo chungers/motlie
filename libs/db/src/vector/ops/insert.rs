@@ -12,10 +12,10 @@ use crate::vector::cache::BinaryCodeCache;
 use crate::vector::hnsw::{self, CacheUpdate};
 use crate::vector::processor::Processor;
 use crate::vector::schema::{
-    AdcCorrection, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpecCfKey,
-    EmbeddingSpecs, ExternalKey, GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, IdForward,
-    IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue,
-    LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta, Pending, VecId,
+    AdcCorrection, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode,
+    EmbeddingSpecCfKey, EmbeddingSpecs, ExternalKey, GraphMeta, GraphMetaCfKey, GraphMetaCfValue,
+    GraphMetaField, IdForward, IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey,
+    IdReverseCfValue, LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta, Pending, VecId,
     VecMeta, VecMetaCfKey, VecMetaCfValue, VecMetadata, VectorCfKey, Vectors,
 };
 
@@ -282,7 +282,7 @@ pub(crate) fn vector(
             .cf_handle(Pending::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
         let pending_key = Pending::key_now(embedding, vec_id);
-        txn.put_cf(&pending_cf, Pending::key_to_bytes(&pending_key), &[])?;
+        txn.put_cf(&pending_cf, Pending::key_to_bytes(&pending_key), [])?;
 
         None
     };
@@ -391,7 +391,10 @@ pub(crate) fn batch(
         for (external_key, _) in vectors {
             let key_bytes = external_key.to_bytes();
             if !seen.insert(key_bytes) {
-                return Err(anyhow::anyhow!("Duplicate external key {:?} in batch", external_key));
+                return Err(anyhow::anyhow!(
+                    "Duplicate external key {:?} in batch",
+                    external_key
+                ));
             }
         }
     }
@@ -561,7 +564,7 @@ pub(crate) fn batch(
 
             // Add to pending queue for async graph construction
             let pending_key = Pending::key_now(embedding, *vec_id);
-            txn.put_cf(&pending_cf, Pending::key_to_bytes(&pending_key), &[])?;
+            txn.put_cf(&pending_cf, Pending::key_to_bytes(&pending_key), [])?;
         }
     }
 
@@ -572,9 +575,15 @@ pub(crate) fn batch(
     let lifecycle_key = LifecycleCountsCfKey(embedding);
     let count = vec_ids.len() as i64;
     let delta = if build_index {
-        LifecycleCountsDelta { indexed: count, ..Default::default() }
+        LifecycleCountsDelta {
+            indexed: count,
+            ..Default::default()
+        }
     } else {
-        LifecycleCountsDelta { pending: count, ..Default::default() }
+        LifecycleCountsDelta {
+            pending: count,
+            ..Default::default()
+        }
     };
     txn.merge_cf(
         &lifecycle_cf,

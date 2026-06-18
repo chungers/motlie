@@ -275,7 +275,9 @@ impl ExternalKey {
                 }
                 let mut hash_bytes = [0u8; 8];
                 hash_bytes.copy_from_slice(payload);
-                Ok(ExternalKey::NodeSummary(SummaryHash::from_bytes(hash_bytes)))
+                Ok(ExternalKey::NodeSummary(SummaryHash::from_bytes(
+                    hash_bytes,
+                )))
             }
             Self::TAG_EDGE_SUMMARY => {
                 if payload.len() != 8 {
@@ -286,7 +288,9 @@ impl ExternalKey {
                 }
                 let mut hash_bytes = [0u8; 8];
                 hash_bytes.copy_from_slice(payload);
-                Ok(ExternalKey::EdgeSummary(SummaryHash::from_bytes(hash_bytes)))
+                Ok(ExternalKey::EdgeSummary(SummaryHash::from_bytes(
+                    hash_bytes,
+                )))
             }
             _ => anyhow::bail!("ExternalKey: unknown tag 0x{:02x}", tag),
         }
@@ -433,7 +437,6 @@ pub struct EmbeddingSpec {
     // =========================================================================
     // Build Parameters (Phase 5.6 - Config Persistence)
     // =========================================================================
-
     /// HNSW M parameter: number of bidirectional links per node.
     /// Higher M = better recall, more memory. Default: 16
     #[serde(default = "default_hnsw_m")]
@@ -703,7 +706,7 @@ impl Vectors {
     ) -> Result<Vec<f32>> {
         match storage_type {
             VectorElementType::F32 => {
-                if bytes.len() % 4 != 0 {
+                if !bytes.len().is_multiple_of(4) {
                     anyhow::bail!(
                         "Invalid F32 vector bytes length: {} is not divisible by 4",
                         bytes.len()
@@ -717,7 +720,7 @@ impl Vectors {
             }
             VectorElementType::F16 => {
                 use half::f16;
-                if bytes.len() % 2 != 0 {
+                if !bytes.len().is_multiple_of(2) {
                     anyhow::bail!(
                         "Invalid F16 vector bytes length: {} is not divisible by 2",
                         bytes.len()
@@ -759,15 +762,6 @@ pub(crate) struct EdgeCfKey(
     pub(crate) VecId,
     pub(crate) HnswLayer,
 );
-
-/// Edges value: serialized RoaringBitmap of neighbor vec_ids.
-///
-/// NOTE: This type isn't constructed directly in most call paths; edge updates
-/// are applied via RocksDB merge operators using raw bytes. We keep the wrapper
-/// to document the CF value shape and for potential future typed access.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct EdgeCfValue(pub(crate) RoaringBitmapBytes);
 
 impl ColumnFamily for Edges {
     const CF_NAME: &'static str = "vector/edges";
@@ -818,20 +812,6 @@ impl Edges {
         let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
         let layer = bytes[12];
         Ok(EdgeCfKey(embedding_code, vec_id, layer))
-    }
-
-    /// Serialize edge value (RoaringBitmap bytes passthrough).
-    /// Not currently used in hot paths; merge ops operate on raw bytes.
-    #[allow(dead_code)]
-    pub fn value_to_bytes(value: &EdgeCfValue) -> Vec<u8> {
-        value.0.clone()
-    }
-
-    /// Deserialize edge value (RoaringBitmap bytes passthrough).
-    /// Not currently used in hot paths; merge ops operate on raw bytes.
-    #[allow(dead_code)]
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<EdgeCfValue> {
-        Ok(EdgeCfValue(bytes.to_vec()))
     }
 }
 
@@ -941,7 +921,7 @@ impl BinaryCodes {
 /// Value: VecMetadata (max_layer, flags, created_at)
 pub(crate) struct VecMeta;
 
-/// Domain struct for vector metadata.
+// Domain struct for vector metadata.
 // ============================================================================
 // VecMetadata Flags Design
 // ============================================================================
@@ -1034,31 +1014,6 @@ impl VecLifecycle {
     }
 }
 
-/// Orthogonal flags for future capabilities (upper bits of flags byte).
-///
-/// These flags are independent of lifecycle state and can be combined with
-/// any VecLifecycle value.
-#[allow(non_snake_case)]
-pub(crate) mod VecFlags {
-    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
-    ///
-    /// When implemented, this flag will indicate that the vector data has been
-    /// replicated to another node in a distributed deployment. This enables:
-    /// - Distributed search across multiple nodes
-    /// - Fault tolerance through data redundancy
-    /// - Geographic distribution for latency optimization
-    ///
-    /// Bit 7 is chosen to leave room for other orthogonal flags in bits 2-6.
-    ///
-    /// Usage (when implemented):
-    /// ```ignore
-    /// meta.set_replicated(true);  // Mark as replicated
-    /// if meta.is_replicated() { ... }  // Check replication status
-    /// ```
-    #[allow(dead_code)]
-    pub const REPLICATED: u8 = 0b1000_0000; // bit 7
-}
-
 /// Vector metadata stored in VecMeta column family.
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
@@ -1141,12 +1096,6 @@ impl VecMetadata {
         )
     }
 
-    /// Check if vector is fully indexed and active.
-    #[inline]
-    pub(crate) fn is_indexed(&self) -> bool {
-        self.lifecycle() == VecLifecycle::Indexed
-    }
-
     /// Mark as deleted, handling state transition correctly.
     ///
     /// State transitions:
@@ -1162,47 +1111,9 @@ impl VecMetadata {
         self.set_lifecycle(new_state);
     }
 
-    /// Clear pending state (after graph construction completes).
-    ///
-    /// State transitions:
-    /// - Pending → Indexed
-    /// - PendingDeleted → Deleted
-    /// - Indexed/Deleted → unchanged
-    pub(crate) fn clear_pending(&mut self) {
-        let new_state = match self.lifecycle() {
-            VecLifecycle::Pending => VecLifecycle::Indexed,
-            VecLifecycle::PendingDeleted => VecLifecycle::Deleted,
-            other => other,
-        };
-        self.set_lifecycle(new_state);
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
     // Orthogonal Flags (FUTURE - not yet implemented)
     // ─────────────────────────────────────────────────────────────────────────
-
-    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
-    ///
-    /// Check if vector has been replicated to another node.
-    /// Always returns false until distributed replication is implemented.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn is_replicated(&self) -> bool {
-        self.flags & VecFlags::REPLICATED != 0
-    }
-
-    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
-    ///
-    /// Set the replicated flag. Has no effect until distributed
-    /// replication is implemented.
-    #[allow(dead_code)]
-    pub(crate) fn set_replicated(&mut self, replicated: bool) {
-        if replicated {
-            self.flags |= VecFlags::REPLICATED;
-        } else {
-            self.flags &= !VecFlags::REPLICATED;
-        }
-    }
 }
 
 impl ArchivedVecMetadata {
@@ -1733,10 +1644,6 @@ pub(crate) struct PendingCfKey(
     pub(crate) VecId,
 );
 
-/// Pending value: empty (presence in CF indicates pending status)
-#[derive(Debug, Clone)]
-pub(crate) struct PendingCfValue(pub(crate) ());
-
 impl ColumnFamily for Pending {
     const CF_NAME: &'static str = "vector/pending";
 }
@@ -1797,14 +1704,6 @@ impl Pending {
         let vec_id = u32::from_be_bytes(bytes[16..20].try_into()?);
         Ok(PendingCfKey(embedding_code, timestamp, vec_id))
     }
-
-    pub fn value_to_bytes(_value: &PendingCfValue) -> Vec<u8> {
-        Vec::new()
-    }
-
-    pub fn value_from_bytes(_bytes: &[u8]) -> Result<PendingCfValue> {
-        Ok(PendingCfValue(()))
-    }
 }
 
 // ============================================================================
@@ -1856,37 +1755,61 @@ pub struct LifecycleCountsDelta {
 impl LifecycleCountsDelta {
     /// Create a delta that increments the pending counter.
     pub fn inc_pending() -> Self {
-        Self { pending: 1, ..Default::default() }
+        Self {
+            pending: 1,
+            ..Default::default()
+        }
     }
 
     /// Create a delta that increments the indexed counter.
     pub fn inc_indexed() -> Self {
-        Self { indexed: 1, ..Default::default() }
+        Self {
+            indexed: 1,
+            ..Default::default()
+        }
     }
 
     /// Create a delta for transitioning from pending to indexed.
     pub fn pending_to_indexed() -> Self {
-        Self { pending: -1, indexed: 1, ..Default::default() }
+        Self {
+            pending: -1,
+            indexed: 1,
+            ..Default::default()
+        }
     }
 
     /// Create a delta for marking an indexed vector as deleted.
     pub fn indexed_to_deleted() -> Self {
-        Self { indexed: -1, deleted: 1, ..Default::default() }
+        Self {
+            indexed: -1,
+            deleted: 1,
+            ..Default::default()
+        }
     }
 
     /// Create a delta for marking a pending vector as pending_deleted.
     pub fn pending_to_pending_deleted() -> Self {
-        Self { pending: -1, pending_deleted: 1, ..Default::default() }
+        Self {
+            pending: -1,
+            pending_deleted: 1,
+            ..Default::default()
+        }
     }
 
     /// Create a delta for purging a deleted vector (GC).
     pub fn purge_deleted() -> Self {
-        Self { deleted: -1, ..Default::default() }
+        Self {
+            deleted: -1,
+            ..Default::default()
+        }
     }
 
     /// Create a delta for purging a pending_deleted vector (GC).
     pub fn purge_pending_deleted() -> Self {
-        Self { pending_deleted: -1, ..Default::default() }
+        Self {
+            pending_deleted: -1,
+            ..Default::default()
+        }
     }
 
     /// Serialize to bytes for use as merge operand.
@@ -1896,7 +1819,8 @@ impl LifecycleCountsDelta {
 
     /// Deserialize from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        rmp_serde::from_slice(bytes).map_err(|e| anyhow::anyhow!("Failed to deserialize delta: {}", e))
+        rmp_serde::from_slice(bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize delta: {}", e))
     }
 }
 
@@ -1922,7 +1846,10 @@ impl LifecycleCountsValue {
     /// Deserialize from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != 32 {
-            anyhow::bail!("Invalid LifecycleCountsValue length: expected 32, got {}", bytes.len());
+            anyhow::bail!(
+                "Invalid LifecycleCountsValue length: expected 32, got {}",
+                bytes.len()
+            );
         }
         Ok(Self {
             indexed: u64::from_be_bytes(bytes[0..8].try_into()?),
@@ -1963,7 +1890,10 @@ impl LifecycleCounts {
 
     pub fn key_from_bytes(bytes: &[u8]) -> Result<LifecycleCountsCfKey> {
         if bytes.len() != 8 {
-            anyhow::bail!("Invalid LifecycleCountsCfKey length: expected 8, got {}", bytes.len());
+            anyhow::bail!(
+                "Invalid LifecycleCountsCfKey length: expected 8, got {}",
+                bytes.len()
+            );
         }
         Ok(LifecycleCountsCfKey(u64::from_be_bytes(bytes.try_into()?)))
     }
@@ -1973,7 +1903,9 @@ impl LifecycleCounts {
     }
 
     pub fn value_from_bytes(bytes: &[u8]) -> Result<LifecycleCountsCfValue> {
-        Ok(LifecycleCountsCfValue(LifecycleCountsValue::from_bytes(bytes)?))
+        Ok(LifecycleCountsCfValue(LifecycleCountsValue::from_bytes(
+            bytes,
+        )?))
     }
 }
 
@@ -2098,7 +2030,10 @@ mod tests {
         assert_eq!(VecLifecycle::from_flags(0b1000_0000), VecLifecycle::Indexed);
         assert_eq!(VecLifecycle::from_flags(0b1000_0001), VecLifecycle::Deleted);
         assert_eq!(VecLifecycle::from_flags(0b1000_0010), VecLifecycle::Pending);
-        assert_eq!(VecLifecycle::from_flags(0b1000_0011), VecLifecycle::PendingDeleted);
+        assert_eq!(
+            VecLifecycle::from_flags(0b1000_0011),
+            VecLifecycle::PendingDeleted
+        );
     }
 
     #[test]
@@ -2115,7 +2050,7 @@ mod tests {
         assert_eq!(meta.lifecycle(), VecLifecycle::Pending);
         assert!(meta.is_pending());
         assert!(!meta.is_deleted());
-        assert!(!meta.is_indexed());
+        assert_ne!(meta.lifecycle(), VecLifecycle::Indexed);
         assert_eq!(meta.max_layer, 0);
     }
 
@@ -2125,53 +2060,24 @@ mod tests {
         assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
         assert!(!meta.is_pending());
         assert!(!meta.is_deleted());
-        assert!(meta.is_indexed());
+        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
         assert_eq!(meta.max_layer, 5);
     }
 
     #[test]
     fn test_vec_metadata_state_transitions() {
-        // Pending → Indexed (normal async completion)
-        let mut meta = VecMetadata::pending();
-        meta.clear_pending();
-        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
+        let mut indexed = VecMetadata::indexed(0);
+        indexed.set_deleted();
+        assert_eq!(indexed.lifecycle(), VecLifecycle::Deleted);
 
-        // Indexed → Deleted (normal delete)
-        meta.set_deleted();
-        assert_eq!(meta.lifecycle(), VecLifecycle::Deleted);
+        let mut pending = VecMetadata::pending();
+        pending.set_deleted();
+        assert_eq!(pending.lifecycle(), VecLifecycle::PendingDeleted);
+        assert!(pending.is_pending());
+        assert!(pending.is_deleted());
 
-        // Pending → PendingDeleted (delete before async completion)
-        let mut meta2 = VecMetadata::pending();
-        meta2.set_deleted();
-        assert_eq!(meta2.lifecycle(), VecLifecycle::PendingDeleted);
-        assert!(meta2.is_pending()); // Still needs async cleanup
-        assert!(meta2.is_deleted()); // But skip in search
-
-        // PendingDeleted → Deleted (async completes on deleted item)
-        meta2.clear_pending();
-        assert_eq!(meta2.lifecycle(), VecLifecycle::Deleted);
-        assert!(!meta2.is_pending());
-        assert!(meta2.is_deleted());
-    }
-
-    #[test]
-    fn test_vec_metadata_orthogonal_flags_preserved() {
-        let mut meta = VecMetadata::pending();
-
-        // Set future REPLICATED flag
-        meta.set_replicated(true);
-        assert!(meta.is_replicated());
-        assert_eq!(meta.lifecycle(), VecLifecycle::Pending); // Lifecycle unchanged
-
-        // Lifecycle transition should preserve REPLICATED
-        meta.clear_pending();
-        assert!(meta.is_replicated()); // Still replicated
-        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
-
-        // Another transition
-        meta.set_deleted();
-        assert!(meta.is_replicated()); // Still replicated
-        assert_eq!(meta.lifecycle(), VecLifecycle::Deleted);
+        pending.set_deleted();
+        assert_eq!(pending.lifecycle(), VecLifecycle::PendingDeleted);
     }
 
     #[test]
@@ -2282,7 +2188,10 @@ mod tests {
         let bytes = [0x01, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
         let result = ExternalKey::from_bytes(&bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected 16 bytes"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected 16 bytes"));
     }
 
     #[test]
@@ -2317,7 +2226,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<Id>(), 16, "Id size changed");
         assert_eq!(NameHash::SIZE, 8, "NameHash::SIZE changed");
         assert_eq!(SummaryHash::SIZE, 8, "SummaryHash::SIZE changed");
-        assert_eq!(std::mem::size_of::<TimestampMilli>(), 8, "TimestampMilli size changed");
+        assert_eq!(
+            std::mem::size_of::<TimestampMilli>(),
+            8,
+            "TimestampMilli size changed"
+        );
     }
 
     #[test]

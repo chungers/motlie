@@ -184,16 +184,8 @@ pub enum Search {
 impl std::fmt::Display for Search {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Search::Nodes(q) => write!(
-                f,
-                "FulltextNodes: query={}, limit={}",
-                q.query, q.limit
-            ),
-            Search::Edges(q) => write!(
-                f,
-                "FulltextEdges: query={}, limit={}",
-                q.query, q.limit
-            ),
+            Search::Nodes(q) => write!(f, "FulltextNodes: query={}, limit={}", q.query, q.limit),
+            Search::Edges(q) => write!(f, "FulltextEdges: query={}, limit={}", q.query, q.limit),
             Search::Facets(q) => write!(
                 f,
                 "FulltextFacets: doc_type_filter={:?}, tags_limit={}",
@@ -432,10 +424,9 @@ impl QueryExecutor for Nodes {
         let fuzzy_level = self.fuzzy_level.unwrap_or(FuzzyLevel::None);
         let text_query: Box<dyn tantivy::query::Query> = if fuzzy_level == FuzzyLevel::None {
             // Check for wildcard patterns (e.g., lik*, test?)
-            if let Some(wildcard_query) = build_wildcard_query(
-                &self.query,
-                &[fields.content_field, fields.node_name_field],
-            ) {
+            if let Some(wildcard_query) =
+                build_wildcard_query(&self.query, &[fields.content_field, fields.node_name_field])
+            {
                 wildcard_query
             } else {
                 // No wildcards: use QueryParser for full query syntax support
@@ -735,10 +726,9 @@ impl QueryExecutor for Edges {
         let fuzzy_level = self.fuzzy_level.unwrap_or(FuzzyLevel::None);
         let text_query: Box<dyn tantivy::query::Query> = if fuzzy_level == FuzzyLevel::None {
             // Check for wildcard patterns (e.g., lik*, test?)
-            if let Some(wildcard_query) = build_wildcard_query(
-                &self.query,
-                &[fields.content_field, fields.edge_name_field],
-            ) {
+            if let Some(wildcard_query) =
+                build_wildcard_query(&self.query, &[fields.content_field, fields.edge_name_field])
+            {
                 wildcard_query
             } else {
                 // No wildcards: use QueryParser for full query syntax support
@@ -1136,8 +1126,8 @@ mod tests {
     use crate::fulltext::writer::spawn_mutation_consumer;
     use crate::fulltext::{Index, Storage};
     use crate::graph::mutation::{AddNode, AddNodeFragment};
-    use crate::writer::Runnable as MutRunnable;
     use crate::graph::writer::{create_mutation_writer, WriterConfig};
+    use crate::writer::Runnable as MutRunnable;
     use crate::{DataUrl, TimestampMilli};
     use std::sync::Arc;
     use tempfile::TempDir;

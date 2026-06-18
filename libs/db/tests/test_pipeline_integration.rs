@@ -5,23 +5,21 @@
 //! 3. Concurrent clients performing mixed graph and fulltext queries
 
 use motlie_db::fulltext::{
-    create_query_reader as create_fulltext_query_reader, Index as FulltextIndex,
-    Nodes as FulltextNodes, ReaderConfig as FulltextReaderConfig,
-    Runnable as FulltextQueryRunnable, spawn_mutation_consumer as spawn_fulltext_mutation_consumer,
+    create_query_reader as create_fulltext_query_reader,
+    spawn_mutation_consumer as spawn_fulltext_mutation_consumer,
     spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
-    Storage as FulltextStorage,
+    Index as FulltextIndex, Nodes as FulltextNodes, ReaderConfig as FulltextReaderConfig,
+    Runnable as FulltextQueryRunnable, Storage as FulltextStorage,
 };
 use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
-use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{NodeById, OutgoingEdges};
-use motlie_db::graph::reader::{
-    spawn_query_consumers_with_storage, ReaderConfig,
-};
+use motlie_db::graph::reader::{spawn_query_consumers_with_storage, ReaderConfig};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
 use motlie_db::graph::Storage;
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,13 +61,7 @@ async fn test_single_mutation_pipeline_chain() {
 
     // Create test data
     let node_ids: Vec<Id> = (0..5).map(|_| Id::new()).collect();
-    let node_names = [
-        "Alice",
-        "Bob",
-        "Charlie",
-        "David",
-        "Eve",
-    ];
+    let node_names = ["Alice", "Bob", "Charlie", "David", "Eve"];
     let summaries = [
         "Software engineer specializing in Rust and systems programming",
         "Data scientist working on machine learning models",
@@ -182,8 +174,12 @@ async fn test_multi_consumer_query_channels() {
         spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle =
-        spawn_mutation_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
+    let graph_handle = spawn_mutation_consumer_with_next(
+        graph_receiver,
+        config.clone(),
+        &db_path,
+        fulltext_sender,
+    );
 
     // Create test nodes
     let mut node_ids = Vec::new();
@@ -196,10 +192,14 @@ async fn test_multi_consumer_query_channels() {
             ts_millis: TimestampMilli::now(),
             name: format!("TestNode_{}", i),
             valid_range: None,
-            summary: NodeSummary::from_text(&format!(
+            summary: NodeSummary::from_text(format!(
                 "This is test node {} with searchable content about topic {}",
                 i,
-                if i % 2 == 0 { "databases" } else { "networking" }
+                if i % 2 == 0 {
+                    "databases"
+                } else {
+                    "networking"
+                }
             )),
         };
         node.run(&writer).await.unwrap();
@@ -341,14 +341,18 @@ async fn test_concurrent_mixed_queries() {
         spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle =
-        spawn_mutation_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
+    let graph_handle = spawn_mutation_consumer_with_next(
+        graph_receiver,
+        config.clone(),
+        &db_path,
+        fulltext_sender,
+    );
 
     // Create a more realistic dataset
     let categories = ["engineering", "science", "business", "design"];
     let mut all_node_ids = Vec::new();
 
-    for (_cat_idx, category) in categories.iter().enumerate() {
+    for category in categories.iter() {
         for i in 0..5 {
             let node_id = Id::new();
             all_node_ids.push((node_id, category.to_string()));
@@ -358,7 +362,7 @@ async fn test_concurrent_mixed_queries() {
                 ts_millis: TimestampMilli::now(),
                 name: format!("{}_{}", category, i),
                 valid_range: None,
-                summary: NodeSummary::from_text(&format!(
+                summary: NodeSummary::from_text(format!(
                     "Expert in {} with focus on area {}. Keywords: {}, professional, skilled.",
                     category, i, category
                 )),
@@ -379,7 +383,7 @@ async fn test_concurrent_mixed_queries() {
                 target_node_id: cat_nodes[i + 1],
                 ts_millis: TimestampMilli::now(),
                 name: format!("{}_link", category),
-                summary: EdgeSummary::from_text(&format!("{} collaboration", category)),
+                summary: EdgeSummary::from_text(format!("{} collaboration", category)),
                 weight: Some(0.8),
                 valid_range: None,
             };
@@ -392,7 +396,11 @@ async fn test_concurrent_mixed_queries() {
     graph_handle.await.unwrap().unwrap();
     fulltext_handle.await.unwrap().unwrap();
 
-    println!("  Created {} nodes across {} categories", all_node_ids.len(), categories.len());
+    println!(
+        "  Created {} nodes across {} categories",
+        all_node_ids.len(),
+        categories.len()
+    );
 
     // Setup query infrastructure
     let mut storage = Storage::readwrite(&db_path);
@@ -416,11 +424,8 @@ async fn test_concurrent_mixed_queries() {
     let fulltext_index = Arc::new(FulltextIndex::new(Arc::new(ft_storage)));
 
     // Spawn 2 fulltext query consumers sharing the readonly Index
-    let ft_consumer_handles = spawn_fulltext_query_consumer_pool_shared(
-        fulltext_query_receiver,
-        fulltext_index,
-        2,
-    );
+    let ft_consumer_handles =
+        spawn_fulltext_query_consumer_pool_shared(fulltext_query_receiver, fulltext_index, 2);
 
     // Clone readers for concurrent clients
     let graph_reader_1 = graph_reader.clone();
@@ -504,10 +509,7 @@ async fn test_concurrent_mixed_queries() {
         handle.await.unwrap();
     }
 
-    println!(
-        "  Total successful operations: {}/21",
-        total_successes
-    );
+    println!("  Total successful operations: {}/21", total_successes);
 
     assert!(
         total_successes >= 15,
@@ -541,8 +543,12 @@ async fn test_complete_pipeline_architecture() {
         spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_mut_handle =
-        spawn_mutation_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
+    let graph_mut_handle = spawn_mutation_consumer_with_next(
+        graph_receiver,
+        config.clone(),
+        &db_path,
+        fulltext_sender,
+    );
 
     // Populate with test data
     let mut node_ids = Vec::new();
@@ -555,7 +561,7 @@ async fn test_complete_pipeline_architecture() {
             ts_millis: TimestampMilli::now(),
             name: format!("Entity_{:02}", i),
             valid_range: None,
-            summary: NodeSummary::from_text(&format!(
+            summary: NodeSummary::from_text(format!(
                 "Entity {} description with searchable terms: alpha beta gamma",
                 i
             )),
@@ -644,7 +650,11 @@ async fn test_complete_pipeline_architecture() {
     let graph_client_2 = tokio::spawn(async move {
         let mut count = 0;
         for id in &node_ids_clone2[0..5] {
-            if OutgoingEdges::new(*id, None).run(&gr2, timeout).await.is_ok() {
+            if OutgoingEdges::new(*id, None)
+                .run(&gr2, timeout)
+                .await
+                .is_ok()
+            {
                 count += 1;
             }
         }
@@ -655,7 +665,10 @@ async fn test_complete_pipeline_architecture() {
     let fulltext_client_1 = tokio::spawn(async move {
         let mut count = 0;
         for term in &["alpha", "beta", "gamma", "Entity"] {
-            if let Ok(r) = FulltextNodes::new(term.to_string(), 5).run(&fr1, timeout).await {
+            if let Ok(r) = FulltextNodes::new(term.to_string(), 5)
+                .run(&fr1, timeout)
+                .await
+            {
                 if !r.is_empty() {
                     count += 1;
                 }
@@ -668,7 +681,10 @@ async fn test_complete_pipeline_architecture() {
     let fulltext_client_2 = tokio::spawn(async move {
         let mut count = 0;
         for term in &["description", "searchable", "terms"] {
-            if let Ok(r) = FulltextNodes::new(term.to_string(), 10).run(&fr2, timeout).await {
+            if let Ok(r) = FulltextNodes::new(term.to_string(), 10)
+                .run(&fr2, timeout)
+                .await
+            {
                 if !r.is_empty() {
                     count += 1;
                 }
@@ -688,7 +704,10 @@ async fn test_complete_pipeline_architecture() {
     let fulltext_total = f1.unwrap() + f2.unwrap();
 
     println!("  [Results] Graph queries: {}/13 successful", graph_total);
-    println!("  [Results] FullText queries: {}/7 with results", fulltext_total);
+    println!(
+        "  [Results] FullText queries: {}/7 with results",
+        fulltext_total
+    );
 
     // Cleanup
     drop(graph_reader);
@@ -701,8 +720,14 @@ async fn test_complete_pipeline_architecture() {
         h.await.unwrap();
     }
 
-    assert!(graph_total >= 10, "Expected at least 10/13 graph queries to succeed");
-    assert!(fulltext_total >= 5, "Expected at least 5/7 fulltext queries with results");
+    assert!(
+        graph_total >= 10,
+        "Expected at least 10/13 graph queries to succeed"
+    );
+    assert!(
+        fulltext_total >= 5,
+        "Expected at least 5/7 fulltext queries with results"
+    );
 
     println!("\n✅ Complete pipeline architecture test passed!");
     println!("   - Mutation chain: Graph -> FullText ✓");

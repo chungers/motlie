@@ -257,7 +257,8 @@ impl<S: StorageSubsystem> Storage<S> {
 
                         // Rebuild descriptors: subsystem's for known CFs, defaults for unknown
                         let cache_ref = self.block_cache.as_ref().unwrap();
-                        let mut full_descriptors = S::cf_descriptors(cache_ref, &self.block_cache_config);
+                        let mut full_descriptors =
+                            S::cf_descriptors(cache_ref, &self.block_cache_config);
 
                         for cf_name in &all_cf_names {
                             if cf_name == "default" || known.contains(cf_name.as_str()) {
@@ -335,12 +336,9 @@ impl<S: StorageSubsystem> Storage<S> {
 
     /// Get a reference to the underlying DB (only in readonly/secondary mode).
     pub(crate) fn db(&self) -> Result<&DB> {
-        self.db
-            .as_ref()
-            .and_then(|h| h.as_db())
-            .ok_or_else(|| {
-                anyhow::anyhow!("[{}] Not in readonly/secondary mode or not ready", S::NAME)
-            })
+        self.db.as_ref().and_then(|h| h.as_db()).ok_or_else(|| {
+            anyhow::anyhow!("[{}] Not in readonly/secondary mode or not ready", S::NAME)
+        })
     }
 
     /// Get a reference to the TransactionDB (only in readwrite mode).
@@ -353,10 +351,7 @@ impl<S: StorageSubsystem> Storage<S> {
 
     /// Check if storage is in readwrite mode with TransactionDB.
     pub fn is_transactional(&self) -> bool {
-        self.db
-            .as_ref()
-            .map(|h| h.is_read_write())
-            .unwrap_or(false)
+        self.db.as_ref().map(|h| h.is_read_write()).unwrap_or(false)
     }
 
     /// Check if this is a secondary instance.

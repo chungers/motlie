@@ -18,8 +18,8 @@ use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::processor::Processor;
 use crate::vector::schema::{
     BinaryCodeCfKey, BinaryCodes, EmbeddingCode, ExternalKey, IdForward, IdForwardCfKey, IdReverse,
-    IdReverseCfKey, LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta,
-    Pending, VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
+    IdReverseCfKey, LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta, Pending, VecId,
+    VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
 
 // ============================================================================
@@ -122,14 +122,11 @@ pub(crate) fn vector(
         .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
     let forward_key = IdForwardCfKey(embedding, external_key);
 
-    let vec_id = match txn.get_for_update_cf(
-        &forward_cf,
-        IdForward::key_to_bytes(&forward_key),
-        true,
-    )? {
-        Some(bytes) => IdForward::value_from_bytes(&bytes)?.0,
-        None => return Ok(DeleteResult::NotFound),
-    };
+    let vec_id =
+        match txn.get_for_update_cf(&forward_cf, IdForward::key_to_bytes(&forward_key), true)? {
+            Some(bytes) => IdForward::value_from_bytes(&bytes)?.0,
+            None => return Ok(DeleteResult::NotFound),
+        };
 
     // 2. Delete IdForward mapping
     txn.delete_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?;

@@ -18,15 +18,15 @@ mod common;
 
 use common::concurrent_test_utils::{Metrics, TestContext};
 use motlie_db::graph::mutation::{AddEdge, AddNode};
-use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::NodeById;
-use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{spawn_query_consumers_with_storage, ReaderConfig};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_receiver, WriterConfig,
 };
 use motlie_db::graph::Storage;
+use motlie_db::reader::Runnable as QueryRunnable;
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::{Id, TimestampMilli};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,7 +63,7 @@ async fn writer_task_shared_storage(
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
             valid_range: None,
-            summary: NodeSummary::from_text(&format!("summary {}", i)),
+            summary: NodeSummary::from_text(format!("summary {}", i)),
         }
         .run(&writer)
         .await;
@@ -87,7 +87,7 @@ async fn writer_task_shared_storage(
                         ts_millis: TimestampMilli::now(),
                         name: edge_name.clone(),
                         valid_range: None,
-                        summary: EdgeSummary::from_text(&format!("Edge summary {}", edge_name)),
+                        summary: EdgeSummary::from_text(format!("Edge summary {}", edge_name)),
                         weight: None,
                     }
                     .run(&writer)
@@ -203,7 +203,13 @@ async fn test_concurrent_read_write_with_readwrite_readers() {
     let writer_context = context.clone();
     let writer_storage = storage.clone();
     let writer_handle = tokio::spawn(async move {
-        writer_task_shared_storage(writer_storage, writer_context, num_nodes, num_edges_per_node).await
+        writer_task_shared_storage(
+            writer_storage,
+            writer_context,
+            num_nodes,
+            num_edges_per_node,
+        )
+        .await
     });
 
     // Spawn reader tasks - all sharing the same Arc<Storage> (and underlying TransactionDB)
@@ -298,7 +304,10 @@ async fn test_concurrent_read_write_with_readwrite_readers() {
     println!("  Nodes written: {}", final_node_count);
     println!("  Expected nodes: {}", num_nodes);
     println!("  Write operations: {}", write_metrics.success_count);
-    println!("  Expected operations: {}", num_nodes * (1 + num_edges_per_node));
+    println!(
+        "  Expected operations: {}",
+        num_nodes * (1 + num_edges_per_node)
+    );
 
     // Assertions for correctness
     assert_eq!(write_metrics.error_count, 0, "Writer should have no errors");

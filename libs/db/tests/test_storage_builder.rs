@@ -43,8 +43,14 @@ fn test_shared_storage_all_cfs_created() {
     let db = storage.db().expect("Should have DB");
 
     // Check graph CFs exist (all use "graph/" prefix)
-    assert!(db.cf_handle("graph/names").is_some(), "graph/names CF should exist");
-    assert!(db.cf_handle("graph/nodes").is_some(), "graph/nodes CF should exist");
+    assert!(
+        db.cf_handle("graph/names").is_some(),
+        "graph/names CF should exist"
+    );
+    assert!(
+        db.cf_handle("graph/nodes").is_some(),
+        "graph/nodes CF should exist"
+    );
     assert!(
         db.cf_handle("graph/forward_edges").is_some(),
         "graph/forward_edges CF should exist"

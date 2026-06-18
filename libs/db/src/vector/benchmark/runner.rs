@@ -14,12 +14,12 @@ use anyhow::Result;
 use super::dataset::{compute_ground_truth_parallel, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
 use super::Dataset;
+use crate::vector::schema::ExternalKey;
 use crate::vector::{
     hnsw, processor::Processor, query::SearchKNN, BinaryCodeCache, Distance, Embedding,
     EmbeddingBuilder, EmbeddingCode, RaBitQ, Storage, VecId, VectorElementType,
 };
 use crate::Id;
-use crate::vector::schema::ExternalKey;
 
 /// Experiment configuration.
 #[derive(Debug, Clone)]

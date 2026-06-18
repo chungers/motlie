@@ -6,6 +6,10 @@
 use tempfile::TempDir;
 
 use super::{edge, fragment, node, read};
+use crate::graph::mutation::{AddNodeFragment, RestoreEdge};
+use crate::graph::name_hash::NameHash;
+use crate::graph::ops::summary::verify_edge_summary_exists;
+use crate::graph::query::{EdgeAtVersion, EdgeVersions, NodeAtVersion, NodeVersions};
 use crate::graph::schema::{
     EdgeSummaries, EdgeSummaryCfKey, EdgeVersionHistory, EdgeVersionHistoryCfKey,
     EdgeVersionHistoryCfValue, ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges, NodeCfKey,
@@ -13,16 +17,10 @@ use crate::graph::schema::{
     NodeSummaryIndexCfKey, NodeVersionHistory, NodeVersionHistoryCfKey, Nodes, ReverseEdgeCfKey,
     ReverseEdges,
 };
-use crate::graph::{AddEdge, AddNode, DeleteEdge, DeleteNode, UpdateNode, UpdateEdge};
-use crate::graph::mutation::{AddNodeFragment, RestoreEdge};
-use crate::graph::query::{
-    EdgeAtVersion, EdgeVersions, NodeAtVersion, NodeVersions,
-};
-use crate::graph::ops::summary::verify_edge_summary_exists;
-use crate::graph::name_hash::NameHash;
 use crate::graph::SummaryHash;
-use crate::{DataUrl, Id, TimestampMilli};
+use crate::graph::{AddEdge, AddNode, DeleteEdge, DeleteNode, UpdateEdge, UpdateNode};
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
+use crate::{DataUrl, Id, TimestampMilli};
 
 fn setup_storage() -> (TempDir, crate::graph::Storage) {
     let temp_dir = TempDir::new().unwrap();
@@ -56,12 +54,18 @@ fn ops_add_node_writes_node_and_history() {
     let node_key_bytes = Nodes::key_to_bytes(&node_key);
     let node_value_bytes = txn_db.get_cf(nodes_cf, node_key_bytes).unwrap().unwrap();
     let node_value = Nodes::value_from_bytes(&node_value_bytes).unwrap();
-    assert!(node_value.0.is_none(), "current node should have ValidUntil=None");
+    assert!(
+        node_value.0.is_none(),
+        "current node should have ValidUntil=None"
+    );
 
     let history_cf = txn_db.cf_handle(NodeVersionHistory::CF_NAME).unwrap();
     let history_key = NodeVersionHistoryCfKey(id, ts, 1);
     let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
-    let history_value_bytes = txn_db.get_cf(history_cf, history_key_bytes).unwrap().unwrap();
+    let history_value_bytes = txn_db
+        .get_cf(history_cf, history_key_bytes)
+        .unwrap()
+        .unwrap();
     let history_value = NodeVersionHistory::value_from_bytes(&history_value_bytes).unwrap();
     assert_eq!(history_value.0, ts);
 }
@@ -112,17 +116,26 @@ fn ops_add_edge_writes_forward_reverse_and_history() {
     let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
     let forward_key = ForwardEdgeCfKey(src, dst, name_hash, edge_ts);
     let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
-    assert!(txn_db.get_cf(forward_cf, forward_key_bytes).unwrap().is_some());
+    assert!(txn_db
+        .get_cf(forward_cf, forward_key_bytes)
+        .unwrap()
+        .is_some());
 
     let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).unwrap();
     let reverse_key = ReverseEdgeCfKey(dst, src, name_hash, edge_ts);
     let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
-    assert!(txn_db.get_cf(reverse_cf, reverse_key_bytes).unwrap().is_some());
+    assert!(txn_db
+        .get_cf(reverse_cf, reverse_key_bytes)
+        .unwrap()
+        .is_some());
 
     let history_cf = txn_db.cf_handle(EdgeVersionHistory::CF_NAME).unwrap();
     let history_key = EdgeVersionHistoryCfKey(src, dst, name_hash, edge_ts, 1);
     let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
-    assert!(txn_db.get_cf(history_cf, history_key_bytes).unwrap().is_some());
+    assert!(txn_db
+        .get_cf(history_cf, history_key_bytes)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -228,11 +241,15 @@ fn ops_restore_edges_dry_run_strict() {
     let summary_key_bytes = EdgeSummaries::key_to_bytes(&summary_key);
     {
         let txn = txn_db.transaction();
-        txn.delete_cf(summaries_cf, summary_key_bytes.clone()).unwrap();
+        txn.delete_cf(summaries_cf, summary_key_bytes.clone())
+            .unwrap();
         txn.commit().unwrap();
     }
     assert!(
-        txn_db.get_cf(summaries_cf, summary_key_bytes).unwrap().is_none(),
+        txn_db
+            .get_cf(summaries_cf, summary_key_bytes)
+            .unwrap()
+            .is_none(),
         "expected EdgeSummaries entry to be deleted"
     );
 
@@ -259,7 +276,10 @@ fn ops_restore_edges_dry_run_strict() {
             break;
         }
     }
-    assert!(current_hash.is_some(), "expected current edge to have summary hash");
+    assert!(
+        current_hash.is_some(),
+        "expected current edge to have summary hash"
+    );
     assert_eq!(
         current_hash,
         Some(summary_hash),
@@ -276,18 +296,20 @@ fn ops_restore_edges_dry_run_strict() {
         rocksdb::IteratorMode::From(&history_prefix, rocksdb::Direction::Forward),
     );
     let mut history_hash = None;
-    for item in history_iter {
+    if let Some(item) = history_iter.into_iter().next() {
         let (key_bytes, value_bytes) = item.unwrap();
-        if !key_bytes.starts_with(&history_prefix) {
-            break;
+        if key_bytes.starts_with(&history_prefix) {
+            let _key: EdgeVersionHistoryCfKey =
+                EdgeVersionHistory::key_from_bytes(&key_bytes).unwrap();
+            let value: EdgeVersionHistoryCfValue =
+                EdgeVersionHistory::value_from_bytes(&value_bytes).unwrap();
+            history_hash = value.1;
         }
-        let _key: EdgeVersionHistoryCfKey = EdgeVersionHistory::key_from_bytes(&key_bytes).unwrap();
-        let value: EdgeVersionHistoryCfValue =
-            EdgeVersionHistory::value_from_bytes(&value_bytes).unwrap();
-        history_hash = value.1;
-        break;
     }
-    assert!(history_hash.is_some(), "expected history to include summary hash");
+    assert!(
+        history_hash.is_some(),
+        "expected history to include summary hash"
+    );
     assert_eq!(
         history_hash,
         Some(summary_hash),
@@ -332,32 +354,50 @@ fn ops_reverse_edge_index_consistency() {
     {
         let txn = txn_db.transaction();
 
-        node::add_node(&txn, txn_db, &AddNode {
-            id: src_id,
-            ts_millis: ts,
-            name: "source".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Source node"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: src_id,
+                ts_millis: ts,
+                name: "source".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Source node"),
+            },
+            None,
+        )
+        .unwrap();
 
-        node::add_node(&txn, txn_db, &AddNode {
-            id: dst_id,
-            ts_millis: ts,
-            name: "target".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Target node"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: dst_id,
+                ts_millis: ts,
+                name: "target".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Target node"),
+            },
+            None,
+        )
+        .unwrap();
 
         let edge_ts = TimestampMilli::now();
-        edge::add_edge(&txn, txn_db, &AddEdge {
-            source_node_id: src_id,
-            target_node_id: dst_id,
-            ts_millis: edge_ts,
-            name: "test_edge".to_string(),
-            summary: DataUrl::from_text("Test edge"),
-            weight: Some(1.0),
-            valid_range: None,
-        }, None).unwrap();
+        edge::add_edge(
+            &txn,
+            txn_db,
+            &AddEdge {
+                source_node_id: src_id,
+                target_node_id: dst_id,
+                ts_millis: edge_ts,
+                name: "test_edge".to_string(),
+                summary: DataUrl::from_text("Test edge"),
+                weight: Some(1.0),
+                valid_range: None,
+            },
+            None,
+        )
+        .unwrap();
 
         txn.commit().unwrap();
     }
@@ -400,31 +440,49 @@ fn ops_forward_reverse_atomic() {
     {
         let txn = txn_db.transaction();
 
-        node::add_node(&txn, txn_db, &AddNode {
-            id: src_id,
-            ts_millis: ts,
-            name: "src".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Source"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: src_id,
+                ts_millis: ts,
+                name: "src".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Source"),
+            },
+            None,
+        )
+        .unwrap();
 
-        node::add_node(&txn, txn_db, &AddNode {
-            id: dst_id,
-            ts_millis: ts,
-            name: "dst".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Dest"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: dst_id,
+                ts_millis: ts,
+                name: "dst".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Dest"),
+            },
+            None,
+        )
+        .unwrap();
 
-        edge::add_edge(&txn, txn_db, &AddEdge {
-            source_node_id: src_id,
-            target_node_id: dst_id,
-            ts_millis: edge_ts,
-            name: "atomic_edge".to_string(),
-            summary: DataUrl::from_text("Atomic test"),
-            weight: Some(2.5),
-            valid_range: None,
-        }, None).unwrap();
+        edge::add_edge(
+            &txn,
+            txn_db,
+            &AddEdge {
+                source_node_id: src_id,
+                target_node_id: dst_id,
+                ts_millis: edge_ts,
+                name: "atomic_edge".to_string(),
+                summary: DataUrl::from_text("Atomic test"),
+                weight: Some(2.5),
+                valid_range: None,
+            },
+            None,
+        )
+        .unwrap();
 
         txn.commit().unwrap();
     }
@@ -433,13 +491,19 @@ fn ops_forward_reverse_atomic() {
     let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
     let forward_key = ForwardEdgeCfKey(src_id, dst_id, name_hash, edge_ts);
     let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
-    assert!(txn_db.get_cf(forward_cf, &forward_key_bytes).unwrap().is_some());
+    assert!(txn_db
+        .get_cf(forward_cf, &forward_key_bytes)
+        .unwrap()
+        .is_some());
 
     // Verify reverse CF
     let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).unwrap();
     let reverse_key = ReverseEdgeCfKey(dst_id, src_id, name_hash, edge_ts);
     let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
-    assert!(txn_db.get_cf(reverse_cf, &reverse_key_bytes).unwrap().is_some());
+    assert!(txn_db
+        .get_cf(reverse_cf, &reverse_key_bytes)
+        .unwrap()
+        .is_some());
 }
 
 /// Validates: Fragment append preserves existing fragments.
@@ -454,13 +518,19 @@ fn ops_fragment_append_idempotency() {
     // Add node first
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "frag_test".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Fragment test node"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "frag_test".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Fragment test node"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -473,36 +543,56 @@ fn ops_fragment_append_idempotency() {
 
     {
         let txn = txn_db.transaction();
-        fragment::add_node_fragment(&txn, txn_db, &AddNodeFragment {
-            id: node_id,
-            ts_millis: ts1,
-            content: DataUrl::from_text("Fragment 1"),
-            valid_range: None,
-        }).unwrap();
-        fragment::add_node_fragment(&txn, txn_db, &AddNodeFragment {
-            id: node_id,
-            ts_millis: ts2,
-            content: DataUrl::from_text("Fragment 2"),
-            valid_range: None,
-        }).unwrap();
-        fragment::add_node_fragment(&txn, txn_db, &AddNodeFragment {
-            id: node_id,
-            ts_millis: ts3,
-            content: DataUrl::from_text("Fragment 3"),
-            valid_range: None,
-        }).unwrap();
+        fragment::add_node_fragment(
+            &txn,
+            txn_db,
+            &AddNodeFragment {
+                id: node_id,
+                ts_millis: ts1,
+                content: DataUrl::from_text("Fragment 1"),
+                valid_range: None,
+            },
+        )
+        .unwrap();
+        fragment::add_node_fragment(
+            &txn,
+            txn_db,
+            &AddNodeFragment {
+                id: node_id,
+                ts_millis: ts2,
+                content: DataUrl::from_text("Fragment 2"),
+                valid_range: None,
+            },
+        )
+        .unwrap();
+        fragment::add_node_fragment(
+            &txn,
+            txn_db,
+            &AddNodeFragment {
+                id: node_id,
+                ts_millis: ts3,
+                content: DataUrl::from_text("Fragment 3"),
+                valid_range: None,
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
     // Re-add fragment 2 (should append new entry, not overwrite)
     {
         let txn = txn_db.transaction();
-        fragment::add_node_fragment(&txn, txn_db, &AddNodeFragment {
-            id: node_id,
-            ts_millis: ts2,
-            content: DataUrl::from_text("Fragment 2 replay"),
-            valid_range: None,
-        }).unwrap();
+        fragment::add_node_fragment(
+            &txn,
+            txn_db,
+            &AddNodeFragment {
+                id: node_id,
+                ts_millis: ts2,
+                content: DataUrl::from_text("Fragment 2 replay"),
+                valid_range: None,
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -524,7 +614,11 @@ fn ops_fragment_append_idempotency() {
     }
     // Should have 4 fragments (3 original + 1 replay which overwrites)
     // Actually fragments use (id, ts) as key, so same ts overwrites
-    assert!(count >= 3, "Should have at least 3 fragments, got {}", count);
+    assert!(
+        count >= 3,
+        "Should have at least 3 fragments, got {}",
+        count
+    );
 }
 
 // ============================================================================
@@ -543,13 +637,19 @@ fn ops_node_update_creates_version_history() {
     // Create initial node
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "versioned_node".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Version 1"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "versioned_node".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Version 1"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -559,12 +659,17 @@ fn ops_node_update_creates_version_history() {
     // Update summary (version 1 -> 2)
     {
         let txn = txn_db.transaction();
-        node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 1,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("Version 2")),
-        }).unwrap();
+        node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 1,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("Version 2")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -584,7 +689,11 @@ fn ops_node_update_creates_version_history() {
             break;
         }
     }
-    assert!(version_count >= 2, "Should have at least 2 versions in Nodes CF, got {}", version_count);
+    assert!(
+        version_count >= 2,
+        "Should have at least 2 versions in Nodes CF, got {}",
+        version_count
+    );
 }
 
 /// Validates: UpdateEdge (summary) creates a new version in ForwardEdges CF.
@@ -602,29 +711,47 @@ fn ops_edge_update_creates_version_history() {
     // Create nodes and edge
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: src_id,
-            ts_millis: ts,
-            name: "src".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Source"),
-        }, None).unwrap();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: dst_id,
-            ts_millis: ts,
-            name: "dst".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Dest"),
-        }, None).unwrap();
-        edge::add_edge(&txn, txn_db, &AddEdge {
-            source_node_id: src_id,
-            target_node_id: dst_id,
-            ts_millis: TimestampMilli::now(),
-            name: edge_name.clone(),
-            summary: DataUrl::from_text("Edge V1"),
-            weight: Some(1.0),
-            valid_range: None,
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: src_id,
+                ts_millis: ts,
+                name: "src".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Source"),
+            },
+            None,
+        )
+        .unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: dst_id,
+                ts_millis: ts,
+                name: "dst".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Dest"),
+            },
+            None,
+        )
+        .unwrap();
+        edge::add_edge(
+            &txn,
+            txn_db,
+            &AddEdge {
+                source_node_id: src_id,
+                target_node_id: dst_id,
+                ts_millis: TimestampMilli::now(),
+                name: edge_name.clone(),
+                summary: DataUrl::from_text("Edge V1"),
+                weight: Some(1.0),
+                valid_range: None,
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -634,15 +761,20 @@ fn ops_edge_update_creates_version_history() {
     // Update edge summary using consolidated UpdateEdge
     {
         let txn = txn_db.transaction();
-        edge::update_edge(&txn, txn_db, &UpdateEdge {
-            src_id,
-            dst_id,
-            name: edge_name.clone(),
-            expected_version: 1,
-            new_weight: None,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("Edge V2")),
-        }).unwrap();
+        edge::update_edge(
+            &txn,
+            txn_db,
+            &UpdateEdge {
+                src_id,
+                dst_id,
+                name: edge_name.clone(),
+                expected_version: 1,
+                new_weight: None,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("Edge V2")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -666,7 +798,11 @@ fn ops_edge_update_creates_version_history() {
             break;
         }
     }
-    assert!(version_count >= 2, "Should have at least 2 edge versions, got {}", version_count);
+    assert!(
+        version_count >= 2,
+        "Should have at least 2 edge versions, got {}",
+        version_count
+    );
 }
 
 /// Validates: UpdateEdge (weight) creates a new version.
@@ -684,29 +820,47 @@ fn ops_edge_weight_update_creates_version() {
     // Create nodes and edge
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: src_id,
-            ts_millis: ts,
-            name: "src".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Source"),
-        }, None).unwrap();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: dst_id,
-            ts_millis: ts,
-            name: "dst".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Dest"),
-        }, None).unwrap();
-        edge::add_edge(&txn, txn_db, &AddEdge {
-            source_node_id: src_id,
-            target_node_id: dst_id,
-            ts_millis: TimestampMilli::now(),
-            name: edge_name.clone(),
-            summary: DataUrl::from_text("Weight test edge"),
-            weight: Some(1.0),
-            valid_range: None,
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: src_id,
+                ts_millis: ts,
+                name: "src".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Source"),
+            },
+            None,
+        )
+        .unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: dst_id,
+                ts_millis: ts,
+                name: "dst".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Dest"),
+            },
+            None,
+        )
+        .unwrap();
+        edge::add_edge(
+            &txn,
+            txn_db,
+            &AddEdge {
+                source_node_id: src_id,
+                target_node_id: dst_id,
+                ts_millis: TimestampMilli::now(),
+                name: edge_name.clone(),
+                summary: DataUrl::from_text("Weight test edge"),
+                weight: Some(1.0),
+                valid_range: None,
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -716,15 +870,20 @@ fn ops_edge_weight_update_creates_version() {
     // Update weight using consolidated UpdateEdge
     {
         let txn = txn_db.transaction();
-        edge::update_edge(&txn, txn_db, &UpdateEdge {
-            src_id,
-            dst_id,
-            name: edge_name.clone(),
-            expected_version: 1,
-            new_weight: Some(Some(5.0)),
-            new_active_period: None,
-            new_summary: None,
-        }).unwrap();
+        edge::update_edge(
+            &txn,
+            txn_db,
+            &UpdateEdge {
+                src_id,
+                dst_id,
+                name: edge_name.clone(),
+                expected_version: 1,
+                new_weight: Some(Some(5.0)),
+                new_active_period: None,
+                new_summary: None,
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -748,7 +907,11 @@ fn ops_edge_weight_update_creates_version() {
             break;
         }
     }
-    assert!(version_count >= 2, "Should have at least 2 versions after weight update, got {}", version_count);
+    assert!(
+        version_count >= 2,
+        "Should have at least 2 versions after weight update, got {}",
+        version_count
+    );
 }
 
 /// Validates: DeleteNode creates a tombstone version.
@@ -763,23 +926,34 @@ fn ops_delete_node_creates_tombstone() {
     // Create node
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "delete_test".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("To be deleted"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "delete_test".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("To be deleted"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
     // Delete node
     {
         let txn = txn_db.transaction();
-        node::delete_node(&txn, txn_db, &DeleteNode {
-            id: node_id,
-            expected_version: 1,
-        }).unwrap();
+        node::delete_node(
+            &txn,
+            txn_db,
+            &DeleteNode {
+                id: node_id,
+                expected_version: 1,
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -824,13 +998,19 @@ fn ops_summary_hash_prefix_scan() {
     {
         let txn = txn_db.transaction();
         for (id, name) in [(node1, "n1"), (node2, "n2"), (node3, "n3")] {
-            node::add_node(&txn, txn_db, &AddNode {
-                id,
-                ts_millis: ts,
-                name: name.to_string(),
-                valid_range: None,
-                summary: shared_summary.clone(),
-            }, None).unwrap();
+            node::add_node(
+                &txn,
+                txn_db,
+                &AddNode {
+                    id,
+                    ts_millis: ts,
+                    name: name.to_string(),
+                    valid_range: None,
+                    summary: shared_summary.clone(),
+                },
+                None,
+            )
+            .unwrap();
         }
         txn.commit().unwrap();
     }
@@ -868,13 +1048,19 @@ fn ops_version_scan_ordering() {
     // Create node with V1
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "version_order".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("V1"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "version_order".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("V1"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -883,12 +1069,17 @@ fn ops_version_scan_ordering() {
     // Update to V2
     {
         let txn = txn_db.transaction();
-        node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 1,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("V2")),
-        }).unwrap();
+        node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 1,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("V2")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -897,12 +1088,17 @@ fn ops_version_scan_ordering() {
     // Update to V3
     {
         let txn = txn_db.transaction();
-        node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 2,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("V3")),
-        }).unwrap();
+        node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 2,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("V3")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -929,7 +1125,10 @@ fn ops_version_scan_ordering() {
 
     assert!(timestamps.len() >= 3, "Should have at least 3 versions");
     for i in 1..timestamps.len() {
-        assert!(timestamps[i] >= timestamps[i-1], "Timestamps should be ordered");
+        assert!(
+            timestamps[i] >= timestamps[i - 1],
+            "Timestamps should be ordered"
+        );
     }
 }
 
@@ -983,28 +1182,41 @@ fn ops_version_mismatch_rejected() {
     // Create node (version 1)
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "version_test".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("V1"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "version_test".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("V1"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
     // Try to update with wrong expected_version
     {
         let txn = txn_db.transaction();
-        let result = node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 99, // Wrong version
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("V2")),
-        });
+        let result = node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 99, // Wrong version
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("V2")),
+            },
+        );
         assert!(result.is_err(), "Should reject version mismatch");
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Version mismatch"), "Error should mention version mismatch");
+        assert!(
+            err_msg.contains("Version mismatch"),
+            "Error should mention version mismatch"
+        );
     }
 }
 
@@ -1020,35 +1232,53 @@ fn ops_double_delete_rejected() {
     // Create and delete node
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "double_delete".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Will be deleted"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "double_delete".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Will be deleted"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
     {
         let txn = txn_db.transaction();
-        node::delete_node(&txn, txn_db, &DeleteNode {
-            id: node_id,
-            expected_version: 1,
-        }).unwrap();
+        node::delete_node(
+            &txn,
+            txn_db,
+            &DeleteNode {
+                id: node_id,
+                expected_version: 1,
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
     // Try to delete again
     {
         let txn = txn_db.transaction();
-        let result = node::delete_node(&txn, txn_db, &DeleteNode {
-            id: node_id,
-            expected_version: 2,
-        });
+        let result = node::delete_node(
+            &txn,
+            txn_db,
+            &DeleteNode {
+                id: node_id,
+                expected_version: 2,
+            },
+        );
         assert!(result.is_err(), "Double delete should be rejected");
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("already deleted"), "Error should mention already deleted");
+        assert!(
+            err_msg.contains("already deleted"),
+            "Error should mention already deleted"
+        );
     }
 }
 
@@ -1064,34 +1294,49 @@ fn ops_update_deleted_node_rejected() {
     // Create and delete node
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "update_deleted".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("Will be deleted"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "update_deleted".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("Will be deleted"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
     {
         let txn = txn_db.transaction();
-        node::delete_node(&txn, txn_db, &DeleteNode {
-            id: node_id,
-            expected_version: 1,
-        }).unwrap();
+        node::delete_node(
+            &txn,
+            txn_db,
+            &DeleteNode {
+                id: node_id,
+                expected_version: 1,
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
     // Try to update deleted node
     {
         let txn = txn_db.transaction();
-        let result = node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 2,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("Should fail")),
-        });
+        let result = node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 2,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("Should fail")),
+            },
+        );
         assert!(result.is_err(), "Update of deleted node should be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("deleted"), "Error should mention deleted");
@@ -1113,13 +1358,19 @@ fn ops_node_at_version_head() {
     // Create v1
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "versioned".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("V1 summary"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "versioned".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("V1 summary"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1128,12 +1379,17 @@ fn ops_node_at_version_head() {
     // Create v2
     {
         let txn = txn_db.transaction();
-        node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 1,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("V2 summary")),
-        }).unwrap();
+        node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 1,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("V2 summary")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1142,12 +1398,17 @@ fn ops_node_at_version_head() {
     // Create v3
     {
         let txn = txn_db.transaction();
-        node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 2,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("V3 summary")),
-        }).unwrap();
+        node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 2,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("V3 summary")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1181,13 +1442,19 @@ fn ops_node_at_version_missing_summary_errors() {
 
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "node".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("V1 summary"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "node".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("V1 summary"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1195,12 +1462,17 @@ fn ops_node_at_version_missing_summary_errors() {
 
     {
         let txn = txn_db.transaction();
-        node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 1,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("V2 summary")),
-        }).unwrap();
+        node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 1,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("V2 summary")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1210,11 +1482,17 @@ fn ops_node_at_version_missing_summary_errors() {
     txn_db.delete_cf(summaries_cf, key_bytes).unwrap();
 
     let result = read::node_at_version(&storage, &NodeAtVersion::new(node_id, 1));
-    assert!(result.is_err(), "Playback should error if summary is missing");
+    assert!(
+        result.is_err(),
+        "Playback should error if summary is missing"
+    );
 
     let versions = read::list_node_versions(&storage, &NodeVersions::new(node_id, 10)).unwrap();
     let v1 = versions.iter().find(|v| v.version == 1).unwrap();
-    assert!(!v1.summary_available, "summary_available should be false for missing summary");
+    assert!(
+        !v1.summary_available,
+        "summary_available should be false for missing summary"
+    );
 }
 
 #[test]
@@ -1230,15 +1508,21 @@ fn ops_edge_at_version_head() {
     // Create v1
     {
         let txn = txn_db.transaction();
-        edge::add_edge(&txn, txn_db, &AddEdge {
-            source_node_id: src_id,
-            target_node_id: dst_id,
-            ts_millis: ts,
-            name: edge_name.clone(),
-            summary: DataUrl::from_text("Edge V1"),
-            weight: Some(1.0),
-            valid_range: None,
-        }, None).unwrap();
+        edge::add_edge(
+            &txn,
+            txn_db,
+            &AddEdge {
+                source_node_id: src_id,
+                target_node_id: dst_id,
+                ts_millis: ts,
+                name: edge_name.clone(),
+                summary: DataUrl::from_text("Edge V1"),
+                weight: Some(1.0),
+                valid_range: None,
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1247,26 +1531,39 @@ fn ops_edge_at_version_head() {
     // Create v2
     {
         let txn = txn_db.transaction();
-        edge::update_edge(&txn, txn_db, &UpdateEdge {
-            src_id,
-            dst_id,
-            name: edge_name.clone(),
-            expected_version: 1,
-            new_weight: Some(Some(5.0)),
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("Edge V2")),
-        }).unwrap();
+        edge::update_edge(
+            &txn,
+            txn_db,
+            &UpdateEdge {
+                src_id,
+                dst_id,
+                name: edge_name.clone(),
+                expected_version: 1,
+                new_weight: Some(Some(5.0)),
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("Edge V2")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
     // HEAD (versions_back=0) → v2
-    let snap = read::edge_at_version(&storage, &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 0)).unwrap();
+    let snap = read::edge_at_version(
+        &storage,
+        &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 0),
+    )
+    .unwrap();
     assert_eq!(snap.version, 2);
     assert_eq!(snap.payload.0, DataUrl::from_text("Edge V2"));
     assert_eq!(snap.payload.1, Some(5.0));
 
     // HEAD~1 (versions_back=1) → v1
-    let snap = read::edge_at_version(&storage, &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 1)).unwrap();
+    let snap = read::edge_at_version(
+        &storage,
+        &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 1),
+    )
+    .unwrap();
     assert_eq!(snap.version, 1);
     assert_eq!(snap.payload.0, DataUrl::from_text("Edge V1"));
     assert_eq!(snap.payload.1, Some(1.0));
@@ -1288,15 +1585,21 @@ fn ops_edge_at_version_missing_summary_errors() {
 
     {
         let txn = txn_db.transaction();
-        edge::add_edge(&txn, txn_db, &AddEdge {
-            source_node_id: src_id,
-            target_node_id: dst_id,
-            ts_millis: ts,
-            name: edge_name.clone(),
-            summary: DataUrl::from_text("Edge V1"),
-            weight: Some(1.0),
-            valid_range: None,
-        }, None).unwrap();
+        edge::add_edge(
+            &txn,
+            txn_db,
+            &AddEdge {
+                source_node_id: src_id,
+                target_node_id: dst_id,
+                ts_millis: ts,
+                name: edge_name.clone(),
+                summary: DataUrl::from_text("Edge V1"),
+                weight: Some(1.0),
+                valid_range: None,
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1304,15 +1607,20 @@ fn ops_edge_at_version_missing_summary_errors() {
 
     {
         let txn = txn_db.transaction();
-        edge::update_edge(&txn, txn_db, &UpdateEdge {
-            src_id,
-            dst_id,
-            name: edge_name.clone(),
-            expected_version: 1,
-            new_weight: Some(Some(5.0)),
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("Edge V2")),
-        }).unwrap();
+        edge::update_edge(
+            &txn,
+            txn_db,
+            &UpdateEdge {
+                src_id,
+                dst_id,
+                name: edge_name.clone(),
+                expected_version: 1,
+                new_weight: Some(Some(5.0)),
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("Edge V2")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1321,12 +1629,23 @@ fn ops_edge_at_version_missing_summary_errors() {
     let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(missing_hash));
     txn_db.delete_cf(summaries_cf, key_bytes).unwrap();
 
-    let result = read::edge_at_version(&storage, &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 1));
-    assert!(result.is_err(), "Playback should error if summary is missing");
+    let result = read::edge_at_version(
+        &storage,
+        &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 1),
+    );
+    assert!(
+        result.is_err(),
+        "Playback should error if summary is missing"
+    );
 
-    let versions = read::list_edge_versions(&storage, &EdgeVersions::new(src_id, dst_id, edge_name, 10)).unwrap();
+    let versions =
+        read::list_edge_versions(&storage, &EdgeVersions::new(src_id, dst_id, edge_name, 10))
+            .unwrap();
     let v1 = versions.iter().find(|v| v.version == 1).unwrap();
-    assert!(!v1.summary_available, "summary_available should be false for missing summary");
+    assert!(
+        !v1.summary_available,
+        "summary_available should be false for missing summary"
+    );
 }
 
 #[test]
@@ -1340,35 +1659,51 @@ fn ops_list_node_versions() {
     // Create 3 versions
     {
         let txn = txn_db.transaction();
-        node::add_node(&txn, txn_db, &AddNode {
-            id: node_id,
-            ts_millis: ts,
-            name: "listed".to_string(),
-            valid_range: None,
-            summary: DataUrl::from_text("V1"),
-        }, None).unwrap();
+        node::add_node(
+            &txn,
+            txn_db,
+            &AddNode {
+                id: node_id,
+                ts_millis: ts,
+                name: "listed".to_string(),
+                valid_range: None,
+                summary: DataUrl::from_text("V1"),
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
     std::thread::sleep(std::time::Duration::from_millis(5));
     {
         let txn = txn_db.transaction();
-        node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 1,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("V2")),
-        }).unwrap();
+        node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 1,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("V2")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
     std::thread::sleep(std::time::Duration::from_millis(5));
     {
         let txn = txn_db.transaction();
-        node::update_node(&txn, txn_db, &UpdateNode {
-            id: node_id,
-            expected_version: 2,
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("V3")),
-        }).unwrap();
+        node::update_node(
+            &txn,
+            txn_db,
+            &UpdateNode {
+                id: node_id,
+                expected_version: 2,
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("V3")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1385,7 +1720,11 @@ fn ops_list_node_versions() {
 
     // summary_available should be true for all
     for v in &versions {
-        assert!(v.summary_available, "Summary should be available for version {}", v.version);
+        assert!(
+            v.summary_available,
+            "Summary should be available for version {}",
+            v.version
+        );
     }
 
     // Test pagination: limit=2
@@ -1395,10 +1734,8 @@ fn ops_list_node_versions() {
     assert_eq!(page[1].version, 2);
 
     // Test offset: skip 1, get remaining
-    let offset_page = read::list_node_versions(
-        &storage,
-        &NodeVersions::new(node_id, 10).with_offset(1),
-    ).unwrap();
+    let offset_page =
+        read::list_node_versions(&storage, &NodeVersions::new(node_id, 10).with_offset(1)).unwrap();
     assert_eq!(offset_page.len(), 2, "Offset=1 should skip HEAD, return 2");
     assert_eq!(offset_page[0].version, 2);
     assert_eq!(offset_page[1].version, 1);
@@ -1417,15 +1754,21 @@ fn ops_list_edge_versions() {
     // Create v1
     {
         let txn = txn_db.transaction();
-        edge::add_edge(&txn, txn_db, &AddEdge {
-            source_node_id: src_id,
-            target_node_id: dst_id,
-            ts_millis: ts,
-            name: edge_name.clone(),
-            summary: DataUrl::from_text("EV1"),
-            weight: Some(1.0),
-            valid_range: None,
-        }, None).unwrap();
+        edge::add_edge(
+            &txn,
+            txn_db,
+            &AddEdge {
+                source_node_id: src_id,
+                target_node_id: dst_id,
+                ts_millis: ts,
+                name: edge_name.clone(),
+                summary: DataUrl::from_text("EV1"),
+                weight: Some(1.0),
+                valid_range: None,
+            },
+            None,
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1433,15 +1776,20 @@ fn ops_list_edge_versions() {
     // Create v2
     {
         let txn = txn_db.transaction();
-        edge::update_edge(&txn, txn_db, &UpdateEdge {
-            src_id,
-            dst_id,
-            name: edge_name.clone(),
-            expected_version: 1,
-            new_weight: Some(Some(2.0)),
-            new_active_period: None,
-            new_summary: Some(DataUrl::from_text("EV2")),
-        }).unwrap();
+        edge::update_edge(
+            &txn,
+            txn_db,
+            &UpdateEdge {
+                src_id,
+                dst_id,
+                name: edge_name.clone(),
+                expected_version: 1,
+                new_weight: Some(Some(2.0)),
+                new_active_period: None,
+                new_summary: Some(DataUrl::from_text("EV2")),
+            },
+        )
+        .unwrap();
         txn.commit().unwrap();
     }
 
@@ -1449,7 +1797,8 @@ fn ops_list_edge_versions() {
     let versions = read::list_edge_versions(
         &storage,
         &EdgeVersions::new(src_id, dst_id, edge_name.clone(), 10),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(versions.len(), 2, "Should have 2 versions");
     assert_eq!(versions[0].version, 2, "First should be newest (v2)");
     assert_eq!(versions[1].version, 1, "Second should be oldest (v1)");
@@ -1475,12 +1824,19 @@ fn ops_version_playback_nonexistent_entity() {
 
     // list_node_versions on non-existent node → empty vec
     let versions = read::list_node_versions(&storage, &NodeVersions::new(fake_id, 10)).unwrap();
-    assert!(versions.is_empty(), "Non-existent node should have no versions");
+    assert!(
+        versions.is_empty(),
+        "Non-existent node should have no versions"
+    );
 
     // list_edge_versions on non-existent edge → empty vec
     let versions = read::list_edge_versions(
         &storage,
         &EdgeVersions::new(fake_id, Id::new(), "nope".to_string(), 10),
-    ).unwrap();
-    assert!(versions.is_empty(), "Non-existent edge should have no versions");
+    )
+    .unwrap();
+    assert!(
+        versions.is_empty(),
+        "Non-existent edge should have no versions"
+    );
 }

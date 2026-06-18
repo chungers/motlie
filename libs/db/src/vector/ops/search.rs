@@ -36,10 +36,7 @@ use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 /// since the HNSW index was built, requiring a rebuild.
 ///
 /// Legacy indexes without a stored SpecHash emit a warning but succeed.
-pub(crate) fn validate_spec_hash(
-    storage: &Storage,
-    embedding_code: EmbeddingCode,
-) -> Result<()> {
+pub(crate) fn validate_spec_hash(storage: &Storage, embedding_code: EmbeddingCode) -> Result<()> {
     let txn_db = storage.transaction_db()?;
 
     // Get current EmbeddingSpec from storage
@@ -116,6 +113,10 @@ pub(crate) fn search_exact(
 /// defense-in-depth filtering (IdReverse + VecMeta lifecycle check).
 ///
 /// Used by `Processor::search_with_config()`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "strategy dispatcher keeps storage, caches, and search knobs explicit for hot-path callers"
+)]
 pub(crate) fn search_with_strategy(
     storage: &Storage,
     index: &hnsw::Index,
@@ -132,13 +133,10 @@ pub(crate) fn search_with_strategy(
     let effective_ef = ef.max(overfetch_k);
 
     let raw_results = match strategy {
-        SearchStrategy::Exact => {
-            index.search(storage, query, overfetch_k, effective_ef)?
-        }
+        SearchStrategy::Exact => index.search(storage, query, overfetch_k, effective_ef)?,
         SearchStrategy::RaBitQ { use_cache } => {
             if *use_cache {
-                let enc = encoder
-                    .ok_or_else(|| anyhow::anyhow!("RaBitQ encoder not available"))?;
+                let enc = encoder.ok_or_else(|| anyhow::anyhow!("RaBitQ encoder not available"))?;
                 index.search_with_rabitq_cached(
                     storage,
                     query,

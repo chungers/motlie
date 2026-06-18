@@ -56,7 +56,7 @@ use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::merge::EdgeOp;
 use crate::vector::registry::EmbeddingRegistry;
 use crate::vector::schema::{
-    BinaryCodeCfKey, BinaryCodes, EmbeddingCode, Edges, EdgeCfKey, IdAlloc, IdAllocCfKey,
+    BinaryCodeCfKey, BinaryCodes, EdgeCfKey, Edges, EmbeddingCode, IdAlloc, IdAllocCfKey,
     IdAllocCfValue, IdAllocField, LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta,
     VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
@@ -264,8 +264,6 @@ struct CleanupResult {
 /// 4. Deletes VecMeta entries
 pub struct GarbageCollector {
     storage: Arc<Storage>,
-    #[allow(dead_code)]
-    registry: Arc<EmbeddingRegistry>,
     config: GcConfig,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -284,7 +282,7 @@ impl GarbageCollector {
     /// before starting the periodic worker.
     pub fn start(
         storage: Arc<Storage>,
-        registry: Arc<EmbeddingRegistry>,
+        _registry: Arc<EmbeddingRegistry>,
         config: GcConfig,
     ) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -319,7 +317,6 @@ impl GarbageCollector {
 
         Self {
             storage,
-            registry,
             config,
             shutdown,
             worker: Some(worker),
@@ -441,7 +438,7 @@ impl GarbageCollector {
         let txn_db = storage.transaction_db()?;
 
         // Find deleted vectors by scanning VecMeta
-        let deleted = Self::find_deleted_vectors(&txn_db, config.batch_size)?;
+        let deleted = Self::find_deleted_vectors(txn_db, config.batch_size)?;
 
         if deleted.is_empty() {
             return Ok(0);
@@ -455,7 +452,7 @@ impl GarbageCollector {
         let mut total_recycling_skipped = 0u64;
 
         for (embedding, vec_id) in &deleted {
-            match Self::cleanup_vector(&txn_db, config, *embedding, *vec_id) {
+            match Self::cleanup_vector(txn_db, config, *embedding, *vec_id) {
                 Ok(result) => {
                     total_cleaned += 1;
                     total_edges_pruned += result.edges_pruned;
@@ -670,6 +667,10 @@ impl GarbageCollector {
     /// Returns a `PruneResult` with the number of edges pruned and whether
     /// the scan completed fully. If `fully_scanned` is false, ID recycling
     /// should be skipped to avoid reusing an ID that may still have references.
+    #[expect(
+        clippy::explicit_counter_loop,
+        reason = "scanned tracks edge scan limit and recycling safety"
+    )]
     fn prune_edges(
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
@@ -821,9 +822,7 @@ mod tests {
     use crate::vector::Distance;
     use tempfile::TempDir;
 
-    fn setup_test_env(
-        temp_dir: &TempDir,
-    ) -> (Arc<Storage>, Arc<EmbeddingRegistry>) {
+    fn setup_test_env(temp_dir: &TempDir) -> (Arc<Storage>, Arc<EmbeddingRegistry>) {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
@@ -881,8 +880,7 @@ mod tests {
         let _embedding = register_embedding(&registry, 64);
 
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
-        let deleted = GarbageCollector::find_deleted_vectors(&txn_db, 100)
-            .expect("Should succeed");
+        let deleted = GarbageCollector::find_deleted_vectors(txn_db, 100).expect("Should succeed");
 
         assert!(deleted.is_empty(), "No deleted vectors should exist");
     }
@@ -915,8 +913,7 @@ mod tests {
 
         // Find deleted vectors
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
-        let deleted = GarbageCollector::find_deleted_vectors(&txn_db, 100)
-            .expect("Should succeed");
+        let deleted = GarbageCollector::find_deleted_vectors(txn_db, 100).expect("Should succeed");
 
         assert_eq!(deleted.len(), 3, "Should find 3 deleted vectors");
     }
@@ -946,7 +943,10 @@ mod tests {
         let vectors_cf = txn_db.cf_handle(Vectors::CF_NAME).unwrap();
         let vec_key = VectorCfKey(embedding.code(), vec_id);
         assert!(
-            txn_db.get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key)).unwrap().is_some(),
+            txn_db
+                .get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))
+                .unwrap()
+                .is_some(),
             "Vector data should still exist after soft delete"
         );
 
@@ -958,7 +958,10 @@ mod tests {
 
         // Verify vector data is now gone
         assert!(
-            txn_db.get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key)).unwrap().is_none(),
+            txn_db
+                .get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))
+                .unwrap()
+                .is_none(),
             "Vector data should be deleted after GC"
         );
 
@@ -966,7 +969,10 @@ mod tests {
         let meta_cf = txn_db.cf_handle(VecMeta::CF_NAME).unwrap();
         let meta_key = VecMetaCfKey(embedding.code(), vec_id);
         assert!(
-            txn_db.get_cf(&meta_cf, VecMeta::key_to_bytes(&meta_key)).unwrap().is_none(),
+            txn_db
+                .get_cf(&meta_cf, VecMeta::key_to_bytes(&meta_key))
+                .unwrap()
+                .is_none(),
             "VecMeta should be deleted after GC"
         );
 
@@ -1025,8 +1031,8 @@ mod tests {
                 break;
             }
 
-            let bitmap = RoaringBitmap::deserialize_from(&value[..])
-                .expect("Should deserialize bitmap");
+            let bitmap =
+                RoaringBitmap::deserialize_from(&value[..]).expect("Should deserialize bitmap");
 
             assert!(
                 !bitmap.contains(deleted_vec_id),
@@ -1185,7 +1191,10 @@ mod tests {
         let bitmap_key = IdAllocCfKey::free_bitmap(embedding.code());
         let key_bytes = IdAlloc::key_to_bytes(&bitmap_key);
 
-        let bitmap_empty = match txn_db.get_cf(&alloc_cf, &key_bytes).expect("Read should succeed") {
+        let bitmap_empty = match txn_db
+            .get_cf(&alloc_cf, &key_bytes)
+            .expect("Read should succeed")
+        {
             Some(bitmap_bytes) => {
                 let value = IdAlloc::value_from_bytes(&bitmap_key, &bitmap_bytes)
                     .expect("Should deserialize value");

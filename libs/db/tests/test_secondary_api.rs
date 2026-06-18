@@ -3,11 +3,11 @@
 /// Secondary instances provide dynamic catch-up capability for read replicas,
 /// allowing them to see new writes from the primary database.
 use motlie_db::graph::mutation::AddNode;
-use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::NodeById;
 use motlie_db::reader::Runnable as QueryRunnable;
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::{Id, TimestampMilli};
-use std::time::Duration;  // Still needed for reader timeout
+use std::time::Duration; // Still needed for reader timeout
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -18,8 +18,11 @@ async fn test_secondary_instance_basic() {
 
     // Create primary database and write a node
     let (writer, writer_rx) = motlie_db::graph::writer::create_mutation_writer(Default::default());
-    let writer_handle =
-        motlie_db::graph::writer::spawn_mutation_consumer(writer_rx, Default::default(), &primary_path);
+    let writer_handle = motlie_db::graph::writer::spawn_mutation_consumer(
+        writer_rx,
+        Default::default(),
+        &primary_path,
+    );
 
     let node_id = Id::new();
     let node_name = "test_node".to_string();
@@ -45,7 +48,8 @@ async fn test_secondary_instance_basic() {
         .expect("Writer failed");
 
     // Open secondary instance
-    let mut secondary_storage = motlie_db::graph::Storage::secondary(&primary_path, &secondary_path);
+    let mut secondary_storage =
+        motlie_db::graph::Storage::secondary(&primary_path, &secondary_path);
     secondary_storage
         .ready()
         .expect("Failed to ready secondary");
@@ -66,12 +70,16 @@ async fn test_secondary_instance_basic() {
         },
     );
 
-    let consumer_handle =
-        motlie_db::graph::reader::spawn_query_consumer(reader_rx, Default::default(), &primary_path);
+    let consumer_handle = motlie_db::graph::reader::spawn_query_consumer(
+        reader_rx,
+        Default::default(),
+        &primary_path,
+    );
 
     // Query the node from secondary
-    let result = NodeById::new(node_id, None).run(
-        &reader, Duration::from_secs(1)).await;
+    let result = NodeById::new(node_id, None)
+        .run(&reader, Duration::from_secs(1))
+        .await;
 
     assert!(result.is_ok(), "Should be able to read from secondary");
     let (returned_name, _summary, _version) = result.unwrap();
@@ -92,9 +100,13 @@ async fn test_secondary_catch_up_sees_new_writes() {
 
     // Write first node
     {
-        let (writer, writer_rx) = motlie_db::graph::writer::create_mutation_writer(Default::default());
-        let writer_handle =
-            motlie_db::graph::writer::spawn_mutation_consumer(writer_rx, Default::default(), &primary_path);
+        let (writer, writer_rx) =
+            motlie_db::graph::writer::create_mutation_writer(Default::default());
+        let writer_handle = motlie_db::graph::writer::spawn_mutation_consumer(
+            writer_rx,
+            Default::default(),
+            &primary_path,
+        );
 
         let node1_id = Id::new();
         AddNode {
@@ -114,7 +126,8 @@ async fn test_secondary_catch_up_sees_new_writes() {
     }
 
     // Open secondary and catch up
-    let mut secondary_storage = motlie_db::graph::Storage::secondary(&primary_path, &secondary_path);
+    let mut secondary_storage =
+        motlie_db::graph::Storage::secondary(&primary_path, &secondary_path);
     secondary_storage
         .ready()
         .expect("Failed to ready secondary");
@@ -125,9 +138,13 @@ async fn test_secondary_catch_up_sees_new_writes() {
     // Write second node to primary
     let node2_id = Id::new();
     {
-        let (writer, writer_rx) = motlie_db::graph::writer::create_mutation_writer(Default::default());
-        let writer_handle =
-            motlie_db::graph::writer::spawn_mutation_consumer(writer_rx, Default::default(), &primary_path);
+        let (writer, writer_rx) =
+            motlie_db::graph::writer::create_mutation_writer(Default::default());
+        let writer_handle = motlie_db::graph::writer::spawn_mutation_consumer(
+            writer_rx,
+            Default::default(),
+            &primary_path,
+        );
 
         AddNode {
             id: node2_id,

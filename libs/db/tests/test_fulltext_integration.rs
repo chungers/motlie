@@ -8,9 +8,9 @@
 
 use motlie_db::fulltext::spawn_mutation_consumer as spawn_fulltext_mutation_consumer;
 use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
-use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -36,7 +36,8 @@ async fn test_fulltext_search_integration() {
 
     // Spawn both consumers
     let graph_handle = spawn_mutation_consumer(graph_receiver, config.clone(), &db_path);
-    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
+    let fulltext_handle =
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     // Scenario: Building a knowledge graph about programming languages
     println!("=== Building Knowledge Graph ===");
@@ -76,11 +77,7 @@ async fn test_fulltext_search_integration() {
     python_node.clone().run(&graph_writer).await.unwrap();
     python_node.run(&fulltext_writer).await.unwrap();
 
-    javascript_node
-        .clone()
-        .run(&graph_writer)
-        .await
-        .unwrap();
+    javascript_node.clone().run(&graph_writer).await.unwrap();
     javascript_node.run(&fulltext_writer).await.unwrap();
 
     // Add detailed content fragments (main searchable content)
@@ -151,11 +148,7 @@ Key features:
     rust_fragment.clone().run(&graph_writer).await.unwrap();
     rust_fragment.run(&fulltext_writer).await.unwrap();
 
-    python_fragment
-        .clone()
-        .run(&graph_writer)
-        .await
-        .unwrap();
+    python_fragment.clone().run(&graph_writer).await.unwrap();
     python_fragment.run(&fulltext_writer).await.unwrap();
 
     javascript_fragment
@@ -163,10 +156,7 @@ Key features:
         .run(&graph_writer)
         .await
         .unwrap();
-    javascript_fragment
-        .run(&fulltext_writer)
-        .await
-        .unwrap();
+    javascript_fragment.run(&fulltext_writer).await.unwrap();
 
     // Add relationships
     let rust_to_systems = AddEdge {
@@ -174,16 +164,14 @@ Key features:
         target_node_id: Id::new(),
         ts_millis: TimestampMilli::now(),
         name: "used_for".to_string(),
-        summary: EdgeSummary::from_text("Systems programming and performance-critical applications"),
+        summary: EdgeSummary::from_text(
+            "Systems programming and performance-critical applications",
+        ),
         weight: Some(1.0),
         valid_range: None,
     };
 
-    rust_to_systems
-        .clone()
-        .run(&graph_writer)
-        .await
-        .unwrap();
+    rust_to_systems.clone().run(&graph_writer).await.unwrap();
     rust_to_systems.run(&fulltext_writer).await.unwrap();
 
     // Give consumers time to process
@@ -199,7 +187,9 @@ Key features:
 
     // Get the schema to know which fields to search
     let schema = index.schema();
-    let content_field = schema.get_field("content").expect("content field not found");
+    let content_field = schema
+        .get_field("content")
+        .expect("content field not found");
     let node_name_field = schema
         .get_field("node_name")
         .expect("node_name field not found");
@@ -212,7 +202,9 @@ Key features:
 
     println!("Found {} results:", top_docs.len());
     for (_score, doc_address) in top_docs {
-        let retrieved_doc = searcher.doc::<tantivy::TantivyDocument>(doc_address).unwrap();
+        let retrieved_doc = searcher
+            .doc::<tantivy::TantivyDocument>(doc_address)
+            .unwrap();
         if let Some(name_value) = retrieved_doc.get_first(node_name_field) {
             if let Some(text) = name_value.as_str() {
                 println!("  - {}", text);
@@ -228,7 +220,9 @@ Key features:
 
     println!("Found {} results:", top_docs.len());
     for (_score, doc_address) in top_docs {
-        let retrieved_doc = searcher.doc::<tantivy::TantivyDocument>(doc_address).unwrap();
+        let retrieved_doc = searcher
+            .doc::<tantivy::TantivyDocument>(doc_address)
+            .unwrap();
         if let Some(name_value) = retrieved_doc.get_first(node_name_field) {
             if let Some(text) = name_value.as_str() {
                 println!("  - {}", text);
@@ -244,7 +238,9 @@ Key features:
 
     println!("Found {} results:", top_docs.len());
     for (_score, doc_address) in top_docs {
-        let retrieved_doc = searcher.doc::<tantivy::TantivyDocument>(doc_address).unwrap();
+        let retrieved_doc = searcher
+            .doc::<tantivy::TantivyDocument>(doc_address)
+            .unwrap();
         if let Some(name_value) = retrieved_doc.get_first(node_name_field) {
             if let Some(text) = name_value.as_str() {
                 println!("  - {}", text);
@@ -262,7 +258,9 @@ Key features:
 
     println!("Found {} results:", top_docs.len());
     for (_score, doc_address) in top_docs {
-        let retrieved_doc = searcher.doc::<tantivy::TantivyDocument>(doc_address).unwrap();
+        let retrieved_doc = searcher
+            .doc::<tantivy::TantivyDocument>(doc_address)
+            .unwrap();
         if let Some(name_value) = retrieved_doc.get_first(node_name_field) {
             if let Some(text) = name_value.as_str() {
                 println!("  - {}", text);
@@ -368,9 +366,7 @@ async fn test_fulltext_bm25_ranking() {
     AddNodeFragment {
         id: Id::new(),
         ts_millis: TimestampMilli::now(),
-        content: DataUrl::from_text(
-            "Rust Rust Rust programming language for systems programming",
-        ),
+        content: DataUrl::from_text("Rust Rust Rust programming language for systems programming"),
         valid_range: None,
     }
     .run(&writer)

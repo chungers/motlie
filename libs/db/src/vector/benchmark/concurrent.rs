@@ -56,9 +56,13 @@ use tokio::task::JoinHandle;
 
 use crate::reader::Runnable as QueryRunnable;
 use crate::vector::benchmark::dataset::LAION_EMBEDDING_DIM;
+use crate::vector::reader::{
+    create_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig,
+};
 use crate::vector::schema::{EmbeddingCode, ExternalKey};
-use crate::vector::writer::{create_writer, spawn_mutation_consumer_with_storage_autoreg, WriterConfig};
-use crate::vector::reader::{create_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig};
+use crate::vector::writer::{
+    create_writer, spawn_mutation_consumer_with_storage_autoreg, WriterConfig,
+};
 use crate::vector::{
     Distance, EmbeddingBuilder, InsertVector, InsertVectorBatch, MutationRunnable, SearchKNN,
     Storage,
@@ -629,16 +633,10 @@ impl BenchConfig {
         // RaBitQ requires Cosine distance
         if let SearchMode::RaBitQ { bits } = self.search_mode {
             if self.distance != Distance::Cosine {
-                anyhow::bail!(
-                    "RaBitQ requires Cosine distance, got {:?}",
-                    self.distance
-                );
+                anyhow::bail!("RaBitQ requires Cosine distance, got {:?}", self.distance);
             }
             if ![1, 2, 4].contains(&bits) {
-                anyhow::bail!(
-                    "RaBitQ bits must be 1, 2, or 4, got {}",
-                    bits
-                );
+                anyhow::bail!("RaBitQ bits must be 1, 2, or 4, got {}", bits);
             }
         }
         Ok(())
@@ -724,9 +722,17 @@ impl fmt::Display for BenchResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Concurrent Benchmark Results ===")?;
         writeln!(f, "Configuration:")?;
-        writeln!(f, "  Insert Producers: {} (MPSC → 1 consumer)", self.config.insert_producers)?;
+        writeln!(
+            f,
+            "  Insert Producers: {} (MPSC → 1 consumer)",
+            self.config.insert_producers
+        )?;
         writeln!(f, "  Search Producers: {}", self.config.search_producers)?;
-        writeln!(f, "  Query Workers: {} (MPMC pool)", self.config.query_workers)?;
+        writeln!(
+            f,
+            "  Query Workers: {} (MPMC pool)",
+            self.config.query_workers
+        )?;
         writeln!(f, "  Search Mode: {}", self.config.search_mode)?;
         writeln!(f, "  Distance: {:?}", self.config.distance)?;
         writeln!(f, "  Duration: {:?}", self.duration)?;
@@ -790,12 +796,15 @@ impl ConcurrentBenchmark {
         let registry = storage.cache().clone();
 
         let embedding_name = format!("bench-{}", embedding_code);
-        let embedding = registry
-            .register(
-                EmbeddingBuilder::new(&embedding_name, self.config.vector_dim as u32, self.config.distance)
-                    .with_hnsw_m(self.config.hnsw_m as u16)
-                    .with_hnsw_ef_construction(self.config.hnsw_ef_construction as u16),
-            )?;
+        let embedding = registry.register(
+            EmbeddingBuilder::new(
+                &embedding_name,
+                self.config.vector_dim as u32,
+                self.config.distance,
+            )
+            .with_hnsw_m(self.config.hnsw_m as u16)
+            .with_hnsw_ef_construction(self.config.hnsw_ef_construction as u16),
+        )?;
 
         // Create Writer (MPSC) - all insert producers share this
         let (writer, writer_rx) = create_writer(WriterConfig {
@@ -933,8 +942,8 @@ impl ConcurrentBenchmark {
 // Producer workload functions (async)
 // ============================================================================
 
-use crate::vector::writer::Writer;
 use crate::vector::reader::Reader;
+use crate::vector::writer::Writer;
 use crate::vector::Embedding;
 
 /// Insert producer workload: sends inserts to Writer channel until deadline.
@@ -1174,7 +1183,10 @@ pub async fn compare_sync_async_latency(
     let mut rng = StdRng::seed_from_u64(42);
 
     // Phase 1: Sync inserts (immediate graph build)
-    tracing::info!(num_vectors, "Starting sync insert phase (immediate graph build)");
+    tracing::info!(
+        num_vectors,
+        "Starting sync insert phase (immediate graph build)"
+    );
     for _ in 0..num_vectors {
         let vector: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
         let id = Id::new();
@@ -1194,7 +1206,10 @@ pub async fn compare_sync_async_latency(
     let mut rng = StdRng::seed_from_u64(43); // Different seed
 
     // Phase 2: Async inserts (deferred graph build)
-    tracing::info!(num_vectors, "Starting async insert phase (deferred graph build)");
+    tracing::info!(
+        num_vectors,
+        "Starting async insert phase (deferred graph build)"
+    );
     for _ in 0..num_vectors {
         let vector: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
         let id = Id::new();
@@ -1284,10 +1299,20 @@ impl fmt::Display for BackpressureResult {
         writeln!(f, "Configuration:")?;
         writeln!(f, "  Vectors per test: {}", self.num_vectors)?;
         writeln!(f, "  Concurrent producers: {}", self.num_producers)?;
-        writeln!(f, "  Baseline throughput: {:.1} ops/sec", self.baseline_throughput)?;
+        writeln!(
+            f,
+            "  Baseline throughput: {:.1} ops/sec",
+            self.baseline_throughput
+        )?;
         writeln!(f)?;
-        writeln!(f, "Buffer Size | Throughput | % Baseline | P50 Latency | P99 Latency | Errors")?;
-        writeln!(f, "------------|------------|------------|-------------|-------------|-------")?;
+        writeln!(
+            f,
+            "Buffer Size | Throughput | % Baseline | P50 Latency | P99 Latency | Errors"
+        )?;
+        writeln!(
+            f,
+            "------------|------------|------------|-------------|-------------|-------"
+        )?;
         for sample in &self.results {
             writeln!(
                 f,
@@ -1363,7 +1388,12 @@ pub async fn measure_backpressure_impact(
 
     // Test each buffer size
     for &buffer_size in buffer_sizes {
-        tracing::info!(buffer_size, num_vectors, num_producers, "Testing buffer size");
+        tracing::info!(
+            buffer_size,
+            num_vectors,
+            num_producers,
+            "Testing buffer size"
+        );
 
         // Create writer with specific buffer size
         let (writer, receiver) = create_writer(WriterConfig {
@@ -1500,7 +1530,7 @@ mod tests {
         assert_eq!(latency_to_bucket(Duration::from_micros(1)), 1); // 1us
         assert_eq!(latency_to_bucket(Duration::from_micros(2)), 2); // 2us
         assert_eq!(latency_to_bucket(Duration::from_micros(4)), 3); // 4us
-        // 1ms = 1000us, log2(1000) ≈ 9.97, leading_zeros gives bucket 10
+                                                                    // 1ms = 1000us, log2(1000) ≈ 9.97, leading_zeros gives bucket 10
         assert_eq!(latency_to_bucket(Duration::from_millis(1)), 10); // 1ms = 1000us
         assert_eq!(latency_to_bucket(Duration::from_secs(1)), NUM_BUCKETS - 1); // capped
     }

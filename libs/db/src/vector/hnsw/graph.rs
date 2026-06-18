@@ -57,20 +57,14 @@ impl BatchEdgeCache {
     /// (each neighbor -> vec_id) since HNSW connections are bidirectional.
     pub fn add_edges(&mut self, vec_id: VecId, layer: HnswLayer, neighbors: &[VecId]) {
         // Add forward edges
-        let entry = self
-            .edges
-            .entry((vec_id, layer))
-            .or_insert_with(RoaringBitmap::new);
+        let entry = self.edges.entry((vec_id, layer)).or_default();
         for &neighbor in neighbors {
             entry.insert(neighbor);
         }
 
         // Add reverse edges (bidirectional graph)
         for &neighbor in neighbors {
-            let rev_entry = self
-                .edges
-                .entry((neighbor, layer))
-                .or_insert_with(RoaringBitmap::new);
+            let rev_entry = self.edges.entry((neighbor, layer)).or_default();
             rev_entry.insert(vec_id);
         }
     }
@@ -147,7 +141,7 @@ pub fn compute_distance_metric(distance: Distance, a: &[f32], b: &[f32]) -> f32 
 ///
 /// # Arguments
 /// * `use_cache` - If true, uses NavigationCache for edge caching (for search).
-///                 If false, reads directly from RocksDB (for index build).
+///   If false, reads directly from RocksDB (for index build).
 ///
 /// Cache behavior when `use_cache` is true:
 /// - Upper layers (>= 2): Full caching in HashMap
@@ -160,12 +154,11 @@ pub fn get_neighbors(
     use_cache: bool,
 ) -> Result<RoaringBitmap> {
     if use_cache {
-        index.nav_cache().get_neighbors_cached(
-            index.embedding(),
-            vec_id,
-            layer,
-            || get_neighbors_uncached(index, storage, vec_id, layer),
-        )
+        index
+            .nav_cache()
+            .get_neighbors_cached(index.embedding(), vec_id, layer, || {
+                get_neighbors_uncached(index, storage, vec_id, layer)
+            })
     } else {
         get_neighbors_uncached(index, storage, vec_id, layer)
     }
@@ -293,7 +286,11 @@ pub fn connect_neighbors(
 /// Compute distance between query vector and stored vector.
 pub fn distance(index: &Index, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
     let vector = get_vector(index, storage, vec_id)?;
-    Ok(compute_distance_metric(index.distance_metric(), query, &vector))
+    Ok(compute_distance_metric(
+        index.distance_metric(),
+        query,
+        &vector,
+    ))
 }
 
 /// Load a vector from storage.
@@ -322,7 +319,11 @@ pub fn distance_in_txn(
     vec_id: VecId,
 ) -> Result<f32> {
     let vector = get_vector_in_txn(index, txn, txn_db, vec_id)?;
-    Ok(compute_distance_metric(index.distance_metric(), query, &vector))
+    Ok(compute_distance_metric(
+        index.distance_metric(),
+        query,
+        &vector,
+    ))
 }
 
 /// Load a vector from transaction (can read uncommitted data).
@@ -445,6 +446,10 @@ pub fn search_layer(
 /// This version merges edges from the batch cache so that later inserts in a
 /// batch can see edges created by earlier inserts (which are not visible via
 /// `txn.get_cf()` since they are pending merge operations).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "HNSW hot path passes transaction, storage, query, and cache state explicitly"
+)]
 pub fn greedy_search_layer_with_batch_cache(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -461,7 +466,8 @@ pub fn greedy_search_layer_with_batch_cache(
 
     loop {
         // Use batch-cache-aware neighbor lookup
-        let neighbors = get_neighbors_with_batch_cache(index, storage, current, layer, batch_cache)?;
+        let neighbors =
+            get_neighbors_with_batch_cache(index, storage, current, layer, batch_cache)?;
         if neighbors.is_empty() {
             break;
         }
@@ -489,6 +495,10 @@ pub fn greedy_search_layer_with_batch_cache(
 /// This version merges edges from the batch cache so that later inserts in a
 /// batch can see edges created by earlier inserts (which are not visible via
 /// `txn.get_cf()` since they are pending merge operations).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "HNSW hot path passes transaction, storage, query, and cache state explicitly"
+)]
 pub fn search_layer_with_batch_cache(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -517,7 +527,10 @@ pub fn search_layer_with_batch_cache(
     // Min-heap for candidates (closest first)
     let mut candidates: BinaryHeap<std::cmp::Reverse<(ordered_float::OrderedFloat<f32>, VecId)>> =
         BinaryHeap::new();
-    candidates.push(std::cmp::Reverse((ordered_float::OrderedFloat(entry_dist), entry)));
+    candidates.push(std::cmp::Reverse((
+        ordered_float::OrderedFloat(entry_dist),
+        entry,
+    )));
 
     // Max-heap for results (furthest first for easy pruning)
     let mut results: BinaryHeap<(ordered_float::OrderedFloat<f32>, VecId)> = BinaryHeap::new();
@@ -534,7 +547,8 @@ pub fn search_layer_with_batch_cache(
         }
 
         // Explore neighbors using batch-cache-aware lookup
-        let neighbors = get_neighbors_with_batch_cache(index, storage, current, layer, batch_cache)?;
+        let neighbors =
+            get_neighbors_with_batch_cache(index, storage, current, layer, batch_cache)?;
         for neighbor in neighbors.iter() {
             if visited.insert(neighbor) {
                 let neighbor_dist = distance_in_txn(index, txn, txn_db, query, neighbor)?;
@@ -563,8 +577,7 @@ pub fn search_layer_with_batch_cache(
     }
 
     // Convert to sorted vec
-    let mut result_vec: Vec<(f32, VecId)> =
-        results.into_iter().map(|(d, id)| (d.0, id)).collect();
+    let mut result_vec: Vec<(f32, VecId)> = results.into_iter().map(|(d, id)| (d.0, id)).collect();
     result_vec.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     Ok(result_vec)
 }
@@ -633,7 +646,7 @@ pub fn batch_distances(
     let id_vec_pairs: Vec<(VecId, Vec<f32>)> = vec_ids
         .iter()
         .copied()
-        .zip(vectors.into_iter())
+        .zip(vectors)
         .filter_map(|(id, vec_opt)| vec_opt.map(|v| (id, v)))
         .collect();
 
@@ -677,7 +690,7 @@ pub fn get_neighbors_batch(
     vec_ids
         .iter()
         .copied()
-        .zip(results.into_iter())
+        .zip(results)
         .map(|(id, result)| {
             let bitmap = result
                 .map_err(|e| anyhow::anyhow!("RocksDB error: {}", e))?
@@ -733,6 +746,9 @@ pub fn get_binary_codes_batch(
 
     results
         .into_iter()
-        .map(|r| r.map(|opt| opt.map(|b| b.to_vec())).map_err(|e| anyhow::anyhow!("RocksDB error: {}", e)))
+        .map(|r| {
+            r.map(|opt| opt.map(|b| b.to_vec()))
+                .map_err(|e| anyhow::anyhow!("RocksDB error: {}", e))
+        })
         .collect()
 }

@@ -494,8 +494,8 @@ impl fmt::Debug for EmbeddingBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::schema::VectorElementType;
+    use super::*;
 
     fn make_test_embedding(code: u64, model: &str, dim: u32, distance: Distance) -> Embedding {
         let spec = Arc::new(EmbeddingSpec {
@@ -591,48 +591,56 @@ mod tests {
 
     #[test]
     fn test_embedding_builder_validate_invalid_rabitq_bits() {
-        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
-            .with_rabitq_bits(3); // Invalid - only 1, 2, 4 allowed
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine).with_rabitq_bits(3); // Invalid - only 1, 2, 4 allowed
 
         let result = builder.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("rabitq_bits must be 1, 2, or 4"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("rabitq_bits must be 1, 2, or 4"));
     }
 
     #[test]
     fn test_embedding_builder_validate_invalid_hnsw_m() {
         // hnsw_m = 0 is invalid
-        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
-            .with_hnsw_m(0);
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine).with_hnsw_m(0);
         let result = builder.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("hnsw_m must be >= 2"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("hnsw_m must be >= 2"));
 
         // hnsw_m = 1 is also invalid (ln(1) = 0)
-        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
-            .with_hnsw_m(1);
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine).with_hnsw_m(1);
         let result = builder.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("hnsw_m must be >= 2"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("hnsw_m must be >= 2"));
 
         // hnsw_m = 2 is valid (minimum)
-        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
-            .with_hnsw_m(2);
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine).with_hnsw_m(2);
         assert!(builder.validate().is_ok());
     }
 
     #[test]
     fn test_embedding_builder_validate_invalid_ef_construction() {
         // ef_construction = 0 is invalid
-        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
-            .with_hnsw_ef_construction(0);
+        let builder =
+            EmbeddingBuilder::new("test", 128, Distance::Cosine).with_hnsw_ef_construction(0);
         let result = builder.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("hnsw_ef_construction must be >= 1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("hnsw_ef_construction must be >= 1"));
 
         // ef_construction = 1 is valid (minimum)
-        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
-            .with_hnsw_ef_construction(1);
+        let builder =
+            EmbeddingBuilder::new("test", 128, Distance::Cosine).with_hnsw_ef_construction(1);
         assert!(builder.validate().is_ok());
     }
 

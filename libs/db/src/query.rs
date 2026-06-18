@@ -137,11 +137,11 @@ use crate::graph::reader::QueryExecutor;
 use crate::request::{new_request_id, RequestEnvelope, RequestMeta};
 
 // Re-export Runnable trait from reader module
-pub use crate::reader::Runnable;
 use crate::graph::schema::{
     DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, SrcId,
     Version,
 };
+pub use crate::reader::Runnable;
 use crate::{Id, TimestampMilli};
 
 // ============================================================================
@@ -288,7 +288,14 @@ pub type NodeResult = (Id, NodeName, NodeSummary);
 pub type EdgeResult = (SrcId, DstId, EdgeName, EdgeSummary);
 
 /// Result type for EdgeDetails query: (weight, src_id, dst_id, edge_name, edge_summary, version)
-pub type EdgeDetailsResult = (Option<EdgeWeight>, SrcId, DstId, EdgeName, EdgeSummary, Version);
+pub type EdgeDetailsResult = (
+    Option<EdgeWeight>,
+    SrcId,
+    DstId,
+    EdgeName,
+    EdgeSummary,
+    Version,
+);
 
 // ============================================================================
 // Unified Query Types and Execution
@@ -407,21 +414,20 @@ impl Query {
     pub async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<QueryResult> {
         let processor = storage.graph.as_ref();
         match self {
-            Query::Nodes(q) => execute_nodes_query(q, storage).await.map(QueryResult::Nodes),
-            Query::Edges(q) => execute_edges_query(q, storage).await.map(QueryResult::Edges),
+            Query::Nodes(q) => execute_nodes_query(q, storage)
+                .await
+                .map(QueryResult::Nodes),
+            Query::Edges(q) => execute_edges_query(q, storage)
+                .await
+                .map(QueryResult::Edges),
             Query::NodeById(q) => q.execute(processor).await.map(QueryResult::NodeById),
             Query::NodesByIdsMulti(q) => {
                 q.execute(processor).await.map(QueryResult::NodesByIdsMulti)
             }
-            Query::OutgoingEdges(q) => {
-                q.execute(processor).await.map(QueryResult::OutgoingEdges)
-            }
-            Query::IncomingEdges(q) => {
-                q.execute(processor).await.map(QueryResult::IncomingEdges)
-            }
+            Query::OutgoingEdges(q) => q.execute(processor).await.map(QueryResult::OutgoingEdges),
+            Query::IncomingEdges(q) => q.execute(processor).await.map(QueryResult::IncomingEdges),
             Query::EdgeDetails(q) => {
-                let (summary, weight, version) =
-                    q.execute(processor).await?;
+                let (summary, weight, version) = q.execute(processor).await?;
                 Ok(QueryResult::EdgeDetails((
                     weight,
                     q.source_id,
@@ -431,12 +437,8 @@ impl Query {
                     version,
                 )))
             }
-            Query::NodeFragments(q) => {
-                q.execute(processor).await.map(QueryResult::NodeFragments)
-            }
-            Query::EdgeFragments(q) => {
-                q.execute(processor).await.map(QueryResult::EdgeFragments)
-            }
+            Query::NodeFragments(q) => q.execute(processor).await.map(QueryResult::NodeFragments),
+            Query::EdgeFragments(q) => q.execute(processor).await.map(QueryResult::EdgeFragments),
             Query::AllNodes(q) => q.execute(processor).await.map(QueryResult::AllNodes),
             Query::AllEdges(q) => q.execute(processor).await.map(QueryResult::AllEdges),
         }
@@ -451,7 +453,8 @@ async fn execute_nodes_query(
     use crate::graph::Processor as GraphProcessor;
 
     let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
-    let hits: Vec<NodeHit> = fulltext::query::Nodes::execute_params(&query.params, fulltext_storage).await?;
+    let hits: Vec<NodeHit> =
+        fulltext::query::Nodes::execute_params(&query.params, fulltext_storage).await?;
 
     let graph_processor: &GraphProcessor = storage.graph.as_ref();
     let mut results = Vec::with_capacity(hits.len());
@@ -480,7 +483,8 @@ async fn execute_edges_query(
     use crate::graph::Processor as GraphProcessor;
 
     let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
-    let hits: Vec<EdgeHit> = fulltext::query::Edges::execute_params(&query.params, fulltext_storage).await?;
+    let hits: Vec<EdgeHit> =
+        fulltext::query::Edges::execute_params(&query.params, fulltext_storage).await?;
 
     let graph_processor: &GraphProcessor = storage.graph.as_ref();
     let mut results = Vec::with_capacity(hits.len());

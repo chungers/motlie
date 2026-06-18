@@ -1059,7 +1059,8 @@ async fn test_edge_details_query() {
         .unwrap();
 
     // EdgeDetails returns EdgeDetailsResult: (Option<f64>, SrcId, DstId, EdgeName, EdgeSummary, Version)
-    let (detail_weight, detail_src, detail_dst, detail_name, detail_summary, _version) = edge_detail;
+    let (detail_weight, detail_src, detail_dst, detail_name, detail_summary, _version) =
+        edge_detail;
 
     assert_eq!(detail_src, *src_id, "Source ID should match");
     assert_eq!(detail_dst, *dst_id, "Destination ID should match");
@@ -1312,7 +1313,11 @@ async fn test_nodes_by_ids_multi() {
         .await
         .unwrap();
 
-    assert_eq!(empty_results.len(), 0, "Empty input should return empty vec");
+    assert_eq!(
+        empty_results.len(),
+        0,
+        "Empty input should return empty vec"
+    );
 
     // Clean shutdown
     handle.shutdown().await.unwrap();
@@ -1340,10 +1345,16 @@ async fn test_all_nodes_via_unified_api() {
     assert_eq!(results.len(), 3, "Should return all 3 nodes from test data");
 
     // Verify results are tuples: (Id, NodeName, NodeSummary, Version)
-    let names: Vec<&str> = results.iter().map(|(_, name, _, _)| name.as_str()).collect();
+    let names: Vec<&str> = results
+        .iter()
+        .map(|(_, name, _, _)| name.as_str())
+        .collect();
     assert!(names.contains(&"Rust"), "Should contain Rust node");
     assert!(names.contains(&"Python"), "Should contain Python node");
-    assert!(names.contains(&"JavaScript"), "Should contain JavaScript node");
+    assert!(
+        names.contains(&"JavaScript"),
+        "Should contain JavaScript node"
+    );
 
     // Verify each node has valid data
     for (id, name, summary, _version) in &results {
@@ -1422,8 +1433,10 @@ async fn test_all_edges_via_unified_api() {
     assert_eq!(results.len(), 2, "Should return all 2 edges from test data");
 
     // Verify results are tuples: (Option<f64>, SrcId, DstId, EdgeName, Version)
-    let edge_names: Vec<&str> =
-        results.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
+    let edge_names: Vec<&str> = results
+        .iter()
+        .map(|(_, _, _, name, _)| name.as_str())
+        .collect();
     assert!(
         edge_names.contains(&"influences"),
         "Should contain 'influences' edge"
@@ -1444,7 +1457,9 @@ async fn test_all_edges_via_unified_api() {
     // Verify weights match test data
     for (weight, _, _, name, _version) in &results {
         match name.as_str() {
-            "influences" => assert_eq!(*weight, Some(0.8), "influences edge should have weight 0.8"),
+            "influences" => {
+                assert_eq!(*weight, Some(0.8), "influences edge should have weight 0.8")
+            }
             "used_with" => assert_eq!(*weight, Some(0.9), "used_with edge should have weight 0.9"),
             _ => panic!("Unexpected edge name: {}", name),
         }
@@ -1481,10 +1496,14 @@ async fn test_all_edges_pagination_via_unified_api() {
     assert_eq!(page2.len(), 1, "Second page should have 1 remaining edge");
 
     // Verify no overlap - different edge names
-    let page1_names: std::collections::HashSet<_> =
-        page1.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
-    let page2_names: std::collections::HashSet<_> =
-        page2.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
+    let page1_names: std::collections::HashSet<_> = page1
+        .iter()
+        .map(|(_, _, _, name, _)| name.as_str())
+        .collect();
+    let page2_names: std::collections::HashSet<_> = page2
+        .iter()
+        .map(|(_, _, _, name, _)| name.as_str())
+        .collect();
     assert!(
         page1_names.is_disjoint(&page2_names),
         "Pages should not overlap"

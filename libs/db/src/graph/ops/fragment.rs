@@ -1,9 +1,9 @@
 use anyhow::Result;
 
-use super::name::{write_name_to_cf, write_name_to_cf_cached};
 use super::super::mutation::{AddEdgeFragment, AddNodeFragment};
 use super::super::name_hash::NameCache;
 use super::super::schema::{EdgeFragments, NodeFragments};
+use super::name::{write_name_to_cf, write_name_to_cf_cached};
 use crate::rocksdb::{ColumnFamily, MutationCodec};
 
 pub(crate) fn add_node_fragment(
@@ -18,9 +18,9 @@ pub(crate) fn add_node_fragment(
         "Executing AddNodeFragment op"
     );
 
-    let cf = txn_db.cf_handle(NodeFragments::CF_NAME).ok_or_else(|| {
-        anyhow::anyhow!("Column family '{}' not found", NodeFragments::CF_NAME)
-    })?;
+    let cf = txn_db
+        .cf_handle(NodeFragments::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeFragments::CF_NAME))?;
     let (key, value) = mutation.to_cf_bytes()?;
     txn.put_cf(cf, key, value)?;
 
@@ -51,9 +51,9 @@ pub(crate) fn add_edge_fragment(
         }
     }
 
-    let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
-        anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
-    })?;
+    let cf = txn_db
+        .cf_handle(EdgeFragments::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME))?;
     let (key, value) = mutation.to_cf_bytes()?;
     txn.put_cf(cf, key, value)?;
 

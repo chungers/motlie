@@ -9,11 +9,6 @@ use anyhow::Result;
 use crate::graph::ColumnFamilySerde;
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 
-use super::name::resolve_name;
-use super::summary::{
-    edge_summary_exists, node_summary_exists, resolve_edge_summary, resolve_edge_summary_strict,
-    resolve_node_summary, resolve_node_summary_strict,
-};
 use super::super::name_hash::NameHash;
 use super::super::query::{
     AllEdges, AllNodes, EdgeAtVersion, EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName,
@@ -24,11 +19,19 @@ use super::super::query::{
 use super::super::scan;
 use super::super::scan::Visitable;
 use super::super::schema::{
-    self, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, ForwardEdges, Nodes, NodeName,
-    NodeSummary, Version,
+    self, EdgeName, EdgeSummary, EdgeWeight, ForwardEdges, FragmentContent, NodeName, NodeSummary,
+    Nodes, Version,
 };
 use super::super::summary_hash::SummaryHash;
+use super::name::resolve_name;
+use super::summary::{
+    edge_summary_exists, node_summary_exists, resolve_edge_summary, resolve_edge_summary_strict,
+    resolve_node_summary, resolve_node_summary_strict,
+};
 use crate::{Id, SystemTimeMillis, TimestampMilli};
+
+type EdgeRow = (Option<EdgeWeight>, Id, Id, EdgeName, Version);
+type EdgeRows = Vec<EdgeRow>;
 
 // ============================================================================
 // Storage Access Abstraction
@@ -393,8 +396,9 @@ fn find_edge_current_version_scan(
                 if !key_bytes.starts_with(prefix) {
                     break;
                 }
-                let value: schema::ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+                let value: schema::ForwardEdgeCfValue =
+                    ForwardEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
                 if value.0.is_none() {
                     return Ok(Some((key_bytes.to_vec(), value)));
                 }
@@ -406,8 +410,9 @@ fn find_edge_current_version_scan(
                 if !key_bytes.starts_with(prefix) {
                     break;
                 }
-                let value: schema::ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+                let value: schema::ForwardEdgeCfValue =
+                    ForwardEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
                 if value.0.is_none() {
                     return Ok(Some((key_bytes.to_vec(), value)));
                 }
@@ -419,8 +424,9 @@ fn find_edge_current_version_scan(
                 if !key_bytes.starts_with(prefix) {
                     break;
                 }
-                let value: schema::ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+                let value: schema::ForwardEdgeCfValue =
+                    ForwardEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
                 if value.0.is_none() {
                     return Ok(Some((key_bytes.to_vec(), value)));
                 }
@@ -562,8 +568,9 @@ fn find_edge_version_at_time_reverse(
                     continue;
                 }
 
-                let value: schema::ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+                let value: schema::ForwardEdgeCfValue =
+                    ForwardEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
 
                 let is_valid = match value.0 {
                     None => true,
@@ -585,7 +592,10 @@ fn find_edge_version_at_time_reverse(
 // Query Ops (Storage)
 // ============================================================================
 
-pub(crate) fn node_by_id(storage: &super::super::Storage, query: &NodeById) -> Result<(NodeName, NodeSummary, Version)> {
+pub(crate) fn node_by_id(
+    storage: &super::super::Storage,
+    query: &NodeById,
+) -> Result<(NodeName, NodeSummary, Version)> {
     let params = query;
     tracing::debug!(
         id = %params.id,
@@ -593,7 +603,9 @@ pub(crate) fn node_by_id(storage: &super::super::Storage, query: &NodeById) -> R
         "Executing NodeById query"
     );
 
-    let ref_time = params.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+    let ref_time = params
+        .reference_ts_millis
+        .unwrap_or_else(TimestampMilli::now);
     let id = params.id;
 
     let (_key_bytes, value) = if let Ok(db) = storage.db() {
@@ -615,7 +627,11 @@ pub(crate) fn node_by_id(storage: &super::super::Storage, query: &NodeById) -> R
     }
 
     if !schema::is_active_at_time(&value.1, ref_time) {
-        return Err(anyhow::anyhow!("Node {} not valid at time {}", id, ref_time.0));
+        return Err(anyhow::anyhow!(
+            "Node {} not valid at time {}",
+            id,
+            ref_time.0
+        ));
     }
 
     let node_name = resolve_name(storage, value.2)?;
@@ -639,7 +655,9 @@ pub(crate) fn nodes_by_ids_multi(
         return Ok(Vec::new());
     }
 
-    let ref_time = params.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+    let ref_time = params
+        .reference_ts_millis
+        .unwrap_or_else(TimestampMilli::now);
 
     let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>, Version)> =
         Vec::with_capacity(params.ids.len());
@@ -696,7 +714,9 @@ pub(crate) fn node_fragments_by_id_time_range(
 
     use std::ops::Bound;
 
-    let ref_time = params.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+    let ref_time = params
+        .reference_ts_millis
+        .unwrap_or_else(TimestampMilli::now);
 
     let id = params.id;
     let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
@@ -770,7 +790,9 @@ pub(crate) fn edge_fragments_by_id_time_range(
 
     use std::ops::Bound;
 
-    let ref_time = params.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+    let ref_time = params
+        .reference_ts_millis
+        .unwrap_or_else(TimestampMilli::now);
 
     let source_id = params.source_id;
     let dest_id = params.dest_id;
@@ -778,20 +800,23 @@ pub(crate) fn edge_fragments_by_id_time_range(
     let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
 
     let start_key = match &params.time_range.0 {
-        Bound::Unbounded => schema::EdgeFragments::key_to_bytes(
-            &schema::EdgeFragmentCfKey(source_id, dest_id, edge_name_hash, TimestampMilli(0)),
-        ),
+        Bound::Unbounded => schema::EdgeFragments::key_to_bytes(&schema::EdgeFragmentCfKey(
+            source_id,
+            dest_id,
+            edge_name_hash,
+            TimestampMilli(0),
+        )),
         Bound::Included(start_ts) => schema::EdgeFragments::key_to_bytes(
             &schema::EdgeFragmentCfKey(source_id, dest_id, edge_name_hash, *start_ts),
         ),
-        Bound::Excluded(start_ts) => schema::EdgeFragments::key_to_bytes(
-            &schema::EdgeFragmentCfKey(
+        Bound::Excluded(start_ts) => {
+            schema::EdgeFragments::key_to_bytes(&schema::EdgeFragmentCfKey(
                 source_id,
                 dest_id,
                 edge_name_hash,
                 TimestampMilli(start_ts.0 + 1),
-            ),
-        ),
+            ))
+        }
     };
 
     iterate_cf!(storage, schema::EdgeFragments, start_key, |item| {
@@ -846,7 +871,9 @@ pub(crate) fn edge_summary_by_src_dst_name(
         "Executing EdgeSummaryBySrcDstName query"
     );
 
-    let ref_time = params.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+    let ref_time = params
+        .reference_ts_millis
+        .unwrap_or_else(TimestampMilli::now);
 
     let source_id = params.source_id;
     let dest_id = params.dest_id;
@@ -919,20 +946,26 @@ pub(crate) fn edge_summary_by_src_dst_name(
 pub(crate) fn outgoing_edges(
     storage: &super::super::Storage,
     query: &OutgoingEdges,
-) -> Result<Vec<(Option<EdgeWeight>, Id, Id, EdgeName, Version)>> {
+) -> Result<EdgeRows> {
     let params = query;
     tracing::debug!(node_id = %params.id, "Executing OutgoingEdges query");
 
-    let ref_time = params.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+    let ref_time = params
+        .reference_ts_millis
+        .unwrap_or_else(TimestampMilli::now);
 
     let id = params.id;
-    let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+    let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> =
+        std::collections::HashSet::new();
     let mut edges_with_hash: Vec<(Option<EdgeWeight>, Id, Id, NameHash, Version)> = Vec::new();
     let prefix = id.into_bytes();
 
     if let Ok(db) = storage.db() {
         let cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", schema::ForwardEdges::CF_NAME)
+            anyhow::anyhow!(
+                "Column family '{}' not found",
+                schema::ForwardEdges::CF_NAME
+            )
         })?;
 
         let iter = db.iterator_cf(
@@ -946,9 +979,8 @@ pub(crate) fn outgoing_edges(
                 break;
             }
 
-            let key: schema::ForwardEdgeCfKey =
-                schema::ForwardEdges::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
             let value: schema::ForwardEdgeCfValue =
                 schema::ForwardEdges::value_from_bytes(&value_bytes)
@@ -977,7 +1009,12 @@ pub(crate) fn outgoing_edges(
         let txn_db = storage.transaction_db()?;
         let cf = txn_db
             .cf_handle(schema::ForwardEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", schema::ForwardEdges::CF_NAME))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ForwardEdges::CF_NAME
+                )
+            })?;
 
         let iter = txn_db.iterator_cf(
             cf,
@@ -990,9 +1027,8 @@ pub(crate) fn outgoing_edges(
                 break;
             }
 
-            let key: schema::ForwardEdgeCfKey =
-                schema::ForwardEdges::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
             let value: schema::ForwardEdgeCfValue =
                 schema::ForwardEdges::value_from_bytes(&value_bytes)
@@ -1030,20 +1066,26 @@ pub(crate) fn outgoing_edges(
 pub(crate) fn incoming_edges(
     storage: &super::super::Storage,
     query: &IncomingEdges,
-) -> Result<Vec<(Option<EdgeWeight>, Id, Id, EdgeName, Version)>> {
+) -> Result<EdgeRows> {
     let params = query;
     tracing::debug!(node_id = %params.id, "Executing IncomingEdges query");
 
-    let ref_time = params.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+    let ref_time = params
+        .reference_ts_millis
+        .unwrap_or_else(TimestampMilli::now);
 
     let id = params.id;
-    let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+    let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> =
+        std::collections::HashSet::new();
     let mut edges_with_hash: Vec<(Option<EdgeWeight>, Id, Id, NameHash, Version)> = Vec::new();
     let prefix = id.into_bytes();
 
     if let Ok(db) = storage.db() {
         let reverse_cf = db.cf_handle(schema::ReverseEdges::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", schema::ReverseEdges::CF_NAME)
+            anyhow::anyhow!(
+                "Column family '{}' not found",
+                schema::ReverseEdges::CF_NAME
+            )
         })?;
 
         let iter = db.iterator_cf(
@@ -1057,9 +1099,8 @@ pub(crate) fn incoming_edges(
                 break;
             }
 
-            let key: schema::ReverseEdgeCfKey =
-                schema::ReverseEdges::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
             let value: schema::ReverseEdgeCfValue =
                 schema::ReverseEdges::value_from_bytes(&value_bytes)
@@ -1103,7 +1144,12 @@ pub(crate) fn incoming_edges(
         let txn_db = storage.transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(schema::ReverseEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", schema::ReverseEdges::CF_NAME))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ReverseEdges::CF_NAME
+                )
+            })?;
 
         let iter = txn_db.iterator_cf(
             reverse_cf,
@@ -1116,9 +1162,8 @@ pub(crate) fn incoming_edges(
                 break;
             }
 
-            let key: schema::ReverseEdgeCfKey =
-                schema::ReverseEdges::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
             let value: schema::ReverseEdgeCfValue =
                 schema::ReverseEdges::value_from_bytes(&value_bytes)
@@ -1173,7 +1218,11 @@ pub(crate) fn all_nodes(
     query: &AllNodes,
 ) -> Result<Vec<(Id, NodeName, NodeSummary, Version)>> {
     let params = query;
-    tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllNodes query");
+    tracing::debug!(
+        limit = params.limit,
+        has_cursor = params.last.is_some(),
+        "Executing AllNodes query"
+    );
 
     let scan_request = scan::AllNodes {
         last: params.last,
@@ -1184,19 +1233,25 @@ pub(crate) fn all_nodes(
 
     let mut results = Vec::with_capacity(params.limit);
     scan_request.accept(storage, &mut |record: &scan::NodeRecord| {
-        results.push((record.id, record.name.clone(), record.summary.clone(), record.version));
+        results.push((
+            record.id,
+            record.name.clone(),
+            record.summary.clone(),
+            record.version,
+        ));
         true
     })?;
 
     Ok(results)
 }
 
-pub(crate) fn all_edges(
-    storage: &super::super::Storage,
-    query: &AllEdges,
-) -> Result<Vec<(Option<EdgeWeight>, Id, Id, EdgeName, Version)>> {
+pub(crate) fn all_edges(storage: &super::super::Storage, query: &AllEdges) -> Result<EdgeRows> {
     let params = query;
-    tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllEdges query");
+    tracing::debug!(
+        limit = params.limit,
+        has_cursor = params.last.is_some(),
+        "Executing AllEdges query"
+    );
 
     let scan_request = scan::AllEdges {
         last: params.last.clone(),
@@ -1232,14 +1287,16 @@ pub(crate) fn nodes_by_summary_hash(
 
     iterate_cf!(storage, schema::NodeSummaryIndex, prefix, |item| {
         let (key_bytes, value_bytes) = item?;
-        let key: schema::NodeSummaryIndexCfKey = schema::NodeSummaryIndex::key_from_bytes(&key_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+        let key: schema::NodeSummaryIndexCfKey =
+            schema::NodeSummaryIndex::key_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
         if key.0 != params.hash {
             break;
         }
 
-        let value: schema::NodeSummaryIndexCfValue = schema::NodeSummaryIndex::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+        let value: schema::NodeSummaryIndexCfValue =
+            schema::NodeSummaryIndex::value_from_bytes(&value_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
         let is_current = value.is_current();
         if params.current_only && !is_current {
@@ -1268,14 +1325,16 @@ pub(crate) fn edges_by_summary_hash(
 
     iterate_cf!(storage, schema::EdgeSummaryIndex, prefix, |item| {
         let (key_bytes, value_bytes) = item?;
-        let key: schema::EdgeSummaryIndexCfKey = schema::EdgeSummaryIndex::key_from_bytes(&key_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+        let key: schema::EdgeSummaryIndexCfKey =
+            schema::EdgeSummaryIndex::key_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
         if key.0 != params.hash {
             break;
         }
 
-        let value: schema::EdgeSummaryIndexCfValue = schema::EdgeSummaryIndex::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+        let value: schema::EdgeSummaryIndexCfValue =
+            schema::EdgeSummaryIndex::value_from_bytes(&value_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
         let is_current = value.is_current();
         if params.current_only && !is_current {
@@ -1304,14 +1363,19 @@ fn reverse_seek_node_version_history(
     prefix: &[u8],
     seek_key: &[u8],
     offset: u32,
-) -> Result<Option<(schema::NodeVersionHistoryCfKey, schema::NodeVersionHistoryCfValue)>> {
+) -> Result<
+    Option<(
+        schema::NodeVersionHistoryCfKey,
+        schema::NodeVersionHistoryCfValue,
+    )>,
+> {
     let cf_name = schema::NodeVersionHistory::CF_NAME;
 
     macro_rules! reverse_iterate {
         ($db:expr) => {{
-            let cf = $db.cf_handle(cf_name).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", cf_name)
-            })?;
+            let cf = $db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
             let mut iter = $db.raw_iterator_cf(cf);
             iter.seek_for_prev(seek_key);
 
@@ -1329,7 +1393,9 @@ fn reverse_seek_node_version_history(
                     continue;
                 }
 
-                let Some(value_bytes) = iter.value() else { break };
+                let Some(value_bytes) = iter.value() else {
+                    break;
+                };
                 let key = schema::NodeVersionHistory::key_from_bytes(key_bytes)?;
                 let value = schema::NodeVersionHistory::value_from_bytes(value_bytes)?;
                 return Ok(Some((key, value)));
@@ -1352,14 +1418,19 @@ fn reverse_seek_edge_version_history(
     prefix: &[u8],
     seek_key: &[u8],
     offset: u32,
-) -> Result<Option<(schema::EdgeVersionHistoryCfKey, schema::EdgeVersionHistoryCfValue)>> {
+) -> Result<
+    Option<(
+        schema::EdgeVersionHistoryCfKey,
+        schema::EdgeVersionHistoryCfValue,
+    )>,
+> {
     let cf_name = schema::EdgeVersionHistory::CF_NAME;
 
     macro_rules! reverse_iterate {
         ($db:expr) => {{
-            let cf = $db.cf_handle(cf_name).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", cf_name)
-            })?;
+            let cf = $db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
             let mut iter = $db.raw_iterator_cf(cf);
             iter.seek_for_prev(seek_key);
 
@@ -1377,7 +1448,9 @@ fn reverse_seek_edge_version_history(
                     continue;
                 }
 
-                let Some(value_bytes) = iter.value() else { break };
+                let Some(value_bytes) = iter.value() else {
+                    break;
+                };
                 let key = schema::EdgeVersionHistory::key_from_bytes(key_bytes)?;
                 let value = schema::EdgeVersionHistory::value_from_bytes(value_bytes)?;
                 return Ok(Some((key, value)));
@@ -1410,13 +1483,15 @@ pub(crate) fn node_at_version(
     seek_key.extend_from_slice(&prefix);
     seek_key.extend_from_slice(&[0xFF; 12]); // max ValidSince (8) + max Version (4)
 
-    let (key, value) = reverse_seek_node_version_history(storage, &prefix, &seek_key, query.versions_back)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Node {} has no version at offset HEAD~{}",
-                id, query.versions_back
-            )
-        })?;
+    let (key, value) =
+        reverse_seek_node_version_history(storage, &prefix, &seek_key, query.versions_back)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Node {} has no version at offset HEAD~{}",
+                    id,
+                    query.versions_back
+                )
+            })?;
 
     // key: NodeVersionHistoryCfKey(Id, ValidSince, Version)
     // value: NodeVersionHistoryCfValue(UpdatedAt, Option<SummaryHash>, NameHash, Option<ActivePeriod>)
@@ -1449,13 +1524,17 @@ pub(crate) fn edge_at_version(
     seek_key.extend_from_slice(&prefix);
     seek_key.extend_from_slice(&[0xFF; 12]); // max ValidSince (8) + max Version (4)
 
-    let (key, value) = reverse_seek_edge_version_history(storage, &prefix, &seek_key, query.versions_back)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Edge {} -> {} ({}) has no version at offset HEAD~{}",
-                query.source_id, query.dest_id, query.name, query.versions_back
-            )
-        })?;
+    let (key, value) =
+        reverse_seek_edge_version_history(storage, &prefix, &seek_key, query.versions_back)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Edge {} -> {} ({}) has no version at offset HEAD~{}",
+                    query.source_id,
+                    query.dest_id,
+                    query.name,
+                    query.versions_back
+                )
+            })?;
 
     // key: EdgeVersionHistoryCfKey(SrcId, DstId, NameHash, ValidSince, Version)
     // value: EdgeVersionHistoryCfValue(UpdatedAt, Option<SummaryHash>, Option<EdgeWeight>, Option<ActivePeriod>)
@@ -1487,9 +1566,9 @@ pub(crate) fn list_node_versions(
 
     macro_rules! collect_versions {
         ($db:expr) => {{
-            let cf = $db.cf_handle(cf_name).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", cf_name)
-            })?;
+            let cf = $db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
             let mut iter = $db.raw_iterator_cf(cf);
             iter.seek_for_prev(&seek_key);
 
@@ -1506,7 +1585,9 @@ pub(crate) fn list_node_versions(
                     continue;
                 }
 
-                let Some(value_bytes) = iter.value() else { break };
+                let Some(value_bytes) = iter.value() else {
+                    break;
+                };
                 let key = schema::NodeVersionHistory::key_from_bytes(key_bytes)?;
                 let value = schema::NodeVersionHistory::value_from_bytes(value_bytes)?;
 
@@ -1515,10 +1596,10 @@ pub(crate) fn list_node_versions(
                     valid_since: key.1,
                     updated_at: value.0,
                     active_period: value.3,
-                summary_available: match value.1 {
-                    Some(hash) => node_summary_exists(storage, hash)?,
-                    None => false,
-                },
+                    summary_available: match value.1 {
+                        Some(hash) => node_summary_exists(storage, hash)?,
+                        None => false,
+                    },
                 });
 
                 iter.prev();
@@ -1559,9 +1640,9 @@ pub(crate) fn list_edge_versions(
 
     macro_rules! collect_versions {
         ($db:expr) => {{
-            let cf = $db.cf_handle(cf_name).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", cf_name)
-            })?;
+            let cf = $db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
             let mut iter = $db.raw_iterator_cf(cf);
             iter.seek_for_prev(&seek_key);
 
@@ -1578,7 +1659,9 @@ pub(crate) fn list_edge_versions(
                     continue;
                 }
 
-                let Some(value_bytes) = iter.value() else { break };
+                let Some(value_bytes) = iter.value() else {
+                    break;
+                };
                 let key = schema::EdgeVersionHistory::key_from_bytes(key_bytes)?;
                 let value = schema::EdgeVersionHistory::value_from_bytes(value_bytes)?;
 
@@ -1587,10 +1670,10 @@ pub(crate) fn list_edge_versions(
                     valid_since: key.3,
                     updated_at: value.0,
                     active_period: value.3,
-                summary_available: match value.1 {
-                    Some(hash) => edge_summary_exists(storage, hash)?,
-                    None => false,
-                },
+                    summary_available: match value.1 {
+                        Some(hash) => edge_summary_exists(storage, hash)?,
+                        None => false,
+                    },
                 });
 
                 iter.prev();

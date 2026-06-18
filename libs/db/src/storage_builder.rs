@@ -67,8 +67,8 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            size_bytes: 256 * 1024 * 1024,  // 256MB
-            block_size: 4 * 1024,            // 4KB
+            size_bytes: 256 * 1024 * 1024, // 256MB
+            block_size: 4 * 1024,          // 4KB
         }
     }
 }
@@ -265,7 +265,10 @@ impl StorageBuilder {
             // Call on_ready for each subsystem
             for subsystem in &self.rocksdb_subsystems {
                 let name = SubsystemInfo::name(subsystem.as_ref());
-                tracing::debug!(subsystem = name, "[StorageBuilder] Calling RocksDB on_ready");
+                tracing::debug!(
+                    subsystem = name,
+                    "[StorageBuilder] Calling RocksDB on_ready"
+                );
                 subsystem.on_ready(&db_arc)?;
             }
 
@@ -319,7 +322,10 @@ impl StorageBuilder {
             // Call on_ready for each fulltext subsystem
             for subsystem in &self.fulltext_subsystems {
                 let name = SubsystemInfo::name(subsystem.as_ref());
-                tracing::debug!(subsystem = name, "[StorageBuilder] Calling Tantivy on_ready");
+                tracing::debug!(
+                    subsystem = name,
+                    "[StorageBuilder] Calling Tantivy on_ready"
+                );
                 subsystem.on_ready(&index_arc)?;
             }
 
@@ -367,7 +373,6 @@ pub struct SharedStorage {
     path: PathBuf,
     // RocksDB storage
     db: Option<Arc<TransactionDB>>,
-    #[allow(dead_code)]
     cache: Option<Cache>,
     rocksdb_subsystems: Vec<Box<dyn RocksdbSubsystem>>,
     rocksdb_map: HashMap<&'static str, usize>,
@@ -411,6 +416,13 @@ impl SharedStorage {
         self.db.clone()
     }
 
+    /// Get a reference to the shared RocksDB block cache.
+    ///
+    /// Returns `None` if no RocksDB components were registered.
+    pub fn block_cache(&self) -> Option<&Cache> {
+        self.cache.as_ref()
+    }
+
     /// Get a RocksDB component by id (e.g., "graph", "vector").
     ///
     /// Returns `None` if no component with the given id is registered.
@@ -422,10 +434,7 @@ impl SharedStorage {
 
     /// List all registered RocksDB component ids.
     pub fn component_names(&self) -> Vec<&'static str> {
-        self.rocksdb_subsystems
-            .iter()
-            .map(|p| p.id())
-            .collect()
+        self.rocksdb_subsystems.iter().map(|p| p.id()).collect()
     }
 
     /// List all column family names across all RocksDB subsystems.
@@ -471,10 +480,7 @@ impl SharedStorage {
 
     /// List all registered fulltext component ids.
     pub fn fulltext_names(&self) -> Vec<&'static str> {
-        self.fulltext_subsystems
-            .iter()
-            .map(|p| p.id())
-            .collect()
+        self.fulltext_subsystems.iter().map(|p| p.id()).collect()
     }
 
     /// Check if Tantivy storage is available.
@@ -510,7 +516,8 @@ mod tests {
         }
 
         fn was_ready_called(&self) -> bool {
-            self.on_ready_called.load(std::sync::atomic::Ordering::SeqCst)
+            self.on_ready_called
+                .load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -712,8 +719,8 @@ mod tests {
     #[test]
     fn test_storage_builder_with_fulltext() {
         let path = Path::new("/tmp/test_db");
-        let builder = StorageBuilder::new(path)
-            .with_fulltext(Box::new(MockFulltextSubsystem::new()));
+        let builder =
+            StorageBuilder::new(path).with_fulltext(Box::new(MockFulltextSubsystem::new()));
         assert_eq!(builder.fulltext_subsystems.len(), 1);
     }
 

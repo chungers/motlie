@@ -120,7 +120,7 @@ pub struct EdgeHit {
 }
 
 /// Aggregated facet counts
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct FacetCounts {
     /// Document types: [("nodes", 45), ("edges", 23), ...]
     pub doc_types: HashMap<String, u64>,
@@ -130,16 +130,6 @@ pub struct FacetCounts {
 
     /// Validity structure: [("unbounded", 50), ("bounded", 10), ...]
     pub validity: HashMap<String, u64>,
-}
-
-impl Default for FacetCounts {
-    fn default() -> Self {
-        Self {
-            doc_types: HashMap::new(),
-            tags: HashMap::new(),
-            validity: HashMap::new(),
-        }
-    }
 }
 
 impl FacetCounts {

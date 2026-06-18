@@ -8,24 +8,20 @@
 //! 5. Deduplication behavior is documented and tested
 
 use motlie_db::fulltext::{
-    create_query_reader as create_fulltext_query_reader, Edges as FulltextEdges,
-    Facets as FulltextFacets, FuzzyLevel, Index as FulltextIndex,
-    Nodes as FulltextNodes, Reader as FulltextReader, ReaderConfig as FulltextReaderConfig,
-    Runnable as FulltextQueryRunnable,
+    create_query_reader as create_fulltext_query_reader,
     spawn_mutation_consumer as spawn_fulltext_mutation_consumer,
     spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
-    Storage as FulltextStorage,
+    Edges as FulltextEdges, Facets as FulltextFacets, FuzzyLevel, Index as FulltextIndex,
+    Nodes as FulltextNodes, Reader as FulltextReader, ReaderConfig as FulltextReaderConfig,
+    Runnable as FulltextQueryRunnable, Storage as FulltextStorage,
 };
-use motlie_db::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
-};
-use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use motlie_db::graph::query::{EdgeSummaryBySrcDstName, NodeById};
+use motlie_db::writer::Runnable as MutationRunnable;
 // Only import graph::query::Runnable - fulltext queries use .run() on types
 // that only implement fulltext::query::Runnable so there's no ambiguity
 use motlie_db::graph::reader::{
-    Reader as GraphReader,
-    spawn_query_consumers_with_storage, ReaderConfig,
+    spawn_query_consumers_with_storage, Reader as GraphReader, ReaderConfig,
 };
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
@@ -35,8 +31,8 @@ use motlie_db::graph::Storage;
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tantivy::schema::Value;
 use std::time::Duration;
+use tantivy::schema::Value;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -65,8 +61,12 @@ async fn setup_mutation_pipeline(
 
     // Create graph consumer that forwards to fulltext (chained)
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle =
-        spawn_mutation_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
+    let graph_handle = spawn_mutation_consumer_with_next(
+        graph_receiver,
+        config.clone(),
+        &db_path,
+        fulltext_sender,
+    );
 
     (writer, graph_handle, fulltext_handle, db_path, index_path)
 }
@@ -135,19 +135,37 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
 
     // Node 1: Rust programming
     let rust_id = Id::new();
-    node_data.insert(rust_id, ("Rust", "Systems programming language with memory safety"));
+    node_data.insert(
+        rust_id,
+        ("Rust", "Systems programming language with memory safety"),
+    );
 
     // Node 2: Python programming
     let python_id = Id::new();
-    node_data.insert(python_id, ("Python", "High-level interpreted programming language"));
+    node_data.insert(
+        python_id,
+        ("Python", "High-level interpreted programming language"),
+    );
 
     // Node 3: JavaScript
     let javascript_id = Id::new();
-    node_data.insert(javascript_id, ("JavaScript", "Dynamic scripting language for web development"));
+    node_data.insert(
+        javascript_id,
+        (
+            "JavaScript",
+            "Dynamic scripting language for web development",
+        ),
+    );
 
     // Node 4: Go
     let go_id = Id::new();
-    node_data.insert(go_id, ("Go", "Compiled language designed at Google for cloud infrastructure"));
+    node_data.insert(
+        go_id,
+        (
+            "Go",
+            "Compiled language designed at Google for cloud infrastructure",
+        ),
+    );
 
     // Add all nodes
     for (node_id, (name, summary)) in &node_data {
@@ -166,17 +184,41 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
     // Each node gets 2-3 fragments with related but distinct content
     let fragments = vec![
         // Rust fragments (3)
-        (rust_id, "Rust provides zero-cost abstractions and ownership model"),
-        (rust_id, "Rust is ideal for systems programming without garbage collection"),
-        (rust_id, "Rust enables fearless concurrency through its type system"),
+        (
+            rust_id,
+            "Rust provides zero-cost abstractions and ownership model",
+        ),
+        (
+            rust_id,
+            "Rust is ideal for systems programming without garbage collection",
+        ),
+        (
+            rust_id,
+            "Rust enables fearless concurrency through its type system",
+        ),
         // Python fragments (2)
-        (python_id, "Python excels at data science and machine learning applications"),
-        (python_id, "Python has extensive library ecosystem including NumPy and Pandas"),
+        (
+            python_id,
+            "Python excels at data science and machine learning applications",
+        ),
+        (
+            python_id,
+            "Python has extensive library ecosystem including NumPy and Pandas",
+        ),
         // JavaScript fragments (2)
-        (javascript_id, "JavaScript powers modern web frameworks like React and Vue"),
-        (javascript_id, "JavaScript runs on both browser and server with Node.js"),
+        (
+            javascript_id,
+            "JavaScript powers modern web frameworks like React and Vue",
+        ),
+        (
+            javascript_id,
+            "JavaScript runs on both browser and server with Node.js",
+        ),
         // Go fragment (1)
-        (go_id, "Go is used by Docker, Kubernetes, and many cloud native tools"),
+        (
+            go_id,
+            "Go is used by Docker, Kubernetes, and many cloud native tools",
+        ),
     ];
 
     // Track fragment timestamps per node for later verification
@@ -191,16 +233,17 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
             valid_range: None,
         };
         fragment.run(&writer).await.unwrap();
-        fragment_timestamps
-            .entry(*node_id)
-            .or_default()
-            .push(ts.0);
+        fragment_timestamps.entry(*node_id).or_default().push(ts.0);
 
         // Small delay to ensure distinct timestamps
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    println!("\n  Added {} fragments across {} nodes\n", fragments.len(), node_data.len());
+    println!(
+        "\n  Added {} fragments across {} nodes\n",
+        fragments.len(),
+        node_data.len()
+    );
 
     // Wait for indexing and shutdown mutation pipeline
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -224,13 +267,18 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
     println!("  Found {} results for 'programming'", results.len());
 
     // Should find Rust, Python (both have "programming" in summary or fragments)
-    assert!(results.len() >= 2, "Expected at least 2 results for 'programming'");
+    assert!(
+        results.len() >= 2,
+        "Expected at least 2 results for 'programming'"
+    );
 
     // Verify each hit resolves to correct RocksDB entry
     let mut resolved_ids: HashSet<Id> = HashSet::new();
     for hit in &results {
-        println!("    Hit: id={}, score={:.4}, fragment_ts={:?}",
-            hit.id, hit.score, hit.fragment_timestamp);
+        println!(
+            "    Hit: id={}, score={:.4}, fragment_ts={:?}",
+            hit.id, hit.score, hit.fragment_timestamp
+        );
 
         // Use NodeById query to verify the hit resolves to a real node
         let node_result = NodeById::new(hit.id, None)
@@ -239,7 +287,11 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
 
         match node_result {
             Ok((name, summary, _version)) => {
-                println!("      -> Resolved to node: name='{}', summary='{}'", name, summary.decode_string().unwrap_or_default());
+                println!(
+                    "      -> Resolved to node: name='{}', summary='{}'",
+                    name,
+                    summary.decode_string().unwrap_or_default()
+                );
                 resolved_ids.insert(hit.id);
 
                 // Verify the ID matches our expected data
@@ -280,14 +332,23 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
 
     // === DEDUPLICATION REPORT ===
     println!("\n=== Deduplication Report (Nodes) ===");
-    println!("  Rust node has {} fragments in DB", fragment_timestamps.get(&rust_id).map(|v| v.len()).unwrap_or(0));
+    println!(
+        "  Rust node has {} fragments in DB",
+        fragment_timestamps
+            .get(&rust_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    );
     println!("  Search for 'Rust' returned {} hits", rust_results.len());
     println!("  Note: Current implementation deduplicates by node ID, keeping best score");
     println!("        Multiple fragments for same node are collapsed into single hit");
 
     // Verify deduplication: Despite 3 fragments, we should get at most 1 hit per node for "Rust"
     let rust_hit_count = rust_results.iter().filter(|h| h.id == rust_id).count();
-    assert_eq!(rust_hit_count, 1, "Should have exactly 1 hit for Rust node (deduplicated)");
+    assert_eq!(
+        rust_hit_count, 1,
+        "Should have exactly 1 hit for Rust node (deduplicated)"
+    );
 
     // Cleanup
     drop(graph_reader);
@@ -338,7 +399,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
             ts_millis: TimestampMilli::now(),
             name: name.to_string(),
             valid_range: None,
-            summary: NodeSummary::from_text(&format!("{} topic node", name)),
+            summary: NodeSummary::from_text(format!("{} topic node", name)),
         }
         .run(&writer)
         .await
@@ -355,7 +416,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
         summary: &'static str,
     }
 
-    let edges = vec![
+    let edges = [
         EdgeData {
             src: rust_id,
             dst: python_id,
@@ -405,11 +466,31 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
     // Add MULTIPLE fragments per edge (to test fragment deduplication)
     let edge_fragments = vec![
         // JavaScript -> WebDev edge gets multiple fragments
-        (javascript_id, webdev_id, "powers", "JavaScript frameworks include React, Vue, and Angular"),
-        (javascript_id, webdev_id, "powers", "JavaScript ecosystem has npm with millions of packages"),
+        (
+            javascript_id,
+            webdev_id,
+            "powers",
+            "JavaScript frameworks include React, Vue, and Angular",
+        ),
+        (
+            javascript_id,
+            webdev_id,
+            "powers",
+            "JavaScript ecosystem has npm with millions of packages",
+        ),
         // Python -> WebDev edge gets multiple fragments
-        (python_id, webdev_id, "supports", "Python web frameworks provide RESTful API development"),
-        (python_id, webdev_id, "supports", "Python async libraries like FastAPI enable high-performance backends"),
+        (
+            python_id,
+            webdev_id,
+            "supports",
+            "Python web frameworks provide RESTful API development",
+        ),
+        (
+            python_id,
+            webdev_id,
+            "supports",
+            "Python async libraries like FastAPI enable high-performance backends",
+        ),
     ];
 
     for (src, dst, edge_name, content) in &edge_fragments {
@@ -444,7 +525,10 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
         let searcher = reader.searcher();
         let schema = index.schema();
 
-        println!("\n  DEBUG: Total documents in index: {}", searcher.num_docs());
+        println!(
+            "\n  DEBUG: Total documents in index: {}",
+            searcher.num_docs()
+        );
 
         // Get doc_type field
         let doc_type_field = schema.get_field("doc_type").unwrap();
@@ -452,7 +536,9 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
         // Search for all edge documents
         use tantivy::collector::TopDocs;
         use tantivy::query::AllQuery;
-        let all_results = searcher.search(&AllQuery, &TopDocs::with_limit(100)).unwrap();
+        let all_results = searcher
+            .search(&AllQuery, &TopDocs::with_limit(100))
+            .unwrap();
 
         let mut edges_count = 0;
         let mut edge_fragments_count = 0;
@@ -479,7 +565,6 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
         println!("    - node_fragments: {}", node_fragments_count);
         println!("    - edges: {}", edges_count);
         println!("    - edge_fragments: {}", edge_fragments_count);
-
     }
 
     // Setup query infrastructure
@@ -503,23 +588,24 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
     // Verify each hit resolves to correct RocksDB entry
     let mut resolved_edges: HashSet<(Id, Id, String)> = HashSet::new();
     for hit in &results {
-        println!("    Hit: src={}, dst={}, name='{}', score={:.4}, fragment_ts={:?}",
-            hit.src_id, hit.dst_id, hit.edge_name, hit.score, hit.fragment_timestamp);
+        println!(
+            "    Hit: src={}, dst={}, name='{}', score={:.4}, fragment_ts={:?}",
+            hit.src_id, hit.dst_id, hit.edge_name, hit.score, hit.fragment_timestamp
+        );
 
         // Use EdgeSummaryBySrcDstName query to verify the hit resolves to a real edge
-        let edge_result = EdgeSummaryBySrcDstName::new(
-            hit.src_id,
-            hit.dst_id,
-            hit.edge_name.clone(),
-            None,
-        )
-        .run(&graph_reader, timeout)
-        .await;
+        let edge_result =
+            EdgeSummaryBySrcDstName::new(hit.src_id, hit.dst_id, hit.edge_name.clone(), None)
+                .run(&graph_reader, timeout)
+                .await;
 
         match edge_result {
             Ok((summary, weight, _version)) => {
-                println!("      -> Resolved to edge: summary='{}', weight={:?}",
-                    summary.decode_string().unwrap_or_default(), weight);
+                println!(
+                    "      -> Resolved to edge: summary='{}', weight={:?}",
+                    summary.decode_string().unwrap_or_default(),
+                    weight
+                );
                 resolved_edges.insert((hit.src_id, hit.dst_id, hit.edge_name.clone()));
 
                 // Verify the edge key matches our expected data
@@ -552,30 +638,35 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
     println!("  Found {} results for 'JavaScript'", js_results.len());
 
     // Find the JS -> WebDev edge
-    let js_edge_hit = js_results.iter().find(|h|
-        h.src_id == javascript_id && h.dst_id == webdev_id && h.edge_name == "powers"
+    let js_edge_hit = js_results
+        .iter()
+        .find(|h| h.src_id == javascript_id && h.dst_id == webdev_id && h.edge_name == "powers");
+    assert!(
+        js_edge_hit.is_some(),
+        "Should find JavaScript -> WebDev edge"
     );
-    assert!(js_edge_hit.is_some(), "Should find JavaScript -> WebDev edge");
 
     // Verify it resolves correctly
-    let (summary, _, _version) = EdgeSummaryBySrcDstName::new(
-        javascript_id,
-        webdev_id,
-        "powers".to_string(),
-        None,
-    )
-    .run(&graph_reader, timeout)
-    .await
-    .unwrap();
+    let (summary, _, _version) =
+        EdgeSummaryBySrcDstName::new(javascript_id, webdev_id, "powers".to_string(), None)
+            .run(&graph_reader, timeout)
+            .await
+            .unwrap();
     assert!(
-        summary.decode_string().unwrap_or_default().contains("JavaScript"),
+        summary
+            .decode_string()
+            .unwrap_or_default()
+            .contains("JavaScript"),
         "Resolved edge should contain 'JavaScript'"
     );
 
     // === DEDUPLICATION REPORT ===
     println!("\n=== Deduplication Report (Edges) ===");
     println!("  JavaScript -> WebDev edge has 2 fragments in DB");
-    println!("  Search for 'JavaScript' returned {} hits", js_results.len());
+    println!(
+        "  Search for 'JavaScript' returned {} hits",
+        js_results.len()
+    );
     println!("  Note: Current implementation deduplicates by edge key (src_id, dst_id, edge_name)");
     println!("        Multiple fragments for same edge are collapsed into single hit");
 
@@ -625,10 +716,26 @@ async fn test_fulltext_combined_search_with_verification() {
 
     // Add nodes
     let node_data = vec![
-        (postgres_id, "PostgreSQL", "Advanced open source relational database with ACID compliance"),
-        (mysql_id, "MySQL", "Popular relational database for web applications"),
-        (mongodb_id, "MongoDB", "Document-oriented NoSQL database for flexible schemas"),
-        (redis_id, "Redis", "In-memory key-value store for caching and messaging"),
+        (
+            postgres_id,
+            "PostgreSQL",
+            "Advanced open source relational database with ACID compliance",
+        ),
+        (
+            mysql_id,
+            "MySQL",
+            "Popular relational database for web applications",
+        ),
+        (
+            mongodb_id,
+            "MongoDB",
+            "Document-oriented NoSQL database for flexible schemas",
+        ),
+        (
+            redis_id,
+            "Redis",
+            "In-memory key-value store for caching and messaging",
+        ),
     ];
 
     for (id, name, summary) in &node_data {
@@ -649,7 +756,7 @@ async fn test_fulltext_combined_search_with_verification() {
         AddNodeFragment {
             id: *id,
             ts_millis: TimestampMilli::now(),
-            content: DataUrl::from_text(&format!(
+            content: DataUrl::from_text(format!(
                 "{} is a popular database system used in production environments",
                 name
             )),
@@ -662,9 +769,24 @@ async fn test_fulltext_combined_search_with_verification() {
 
     // Add edges with "database" keyword
     let edge_data = vec![
-        (postgres_id, mysql_id, "similar_to", "Both are relational database systems with SQL support"),
-        (mongodb_id, redis_id, "often_paired", "NoSQL database and cache often used together"),
-        (postgres_id, mongodb_id, "alternative_to", "Relational database alternative to document database"),
+        (
+            postgres_id,
+            mysql_id,
+            "similar_to",
+            "Both are relational database systems with SQL support",
+        ),
+        (
+            mongodb_id,
+            redis_id,
+            "often_paired",
+            "NoSQL database and cache often used together",
+        ),
+        (
+            postgres_id,
+            mongodb_id,
+            "alternative_to",
+            "Relational database alternative to document database",
+        ),
     ];
 
     for (src, dst, name, summary) in &edge_data {
@@ -682,7 +804,11 @@ async fn test_fulltext_combined_search_with_verification() {
         .unwrap();
     }
 
-    println!("  Created {} nodes and {} edges about databases\n", node_data.len(), edge_data.len());
+    println!(
+        "  Created {} nodes and {} edges about databases\n",
+        node_data.len(),
+        edge_data.len()
+    );
 
     // Wait and shutdown mutation pipeline
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -704,10 +830,7 @@ async fn test_fulltext_combined_search_with_verification() {
         .unwrap();
 
     println!("  Found {} node results", node_results.len());
-    assert!(
-        node_results.len() >= 4,
-        "Should find all 4 database nodes"
-    );
+    assert!(node_results.len() >= 4, "Should find all 4 database nodes");
 
     // Verify all node hits resolve
     let mut verified_nodes = 0;
@@ -741,14 +864,10 @@ async fn test_fulltext_combined_search_with_verification() {
     // Verify all edge hits resolve
     let mut verified_edges = 0;
     for hit in &edge_results {
-        let result = EdgeSummaryBySrcDstName::new(
-            hit.src_id,
-            hit.dst_id,
-            hit.edge_name.clone(),
-            None,
-        )
-        .run(&graph_reader, timeout)
-        .await;
+        let result =
+            EdgeSummaryBySrcDstName::new(hit.src_id, hit.dst_id, hit.edge_name.clone(), None)
+                .run(&graph_reader, timeout)
+                .await;
         if result.is_ok() {
             verified_edges += 1;
         }
@@ -812,7 +931,7 @@ async fn test_fulltext_fragment_deduplication_behavior() {
         AddNodeFragment {
             id: node_id,
             ts_millis: TimestampMilli::now(),
-            content: DataUrl::from_text(&format!(
+            content: DataUrl::from_text(format!(
                 "Fragment {} contains unique_keyword_xyz for testing deduplication behavior",
                 i
             )),
@@ -824,7 +943,10 @@ async fn test_fulltext_fragment_deduplication_behavior() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    println!("  Created 1 node with {} fragments containing 'unique_keyword_xyz'\n", fragment_count);
+    println!(
+        "  Created 1 node with {} fragments containing 'unique_keyword_xyz'\n",
+        fragment_count
+    );
 
     // Wait and shutdown
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -849,7 +971,10 @@ async fn test_fulltext_fragment_deduplication_behavior() {
 
     // === DEDUPLICATION VERIFICATION ===
     println!("\n=== Deduplication Verification ===");
-    println!("  Node has {} fragments with the search term", fragment_count);
+    println!(
+        "  Node has {} fragments with the search term",
+        fragment_count
+    );
     println!("  Search returned {} hits", results.len());
 
     // Current behavior: deduplicated by node ID
@@ -972,7 +1097,10 @@ async fn test_fulltext_search_limit_and_ordering() {
     println!("  Scores are in descending order");
 
     // Print scores
-    println!("  Scores: {:?}", results.iter().map(|r| r.score).collect::<Vec<_>>());
+    println!(
+        "  Scores: {:?}",
+        results.iter().map(|r| r.score).collect::<Vec<_>>()
+    );
 
     // Verify all results resolve to RocksDB
     for hit in &results {
@@ -1130,14 +1258,24 @@ async fn test_fulltext_tag_facet_filtering() {
         .await
         .unwrap();
 
-    println!("    Search 'language' with tag #systems: {} results", results.len());
-    assert_eq!(results.len(), 2, "Should find Rust and Go (both have #systems tag)");
+    println!(
+        "    Search 'language' with tag #systems: {} results",
+        results.len()
+    );
+    assert_eq!(
+        results.len(),
+        2,
+        "Should find Rust and Go (both have #systems tag)"
+    );
 
     // Verify correct nodes found
     let found_ids: HashSet<Id> = results.iter().map(|h| h.id).collect();
     assert!(found_ids.contains(&rust_id), "Should find Rust");
     assert!(found_ids.contains(&go_id), "Should find Go");
-    assert!(!found_ids.contains(&python_id), "Should NOT find Python (no #systems tag)");
+    assert!(
+        !found_ids.contains(&python_id),
+        "Should NOT find Python (no #systems tag)"
+    );
 
     // Test 2: Filter by single tag #scripting
     let results = FulltextNodes::new("language".to_string(), 10)
@@ -1146,8 +1284,15 @@ async fn test_fulltext_tag_facet_filtering() {
         .await
         .unwrap();
 
-    println!("    Search 'language' with tag #scripting: {} results", results.len());
-    assert_eq!(results.len(), 2, "Should find Python and TypeScript (both have #scripting tag)");
+    println!(
+        "    Search 'language' with tag #scripting: {} results",
+        results.len()
+    );
+    assert_eq!(
+        results.len(),
+        2,
+        "Should find Python and TypeScript (both have #scripting tag)"
+    );
 
     // Test 3: Filter by single tag #async
     let results = FulltextNodes::new("language".to_string(), 10)
@@ -1156,8 +1301,15 @@ async fn test_fulltext_tag_facet_filtering() {
         .await
         .unwrap();
 
-    println!("    Search 'language' with tag #async: {} results", results.len());
-    assert_eq!(results.len(), 2, "Should find Rust and Python (both have #async tag)");
+    println!(
+        "    Search 'language' with tag #async: {} results",
+        results.len()
+    );
+    assert_eq!(
+        results.len(),
+        2,
+        "Should find Rust and Python (both have #async tag)"
+    );
 
     // Test 4: Filter by multiple tags (OR semantics - matches ANY tag)
     let results = FulltextNodes::new("language".to_string(), 10)
@@ -1166,14 +1318,24 @@ async fn test_fulltext_tag_facet_filtering() {
         .await
         .unwrap();
 
-    println!("    Search 'language' with tags #systems OR #scripting: {} results", results.len());
+    println!(
+        "    Search 'language' with tags #systems OR #scripting: {} results",
+        results.len()
+    );
     // Should find: Rust (#systems), Go (#systems), Python (#scripting), TypeScript (#scripting)
-    assert_eq!(results.len(), 4, "Should find all 4 nodes (Rust/Go have #systems, Python/TypeScript have #scripting)");
+    assert_eq!(
+        results.len(),
+        4,
+        "Should find all 4 nodes (Rust/Go have #systems, Python/TypeScript have #scripting)"
+    );
     let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
     assert!(result_ids.contains(&rust_id), "Should contain Rust");
     assert!(result_ids.contains(&go_id), "Should contain Go");
     assert!(result_ids.contains(&python_id), "Should contain Python");
-    assert!(result_ids.contains(&typescript_id), "Should contain TypeScript");
+    assert!(
+        result_ids.contains(&typescript_id),
+        "Should contain TypeScript"
+    );
 
     // Test 5: No results when tag doesn't match
     let results = FulltextNodes::new("language".to_string(), 10)
@@ -1182,8 +1344,15 @@ async fn test_fulltext_tag_facet_filtering() {
         .await
         .unwrap();
 
-    println!("    Search 'language' with non-existent tag: {} results", results.len());
-    assert_eq!(results.len(), 0, "Should find nothing with non-existent tag");
+    println!(
+        "    Search 'language' with non-existent tag: {} results",
+        results.len()
+    );
+    assert_eq!(
+        results.len(),
+        0,
+        "Should find nothing with non-existent tag"
+    );
 
     // === EDGE TAG FILTERING TESTS ===
     println!("\n  Testing edge tag filtering...\n");
@@ -1195,8 +1364,14 @@ async fn test_fulltext_tag_facet_filtering() {
         .await
         .unwrap();
 
-    println!("    Search 'compete' with tag #systems: {} results", results.len());
-    assert!(results.len() >= 1, "Should find Rust->Go edge (has #systems tag)");
+    println!(
+        "    Search 'compete' with tag #systems: {} results",
+        results.len()
+    );
+    assert!(
+        !results.is_empty(),
+        "Should find Rust->Go edge (has #systems tag)"
+    );
 
     // Test 7: Filter edges by tag #scripting
     let results = FulltextEdges::new("similar".to_string(), 10)
@@ -1205,8 +1380,14 @@ async fn test_fulltext_tag_facet_filtering() {
         .await
         .unwrap();
 
-    println!("    Search 'similar' with tag #scripting: {} results", results.len());
-    assert!(results.len() >= 1, "Should find Python->TypeScript edge (has #scripting tag)");
+    println!(
+        "    Search 'similar' with tag #scripting: {} results",
+        results.len()
+    );
+    assert!(
+        !results.is_empty(),
+        "Should find Python->TypeScript edge (has #scripting tag)"
+    );
 
     // Test 8: Edge with multiple tags (OR semantics - matches ANY tag)
     // Use a broad search term that appears in both edges
@@ -1216,9 +1397,16 @@ async fn test_fulltext_tag_facet_filtering() {
         .await
         .unwrap();
 
-    println!("    Search edges with tags #systems OR #scripting: {} results", results.len());
+    println!(
+        "    Search edges with tags #systems OR #scripting: {} results",
+        results.len()
+    );
     // Should find both edges: Rust->Go (#systems #cloud) and Python->TypeScript (#scripting #web)
-    assert_eq!(results.len(), 2, "Should find both edges (one has #systems, one has #scripting)");
+    assert_eq!(
+        results.len(),
+        2,
+        "Should find both edges (one has #systems, one has #scripting)"
+    );
 
     // === VERIFY RESULTS RESOLVE TO ROCKSDB ===
     println!("\n  Verifying tag-filtered results resolve to RocksDB...");
@@ -1234,9 +1422,15 @@ async fn test_fulltext_tag_facet_filtering() {
         let node = NodeById::new(hit.id, None)
             .run(&graph_reader, timeout)
             .await;
-        assert!(node.is_ok(), "Tag-filtered node hit should resolve to RocksDB");
+        assert!(
+            node.is_ok(),
+            "Tag-filtered node hit should resolve to RocksDB"
+        );
     }
-    println!("    All {} tag-filtered node hits resolved correctly", results.len());
+    println!(
+        "    All {} tag-filtered node hits resolved correctly",
+        results.len()
+    );
 
     // Cleanup
     drop(graph_reader);
@@ -1329,7 +1523,10 @@ async fn test_fulltext_tag_or_semantics() {
         .await
         .unwrap();
 
-    println!("    Search 'document' with tags [#alpha, #beta]: {} results", results.len());
+    println!(
+        "    Search 'document' with tags [#alpha, #beta]: {} results",
+        results.len()
+    );
 
     // With OR semantics: should find 2 results (NodeA has #alpha, NodeB has #beta)
     // With AND semantics: would find 0 results (no node has both tags)
@@ -1340,9 +1537,18 @@ async fn test_fulltext_tag_or_semantics() {
     );
 
     let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
-    assert!(result_ids.contains(&node_a_id), "Should contain NodeA (has #alpha)");
-    assert!(result_ids.contains(&node_b_id), "Should contain NodeB (has #beta)");
-    assert!(!result_ids.contains(&node_c_id), "Should NOT contain NodeC (has only #gamma)");
+    assert!(
+        result_ids.contains(&node_a_id),
+        "Should contain NodeA (has #alpha)"
+    );
+    assert!(
+        result_ids.contains(&node_b_id),
+        "Should contain NodeB (has #beta)"
+    );
+    assert!(
+        !result_ids.contains(&node_c_id),
+        "Should NOT contain NodeC (has only #gamma)"
+    );
 
     // Verify single tag still works
     let results = FulltextNodes::new("document".to_string(), 10)
@@ -1351,18 +1557,28 @@ async fn test_fulltext_tag_or_semantics() {
         .await
         .unwrap();
 
-    println!("    Search 'document' with tag [#gamma]: {} results", results.len());
+    println!(
+        "    Search 'document' with tag [#gamma]: {} results",
+        results.len()
+    );
     assert_eq!(results.len(), 1, "Should find only NodeC with #gamma");
     assert_eq!(results[0].id, node_c_id, "Should be NodeC");
 
     // Verify all three tags finds all three nodes
     let results = FulltextNodes::new("document".to_string(), 10)
-        .with_tags(vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()])
+        .with_tags(vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+        ])
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
 
-    println!("    Search 'document' with tags [#alpha, #beta, #gamma]: {} results", results.len());
+    println!(
+        "    Search 'document' with tags [#alpha, #beta, #gamma]: {} results",
+        results.len()
+    );
     assert_eq!(results.len(), 3, "OR semantics: should find all 3 nodes");
 
     // Cleanup
@@ -1456,19 +1672,25 @@ async fn test_fulltext_fuzzy_search() {
         .await
         .unwrap();
     println!("    Exact 'programming': {} results", results.len());
-    assert!(results.len() >= 1, "Exact match should find Programming node");
+    assert!(
+        !results.is_empty(),
+        "Exact match should find Programming node"
+    );
 
     // FuzzyLevel::Low (1 edit) - common typo
-    let results = FulltextNodes::new("programing".to_string(), 10)  // missing 'm'
+    let results = FulltextNodes::new("programing".to_string(), 10) // missing 'm'
         .with_fuzzy(FuzzyLevel::Low)
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
     println!("    Fuzzy Low 'programing': {} results", results.len());
-    assert!(results.len() >= 1, "Fuzzy Low should match 'programming' with 1 edit");
+    assert!(
+        !results.is_empty(),
+        "Fuzzy Low should match 'programming' with 1 edit"
+    );
 
     // FuzzyLevel::Medium (2 edits)
-    let results = FulltextNodes::new("progaming".to_string(), 10)  // missing 'r' and 'm'
+    let results = FulltextNodes::new("progaming".to_string(), 10) // missing 'r' and 'm'
         .with_fuzzy(FuzzyLevel::Medium)
         .run(&fulltext_reader, timeout)
         .await
@@ -1478,17 +1700,24 @@ async fn test_fulltext_fuzzy_search() {
 
     // FuzzyLevel::None should NOT match typo
     let results = FulltextNodes::new("programing".to_string(), 10)
-        .run(&fulltext_reader, timeout)  // No fuzzy - exact only
+        .run(&fulltext_reader, timeout) // No fuzzy - exact only
         .await
         .unwrap();
-    println!("    Exact (no fuzzy) 'programing': {} results", results.len());
-    assert_eq!(results.len(), 0, "Exact match should NOT find misspelled word");
+    println!(
+        "    Exact (no fuzzy) 'programing': {} results",
+        results.len()
+    );
+    assert_eq!(
+        results.len(),
+        0,
+        "Exact match should NOT find misspelled word"
+    );
 
     // === FUZZY EDGE SEARCH ===
     println!("\n  Testing fuzzy edge search...");
 
     // FuzzyLevel::Low for edges
-    let results = FulltextEdges::new("databse".to_string(), 10)  // typo: 'databse' instead of 'database'
+    let results = FulltextEdges::new("databse".to_string(), 10) // typo: 'databse' instead of 'database'
         .with_fuzzy(FuzzyLevel::Low)
         .run(&fulltext_reader, timeout)
         .await
@@ -1549,7 +1778,9 @@ async fn test_fulltext_facets_query() {
         ts_millis: TimestampMilli::now(),
         name: "Python".to_string(),
         valid_range: None,
-        summary: NodeSummary::from_text("Python is a #python #scripting language for #data science"),
+        summary: NodeSummary::from_text(
+            "Python is a #python #scripting language for #data science",
+        ),
     }
     .run(&writer)
     .await
@@ -1672,20 +1903,44 @@ async fn test_fulltext_facets_query() {
     }
 
     // Verify doc_type counts
-    assert!(facet_counts.doc_types.get("nodes").unwrap_or(&0) >= &3, "Should have at least 3 nodes");
-    assert!(facet_counts.doc_types.get("edges").unwrap_or(&0) >= &2, "Should have at least 2 edges");
-    assert!(facet_counts.doc_types.get("node_fragments").unwrap_or(&0) >= &2, "Should have at least 2 node fragments");
-    assert!(facet_counts.doc_types.get("edge_fragments").unwrap_or(&0) >= &1, "Should have at least 1 edge fragment");
+    assert!(
+        facet_counts.doc_types.get("nodes").unwrap_or(&0) >= &3,
+        "Should have at least 3 nodes"
+    );
+    assert!(
+        facet_counts.doc_types.get("edges").unwrap_or(&0) >= &2,
+        "Should have at least 2 edges"
+    );
+    assert!(
+        facet_counts.doc_types.get("node_fragments").unwrap_or(&0) >= &2,
+        "Should have at least 2 node fragments"
+    );
+    assert!(
+        facet_counts.doc_types.get("edge_fragments").unwrap_or(&0) >= &1,
+        "Should have at least 1 edge fragment"
+    );
 
     // Verify tag counts
     // #rust appears in: Node 1, Node 3, and their fragments/edges mentioning rust
-    assert!(facet_counts.tags.get("rust").unwrap_or(&0) >= &2, "#rust should appear at least twice");
+    assert!(
+        facet_counts.tags.get("rust").unwrap_or(&0) >= &2,
+        "#rust should appear at least twice"
+    );
     // #systems appears in multiple documents
-    assert!(facet_counts.tags.get("systems").unwrap_or(&0) >= &2, "#systems should appear at least twice");
+    assert!(
+        facet_counts.tags.get("systems").unwrap_or(&0) >= &2,
+        "#systems should appear at least twice"
+    );
     // #async appears in multiple documents
-    assert!(facet_counts.tags.get("async").unwrap_or(&0) >= &2, "#async should appear at least twice");
+    assert!(
+        facet_counts.tags.get("async").unwrap_or(&0) >= &2,
+        "#async should appear at least twice"
+    );
     // #data appears
-    assert!(facet_counts.tags.contains_key("data"), "#data tag should exist");
+    assert!(
+        facet_counts.tags.contains_key("data"),
+        "#data tag should exist"
+    );
 
     // === TEST 2: Get facet counts filtered by doc_type ===
     println!("\n  Testing facet counts filtered to nodes only...\n");
@@ -1708,8 +1963,14 @@ async fn test_fulltext_facets_query() {
 
     // When filtering to nodes only, the tag counts should only reflect tags in nodes
     // Node 1 has #rust #systems, Node 2 has #python #scripting #data, Node 3 has #async #rust
-    assert!(nodes_only_counts.tags.contains_key("rust"), "#rust should be in nodes");
-    assert!(nodes_only_counts.tags.contains_key("python"), "#python should be in nodes");
+    assert!(
+        nodes_only_counts.tags.contains_key("rust"),
+        "#rust should be in nodes"
+    );
+    assert!(
+        nodes_only_counts.tags.contains_key("python"),
+        "#python should be in nodes"
+    );
 
     // === TEST 3: Get facet counts with tags_limit ===
     println!("\n  Testing facet counts with tags_limit=2...\n");
@@ -1725,7 +1986,10 @@ async fn test_fulltext_facets_query() {
         println!("    #{}: {}", tag, count);
     }
 
-    assert!(limited_counts.tags.len() <= 2, "Should have at most 2 tags with tags_limit=2");
+    assert!(
+        limited_counts.tags.len() <= 2,
+        "Should have at most 2 tags with tags_limit=2"
+    );
 
     // Cleanup - must drop readers first to close channels before awaiting handles
     drop(fulltext_reader);

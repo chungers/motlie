@@ -99,11 +99,7 @@ impl LatencyStats {
 /// # Returns
 ///
 /// Average recall across all queries.
-pub fn compute_recall(
-    search_results: &[Vec<usize>],
-    ground_truth: &[Vec<usize>],
-    k: usize,
-) -> f64 {
+pub fn compute_recall(search_results: &[Vec<usize>], ground_truth: &[Vec<usize>], k: usize) -> f64 {
     if search_results.len() != ground_truth.len() {
         return 0.0;
     }
@@ -261,9 +257,7 @@ pub fn compute_pareto_frontier(results: &[ParetoInput]) -> Vec<ParetoPoint> {
     frontier.sort_by(|a, b| a.recall.partial_cmp(&b.recall).unwrap());
 
     // Remove duplicates (same recall/qps but different params)
-    frontier.dedup_by(|a, b| {
-        (a.recall - b.recall).abs() < 1e-6 && (a.qps - b.qps).abs() < 1e-6
-    });
+    frontier.dedup_by(|a, b| (a.recall - b.recall).abs() < 1e-6 && (a.qps - b.qps).abs() < 1e-6);
 
     frontier
 }
@@ -272,11 +266,7 @@ pub fn compute_pareto_frontier(results: &[ParetoInput]) -> Vec<ParetoPoint> {
 ///
 /// Filters results to only include entries with the specified k.
 pub fn compute_pareto_frontier_for_k(results: &[ParetoInput], k: usize) -> Vec<ParetoPoint> {
-    let filtered: Vec<ParetoInput> = results
-        .iter()
-        .filter(|r| r.k == k)
-        .cloned()
-        .collect();
+    let filtered: Vec<ParetoInput> = results.iter().filter(|r| r.k == k).cloned().collect();
     compute_pareto_frontier(&filtered)
 }
 
@@ -312,7 +302,10 @@ impl RotationStats {
     pub fn summary(&self) -> String {
         format!(
             "mean={:.4}, variance={:.4} (expected {:.1}), valid={}",
-            self.component_mean, self.component_variance, self.expected_variance, self.scaling_valid
+            self.component_mean,
+            self.component_variance,
+            self.expected_variance,
+            self.scaling_valid
         )
     }
 }
@@ -332,7 +325,11 @@ impl RotationStats {
 /// # Returns
 ///
 /// Statistics about the rotation quality.
-pub fn compute_rotated_variance<F>(rotate_fn: F, vectors: &[Vec<f32>], sample_size: usize) -> RotationStats
+pub fn compute_rotated_variance<F>(
+    rotate_fn: F,
+    vectors: &[Vec<f32>],
+    sample_size: usize,
+) -> RotationStats
 where
     F: Fn(&[f32]) -> Vec<f32>,
 {
@@ -383,7 +380,11 @@ pub fn print_rotation_stats(stats: &RotationStats, title: &str) {
     );
     println!(
         "  Scaling valid: {} (variance in [0.8, 1.2])",
-        if stats.scaling_valid { "YES ✓" } else { "NO ✗" }
+        if stats.scaling_valid {
+            "YES ✓"
+        } else {
+            "NO ✗"
+        }
     );
     println!("{}", "-".repeat(50));
 }

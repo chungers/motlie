@@ -47,43 +47,67 @@ pub mod repair;
 mod tests;
 
 // Re-export commonly used types from submodules
-pub use mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, ExecOptions, Mutation,
-    MutationResult, RunnableWithResult,
-    // CONTENT-ADDRESS: Update/Delete mutations with optimistic locking
-    UpdateNode, UpdateEdge, DeleteNode, DeleteEdge,
-};
-pub use crate::writer::Runnable;
-pub use query::{
-    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, OutgoingEdges, Query, TransactionQueryExecutor,
-    // CONTENT-ADDRESS reverse lookup query types
-    NodesBySummaryHash, NodeSummaryLookupResult,
-    EdgesBySummaryHash, EdgeSummaryLookupResult,
-    // Version playback query types
-    NodeAtVersion, EdgeAtVersion, NodeVersions, EdgeVersions,
-    VersionSnapshot, VersionMeta,
-};
-pub use transaction::Transaction;
 pub use crate::reader::Runnable as QueryRunnable;
+pub use crate::writer::Runnable;
+pub use mutation::{
+    AddEdge,
+    AddEdgeFragment,
+    AddNode,
+    AddNodeFragment,
+    DeleteEdge,
+    DeleteNode,
+    ExecOptions,
+    Mutation,
+    MutationResult,
+    RunnableWithResult,
+    UpdateEdge,
+    // CONTENT-ADDRESS: Update/Delete mutations with optimistic locking
+    UpdateNode,
+};
+pub use name_hash::{NameCache, NameHash};
+pub use query::{
+    EdgeAtVersion,
+    EdgeFragmentsByIdTimeRange,
+    EdgeSummaryBySrcDstName,
+    EdgeSummaryLookupResult,
+    EdgeVersions,
+    EdgesBySummaryHash,
+    IncomingEdges,
+    // Version playback query types
+    NodeAtVersion,
+    NodeById,
+    NodeFragmentsByIdTimeRange,
+    NodeSummaryLookupResult,
+    NodeVersions,
+    // CONTENT-ADDRESS reverse lookup query types
+    NodesBySummaryHash,
+    OutgoingEdges,
+    Query,
+    TransactionQueryExecutor,
+    VersionMeta,
+    VersionSnapshot,
+};
 pub use reader::{
     // Query consumer functions
     create_reader_with_storage,
-    spawn_query_consumers_with_storage,
     spawn_query_consumer,
     spawn_query_consumer_pool_readonly,
+    spawn_query_consumers_with_storage,
     Reader,
     ReaderConfig,
 };
-pub use name_hash::{NameCache, NameHash};
+pub use schema::{
+    DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, RefCount,
+    SrcId, Version,
+};
 pub use summary_hash::SummaryHash;
-pub use schema::{DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, RefCount, SrcId, Version};
+pub use transaction::Transaction;
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};
 
 // CONTENT-ADDRESS: Garbage collection for stale index entries
-pub use gc::{GraphGarbageCollector, GraphGcConfig, GcMetrics, GcMetricsSnapshot};
+pub use gc::{GcMetrics, GcMetricsSnapshot, GraphGarbageCollector, GraphGcConfig};
 
 // CONTENT-ADDRESS: Repair for forward/reverse edge consistency
 pub use repair::{GraphRepairer, RepairConfig, RepairMetrics, RepairMetricsSnapshot};
@@ -94,10 +118,10 @@ pub type Storage = crate::rocksdb::Storage<Subsystem>;
 pub use writer::{
     // Mutation consumer functions
     create_mutation_writer,
-    spawn_mutation_consumer_with_storage,
     spawn_mutation_consumer,
     spawn_mutation_consumer_with_next,
     spawn_mutation_consumer_with_receiver,
+    spawn_mutation_consumer_with_storage,
     Consumer as MutationConsumer,
     Writer,
     WriterConfig,

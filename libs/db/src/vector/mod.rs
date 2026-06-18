@@ -78,7 +78,9 @@ pub mod search;
 mod crash_recovery_tests;
 
 // Re-exports for public API
-pub use cache::{BinaryCodeCache, BinaryCodeEntry, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
+pub use cache::{
+    BinaryCodeCache, BinaryCodeEntry, NavigationCache, NavigationCacheConfig, NavigationLayerInfo,
+};
 pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
@@ -89,7 +91,8 @@ pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
     AdcCorrection, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpec,
-    ExternalKey, VecId, VectorCfKey, VectorCfValue, VectorElementType, Vectors, ALL_COLUMN_FAMILIES,
+    ExternalKey, VecId, VectorCfKey, VectorCfValue, VectorElementType, Vectors,
+    ALL_COLUMN_FAMILIES,
 };
 pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
 
@@ -104,27 +107,23 @@ pub use gc::{GarbageCollector, GcConfig, GcMetrics};
 // Graph repair requires full rebuild - no partial repair API exposed
 pub use mutation::{
     AddEmbeddingSpec, DeleteVector, FlushMarker, InsertVector, InsertVectorBatch, Mutation,
-    MutationResult, Runnable as MutationRunnable, RunnableWithResult, MutationBatchExt,
+    MutationBatchExt, MutationResult, Runnable as MutationRunnable, RunnableWithResult,
 };
 pub use writer::{
-    create_writer,
-    spawn_mutation_consumer_with_storage,
-    spawn_mutation_consumer_with_storage_autoreg,
-    MutationCacheUpdate, Writer, WriterConfig,
+    create_writer, spawn_mutation_consumer_with_storage,
+    spawn_mutation_consumer_with_storage_autoreg, MutationCacheUpdate, Writer, WriterConfig,
 };
 
 // Query types and infrastructure (following graph::query pattern)
 // Runnable<R> is the query trait (with timeout + Output), MutationRunnable is for mutations
 pub use crate::reader::Runnable;
 pub use query::{
-    FindEmbeddings, GetExternalId, GetInternalId, GetVector, ListEmbeddings, Query,
-    ResolveIds, SearchKNN,
+    FindEmbeddings, GetExternalId, GetInternalId, GetVector, ListEmbeddings, Query, ResolveIds,
+    SearchKNN,
 };
 pub use reader::{
-    create_reader_with_storage,
-    spawn_query_consumers_with_storage,
-    spawn_query_consumers_with_storage_autoreg,
-    Reader, ReaderConfig,
+    create_reader_with_storage, spawn_query_consumers_with_storage,
+    spawn_query_consumers_with_storage_autoreg, Reader, ReaderConfig,
 };
 // Note: Consumer and spawn_consumers are pub(crate) since they take Processor.
 // Use spawn_query_consumers_with_storage_autoreg for the simplest public setup.

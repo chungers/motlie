@@ -40,9 +40,9 @@ pub struct BlockCacheConfig {
 impl Default for BlockCacheConfig {
     fn default() -> Self {
         Self {
-            cache_size_bytes: 256 * 1024 * 1024,       // 256MB
-            default_block_size: 4 * 1024,               // 4KB
-            large_block_size: 16 * 1024,                // 16KB
+            cache_size_bytes: 256 * 1024 * 1024, // 256MB
+            default_block_size: 4 * 1024,        // 4KB
+            large_block_size: 16 * 1024,         // 16KB
             cache_index_and_filter_blocks: true,
             pin_l0_filter_and_index: true,
         }

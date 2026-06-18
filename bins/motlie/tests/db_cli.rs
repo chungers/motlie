@@ -16,16 +16,10 @@ use tempfile::TempDir;
 
 /// Test data structure holding all IDs for verification
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct TestData {
     alice_id: Id,
     bob_id: Id,
     charlie_id: Id,
-    alice_fragment_ts: TimestampMilli,
-    bob_fragment_ts: TimestampMilli,
-    alice_bob_edge_ts: TimestampMilli,
-    bob_charlie_edge_ts: TimestampMilli,
-    edge_fragment_ts: TimestampMilli,
 }
 
 /// Helper to run the motlie CLI command
@@ -163,11 +157,6 @@ async fn insert_test_data(db_path: &std::path::Path) -> TestData {
         alice_id,
         bob_id,
         charlie_id,
-        alice_fragment_ts,
-        bob_fragment_ts,
-        alice_bob_edge_ts,
-        bob_charlie_edge_ts,
-        edge_fragment_ts,
     }
 }
 

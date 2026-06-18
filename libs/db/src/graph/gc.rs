@@ -60,11 +60,8 @@ use anyhow::Result;
 
 use super::name_hash::NameHash;
 use super::schema::{
-    GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField,
-    NodeSummaryIndex, EdgeSummaryIndex,
-    Nodes, NodeCfValue,
-    ForwardEdges,
-    Version,
+    EdgeSummaryIndex, ForwardEdges, GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField,
+    NodeCfValue, NodeSummaryIndex, Nodes, Version,
 };
 use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Storage};
 use crate::Id;
@@ -72,7 +69,7 @@ use crate::Id;
 // ============================================================================
 // VERSIONING Helpers for GC
 // ============================================================================
-/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan helper for GC)
+// (claude, 2026-02-06, in-progress: VERSIONING prefix scan helper for GC)
 
 /// Find the current version of a node via prefix scan (within transaction).
 /// Returns the current version number and deleted flag.
@@ -103,7 +100,7 @@ fn find_current_node_version_for_gc(
 }
 
 /// Find the current version of an edge via prefix scan (within transaction).
-/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan helper for GC)
+// (claude, 2026-02-06, in-progress: VERSIONING prefix scan helper for GC)
 /// Returns the current version number and deleted flag.
 fn find_current_edge_version_for_gc(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -139,7 +136,7 @@ fn find_current_edge_version_for_gc(
 }
 
 /// Check if any CURRENT entry in NodeSummaryIndex references this summary hash.
-/// (claude, 2026-02-07, FIXED: Added reference check for shared summaries per Codex review)
+// (claude, 2026-02-07, FIXED: Added reference check for shared summaries per Codex review)
 ///
 /// NodeSummaryIndex key is (SummaryHash, NodeId, Version), so we prefix-scan on hash.
 fn has_current_node_summary_reference(
@@ -167,7 +164,7 @@ fn has_current_node_summary_reference(
 }
 
 /// Check if any CURRENT entry in EdgeSummaryIndex references this summary hash.
-/// (claude, 2026-02-07, FIXED: Added reference check for shared summaries per Codex review)
+// (claude, 2026-02-07, FIXED: Added reference check for shared summaries per Codex review)
 ///
 /// EdgeSummaryIndex key is (SummaryHash, SrcId, DstId, NameHash, Version), so we prefix-scan on hash.
 fn has_current_edge_summary_reference(
@@ -239,7 +236,7 @@ impl Default for GraphGcConfig {
             batch_size: 1000,
             versions_to_keep: 2,
             tombstone_retention: Duration::from_secs(7 * 24 * 60 * 60), // 7 days
-            orphan_retention: Duration::from_secs(7 * 24 * 60 * 60), // 7 days (VERSIONING)
+            orphan_retention: Duration::from_secs(7 * 24 * 60 * 60),    // 7 days (VERSIONING)
             process_on_startup: true,
         }
     }
@@ -315,8 +312,12 @@ impl GcMetrics {
             edge_index_entries_deleted: self.edge_index_entries_deleted.load(Ordering::Relaxed),
             node_tombstones_deleted: self.node_tombstones_deleted.load(Ordering::Relaxed),
             edge_tombstones_deleted: self.edge_tombstones_deleted.load(Ordering::Relaxed),
-            orphan_node_summaries_deleted: self.orphan_node_summaries_deleted.load(Ordering::Relaxed),
-            orphan_edge_summaries_deleted: self.orphan_edge_summaries_deleted.load(Ordering::Relaxed),
+            orphan_node_summaries_deleted: self
+                .orphan_node_summaries_deleted
+                .load(Ordering::Relaxed),
+            orphan_edge_summaries_deleted: self
+                .orphan_edge_summaries_deleted
+                .load(Ordering::Relaxed),
             cycles_completed: self.cycles_completed.load(Ordering::Relaxed),
         }
     }
@@ -327,8 +328,10 @@ impl GcMetrics {
         self.edge_index_entries_deleted.store(0, Ordering::Relaxed);
         self.node_tombstones_deleted.store(0, Ordering::Relaxed);
         self.edge_tombstones_deleted.store(0, Ordering::Relaxed);
-        self.orphan_node_summaries_deleted.store(0, Ordering::Relaxed);
-        self.orphan_edge_summaries_deleted.store(0, Ordering::Relaxed);
+        self.orphan_node_summaries_deleted
+            .store(0, Ordering::Relaxed);
+        self.orphan_edge_summaries_deleted
+            .store(0, Ordering::Relaxed);
         self.cycles_completed.store(0, Ordering::Relaxed);
     }
 }
@@ -379,8 +382,8 @@ impl GcMetricsSnapshot {
 ///    after `orphan_retention` period, enabling rollback within that window.
 ///
 /// # VERSIONING: Deferred Deletion
-/// (claude, 2026-02-07, FIXED: Updated doc to reflect OrphanSummaries GC)
-/// (claude, 2026-02-07, FIXED: P1.1-P1.3 - Store worker handle, use std::thread, shutdown joins)
+// (claude, 2026-02-07, FIXED: Updated doc to reflect OrphanSummaries GC)
+// (claude, 2026-02-07, FIXED: P1.1-P1.3 - Store worker handle, use std::thread, shutdown joins)
 ///
 /// Summary rows are NOT deleted inline when their entity is updated/deleted.
 /// Instead, orphan candidates are written to OrphanSummaries CF. GC scans
@@ -441,11 +444,9 @@ impl GraphGarbageCollector {
 
             // Run startup cycle if configured
             if worker_config.process_on_startup {
-                if let Err(e) = Self::run_cycle_inner(
-                    &worker_storage,
-                    &worker_config,
-                    &worker_metrics,
-                ) {
+                if let Err(e) =
+                    Self::run_cycle_inner(&worker_storage, &worker_config, &worker_metrics)
+                {
                     tracing::error!(error = %e, "GC startup cycle failed");
                 }
             }
@@ -462,11 +463,9 @@ impl GraphGarbageCollector {
                 }
 
                 // Run GC cycle
-                if let Err(e) = Self::run_cycle_inner(
-                    &worker_storage,
-                    &worker_config,
-                    &worker_metrics,
-                ) {
+                if let Err(e) =
+                    Self::run_cycle_inner(&worker_storage, &worker_config, &worker_metrics)
+                {
                     tracing::error!(error = %e, "GC cycle failed");
                 }
             }
@@ -551,10 +550,14 @@ impl GraphGarbageCollector {
         let after = metrics.snapshot();
 
         tracing::info!(
-            node_index_deleted = after.node_index_entries_deleted - before.node_index_entries_deleted,
-            edge_index_deleted = after.edge_index_entries_deleted - before.edge_index_entries_deleted,
-            orphan_node_summaries_deleted = after.orphan_node_summaries_deleted - before.orphan_node_summaries_deleted,
-            orphan_edge_summaries_deleted = after.orphan_edge_summaries_deleted - before.orphan_edge_summaries_deleted,
+            node_index_deleted =
+                after.node_index_entries_deleted - before.node_index_entries_deleted,
+            edge_index_deleted =
+                after.edge_index_entries_deleted - before.edge_index_entries_deleted,
+            orphan_node_summaries_deleted =
+                after.orphan_node_summaries_deleted - before.orphan_node_summaries_deleted,
+            orphan_edge_summaries_deleted =
+                after.orphan_edge_summaries_deleted - before.orphan_edge_summaries_deleted,
             cycle = after.cycles_completed,
             "GC cycle completed"
         );
@@ -569,6 +572,10 @@ impl GraphGarbageCollector {
     /// Scans from cursor position, deletes STALE entries for old versions.
     /// Called from [`run_cycle_inner`].
     /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
+    #[expect(
+        clippy::explicit_counter_loop,
+        reason = "processed tracks batch budget and persisted cursor position"
+    )]
     fn gc_node_summary_index_inner(
         storage: &Arc<Storage>,
         config: &GraphGcConfig,
@@ -593,9 +600,7 @@ impl GraphGarbageCollector {
         // Load cursor
         let cursor_key = GraphMetaCfKey::gc_cursor_node_summary_index();
         let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
-        let start_key = txn
-            .get_cf(meta_cf, &cursor_key_bytes)?
-            .unwrap_or_default();
+        let start_key = txn.get_cf(meta_cf, &cursor_key_bytes)?.unwrap_or_default();
 
         let n = config.versions_to_keep as Version;
 
@@ -653,15 +658,21 @@ impl GraphGarbageCollector {
 
         // Persist cursor
         if let Some(key) = last_key {
-            let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorNodeSummaryIndex(key));
-            txn.put_cf(meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
+            let cursor_value = GraphMetaCfValue(GraphMetaField::NodeSummaryIndex(key));
+            txn.put_cf(
+                meta_cf,
+                &cursor_key_bytes,
+                GraphMeta::value_to_bytes(&cursor_value),
+            )?;
         } else {
             // Iterator exhausted - delete cursor to start fresh
             txn.delete_cf(meta_cf, &cursor_key_bytes)?;
         }
 
         txn.commit()?;
-        metrics.node_index_entries_deleted.fetch_add(deleted, Ordering::Relaxed);
+        metrics
+            .node_index_entries_deleted
+            .fetch_add(deleted, Ordering::Relaxed);
 
         Ok(deleted)
     }
@@ -671,6 +682,10 @@ impl GraphGarbageCollector {
     /// GC stale entries from EdgeSummaryIndex CF.
     /// Called from [`run_cycle_inner`].
     /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
+    #[expect(
+        clippy::explicit_counter_loop,
+        reason = "processed tracks batch budget and persisted cursor position"
+    )]
     fn gc_edge_summary_index_inner(
         storage: &Arc<Storage>,
         config: &GraphGcConfig,
@@ -695,9 +710,7 @@ impl GraphGarbageCollector {
         // Load cursor
         let cursor_key = GraphMetaCfKey::gc_cursor_edge_summary_index();
         let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
-        let start_key = txn
-            .get_cf(meta_cf, &cursor_key_bytes)?
-            .unwrap_or_default();
+        let start_key = txn.get_cf(meta_cf, &cursor_key_bytes)?.unwrap_or_default();
 
         let n = config.versions_to_keep as Version;
 
@@ -757,15 +770,21 @@ impl GraphGarbageCollector {
 
         // Persist cursor
         if let Some(key) = last_key {
-            let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorEdgeSummaryIndex(key));
-            txn.put_cf(meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
+            let cursor_value = GraphMetaCfValue(GraphMetaField::EdgeSummaryIndex(key));
+            txn.put_cf(
+                meta_cf,
+                &cursor_key_bytes,
+                GraphMeta::value_to_bytes(&cursor_value),
+            )?;
         } else {
             // Iterator exhausted - delete cursor to start fresh
             txn.delete_cf(meta_cf, &cursor_key_bytes)?;
         }
 
         txn.commit()?;
-        metrics.edge_index_entries_deleted.fetch_add(deleted, Ordering::Relaxed);
+        metrics
+            .edge_index_entries_deleted
+            .fetch_add(deleted, Ordering::Relaxed);
 
         Ok(deleted)
     }
@@ -783,17 +802,18 @@ impl GraphGarbageCollector {
     ///
     /// Called from [`run_cycle_inner`] — no separate worker needed.
     /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
+    #[expect(
+        clippy::explicit_counter_loop,
+        reason = "processed tracks batch budget and orphan retention cursor progress"
+    )]
     fn gc_orphan_summaries_inner(
         storage: &Arc<Storage>,
         config: &GraphGcConfig,
         metrics: &Arc<GcMetrics>,
     ) -> Result<(u64, u64)> {
         use super::schema::{
-            OrphanSummaries, SummaryKind,
-            NodeSummaries, NodeSummaryCfKey,
-            EdgeSummaries, EdgeSummaryCfKey,
-            NodeSummaryIndex,
-            EdgeSummaryIndex,
+            EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryIndex, NodeSummaries, NodeSummaryCfKey,
+            NodeSummaryIndex, OrphanSummaries, SummaryKind,
         };
 
         let txn_db = storage.transaction_db()?;
@@ -890,12 +910,15 @@ impl GraphGarbageCollector {
 
         txn.commit()?;
 
-        metrics.orphan_node_summaries_deleted.fetch_add(node_deleted, Ordering::Relaxed);
-        metrics.orphan_edge_summaries_deleted.fetch_add(edge_deleted, Ordering::Relaxed);
+        metrics
+            .orphan_node_summaries_deleted
+            .fetch_add(node_deleted, Ordering::Relaxed);
+        metrics
+            .orphan_edge_summaries_deleted
+            .fetch_add(edge_deleted, Ordering::Relaxed);
 
         Ok((node_deleted, edge_deleted))
     }
-
 }
 
 // ============================================================================
@@ -912,8 +935,14 @@ mod tests {
         assert_eq!(config.interval, Duration::from_secs(60));
         assert_eq!(config.batch_size, 1000);
         assert_eq!(config.versions_to_keep, 2);
-        assert_eq!(config.tombstone_retention, Duration::from_secs(7 * 24 * 60 * 60));
-        assert_eq!(config.orphan_retention, Duration::from_secs(7 * 24 * 60 * 60));
+        assert_eq!(
+            config.tombstone_retention,
+            Duration::from_secs(7 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            config.orphan_retention,
+            Duration::from_secs(7 * 24 * 60 * 60)
+        );
         assert!(config.process_on_startup);
     }
 
@@ -943,8 +972,12 @@ mod tests {
     #[test]
     fn test_gc_metrics_snapshot() {
         let metrics = GcMetrics::new();
-        metrics.node_index_entries_deleted.fetch_add(10, Ordering::Relaxed);
-        metrics.edge_index_entries_deleted.fetch_add(5, Ordering::Relaxed);
+        metrics
+            .node_index_entries_deleted
+            .fetch_add(10, Ordering::Relaxed);
+        metrics
+            .edge_index_entries_deleted
+            .fetch_add(5, Ordering::Relaxed);
         metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
 
         let snapshot = metrics.snapshot();
@@ -957,7 +990,9 @@ mod tests {
     #[test]
     fn test_gc_metrics_reset() {
         let metrics = GcMetrics::new();
-        metrics.node_index_entries_deleted.fetch_add(10, Ordering::Relaxed);
+        metrics
+            .node_index_entries_deleted
+            .fetch_add(10, Ordering::Relaxed);
         metrics.reset();
 
         let snapshot = metrics.snapshot();
@@ -971,8 +1006,8 @@ mod tests {
 
     #[test]
     fn test_gc_start_shutdown_lifecycle() {
-        use tempfile::TempDir;
         use crate::graph::Storage;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("gc_lifecycle_test");
@@ -994,7 +1029,10 @@ mod tests {
 
         // Verify at least one cycle ran
         let metrics = gc.metrics().snapshot();
-        assert!(metrics.cycles_completed >= 1, "GC should have completed at least 1 cycle");
+        assert!(
+            metrics.cycles_completed >= 1,
+            "GC should have completed at least 1 cycle"
+        );
 
         // Shutdown - should block until worker completes
         gc.shutdown();
@@ -1005,8 +1043,8 @@ mod tests {
 
     #[test]
     fn test_gc_signal_shutdown_non_blocking() {
-        use tempfile::TempDir;
         use crate::graph::Storage;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("gc_signal_test");
@@ -1017,8 +1055,7 @@ mod tests {
         let storage_arc = Arc::new(storage);
 
         // Start GC with short interval so shutdown is quick
-        let config = GraphGcConfig::default()
-            .with_interval(Duration::from_millis(50));
+        let config = GraphGcConfig::default().with_interval(Duration::from_millis(50));
 
         let gc = GraphGarbageCollector::start(storage_arc.clone(), config);
 
@@ -1026,7 +1063,10 @@ mod tests {
         gc.signal_shutdown();
 
         // Verify shutdown flag is set
-        assert!(gc.is_shutdown(), "Shutdown flag should be set after signal_shutdown");
+        assert!(
+            gc.is_shutdown(),
+            "Shutdown flag should be set after signal_shutdown"
+        );
 
         // Worker will exit on next iteration - shutdown to join
         gc.shutdown();
@@ -1037,8 +1077,8 @@ mod tests {
 
     #[test]
     fn test_gc_new_without_start() {
-        use tempfile::TempDir;
         use crate::graph::Storage;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("gc_new_test");
@@ -1053,7 +1093,10 @@ mod tests {
         let gc = GraphGarbageCollector::new(storage_arc.clone(), config);
 
         // Should have no worker handle
-        assert!(!gc.is_shutdown(), "Shutdown flag should not be set initially");
+        assert!(
+            !gc.is_shutdown(),
+            "Shutdown flag should not be set initially"
+        );
 
         // Can run a single cycle manually
         let result = gc.run_cycle();

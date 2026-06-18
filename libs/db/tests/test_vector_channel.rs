@@ -20,8 +20,8 @@ use std::time::Duration;
 use motlie_db::vector::{
     create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
     spawn_query_consumers_with_storage_autoreg, AsyncUpdaterConfig, DeleteVector, Distance,
-    EmbeddingBuilder, ExternalKey, GcConfig, InsertVector, MutationRunnable, ReaderConfig, Runnable,
-    SearchKNN, Storage, Subsystem, WriterConfig,
+    EmbeddingBuilder, ExternalKey, GcConfig, InsertVector, MutationRunnable, ReaderConfig,
+    Runnable, SearchKNN, Storage, Subsystem, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -73,7 +73,11 @@ async fn test_mutation_via_writer_consumer() {
 
     // Register embedding
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-channel", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-channel",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     // Create Writer with Consumer
@@ -85,8 +89,7 @@ async fn test_mutation_via_writer_consumer() {
     );
 
     // Create Reader for verification
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -126,7 +129,8 @@ async fn test_mutation_via_writer_consumer() {
     // The query vector should match itself (index 0)
     assert!(!results.is_empty(), "Should find results after insert");
     assert_eq!(
-        results[0].node_id().expect("expected NodeId"), ids[0],
+        results[0].node_id().expect("expected NodeId"),
+        ids[0],
         "First result should be the query vector itself"
     );
 }
@@ -150,7 +154,11 @@ async fn test_query_via_reader_pool() {
     registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-reader-pool", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-reader-pool",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     // Create Writer
@@ -163,8 +171,7 @@ async fn test_query_via_reader_pool() {
 
     // Create Reader with 4-worker pool (tests MPMC distribution)
     let num_workers = 4;
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -216,7 +223,11 @@ async fn test_concurrent_queries_mpmc() {
     registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-concurrent", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-concurrent",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     // Create Writer
@@ -229,8 +240,7 @@ async fn test_concurrent_queries_mpmc() {
 
     // Create Reader with 8-worker pool for concurrent queries
     let num_workers = 8;
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -349,7 +359,11 @@ async fn test_subsystem_start_lifecycle() {
 
     // Register embedding and test end-to-end (storage already set by start_with_async)
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-subsystem", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-subsystem",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     // Insert via Writer
@@ -391,7 +405,11 @@ async fn test_writer_flush_semantics() {
     registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-flush", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-flush",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     let (writer, writer_rx) = create_writer(WriterConfig::default());
@@ -401,8 +419,7 @@ async fn test_writer_flush_semantics() {
         storage.clone(),
     );
 
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -433,7 +450,11 @@ async fn test_writer_flush_semantics() {
         .expect("search after flush");
 
     assert!(!results.is_empty(), "Vector should be visible after flush");
-    assert_eq!(results[0].node_id().expect("expected NodeId"), id, "Should find the inserted vector");
+    assert_eq!(
+        results[0].node_id().expect("expected NodeId"),
+        id,
+        "Should find the inserted vector"
+    );
 }
 
 // ============================================================================
@@ -465,8 +486,7 @@ async fn test_channel_close_propagation() {
     );
 
     // Same test for Reader
-    let (search_reader, query_receiver) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, query_receiver) = create_reader_with_storage(ReaderConfig::default());
 
     assert!(
         !search_reader.is_closed(),
@@ -501,7 +521,11 @@ async fn test_concurrent_deletes_vs_searches() {
     registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-delete-search", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-delete-search",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     // Create Writer with Consumer
@@ -513,8 +537,7 @@ async fn test_concurrent_deletes_vs_searches() {
     );
 
     // Create Reader with 4-worker pool
-    let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -739,7 +762,11 @@ async fn test_subsystem_start_with_gc_lifecycle() {
 
     // Register embedding and insert some vectors (storage already set by start_with_async)
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-gc-lifecycle", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-gc-lifecycle",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     let vectors = generate_vectors(DIM, 20, 55);
@@ -809,7 +836,11 @@ async fn test_subsystem_start_with_async_and_gc() {
 
     // Register embedding (storage already set by start_with_async)
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-async-gc", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-async-gc",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     // Insert vectors using async path (build_index=false is default with async updater)
@@ -858,8 +889,10 @@ async fn test_subsystem_start_with_async_and_gc() {
 #[cfg(feature = "test-hooks")]
 #[test]
 fn test_subsystem_shutdown_ordering() {
+    use motlie_db::vector::{
+        AsyncGraphUpdater, EmbeddingRegistry, GarbageCollector, NavigationCache,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use motlie_db::vector::{AsyncGraphUpdater, GarbageCollector, NavigationCache, EmbeddingRegistry};
 
     let temp_dir = TempDir::new().expect("temp dir");
     let mut storage = Storage::readwrite(temp_dir.path());
@@ -888,12 +921,8 @@ fn test_subsystem_shutdown_ordering() {
             );
         });
 
-    let async_updater = AsyncGraphUpdater::start(
-        storage.clone(),
-        registry.clone(),
-        nav_cache,
-        async_config,
-    );
+    let async_updater =
+        AsyncGraphUpdater::start(storage.clone(), registry.clone(), nav_cache, async_config);
 
     // Start GC with shutdown hook
     let gc_config = GcConfig::default()
@@ -908,14 +937,13 @@ fn test_subsystem_shutdown_ordering() {
             );
         });
 
-    let gc = GarbageCollector::start(
-        storage.clone(),
-        registry,
-        gc_config,
-    );
+    let gc = GarbageCollector::start(storage.clone(), registry, gc_config);
 
     // Verify components started
-    assert!(!async_updater.is_shutdown(), "AsyncUpdater should be running");
+    assert!(
+        !async_updater.is_shutdown(),
+        "AsyncUpdater should be running"
+    );
     assert!(!gc.is_shutdown(), "GC should be running");
 
     // Shut down in correct order: AsyncUpdater first, then GC
@@ -952,14 +980,18 @@ async fn test_consumer_exit_timing() {
         storage.clone(),
         WriterConfig::default(),
         ReaderConfig::default(),
-        4, // 4 query workers
+        4,    // 4 query workers
         None, // No async updater
         None, // No GC
     );
 
     // Register embedding and insert vectors to ensure consumers are active (storage already set by start_with_async)
     let embedding = registry
-        .register(EmbeddingBuilder::new("test-consumer-timing", DIM as u32, Distance::Cosine))
+        .register(EmbeddingBuilder::new(
+            "test-consumer-timing",
+            DIM as u32,
+            Distance::Cosine,
+        ))
         .expect("register");
 
     let vectors = generate_vectors(DIM, 50, 99);

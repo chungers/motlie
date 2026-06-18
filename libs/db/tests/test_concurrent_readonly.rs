@@ -17,12 +17,15 @@
 /// - Provides observability metrics for debugging
 /// - Not intended for performance regression testing
 mod common;
+#[path = "common/concurrent_writer.rs"]
+mod concurrent_writer;
 
-use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
+use common::concurrent_test_utils::{Metrics, TestContext};
+use concurrent_writer::writer_task;
 use motlie_db::graph::query::NodeById;
-use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{create_reader_with_storage, spawn_query_consumer, ReaderConfig};
 use motlie_db::graph::Storage;
+use motlie_db::reader::Runnable as QueryRunnable;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -210,7 +213,10 @@ async fn test_concurrent_read_write_integration() {
     println!("  Nodes written: {}", final_node_count);
     println!("  Expected nodes: {}", num_nodes);
     println!("  Write operations: {}", write_metrics.success_count);
-    println!("  Expected operations: {}", num_nodes * (1 + num_edges_per_node)); // 1 node + N edges per node
+    println!(
+        "  Expected operations: {}",
+        num_nodes * (1 + num_edges_per_node)
+    ); // 1 node + N edges per node
 
     // Assertions for correctness
     assert_eq!(write_metrics.error_count, 0, "Writer should have no errors");

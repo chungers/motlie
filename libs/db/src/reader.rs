@@ -96,6 +96,13 @@ use crate::fulltext;
 use crate::graph;
 use crate::query::QueryRequest;
 
+pub type ReaderHandles = (
+    Reader,
+    Vec<JoinHandle<()>>,
+    Vec<JoinHandle<()>>,
+    Vec<JoinHandle<()>>,
+);
+
 // ============================================================================
 // ReaderConfig - Composes graph and fulltext configs
 // ============================================================================
@@ -179,7 +186,8 @@ pub trait Runnable<R> {
 ///
 /// This is used by the consumer pools to execute queries. It holds Arc references
 /// to the initialized storage backends.
-pub(crate) struct CompositeStorage {
+#[doc(hidden)]
+pub struct CompositeStorage {
     /// Graph processor (RocksDB) - source of truth for node/edge data
     pub(crate) graph: Arc<graph::Processor>,
 
@@ -321,14 +329,7 @@ impl ReaderBuilder {
     ///
     /// Returns the Reader and JoinHandles for all spawned workers.
     /// The handles are grouped as (unified_handles, graph_handles, fulltext_handles).
-    pub fn build(
-        self,
-    ) -> (
-        Reader,
-        Vec<JoinHandle<()>>,
-        Vec<JoinHandle<()>>,
-        Vec<JoinHandle<()>>,
-    ) {
+    pub fn build(self) -> ReaderHandles {
         // Create graph processor from storage
         let graph_processor = Arc::new(graph::Processor::new(self.graph_storage));
 
@@ -339,8 +340,10 @@ impl ReaderBuilder {
         ));
 
         // Create graph reader and consumer pool
-        let (graph_reader, graph_receiver) =
-            graph::reader::create_reader_with_processor(graph_processor.clone(), self.config.graph.clone());
+        let (graph_reader, graph_receiver) = graph::reader::create_reader_with_processor(
+            graph_processor.clone(),
+            self.config.graph.clone(),
+        );
         let graph_handles = graph::reader::spawn_consumer_pool_with_processor(
             graph_receiver,
             graph_processor,
@@ -425,12 +428,7 @@ pub fn spawn_consumer_pool(
 pub fn create_reader(
     graph_storage: Arc<graph::Storage>,
     fulltext: Arc<fulltext::Index>,
-) -> (
-    Reader,
-    Vec<JoinHandle<()>>,
-    Vec<JoinHandle<()>>,
-    Vec<JoinHandle<()>>,
-) {
+) -> ReaderHandles {
     ReaderBuilder::new(graph_storage, fulltext).build()
 }
 
@@ -449,12 +447,7 @@ pub fn create_reader_with_config(
     fulltext: Arc<fulltext::Index>,
     config: ReaderConfig,
     num_workers: usize,
-) -> (
-    Reader,
-    Vec<JoinHandle<()>>,
-    Vec<JoinHandle<()>>,
-    Vec<JoinHandle<()>>,
-) {
+) -> ReaderHandles {
     ReaderBuilder::new(graph_storage, fulltext)
         .with_config(config)
         .with_num_workers(num_workers)

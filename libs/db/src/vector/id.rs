@@ -20,9 +20,7 @@ use anyhow::Result;
 use roaring::RoaringBitmap;
 use rocksdb::TransactionDB;
 
-use super::schema::{
-    EmbeddingCode, IdAlloc, IdAllocCfKey, IdAllocCfValue, IdAllocField, VecId,
-};
+use super::schema::{EmbeddingCode, IdAlloc, IdAllocCfKey, IdAllocCfValue, IdAllocField, VecId};
 use crate::rocksdb::ColumnFamily;
 
 // ============================================================================
@@ -412,7 +410,10 @@ mod tests {
             }));
         }
 
-        let all_ids: Vec<VecId> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        let all_ids: Vec<VecId> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
 
         // All 1000 IDs should be unique
         let unique: HashSet<_> = all_ids.iter().collect();
@@ -430,11 +431,7 @@ mod tests {
             if live_ids.is_empty() || rng.random_bool(0.7) {
                 // Allocate
                 let id = allocator.allocate_local();
-                assert!(
-                    !live_ids.contains(&id),
-                    "Duplicate ID allocated: {}",
-                    id
-                );
+                assert!(!live_ids.contains(&id), "Duplicate ID allocated: {}", id);
                 live_ids.insert(id);
             } else {
                 // Free random live ID

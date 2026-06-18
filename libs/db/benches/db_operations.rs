@@ -50,20 +50,39 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use motlie_db::graph::mutation::{AddEdge, AddNode};
-use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{NodeById, OutgoingEdges};
-use motlie_db::reader::Runnable as QueryRunnable;
-use motlie_db::graph::reader::{create_query_reader, spawn_query_consumer, ReaderConfig};
-use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::reader::{
+    create_reader_with_storage, spawn_query_consumer, Reader, ReaderConfig,
+};
+use motlie_db::graph::schema::{EdgeName, EdgeSummary, EdgeWeight, NodeSummary, Version};
 use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+use motlie_db::graph::Storage as GraphStorage;
+use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::vector::schema::ExternalKey;
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::{Id, TimestampMilli};
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::task::JoinHandle;
 
 // For serialization benchmarks
 extern crate lz4;
 extern crate rmp_serde;
+
+fn create_benchmark_query_reader(
+    rt: &tokio::runtime::Runtime,
+    db_path: &std::path::Path,
+    reader_config: ReaderConfig,
+) -> (Reader, JoinHandle<anyhow::Result<()>>) {
+    let mut storage = GraphStorage::readonly(db_path);
+    storage.ready().expect("Failed to initialize query storage");
+    let (reader, query_receiver) =
+        create_reader_with_storage(Arc::new(storage), reader_config.clone());
+    let _guard = rt.enter();
+    let query_handle = spawn_query_consumer(query_receiver, reader_config, db_path);
+    (reader, query_handle)
+}
 
 /// Helper to create a test database with specified characteristics
 async fn create_test_db(
@@ -88,7 +107,7 @@ async fn create_test_db(
             name: format!("node_{}", i),
             ts_millis: TimestampMilli::now(),
             valid_range: None,
-            summary: NodeSummary::from_text(&format!("Benchmark node {}", i)),
+            summary: NodeSummary::from_text(format!("Benchmark node {}", i)),
         };
 
         node.run(&writer).await.unwrap();
@@ -107,7 +126,7 @@ async fn create_test_db(
                 name: format!("edge_{}", j),
                 ts_millis: TimestampMilli::now(),
                 valid_range: None,
-                summary: EdgeSummary::from_text(&format!("Benchmark edge {}", j)),
+                summary: EdgeSummary::from_text(format!("Benchmark edge {}", j)),
                 weight: None,
             };
 
@@ -156,9 +175,8 @@ fn bench_point_lookups(c: &mut Criterion) {
     let reader_config = ReaderConfig {
         channel_buffer_size: 1000,
     };
-    let (reader, query_receiver) = create_query_reader(reader_config.clone());
-    let _guard = rt.enter();
-    let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+    let (reader, _query_handle) =
+        create_benchmark_query_reader(&rt, temp_dir.path(), reader_config);
 
     let mut group = c.benchmark_group("point_lookups");
     group.measurement_time(Duration::from_secs(10));
@@ -215,9 +233,8 @@ fn bench_prefix_scans_by_position(c: &mut Criterion) {
         let reader_config = ReaderConfig {
             channel_buffer_size: 1000,
         };
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let _guard = rt.enter();
-        let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+        let (reader, _query_handle) =
+            create_benchmark_query_reader(&rt, temp_dir.path(), reader_config);
 
         // Test different positions in the key space
         for position in ["early", "middle", "late"].iter() {
@@ -266,9 +283,8 @@ fn bench_prefix_scans_by_degree(c: &mut Criterion) {
         let reader_config = ReaderConfig {
             channel_buffer_size: 1000,
         };
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let _guard = rt.enter();
-        let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+        let (reader, _query_handle) =
+            create_benchmark_query_reader(&rt, temp_dir.path(), reader_config);
 
         // Use a middle node to avoid position effects
         let target_id = node_ids[2_500];
@@ -306,9 +322,8 @@ fn bench_scan_position_independence(c: &mut Criterion) {
     let reader_config = ReaderConfig {
         channel_buffer_size: 1000,
     };
-    let (reader, query_receiver) = create_query_reader(reader_config.clone());
-    let _guard = rt.enter();
-    let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+    let (reader, _query_handle) =
+        create_benchmark_query_reader(&rt, temp_dir.path(), reader_config);
 
     let mut group = c.benchmark_group("scan_position_independence");
     group.measurement_time(Duration::from_secs(10));
@@ -437,9 +452,8 @@ fn bench_value_size_impact(c: &mut Criterion) {
         let reader_config = ReaderConfig {
             channel_buffer_size: 1000,
         };
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let _guard = rt.enter();
-        let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+        let (reader, _query_handle) =
+            create_benchmark_query_reader(&rt, temp_dir.path(), reader_config);
 
         // Use middle node
         let target_id = node_ids[2_500];
@@ -600,9 +614,8 @@ fn bench_transaction_vs_channel(c: &mut Criterion) {
     let reader_config = ReaderConfig {
         channel_buffer_size: 1000,
     };
-    let (reader, query_receiver) = create_query_reader(reader_config.clone());
-    let _guard = rt.enter();
-    let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+    let (reader, _query_handle) =
+        create_benchmark_query_reader(&rt, temp_dir.path(), reader_config);
 
     let mut group = c.benchmark_group("transaction_vs_channel");
     group.measurement_time(Duration::from_secs(15));
@@ -677,9 +690,8 @@ fn bench_batch_scan_throughput(c: &mut Criterion) {
         let reader_config = ReaderConfig {
             channel_buffer_size: 1000,
         };
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let _guard = rt.enter();
-        let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+        let (reader, _query_handle) =
+            create_benchmark_query_reader(&rt, temp_dir.path(), reader_config);
 
         // Benchmark: Scan edges from multiple nodes (simulates BFS/PageRank)
         let num_scans = 100;
@@ -694,10 +706,11 @@ fn bench_batch_scan_throughput(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| async {
                     let mut total_edges = 0;
                     for &target_id in &scan_targets {
-                        let edges = OutgoingEdges::new(target_id, None)
-                            .run(&reader, Duration::from_secs(5))
-                            .await
-                            .unwrap();
+                        let edges: Vec<(Option<EdgeWeight>, Id, Id, EdgeName, Version)> =
+                            OutgoingEdges::new(target_id, None)
+                                .run(&reader, Duration::from_secs(5))
+                                .await
+                                .unwrap();
                         total_edges += edges.len();
                     }
                     black_box(total_edges)
@@ -745,9 +758,8 @@ fn bench_external_key_roundtrip_1m(c: &mut Criterion) {
     group.bench_function("external_key_roundtrip_1m", |b| {
         b.iter_custom(|_| {
             let start = std::time::Instant::now();
-            let mut bytes = Vec::new();
             for _ in 0..1_000_000 {
-                bytes = key.to_bytes();
+                let bytes = key.to_bytes();
                 let parsed = ExternalKey::from_bytes(black_box(&bytes)).unwrap();
                 black_box(parsed);
             }

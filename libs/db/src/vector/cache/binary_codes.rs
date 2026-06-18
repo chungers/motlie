@@ -112,11 +112,7 @@ impl BinaryCodeCache {
     /// Returns an `Arc<BinaryCodeEntry>` for zero-copy access. The Arc::clone
     /// is O(1) atomic increment, avoiding the O(n) memcpy of the previous design.
     pub fn get(&self, embedding: EmbeddingCode, vec_id: VecId) -> Option<Arc<BinaryCodeEntry>> {
-        self.codes
-            .read()
-            .ok()?
-            .get(&(embedding, vec_id))
-            .cloned() // Arc::clone is cheap (atomic increment)
+        self.codes.read().ok()?.get(&(embedding, vec_id)).cloned() // Arc::clone is cheap (atomic increment)
     }
 
     /// Get binary codes with corrections for multiple vectors.
@@ -328,7 +324,12 @@ mod tests {
         assert_eq!(bytes, 10); // Should be 10, not 22 (12 + 10)
 
         // Overwrite with larger entry: 8 bytes code + 8 bytes correction = 16 bytes
-        cache.put(1, 100, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], default_correction());
+        cache.put(
+            1,
+            100,
+            vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            default_correction(),
+        );
         let (count, bytes) = cache.stats();
         assert_eq!(count, 1); // Still 1 entry
         assert_eq!(bytes, 16); // Should be 16, not 26 (10 + 16)

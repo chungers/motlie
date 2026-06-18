@@ -7,11 +7,11 @@
 
 use motlie_db::fulltext::spawn_mutation_consumer as spawn_fulltext_mutation_consumer;
 use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
-use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -35,7 +35,8 @@ async fn test_fulltext_chaining_basic() {
 
     // Create the FullText consumer (end of chain)
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
+    let fulltext_handle =
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     // Create the Graph consumer that forwards to FullText
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
@@ -58,7 +59,7 @@ async fn test_fulltext_chaining_basic() {
             ts_millis: TimestampMilli::now(),
             name: format!("ChainedNode_{}", i),
             valid_range: None,
-            summary: NodeSummary::from_text(&format!("Summary for node {}", i)),
+            summary: NodeSummary::from_text(format!("Summary for node {}", i)),
         };
         node.run(&writer).await.unwrap();
     }
@@ -116,7 +117,9 @@ async fn test_fulltext_chaining_basic() {
     let searcher = reader.searcher();
 
     let schema = index.schema();
-    let content_field = schema.get_field("content").expect("content field not found");
+    let content_field = schema
+        .get_field("content")
+        .expect("content field not found");
     let node_name_field = schema
         .get_field("node_name")
         .expect("node_name field not found");
@@ -136,7 +139,10 @@ async fn test_fulltext_chaining_basic() {
     let query = query_parser.parse_query("Rust").unwrap();
     let top_docs = searcher.search(&query, &TopDocs::with_limit(5)).unwrap();
     println!("Search for 'Rust' found {} results", top_docs.len());
-    assert!(!top_docs.is_empty(), "Expected to find Rust-related content");
+    assert!(
+        !top_docs.is_empty(),
+        "Expected to find Rust-related content"
+    );
 
     // Verify the nodes were indexed
     for (score, doc_address) in &top_docs {
@@ -175,7 +181,8 @@ async fn test_fulltext_chaining_high_volume() {
 
     // Create the chain: Writer -> Graph -> FullText
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
+    let fulltext_handle =
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
     let graph_handle = spawn_mutation_consumer_with_next(
@@ -200,13 +207,13 @@ async fn test_fulltext_chaining_high_volume() {
             ts_millis: TimestampMilli::now(),
             name: format!("HighVolumeNode_{}", i),
             valid_range: None,
-            summary: NodeSummary::from_text(&format!("High volume summary {}", i)),
+            summary: NodeSummary::from_text(format!("High volume summary {}", i)),
         };
 
         let fragment = AddNodeFragment {
             id: node_id,
             ts_millis: TimestampMilli::now(),
-            content: DataUrl::from_text(&format!(
+            content: DataUrl::from_text(format!(
                 "High volume content {} with unique identifier {}",
                 i,
                 node_id.as_str()
@@ -258,7 +265,8 @@ async fn test_fulltext_chaining_graceful_shutdown() {
 
     // Create the chain
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
+    let fulltext_handle =
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
     let graph_handle = spawn_mutation_consumer_with_next(
@@ -275,7 +283,7 @@ async fn test_fulltext_chaining_graceful_shutdown() {
             ts_millis: TimestampMilli::now(),
             name: format!("ShutdownTest_{}", i),
             valid_range: None,
-            summary: NodeSummary::from_text(&format!("Shutdown test summary {}", i)),
+            summary: NodeSummary::from_text(format!("Shutdown test summary {}", i)),
         };
         node.run(&writer).await.unwrap();
     }
@@ -285,7 +293,10 @@ async fn test_fulltext_chaining_graceful_shutdown() {
 
     // Both consumers should shutdown gracefully
     let graph_result = graph_handle.await.unwrap();
-    assert!(graph_result.is_ok(), "Graph consumer should shutdown cleanly");
+    assert!(
+        graph_result.is_ok(),
+        "Graph consumer should shutdown cleanly"
+    );
 
     let fulltext_result = fulltext_handle.await.unwrap();
     assert!(

@@ -152,10 +152,16 @@ impl std::fmt::Debug for Writer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Writer")
             .field("sender", &"<mpsc::Sender>")
-            .field("processor", &self.processor.as_ref().map(|_| "<Arc<Processor>>"))
+            .field(
+                "processor",
+                &self.processor.as_ref().map(|_| "<Arc<Processor>>"),
+            )
             .field(
                 "transaction_forward_to",
-                &self.transaction_forward_to.as_ref().map(|_| "<mpsc::Sender>"),
+                &self
+                    .transaction_forward_to
+                    .as_ref()
+                    .map(|_| "<mpsc::Sender>"),
             )
             .finish()
     }
@@ -176,7 +182,10 @@ impl Writer {
 
     /// Create a new MutationWriter with processor for transaction support.
     /// (claude, 2026-02-07, FIXED: P2.2 - Primary construction with Processor)
-    pub(crate) fn with_processor(sender: mpsc::Sender<MutationRequest>, processor: Arc<GraphProcessor>) -> Self {
+    pub(crate) fn with_processor(
+        sender: mpsc::Sender<MutationRequest>,
+        processor: Arc<GraphProcessor>,
+    ) -> Self {
         Writer {
             sender,
             processor: Some(processor),
@@ -248,15 +257,19 @@ impl Writer {
     /// - Storage is not in read-write mode
     pub fn transaction(&self) -> Result<Transaction<'_>> {
         // (claude, 2026-02-07, FIXED: P2.2/P3.3 - Use processor for transactions)
-        let processor = self
-            .processor
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Writer not configured with processor for transactions"))?;
+        let processor = self.processor.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Writer not configured with processor for transactions")
+        })?;
 
         let txn_db = processor.transaction_db()?;
         let txn = txn_db.transaction();
 
-        Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone(), processor.clone()))
+        Ok(Transaction::new(
+            txn,
+            txn_db,
+            self.transaction_forward_to.clone(),
+            processor.clone(),
+        ))
     }
 
     /// Check if transactions are supported by this writer.
@@ -604,7 +617,7 @@ impl Consumer {
             }
             Err(err) => {
                 if let Some(sender) = reply {
-                    let _ = sender.send(Err(anyhow::anyhow!(err.to_string())));
+                    let _ = sender.send(Err(anyhow::Error::msg(err.to_string())));
                 }
                 return Err(err);
             }
@@ -805,10 +818,10 @@ pub(crate) fn spawn_mutation_consumer_with_processor(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, UpdateEdge};
-    use crate::writer::Runnable as MutRunnable;
     use super::super::schema::{EdgeSummary, NodeSummary};
+    use super::*;
+    use crate::writer::Runnable as MutRunnable;
     use crate::{DataUrl, Id, TimestampMilli};
     use tokio::time::Duration;
 

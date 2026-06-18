@@ -9,10 +9,7 @@ use motlie_db::{Id, Storage, StorageConfig, TimestampMilli};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let base_path = std::env::temp_dir().join(format!(
-        "motlie-db-unified-example-{}",
-        Id::new()
-    ));
+    let base_path = std::env::temp_dir().join(format!("motlie-db-unified-example-{}", Id::new()));
 
     let storage = Storage::readwrite(&base_path);
     let handles = storage.ready(StorageConfig::default())?;

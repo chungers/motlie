@@ -12,15 +12,15 @@ use std::sync::Arc;
 use std::thread;
 use tempfile::TempDir;
 
+use motlie_db::rocksdb::ColumnFamily;
 use motlie_db::vector::benchmark::{compute_recall, LaionSubset, LAION_EMBEDDING_DIM};
+use motlie_db::vector::hnsw::insert;
 use motlie_db::vector::quantization::RaBitQ;
 use motlie_db::vector::schema::Vectors;
 use motlie_db::vector::{
     hnsw, BinaryCodeCache, Distance, EmbeddingSpec, NavigationCache, Storage, VecId,
     VectorElementType,
 };
-use motlie_db::vector::hnsw::insert;
-use motlie_db::rocksdb::ColumnFamily;
 
 /// Generate synthetic LAION-CLIP-like data (512D, Cosine distance, normalized)
 fn generate_laion_subset(num_vectors: usize, num_queries: usize) -> LaionSubset {
@@ -208,9 +208,9 @@ fn test_binary_code_cache_multithreaded_access() -> anyhow::Result<()> {
                             query,
                             &rabitq,
                             &binary_cache,
-                            10,  // k
-                            50,  // ef_search
-                            4,   // rerank_factor
+                            10, // k
+                            50, // ef_search
+                            4,  // rerank_factor
                         )
                         .expect("Search failed");
 
@@ -328,7 +328,11 @@ fn test_arc_sharing_concurrent_reads() {
     // Average Arc ref count should be > 1 (cache + at least one reader)
     let avg_refs = total_arc_refs.load(Ordering::Relaxed) as f64 / total_reads as f64;
     println!("Average Arc strong_count during reads: {:.2}", avg_refs);
-    assert!(avg_refs >= 2.0, "Expected avg refs >= 2.0, got {:.2}", avg_refs);
+    assert!(
+        avg_refs >= 2.0,
+        "Expected avg refs >= 2.0, got {:.2}",
+        avg_refs
+    );
 
     println!("✓ Arc sharing concurrent reads test passed");
 }
@@ -350,10 +354,8 @@ fn test_batch_reads_concurrent() {
     // Populate cache
     for vec_id in 0..NUM_VECTORS as VecId {
         let code = vec![(vec_id % 256) as u8; 32];
-        let correction = motlie_db::vector::schema::AdcCorrection::new(
-            vec_id as f32 / NUM_VECTORS as f32,
-            0.9,
-        );
+        let correction =
+            motlie_db::vector::schema::AdcCorrection::new(vec_id as f32 / NUM_VECTORS as f32, 0.9);
         cache.put(embedding_code, vec_id, code, correction);
     }
 
@@ -371,9 +373,12 @@ fn test_batch_reads_concurrent() {
                 let mut total_entries = 0usize;
 
                 // Each thread reads different batches
-                for batch_start in (thread_id * BATCH_SIZE..NUM_VECTORS).step_by(NUM_THREADS * BATCH_SIZE) {
+                for batch_start in
+                    (thread_id * BATCH_SIZE..NUM_VECTORS).step_by(NUM_THREADS * BATCH_SIZE)
+                {
                     let batch_end = (batch_start + BATCH_SIZE).min(NUM_VECTORS);
-                    let vec_ids: Vec<VecId> = (batch_start..batch_end).map(|i| i as VecId).collect();
+                    let vec_ids: Vec<VecId> =
+                        (batch_start..batch_end).map(|i| i as VecId).collect();
 
                     let batch = cache.get_batch(embedding_code, &vec_ids);
 
@@ -438,7 +443,9 @@ fn test_high_contention_same_entries() {
             thread::spawn(move || {
                 for i in 0..READS_PER_THREAD {
                     let vec_id = (i % NUM_HOT_ENTRIES) as VecId;
-                    let entry = cache.get(embedding_code, vec_id).expect("Entry should exist");
+                    let entry = cache
+                        .get(embedding_code, vec_id)
+                        .expect("Entry should exist");
                     assert_eq!(entry.code.len(), 128);
                     assert_eq!(entry.code[0], 0xAB);
                 }

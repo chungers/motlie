@@ -39,7 +39,7 @@
 //! - If value has ≤2 fields: tuple struct is acceptable
 //! - If value has >2 fields: define a named struct, wrap in `FooCfValue`
 //! - Values use MessagePack serialization (self-describing, compact) or rkyv zero-copy if the
-//! column family implements the HotColumnFamilyRecord trait.
+//!   column family implements the HotColumnFamilyRecord trait.
 //!
 //!
 use super::mutation::{AddEdge, AddNode};
@@ -74,13 +74,13 @@ pub const VERSION_MAX: Version = u32::MAX;
 /// Reference count for content-addressed summaries.
 /// u32 allows billions of references while bounding storage overhead to 4 bytes.
 /// Used to enable safe GC of shared summary content.
-/// (claude, 2026-02-06, deprecated: VERSIONING uses OrphanSummaries CF instead)
+// (claude, 2026-02-06, deprecated: VERSIONING uses OrphanSummaries CF instead)
 pub type RefCount = u32;
 
 // ============================================================================
 // Temporal Type Aliases (VERSIONING design)
 // ============================================================================
-/// (claude, 2026-02-06, in-progress: VERSIONING temporal types)
+// (claude, 2026-02-06, in-progress: VERSIONING temporal types)
 
 /// System time: when this version became valid in the database.
 /// Part of entity keys for time-travel queries.
@@ -172,29 +172,29 @@ impl ColumnFamilySerde for Names {
 /// - Full summary content is stored in `NodeSummaries` CF (COLD)
 /// - Value size reduced from ~200-500 bytes to ~26 bytes
 ///
-/// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
+// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
 pub(crate) struct Nodes;
 
 /// Node key with ValidSince for time-travel queries.
-/// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
+// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfKey(
-    pub(crate) Id,          // 16 bytes
-    pub(crate) ValidSince,  // 8 bytes - when this version became valid
-);  // Total: 24 bytes
+    pub(crate) Id,         // 16 bytes
+    pub(crate) ValidSince, // 8 bytes - when this version became valid
+); // Total: 24 bytes
 
 /// Node value - optimized for graph traversal (hot path)
 /// Size: ~39 bytes (vs ~200-500 bytes with inline summary)
-/// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil for soft-delete)
+// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil for soft-delete)
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct NodeCfValue(
-    pub(crate) Option<ValidUntil>,   // System time when this version stopped being valid (None = current)
+    pub(crate) Option<ValidUntil>, // System time when this version stopped being valid (None = current)
     pub(crate) Option<ActivePeriod>, // Business validity (application time)
-    pub(crate) NameHash,             // Node name hash; full name in Names CF
-    pub(crate) Option<SummaryHash>,  // Content hash; full summary in NodeSummaries CF
-    pub(crate) Version,              // Monotonic version for optimistic locking (starts at 1)
-    pub(crate) bool,                 // Deleted flag (tombstone) for soft deletes
+    pub(crate) NameHash,           // Node name hash; full name in Names CF
+    pub(crate) Option<SummaryHash>, // Content hash; full summary in NodeSummaries CF
+    pub(crate) Version,            // Monotonic version for optimistic locking (starts at 1)
+    pub(crate) bool,               // Deleted flag (tombstone) for soft deletes
 );
 
 /// Id of edge source node
@@ -209,54 +209,54 @@ pub type DstId = Id;
 /// - Full summary content is stored in `EdgeSummaries` CF (COLD)
 /// - Value size reduced from ~200-500 bytes to ~35 bytes
 ///
-/// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
+// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
 pub(crate) struct ForwardEdges;
 
 /// Forward edge key with ValidSince for time-travel queries.
-/// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
+// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfKey(
-    pub(crate) SrcId,       // 16 bytes
-    pub(crate) DstId,       // 16 bytes
-    pub(crate) NameHash,    // 8 bytes - Edge name hash; full name in Names CF
-    pub(crate) ValidSince,  // 8 bytes - when this version became valid
-);  // Total: 48 bytes
+    pub(crate) SrcId,      // 16 bytes
+    pub(crate) DstId,      // 16 bytes
+    pub(crate) NameHash,   // 8 bytes - Edge name hash; full name in Names CF
+    pub(crate) ValidSince, // 8 bytes - when this version became valid
+); // Total: 48 bytes
 
 /// Forward edge value - optimized for graph traversal (hot path)
 /// Size: ~48 bytes (vs ~200-500 bytes with inline summary)
-/// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil for soft-delete)
+// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil for soft-delete)
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ValidUntil>,   // Field 0: System time when version stopped being valid (None = current)
+    pub(crate) Option<ValidUntil>, // Field 0: System time when version stopped being valid (None = current)
     pub(crate) Option<ActivePeriod>, // Field 1: Business validity (application time)
-    pub(crate) Option<EdgeWeight>,          // Field 2: Optional weight
-    pub(crate) Option<SummaryHash>,  // Field 3: Content hash; full summary in EdgeSummaries CF
-    pub(crate) Version,              // Field 4: Monotonic version for optimistic locking
-    pub(crate) bool,                 // Field 5: Deleted flag (tombstone)
+    pub(crate) Option<EdgeWeight>, // Field 2: Optional weight
+    pub(crate) Option<SummaryHash>, // Field 3: Content hash; full summary in EdgeSummaries CF
+    pub(crate) Version,            // Field 4: Monotonic version for optimistic locking
+    pub(crate) bool,               // Field 5: Deleted flag (tombstone)
 );
 
 /// Reverse edges column family (index only).
-/// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
+// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
 pub(crate) struct ReverseEdges;
 
 /// Reverse edge key with ValidSince for time-travel queries.
-/// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
+// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReverseEdgeCfKey(
-    pub(crate) DstId,       // 16 bytes
-    pub(crate) SrcId,       // 16 bytes
-    pub(crate) NameHash,    // 8 bytes - Edge name stored as hash; full name in Names CF
-    pub(crate) ValidSince,  // 8 bytes - when this version became valid
-);  // Total: 48 bytes
+    pub(crate) DstId,      // 16 bytes
+    pub(crate) SrcId,      // 16 bytes
+    pub(crate) NameHash,   // 8 bytes - Edge name stored as hash; full name in Names CF
+    pub(crate) ValidSince, // 8 bytes - when this version became valid
+); // Total: 48 bytes
 
 /// Reverse edge value - minimal for reverse lookups
 /// Size: ~25 bytes
-/// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil)
+// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil)
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ReverseEdgeCfValue(
-    pub(crate) Option<ValidUntil>,   // Field 0: System time when version stopped being valid (None = current)
+    pub(crate) Option<ValidUntil>, // Field 0: System time when version stopped being valid (None = current)
     pub(crate) Option<ActivePeriod>, // Field 1: Business validity (application time)
 );
 
@@ -332,12 +332,12 @@ impl Nodes {
 
         // New nodes: ValidUntil=None (current), version=1, not deleted
         let value = NodeCfValue(
-            None,                      // ValidUntil: None = current version
-            args.valid_range.clone(),  // ActivePeriod (business validity)
+            None,             // ValidUntil: None = current version
+            args.valid_range, // ActivePeriod (business validity)
             name_hash,
             summary_hash,
-            1,                         // version
-            false,                     // deleted
+            1,     // version
+            false, // deleted
         );
         (key, value)
     }
@@ -580,7 +580,12 @@ impl ForwardEdges {
     pub fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let name_hash = NameHash::from_name(&args.name);
         // ValidSince = mutation timestamp (when this version becomes valid)
-        let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash, args.ts_millis);
+        let key = ForwardEdgeCfKey(
+            args.source_node_id,
+            args.target_node_id,
+            name_hash,
+            args.ts_millis,
+        );
 
         // Compute summary hash if summary is non-empty
         let summary_hash = if !args.summary.is_empty() {
@@ -591,12 +596,12 @@ impl ForwardEdges {
 
         // New edges: ValidUntil=None (current), version=1, not deleted
         let value = ForwardEdgeCfValue(
-            None,                      // ValidUntil: None = current version
-            args.valid_range.clone(),  // ActivePeriod (business validity)
+            None,             // ValidUntil: None = current version
+            args.valid_range, // ActivePeriod (business validity)
             args.weight,
             summary_hash,
-            1,                         // version
-            false,                     // deleted
+            1,     // version
+            false, // deleted
         );
         (key, value)
     }
@@ -698,11 +703,16 @@ impl ReverseEdges {
     pub fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
         let name_hash = NameHash::from_name(&args.name);
         // ValidSince = mutation timestamp (when this version becomes valid)
-        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash, args.ts_millis);
+        let key = ReverseEdgeCfKey(
+            args.target_node_id,
+            args.source_node_id,
+            name_hash,
+            args.ts_millis,
+        );
         // New edges: ValidUntil=None (current)
         let value = ReverseEdgeCfValue(
-            None,                      // ValidUntil: None = current version
-            args.valid_range.clone(),  // ActivePeriod (business validity)
+            None,             // ValidUntil: None = current version
+            args.valid_range, // ActivePeriod (business validity)
         );
         (key, value)
     }
@@ -772,7 +782,7 @@ impl HotColumnFamilyRecord for ReverseEdges {
 /// Stores node summary content keyed by content hash (SummaryHash).
 /// Content-addressable: identical summaries stored once, referenced by hash.
 ///
-/// (claude, 2026-02-06, in-progress: VERSIONING replaced RefCount with OrphanSummaries CF)
+// (claude, 2026-02-06, in-progress: VERSIONING replaced RefCount with OrphanSummaries CF)
 /// Key: SummaryHash (8 bytes, content-addressable)
 /// Value: NodeSummary - the summary content
 pub(crate) struct NodeSummaries;
@@ -781,7 +791,7 @@ pub(crate) struct NodeSummaries;
 pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);
 
 /// Value stores just the summary content.
-/// (claude, 2026-02-06, in-progress: VERSIONING removed RefCount - use OrphanSummaries for GC)
+// (claude, 2026-02-06, in-progress: VERSIONING removed RefCount - use OrphanSummaries for GC)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
 // (codex, 2026-02-07, eval: VERSIONING GC section now assumes RefCount + OrphanSummaries; this value has no RefCount field, so GC cannot validate 0-refcount before deletion.)
@@ -843,7 +853,7 @@ impl ColumnFamilySerde for NodeSummaries {
 /// Stores edge summary content keyed by content hash (SummaryHash).
 /// Content-addressable: identical summaries stored once, referenced by hash.
 ///
-/// (claude, 2026-02-06, in-progress: VERSIONING replaced RefCount with OrphanSummaries CF)
+// (claude, 2026-02-06, in-progress: VERSIONING replaced RefCount with OrphanSummaries CF)
 /// Key: SummaryHash (8 bytes, content-addressable)
 /// Value: EdgeSummary - the summary content
 pub(crate) struct EdgeSummaries;
@@ -852,7 +862,7 @@ pub(crate) struct EdgeSummaries;
 pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
 
 /// Value stores just the summary content.
-/// (claude, 2026-02-06, in-progress: VERSIONING removed RefCount - use OrphanSummaries for GC)
+// (claude, 2026-02-06, in-progress: VERSIONING removed RefCount - use OrphanSummaries for GC)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
 // (codex, 2026-02-07, eval: VERSIONING rollback window relies on deferred deletion; without RefCount in value, orphan tracking must be entirely index-driven and is currently unspecified.)
@@ -1177,7 +1187,7 @@ impl ColumnFamilySerde for EdgeSummaryIndex {
 // ============================================================================
 // Version History CFs (COLD - VERSIONING design for rollback/time-travel)
 // ============================================================================
-/// (claude, 2026-02-06, in-progress: VERSIONING version history CFs)
+// (claude, 2026-02-06, in-progress: VERSIONING version history CFs)
 
 /// NodeVersionHistory column family - stores version snapshots for rollback.
 ///
@@ -1191,17 +1201,17 @@ pub(crate) struct NodeVersionHistory;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct NodeVersionHistoryCfKey(
-    pub(crate) Id,          // 16 bytes
-    pub(crate) ValidSince,  // 8 bytes
-    pub(crate) Version,     // 4 bytes
+    pub(crate) Id,         // 16 bytes
+    pub(crate) ValidSince, // 8 bytes
+    pub(crate) Version,    // 4 bytes
 );
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct NodeVersionHistoryCfValue(
-    pub(crate) TimestampMilli,        // UpdatedAt: when this version was created
-    pub(crate) Option<SummaryHash>,   // Content hash at this version
-    pub(crate) NameHash,              // Node name at this version
-    pub(crate) Option<ActivePeriod>,  // Business validity at this version
+    pub(crate) TimestampMilli,       // UpdatedAt: when this version was created
+    pub(crate) Option<SummaryHash>,  // Content hash at this version
+    pub(crate) NameHash,             // Node name at this version
+    pub(crate) Option<ActivePeriod>, // Business validity at this version
 );
 
 impl ColumnFamily for NodeVersionHistory {
@@ -1290,19 +1300,19 @@ pub(crate) struct EdgeVersionHistory;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct EdgeVersionHistoryCfKey(
-    pub(crate) SrcId,       // 16 bytes
-    pub(crate) DstId,       // 16 bytes
-    pub(crate) NameHash,    // 8 bytes
-    pub(crate) ValidSince,  // 8 bytes
-    pub(crate) Version,     // 4 bytes
+    pub(crate) SrcId,      // 16 bytes
+    pub(crate) DstId,      // 16 bytes
+    pub(crate) NameHash,   // 8 bytes
+    pub(crate) ValidSince, // 8 bytes
+    pub(crate) Version,    // 4 bytes
 );
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct EdgeVersionHistoryCfValue(
-    pub(crate) TimestampMilli,        // UpdatedAt: when this version was created
-    pub(crate) Option<SummaryHash>,   // Content hash at this version
-    pub(crate) Option<EdgeWeight>,           // Weight at this version
-    pub(crate) Option<ActivePeriod>,  // Business validity at this version
+    pub(crate) TimestampMilli,       // UpdatedAt: when this version was created
+    pub(crate) Option<SummaryHash>,  // Content hash at this version
+    pub(crate) Option<EdgeWeight>,   // Weight at this version
+    pub(crate) Option<ActivePeriod>, // Business validity at this version
 );
 
 impl ColumnFamily for EdgeVersionHistory {
@@ -1392,7 +1402,7 @@ impl ColumnFamilySerde for EdgeVersionHistory {
 // ============================================================================
 // OrphanSummaries CF (COLD - VERSIONING design for deferred GC)
 // ============================================================================
-/// (claude, 2026-02-06, in-progress: VERSIONING orphan tracking for rollback)
+// (claude, 2026-02-06, in-progress: VERSIONING orphan tracking for rollback)
 
 /// SummaryKind discriminant for OrphanSummaries CF.
 /// Identifies whether orphan is from NodeSummaries or EdgeSummaries.
@@ -1415,8 +1425,8 @@ pub(crate) struct OrphanSummaries;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct OrphanSummaryCfKey(
-    pub(crate) TimestampMilli,  // 8 bytes - when RefCount became 0
-    pub(crate) SummaryHash,     // 8 bytes - which summary
+    pub(crate) TimestampMilli, // 8 bytes - when RefCount became 0
+    pub(crate) SummaryHash,    // 8 bytes - which summary
 );
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1518,33 +1528,33 @@ pub(crate) struct GraphMeta;
 #[derive(Debug, Clone)]
 pub(crate) enum GraphMetaField {
     /// GC cursor for NodeSummaryIndex CF
-    GcCursorNodeSummaryIndex(Vec<u8>),   // 0x00
+    NodeSummaryIndex(Vec<u8>), // 0x00
     /// GC cursor for EdgeSummaryIndex CF
-    GcCursorEdgeSummaryIndex(Vec<u8>),   // 0x01
+    EdgeSummaryIndex(Vec<u8>), // 0x01
     /// GC cursor for Node tombstones
-    GcCursorNodeTombstones(Vec<u8>),     // 0x02
+    NodeTombstones(Vec<u8>), // 0x02
     /// GC cursor for Edge tombstones
-    GcCursorEdgeTombstones(Vec<u8>),     // 0x03
+    EdgeTombstones(Vec<u8>), // 0x03
 }
 
 impl GraphMetaField {
     /// Get the discriminant byte for key serialization
     pub fn discriminant(&self) -> u8 {
         match self {
-            Self::GcCursorNodeSummaryIndex(_) => 0x00,
-            Self::GcCursorEdgeSummaryIndex(_) => 0x01,
-            Self::GcCursorNodeTombstones(_) => 0x02,
-            Self::GcCursorEdgeTombstones(_) => 0x03,
+            Self::NodeSummaryIndex(_) => 0x00,
+            Self::EdgeSummaryIndex(_) => 0x01,
+            Self::NodeTombstones(_) => 0x02,
+            Self::EdgeTombstones(_) => 0x03,
         }
     }
 
     /// Create a field variant from discriminant (with empty payload)
     pub fn from_discriminant(d: u8) -> anyhow::Result<Self> {
         match d {
-            0x00 => Ok(Self::GcCursorNodeSummaryIndex(vec![])),
-            0x01 => Ok(Self::GcCursorEdgeSummaryIndex(vec![])),
-            0x02 => Ok(Self::GcCursorNodeTombstones(vec![])),
-            0x03 => Ok(Self::GcCursorEdgeTombstones(vec![])),
+            0x00 => Ok(Self::NodeSummaryIndex(vec![])),
+            0x01 => Ok(Self::EdgeSummaryIndex(vec![])),
+            0x02 => Ok(Self::NodeTombstones(vec![])),
+            0x03 => Ok(Self::EdgeTombstones(vec![])),
             _ => anyhow::bail!("Unknown GraphMetaField discriminant: {}", d),
         }
     }
@@ -1552,10 +1562,10 @@ impl GraphMetaField {
     /// Get the inner cursor bytes
     pub fn cursor_bytes(&self) -> &[u8] {
         match self {
-            Self::GcCursorNodeSummaryIndex(v)
-            | Self::GcCursorEdgeSummaryIndex(v)
-            | Self::GcCursorNodeTombstones(v)
-            | Self::GcCursorEdgeTombstones(v) => v,
+            Self::NodeSummaryIndex(v)
+            | Self::EdgeSummaryIndex(v)
+            | Self::NodeTombstones(v)
+            | Self::EdgeTombstones(v) => v,
         }
     }
 }
@@ -1567,22 +1577,22 @@ pub(crate) struct GraphMetaCfKey(pub(crate) GraphMetaField);
 impl GraphMetaCfKey {
     /// Create key for NodeSummaryIndex GC cursor
     pub fn gc_cursor_node_summary_index() -> Self {
-        Self(GraphMetaField::GcCursorNodeSummaryIndex(vec![]))
+        Self(GraphMetaField::NodeSummaryIndex(vec![]))
     }
 
     /// Create key for EdgeSummaryIndex GC cursor
     pub fn gc_cursor_edge_summary_index() -> Self {
-        Self(GraphMetaField::GcCursorEdgeSummaryIndex(vec![]))
+        Self(GraphMetaField::EdgeSummaryIndex(vec![]))
     }
 
     /// Create key for Node tombstones GC cursor
     pub fn gc_cursor_node_tombstones() -> Self {
-        Self(GraphMetaField::GcCursorNodeTombstones(vec![]))
+        Self(GraphMetaField::NodeTombstones(vec![]))
     }
 
     /// Create key for Edge tombstones GC cursor
     pub fn gc_cursor_edge_tombstones() -> Self {
-        Self(GraphMetaField::GcCursorEdgeTombstones(vec![]))
+        Self(GraphMetaField::EdgeTombstones(vec![]))
     }
 }
 
@@ -1595,7 +1605,10 @@ impl ColumnFamily for GraphMeta {
 }
 
 impl ColumnFamilyConfig<super::subsystem::GraphBlockCacheConfig> for GraphMeta {
-    fn cf_options(cache: &rocksdb::Cache, config: &super::subsystem::GraphBlockCacheConfig) -> rocksdb::Options {
+    fn cf_options(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::GraphBlockCacheConfig,
+    ) -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         let mut block_opts = rocksdb::BlockBasedOptions::default();
 
@@ -1615,7 +1628,10 @@ impl GraphMeta {
     /// Deserialize key from bytes
     pub fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<GraphMetaCfKey> {
         if bytes.len() != 1 {
-            anyhow::bail!("Invalid GraphMetaCfKey length: expected 1, got {}", bytes.len());
+            anyhow::bail!(
+                "Invalid GraphMetaCfKey length: expected 1, got {}",
+                bytes.len()
+            );
         }
         let field = GraphMetaField::from_discriminant(bytes[0])?;
         Ok(GraphMetaCfKey(field))
@@ -1627,12 +1643,15 @@ impl GraphMeta {
     }
 
     /// Deserialize value using key's field variant for type info
-    pub fn value_from_bytes(key: &GraphMetaCfKey, bytes: &[u8]) -> anyhow::Result<GraphMetaCfValue> {
+    pub fn value_from_bytes(
+        key: &GraphMetaCfKey,
+        bytes: &[u8],
+    ) -> anyhow::Result<GraphMetaCfValue> {
         let field = match key.0.discriminant() {
-            0x00 => GraphMetaField::GcCursorNodeSummaryIndex(bytes.to_vec()),
-            0x01 => GraphMetaField::GcCursorEdgeSummaryIndex(bytes.to_vec()),
-            0x02 => GraphMetaField::GcCursorNodeTombstones(bytes.to_vec()),
-            0x03 => GraphMetaField::GcCursorEdgeTombstones(bytes.to_vec()),
+            0x00 => GraphMetaField::NodeSummaryIndex(bytes.to_vec()),
+            0x01 => GraphMetaField::EdgeSummaryIndex(bytes.to_vec()),
+            0x02 => GraphMetaField::NodeTombstones(bytes.to_vec()),
+            0x03 => GraphMetaField::EdgeTombstones(bytes.to_vec()),
             d => anyhow::bail!("Unknown discriminant: {}", d),
         };
         Ok(GraphMetaCfValue(field))
@@ -1641,22 +1660,22 @@ impl GraphMeta {
 
 /// All column families used in the database.
 /// This is the authoritative list that should be used when opening the database.
-/// (claude, 2026-02-06, in-progress: VERSIONING added version history and orphan CFs)
+// (claude, 2026-02-06, in-progress: VERSIONING added version history and orphan CFs)
 pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Names::CF_NAME,
     Nodes::CF_NAME,
     NodeFragments::CF_NAME,
-    NodeSummaries::CF_NAME,          // COLD: node summary content
-    NodeSummaryIndex::CF_NAME,       // COLD: reverse index hash→nodes
-    NodeVersionHistory::CF_NAME,     // COLD: VERSIONING version snapshots
+    NodeSummaries::CF_NAME,      // COLD: node summary content
+    NodeSummaryIndex::CF_NAME,   // COLD: reverse index hash→nodes
+    NodeVersionHistory::CF_NAME, // COLD: VERSIONING version snapshots
     EdgeFragments::CF_NAME,
-    EdgeSummaries::CF_NAME,          // COLD: edge summary content
-    EdgeSummaryIndex::CF_NAME,       // COLD: reverse index hash→edges
-    EdgeVersionHistory::CF_NAME,     // COLD: VERSIONING version snapshots
+    EdgeSummaries::CF_NAME,      // COLD: edge summary content
+    EdgeSummaryIndex::CF_NAME,   // COLD: reverse index hash→edges
+    EdgeVersionHistory::CF_NAME, // COLD: VERSIONING version snapshots
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
-    OrphanSummaries::CF_NAME,        // COLD: VERSIONING deferred GC tracking
-    GraphMeta::CF_NAME,              // Graph-level metadata (GC cursors)
+    OrphanSummaries::CF_NAME, // COLD: VERSIONING deferred GC tracking
+    GraphMeta::CF_NAME,       // Graph-level metadata (GC cursors)
 ];
 
 #[cfg(test)]
@@ -1670,7 +1689,7 @@ mod tests {
         // Create multiple edge arguments with different source/destination combinations
         // Using deterministic timestamps for stable test behavior
         let base_ts = 1700000000000u64; // Fixed base timestamp
-        let edges = vec![
+        let edges = [
             AddEdge {
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
@@ -1937,7 +1956,7 @@ mod tests {
     #[test]
     fn test_temporal_range_clone_and_equality() {
         let range1 = ActivePeriod(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
-        let range2 = range1.clone();
+        let range2 = range1;
 
         assert_eq!(range1, range2);
 

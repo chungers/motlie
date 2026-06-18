@@ -86,7 +86,7 @@ impl std::fmt::Display for RaBitQConfigWarning {
 impl RaBitQConfig {
     /// Calculate the code size in bytes for a given dimension.
     pub fn code_size(&self, dim: usize) -> usize {
-        (dim * self.bits_per_dim as usize + 7) / 8
+        (dim * self.bits_per_dim as usize).div_ceil(8)
     }
 
     /// Validate configuration and return warnings for invalid settings.

@@ -19,8 +19,8 @@
 use anyhow::Result;
 
 use super::graph::{
-    connect_neighbors, greedy_search_layer, greedy_search_layer_with_batch_cache,
-    search_layer, search_layer_with_batch_cache, BatchEdgeCache,
+    connect_neighbors, greedy_search_layer, greedy_search_layer_with_batch_cache, search_layer,
+    search_layer_with_batch_cache, BatchEdgeCache,
 };
 use super::Index;
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
@@ -163,12 +163,8 @@ pub fn insert(
         )?;
 
         // Select M neighbors (simple heuristic: take closest)
-        let m = if layer == 0 {
-            index.m() * 2
-        } else {
-            index.m()
-        };
-        let selected: Vec<_> = neighbors.into_iter().take(m as usize).collect();
+        let m = if layer == 0 { index.m() * 2 } else { index.m() };
+        let selected: Vec<_> = neighbors.into_iter().take(m).collect();
 
         // Connect bidirectionally (using transaction)
         connect_neighbors(index, txn, txn_db, vec_id, &selected, layer)?;
@@ -267,7 +263,15 @@ pub fn insert_for_batch(
     // Use batch-cache-aware search to see edges from earlier batch inserts
     for layer in (node_layer + 1..=max_layer).rev() {
         (current, current_dist) = greedy_search_layer_with_batch_cache(
-            index, txn, txn_db, storage, vector, current, current_dist, layer, batch_cache,
+            index,
+            txn,
+            txn_db,
+            storage,
+            vector,
+            current,
+            current_dist,
+            layer,
+            batch_cache,
         )?;
     }
 
@@ -287,12 +291,8 @@ pub fn insert_for_batch(
         )?;
 
         // Select M neighbors (simple heuristic: take closest)
-        let m = if layer == 0 {
-            index.m() * 2
-        } else {
-            index.m()
-        };
-        let selected: Vec<_> = neighbors.into_iter().take(m as usize).collect();
+        let m = if layer == 0 { index.m() * 2 } else { index.m() };
+        let selected: Vec<_> = neighbors.into_iter().take(m).collect();
 
         // Connect bidirectionally (using transaction)
         connect_neighbors(index, txn, txn_db, vec_id, &selected, layer)?;
@@ -393,7 +393,10 @@ fn update_entry_point(
 // ============================================================================
 
 /// Get or initialize navigation info from cache or storage.
-pub(super) fn get_or_init_navigation(index: &Index, storage: &Storage) -> Result<NavigationLayerInfo> {
+pub(super) fn get_or_init_navigation(
+    index: &Index,
+    storage: &Storage,
+) -> Result<NavigationLayerInfo> {
     if let Some(info) = index.nav_cache().get(index.embedding()) {
         return Ok(info);
     }

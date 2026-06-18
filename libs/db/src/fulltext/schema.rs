@@ -37,9 +37,9 @@ pub struct DocumentFields {
     pub weight_field: Field,
 
     // Facet fields (for categorical filtering)
-    pub doc_type_facet: Field,  // Document type as facet
-    pub tags_facet: Field,      // User-defined tags from #hashtags
-    pub validity_facet: Field,  // Validity structure: unbounded, since_only, until_only, bounded
+    pub doc_type_facet: Field, // Document type as facet
+    pub tags_facet: Field,     // User-defined tags from #hashtags
+    pub validity_facet: Field, // Validity structure: unbounded, since_only, until_only, bounded
 }
 
 /// Build the Tantivy schema for fulltext indexing.
@@ -156,8 +156,7 @@ pub fn extract_tags(content: &str) -> Vec<String> {
 
             // Collect tag characters (alphanumeric, underscore, hyphen, slash)
             while let Some(&next_ch) = chars.peek() {
-                if next_ch.is_alphanumeric() || next_ch == '_' || next_ch == '-' || next_ch == '/'
-                {
+                if next_ch.is_alphanumeric() || next_ch == '_' || next_ch == '-' || next_ch == '/' {
                     tag.push(chars.next().unwrap());
                 } else {
                     break;
@@ -204,8 +203,8 @@ pub fn compute_validity_facet(temporal_range: &Option<crate::ActivePeriod>) -> F
 // Schema - SubsystemProvider + FulltextSubsystem Implementation
 // ============================================================================
 
-use crate::SubsystemProvider;
 use super::{format_bytes, FulltextSubsystem};
+use crate::SubsystemProvider;
 use motlie_core::telemetry::SubsystemInfo;
 
 /// Fulltext module schema implementing the subsystem provider traits.
@@ -392,7 +391,10 @@ mod tests {
     fn test_extract_tags_underscore_separator() {
         // Underscores connect words within a tag
         let tags = extract_tags("#systems_programming #low_level_code #my_tag_123");
-        assert_eq!(tags, vec!["systems_programming", "low_level_code", "my_tag_123"]);
+        assert_eq!(
+            tags,
+            vec!["systems_programming", "low_level_code", "my_tag_123"]
+        );
     }
 
     #[test]

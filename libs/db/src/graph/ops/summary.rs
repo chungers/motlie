@@ -3,8 +3,8 @@ use anyhow::Result;
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde};
 
 use super::super::schema::{
-    EdgeSummary, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue, NodeSummary,
-    NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue, OrphanSummaries, OrphanSummaryCfKey,
+    EdgeSummaries, EdgeSummary, EdgeSummaryCfKey, EdgeSummaryCfValue, NodeSummaries, NodeSummary,
+    NodeSummaryCfKey, NodeSummaryCfValue, OrphanSummaries, OrphanSummaryCfKey,
     OrphanSummaryCfValue, SummaryKind,
 };
 use super::super::summary_hash::SummaryHash;
@@ -264,31 +264,6 @@ pub(crate) fn resolve_node_summary_from_txn(
     }
 }
 
-/// Resolve a node summary from a transaction context (strict).
-///
-/// Returns an error if the summary hash is missing or not found.
-pub(crate) fn resolve_node_summary_from_txn_strict(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    summary_hash: Option<SummaryHash>,
-) -> Result<NodeSummary> {
-    let hash = summary_hash.ok_or_else(|| anyhow::anyhow!("Missing node summary hash"))?;
-
-    let summaries_cf = txn_db
-        .cf_handle(NodeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-
-    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
-
-    match txn.get_cf(summaries_cf, &key_bytes)? {
-        Some(bytes) => {
-            let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
-        }
-        None => Err(anyhow::anyhow!("Missing node summary for hash {:?}", hash)),
-    }
-}
-
 /// Resolve an edge summary from the EdgeSummaries cold CF.
 ///
 /// If the summary_hash is None or the summary is not found, returns an empty DataUrl.
@@ -379,31 +354,6 @@ pub(crate) fn resolve_edge_summary_from_txn(
             Ok(value.0)
         }
         None => Ok(EdgeSummary::from_text("")),
-    }
-}
-
-/// Resolve an edge summary from a transaction context (strict).
-///
-/// Returns an error if the summary hash is missing or not found.
-pub(crate) fn resolve_edge_summary_from_txn_strict(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    summary_hash: Option<SummaryHash>,
-) -> Result<EdgeSummary> {
-    let hash = summary_hash.ok_or_else(|| anyhow::anyhow!("Missing edge summary hash"))?;
-
-    let summaries_cf = txn_db
-        .cf_handle(EdgeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-
-    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
-
-    match txn.get_cf(summaries_cf, &key_bytes)? {
-        Some(bytes) => {
-            let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
-        }
-        None => Err(anyhow::anyhow!("Missing edge summary for hash {:?}", hash)),
     }
 }
 

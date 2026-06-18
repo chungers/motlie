@@ -105,9 +105,8 @@ pub use crate::writer::Runnable;
 
 // Re-export root mutation facade types from graph::mutation
 pub use crate::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation,
-    UpdateNode, UpdateEdge,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateEdge, UpdateNode,
 };
 
 // Re-export schema types commonly used with mutations
-pub use crate::graph::schema::{EdgeName, EdgeSummary, NodeName, NodeSummary, ActivePeriod};
+pub use crate::graph::schema::{ActivePeriod, EdgeName, EdgeSummary, NodeName, NodeSummary};
