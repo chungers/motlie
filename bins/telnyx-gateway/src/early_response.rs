@@ -8,11 +8,11 @@ use futures_util::{stream, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::conversation::{
-    ConversationProcessorInput, ConversationProcessorKind, ConversationProcessorOutput,
-};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::SharedState;
+use crate::processors::{
+    ConversationProcessorInput, ConversationProcessorKind, ConversationProcessorOutput,
+};
 use crate::speech::{self, AppendSpeechHandle, SpeechConflictPolicy, SpeechQueueRequest};
 use crate::text_calls::turns::CallerSpeechState;
 use crate::text_calls::SharedTextCallRegistry;
