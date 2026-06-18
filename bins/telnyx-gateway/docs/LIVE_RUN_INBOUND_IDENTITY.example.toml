@@ -308,6 +308,46 @@ Quantitative sample:
 - Media transport: 0 reported packet loss in the call summary.
 - WER: not scored; this was an identity/repeat quality smoke test.
 
+Structured latency/quality sample:
+
+```toml
+[result_latency]
+schema_version = 1
+source = "quality_jsonl"
+quality_events = 0
+caller_turns = 0
+raw_asr_final_events = 0
+attempted_playbacks = 0
+completed_playbacks = 0
+canceled_playbacks = 0
+dropped_quality_events = 0
+
+[[result_latency.span]]
+name = "asr.endpoint_wait"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+
+[[result_latency.span]]
+name = "tts.request_to_first_audio"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+```
+
+Structured WER status:
+
+```toml
+[wer_summary]
+schema_version = 1
+wer_passes = 0
+reason = "identity/repeat quality smoke test; no WER passage was scored"
+```
+
 Qualitative sample:
 
 - Caller heard repeat-back, so the identity processor path was active.

@@ -59,8 +59,8 @@ state_path = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identi
 mode = "manual"
 
 [conversation]
-# Gateway-local conversation processor enablement for new calls.
-enabled = true
+# Keep identity/repeat detached until post-dial `conversation smoke-test on`.
+enabled = false
 # Coalesce/debounce committed finals before processor dispatch when enabled.
 final_coalescing_enabled = true
 # Startup bridge for the runtime barge-in owner under `[voice_quality.barge_in]`.
@@ -276,9 +276,9 @@ max_inappropriate_cancel_rate = 0.03
 
 ## Procedure Snapshot
 
-- Gateway started with `--config $HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml`.
+- Gateway started with `--config $HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml`; `conversation.enabled=false` keeps identity/repeat detached during dialing.
 - Operator placed the outbound call with the privacy-preserving `getpass` dial helper.
-- After the selected call connected, operator ran `conversation smoke-test on`, explicitly ran `conversation barge-in off` for the deterministic baseline, and ran `conversation status`.
+- After the selected call connected and before the caller read the script, operator ran `conversation smoke-test on`, explicitly ran `conversation barge-in off` for the deterministic baseline, and ran `conversation status`.
 - Expected conversation status: `processor=identity`, `mode=auto`, `barge_in=off`, `attached=true`.
 - Caller read the identity/repeat script, waited for playback, then gave qualitative feedback.
 
@@ -307,6 +307,46 @@ Quantitative sample:
 - Echo suppression: 1 playback-like partial suppressed, 0 assistant-echo finals forwarded.
 - WER: optional; score only if a WER passage was read and identity repeat did not contaminate the transcript.
 
+Structured latency/quality sample:
+
+```toml
+[result_latency]
+schema_version = 1
+source = "quality_jsonl"
+quality_events = 0
+caller_turns = 0
+raw_asr_final_events = 0
+attempted_playbacks = 0
+completed_playbacks = 0
+canceled_playbacks = 0
+dropped_quality_events = 0
+
+[[result_latency.span]]
+name = "asr.endpoint_wait"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+
+[[result_latency.span]]
+name = "tts.request_to_first_audio"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+```
+
+Structured WER status:
+
+```toml
+[wer_summary]
+schema_version = 1
+wer_passes = 0
+reason = "identity/repeat quality smoke test; no WER passage was scored"
+```
+
 Qualitative sample:
 
 - Caller heard repeat-back after each committed turn.
@@ -317,7 +357,7 @@ Qualitative sample:
 Analysis:
 
 - Outbound smoke testing verifies Telnyx call control, selected outbound caller ID, media WebSocket setup, ASR, identity dispatch, streaming TTS, and playback.
-- The post-dial `conversation smoke-test on` step is required because an outbound call may connect before the operator has explicitly attached the identity smoke-test processor; it preserves barge-in, so the run must set `conversation barge-in on|off` explicitly.
+- The post-dial `conversation smoke-test on` step is the activation boundary because the outbound template starts with `conversation.enabled=false`; it preserves barge-in, so the run must set `conversation barge-in on|off` explicitly.
 - If the callee reaches voicemail, keep the record as a media-pipeline smoke test and rerun for human qualitative feedback.
 
 Next-run tuning:

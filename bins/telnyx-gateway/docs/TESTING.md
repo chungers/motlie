@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-17 | @codex-535 | Added structured WER/latency run-record blocks and clarified outbound post-dial activation. |
 | 2026-06-17 | @codex-535 | Clarified that smoke-test preserves barge-in and live tests must set barge-in explicitly. |
 | 2026-06-17 | @codex-535 | Added explicit inbound/outbound identity smoke-test procedures and redacted sample run records. |
 | 2026-06-17 | @codex-535 | Added the redacted live-run example config and updated the per-run config-as-record workflow. |
@@ -222,6 +223,86 @@ Start WER test. The museum opened before sunrise because the city expected heavy
 
 When scoring, compute one strict WER that includes any extra preface words, and
 one trimmed WER that starts at `Start WER test` and ends at `End WER test`.
+Every scored pass must be recorded in the structured run-record block below.
+
+## Required Structured Results
+
+After hangup, append machine-readable result blocks below the closing `+++`
+delimiter in the same run file. Markdown notes are allowed, but these structured
+blocks are required whenever their data exists.
+
+For each scored WER pass, append one TOML block with exact text or checksum and
+all edit counts:
+
+```toml
+[[wer_pass]]
+schema_version = 1
+reference_id = "telnyx-default-wer-v1"
+reference_text = """Start WER test. The museum opened before sunrise because the city expected heavy rain and slow traffic. Seven engineers carried blue notebooks, fragile microphones, and a small wooden clock into the quiet control room. Please record every word in this sentence, including numbers like forty two and seventeen, without adding extra phrases. The quick brown fox watched a bright red kite drift above the old stone bridge. End WER test."""
+reference_sha256 = "76ffa574dc018f2f579ee74aef068a869ae31ec39d70dd0a0cb476a015395ede"
+raw_asr_text = """Preface audio outside the scored span. Start WER test. The museum open before sunrise because the city expected heavy rain and slow traffic. Seven engineers carry blue notebooks, fragile microphones, and a small wooden clock into the quiet control room. Please record every word in this sentence, including numbers like forty to and seventeen, without adding extra phrases. The quick brown box watched a bright red kite drift above the old stone bridge. End WER test. Feedback after the scored span."""
+scored_hypothesis_text = """Start WER test. The museum open before sunrise because the city expected heavy rain and slow traffic. Seven engineers carry blue notebooks, fragile microphones, and a small wooden clock into the quiet control room. Please record every word in this sentence, including numbers like forty to and seventeen, without adding extra phrases. The quick brown box watched a bright red kite drift above the old stone bridge. End WER test."""
+trim_policy = "strict_full | start_end_markers | manual_span"
+trim_start_marker = "Start WER test"
+trim_end_marker = "End WER test"
+normalization_policy = "lowercase; strip punctuation except apostrophes; collapse whitespace; score word tokens"
+wer_tool = "motlie_telnyx_gateway::replay::wer"
+wer_tool_commit = "<git-sha>"
+reference_word_count = 70
+hypothesis_word_count = 70
+wer_percent = 5.71
+substitutions = 4
+deletions = 0
+insertions = 0
+alignment = [
+  { op = "sub", reference = "opened", hypothesis = "open" },
+  { op = "sub", reference = "carried", hypothesis = "carry" },
+  { op = "sub", reference = "two", hypothesis = "to" },
+  { op = "sub", reference = "fox", hypothesis = "box" },
+]
+```
+
+For each live run, append a stable latency/quality block. Use `null` only when a
+metric is genuinely unavailable from the run artifacts:
+
+```toml
+[result_latency]
+schema_version = 1
+source = "quality_jsonl"
+quality_events = 0
+caller_turns = 0
+raw_asr_final_events = 0
+attempted_playbacks = 0
+completed_playbacks = 0
+canceled_playbacks = 0
+dropped_quality_events = 0
+
+[[result_latency.span]]
+name = "asr.endpoint_wait"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+
+[[result_latency.span]]
+name = "tts.request_to_first_audio"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+
+[result_transport.inbound]
+codec = "PCMU"
+sample_rate_hz = 8000
+packets_total = 0
+lost_packets = 0
+reordered_frames = 0
+jitter_ms_p50 = 0
+jitter_ms_p95 = 0
+jitter_ms_max = 0
+```
 
 ## Privacy-Preserving Dial
 
@@ -248,14 +329,17 @@ PY
 Use outbound identity smoke tests when the operator needs the gateway to place
 the call. `docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml` is the committed
 redacted sample for this path. Start from a new per-run config and complete the
-Startup and Readiness Check sections before dialing. The run config must enable the identity processor,
-streaming TTS, early response, model warming, quality logging, and disabled
-barge-in as listed in the default tuning profile above.
+Startup and Readiness Check sections before dialing. The outbound sample selects
+the identity processor but intentionally starts with `conversation.enabled=false`;
+post-dial `conversation smoke-test on` is the activation boundary. This protects
+the script phase from callee greeting, voicemail, or early coordination audio.
+Streaming TTS, early response, model warming, quality logging, and disabled
+barge-in remain the deterministic baseline knobs.
 
 After the privacy-preserving outbound `dial`, enable the identity/repeat smoke
-test processor for the selected call and explicitly set the intended barge-in
-mode. `conversation smoke-test on` preserves the current barge-in setting; it
-does not reset it.
+test processor for the selected call before the caller reads the script, then
+explicitly set the intended barge-in mode. `conversation smoke-test on` preserves
+the current barge-in setting; it does not reset it.
 
 ```sh
 python3 - <<'PY'
@@ -387,10 +471,11 @@ PY
 Redact phone numbers, live public hosts, connection IDs, call IDs, and unrelated
 personal data before copying logs into issues or PR comments.
 
-Append the quantitative metrics, qualitative caller feedback, WER score when
-used, bugs/gaps, and proposed tuning changes to the same per-run TOML file below
-the closing `+++` delimiter. That file is the run record; keep it local unless
-every live routing value and personal datum has been redacted.
+Append the structured WER and latency/quality blocks, quantitative metrics,
+qualitative caller feedback, bugs/gaps, and proposed tuning changes to the same
+per-run TOML file below the closing `+++` delimiter. That file is the run record;
+keep it local unless every live routing value and personal datum has been
+redacted.
 
 If the call reaches voicemail, classify the run as a media-pipeline smoke test,
 not a valid human qualitative sample. The run can still measure dial setup,

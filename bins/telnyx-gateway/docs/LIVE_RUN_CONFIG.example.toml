@@ -313,13 +313,99 @@ Quantitative summary:
 - Outbound pacing: 3001 frames, p50 inter-frame gap 19 ms, p95 22 ms, max 79 ms, 0 underruns.
 - Telnyx call quality from hangup webhook: MOS 4.49; inbound skip packets 12; outbound skip packets 0.
 
+Structured latency/quality block:
+
+```toml
+[result_latency]
+schema_version = 1
+source = "quality_jsonl"
+quality_events = 416
+caller_turns = 16
+raw_asr_final_events = 16
+attempted_playbacks = 13
+completed_playbacks = 12
+canceled_playbacks = 1
+dropped_quality_events = 0
+
+[[result_latency.span]]
+name = "asr.endpoint_wait"
+n = 25
+min_ms = 716
+p50_ms = 740
+p95_ms = 742
+max_ms = 932
+
+[[result_latency.span]]
+name = "tts.request_to_first_audio"
+n = 13
+min_ms = 973
+p50_ms = 1841
+p95_ms = 3304
+max_ms = 4531
+
+[[result_latency.span]]
+name = "turn.finalize_to_first_audio"
+n = 13
+min_ms = 1425
+p50_ms = 3764
+p95_ms = 13459
+max_ms = 16956
+
+[[result_latency.span]]
+name = "conversation.final_debounce"
+n = 13
+min_ms = 451
+p50_ms = 1832
+p95_ms = 10982
+max_ms = 14211
+
+[result_transport.inbound]
+codec = "PCMU"
+sample_rate_hz = 8000
+packets_total = 9476
+lost_packets = 0
+reordered_frames = 0
+jitter_ms_p50 = 2
+jitter_ms_p95 = 15
+jitter_ms_max = 445
+
+[result_transport.outbound]
+frames_sent = 3001
+inter_frame_gap_ms_p50 = 19
+inter_frame_gap_ms_p95 = 22
+inter_frame_gap_ms_max = 79
+underrun_count = 0
+```
+
 WER passage result:
 
-- Reference words: 64.
-- Hypothesis words: 62.
-- WER: 15.62%.
-- Errors: 4 substitutions, 4 deletions, 2 insertions.
-- Main errors: inserted leading "yep" and duplicate "before"; `slow` -> `s`; missing `traffic`; `carried` -> `carry`; missing `control room`; `record` -> `require`; missing `phrases`; `quick` -> `correct`.
+```toml
+[[wer_pass]]
+schema_version = 1
+reference_id = "telnyx-default-wer-v1"
+reference_text = """Start WER test. The museum opened before sunrise because the city expected heavy rain and slow traffic. Seven engineers carried blue notebooks, fragile microphones, and a small wooden clock into the quiet control room. Please record every word in this sentence, including numbers like forty two and seventeen, without adding extra phrases. The quick brown fox watched a bright red kite drift above the old stone bridge. End WER test."""
+reference_sha256 = "76ffa574dc018f2f579ee74aef068a869ae31ec39d70dd0a0cb476a015395ede"
+raw_asr_text = """Preface audio outside the scored span. Start WER test. The museum open before sunrise because the city expected heavy rain and slow traffic. Seven engineers carry blue notebooks, fragile microphones, and a small wooden clock into the quiet control room. Please record every word in this sentence, including numbers like forty to and seventeen, without adding extra phrases. The quick brown box watched a bright red kite drift above the old stone bridge. End WER test. Feedback after the scored span."""
+scored_hypothesis_text = """Start WER test. The museum open before sunrise because the city expected heavy rain and slow traffic. Seven engineers carry blue notebooks, fragile microphones, and a small wooden clock into the quiet control room. Please record every word in this sentence, including numbers like forty to and seventeen, without adding extra phrases. The quick brown box watched a bright red kite drift above the old stone bridge. End WER test."""
+trim_policy = "start_end_markers"
+trim_start_marker = "Start WER test"
+trim_end_marker = "End WER test"
+normalization_policy = "lowercase; strip punctuation except apostrophes; collapse whitespace; score word tokens"
+wer_tool = "motlie_telnyx_gateway::replay::wer"
+wer_tool_commit = "<git-sha>"
+reference_word_count = 70
+hypothesis_word_count = 70
+wer_percent = 5.71
+substitutions = 4
+deletions = 0
+insertions = 0
+alignment = [
+  { op = "sub", reference = "opened", hypothesis = "open" },
+  { op = "sub", reference = "carried", hypothesis = "carry" },
+  { op = "sub", reference = "two", hypothesis = "to" },
+  { op = "sub", reference = "fox", hypothesis = "box" },
+]
+```
 
 Qualitative caller feedback captured from transcript:
 

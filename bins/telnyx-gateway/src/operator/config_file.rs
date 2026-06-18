@@ -879,7 +879,11 @@ Mentioning generation_mod here is fine because this is not config.
             assert!(config.gateway.state_path.is_some());
             assert!(config.quality_logging.path.is_some());
             assert_eq!(config.inbound.mode, InboundMode::Manual);
-            assert!(config.conversation.enabled);
+            if relative == "docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml" {
+                assert!(!config.conversation.enabled, "{relative}");
+            } else {
+                assert!(config.conversation.enabled, "{relative}");
+            }
             assert!(config.conversation.final_coalescing_enabled);
             assert!(!config.conversation.barge_in_enabled);
             assert_eq!(config.conversation.tts_backend, LiveTtsBackend::Kokoro82m);
