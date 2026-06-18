@@ -1,9 +1,11 @@
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
+use gray_matter::{engine::TOML, Matter, ParsedEntity};
 use serde::{Deserialize, Serialize};
 
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
@@ -15,6 +17,7 @@ use crate::tts::LiveTtsBackend;
 
 const DEFAULT_TELNYX_API_BASE: &str = "https://api.telnyx.com/v2";
 const DEFAULT_TELNYX_API_KEY_REF: &str = "env:TELNYX_API_KEY";
+const TOML_FRONT_MATTER_DELIMITER: &str = "+++";
 
 #[derive(Clone, Debug)]
 pub struct LoadedGatewayConfig {
@@ -33,9 +36,11 @@ impl LoadedGatewayConfig {
         let path = expand_user_path(path);
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("read gateway config {}", path.display()))?;
-        let document: GatewayConfigDocument = toml::from_str(&raw)
+        let config_toml = extract_config_toml_front_matter(&raw)
+            .with_context(|| format!("extract gateway config front matter {}", path.display()))?;
+        let document: GatewayConfigDocument = toml::from_str(config_toml.as_ref())
             .with_context(|| format!("parse gateway config {}", path.display()))?;
-        let voice_quality = VoiceQualityConfig::from_toml_str(&raw)
+        let voice_quality = VoiceQualityConfig::from_toml_str(config_toml.as_ref())
             .with_context(|| format!("parse voice_quality config {}", path.display()))?;
         Self::from_document(document, voice_quality)
             .with_context(|| format!("validate gateway config {}", path.display()))
@@ -348,6 +353,27 @@ pub fn render_state_toml(state: &GatewayState) -> String {
     .expect("gateway state TOML serializes")
 }
 
+fn extract_config_toml_front_matter(raw: &str) -> Result<Cow<'_, str>> {
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let mut matter = Matter::<TOML>::new();
+    matter.delimiter = TOML_FRONT_MATTER_DELIMITER.to_owned();
+
+    let parsed: ParsedEntity = matter.parse(raw).context("parse TOML front matter")?;
+    if !parsed.matter.is_empty() {
+        return Ok(Cow::Owned(parsed.matter));
+    }
+    if starts_with_toml_front_matter(raw) {
+        bail!("TOML front matter opened with +++ but no parsed TOML block was found");
+    }
+    Ok(Cow::Borrowed(raw))
+}
+
+fn starts_with_toml_front_matter(raw: &str) -> bool {
+    raw.lines()
+        .next()
+        .is_some_and(|line| line.trim_end_matches('\r') == TOML_FRONT_MATTER_DELIMITER)
+}
+
 fn resolve_secret_ref(secret_ref: &str) -> Result<Option<String>> {
     let Some(env_name) = secret_ref.strip_prefix("env:") else {
         bail!("unsupported telnyx.api_key_ref {secret_ref}; expected env:<NAME>");
@@ -603,6 +629,19 @@ struct SerializableQualityLogging<'a> {
 mod tests {
     use super::*;
     use crate::operator::state::GatewayState;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_CONFIG_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn write_temp_config(raw: &str) -> PathBuf {
+        let sequence = TEMP_CONFIG_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "motlie-gateway-config-test-{}-{sequence}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, raw).expect("write temp gateway config");
+        path
+    }
 
     #[test]
     fn gateway_config_loads_partial_voice_quality() {
@@ -688,6 +727,77 @@ warm_modelz = true
     }
 
     #[test]
+    fn gateway_config_loads_toml_front_matter_with_appended_report() {
+        let raw = r#"+++
+[conversation]
+enabled = true
+barge_in_enabled = false
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[voice_quality.tts]
+generation_mode = "streaming"
+prebuffer_chunks = 1
+
+[voice_quality.early_response]
+enabled = true
+boundary = "none"
++++
+# Run Results
+
+This markdown is intentionally not valid TOML.
+[not-toml
+"#;
+        let path = write_temp_config(raw);
+        let config = LoadedGatewayConfig::load(&path).expect("load hybrid front matter config");
+
+        assert!(config.conversation.enabled);
+        assert!(!config.conversation.barge_in_enabled);
+        assert_eq!(config.conversation.tts_backend, LiveTtsBackend::Kokoro82m);
+        assert_eq!(
+            config.voice_quality.tts.generation_mode,
+            crate::quality::TtsGenerationMode::Streaming
+        );
+        assert_eq!(config.voice_quality.tts.prebuffer_chunks, 1);
+        assert!(config.voice_quality.early_response.enabled);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn gateway_config_front_matter_still_rejects_unknown_quality_keys() {
+        let raw = r#"+++
+[voice_quality.tts]
+generation_mod = "streaming"
++++
+# Run Results
+
+Mentioning generation_mod here is fine because this is not config.
+"#;
+        let path = write_temp_config(raw);
+        let error = LoadedGatewayConfig::load(&path)
+            .expect_err("unknown front-matter keys should remain strict");
+
+        assert!(
+            format!("{error:?}").contains("unknown field"),
+            "unexpected error: {error:?}"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn gateway_config_front_matter_requires_closing_delimiter() {
+        let error = extract_config_toml_front_matter("+++\n[process]\ntui = true\n")
+            .expect_err("unterminated front matter should fail");
+
+        assert!(
+            error.to_string().contains("no parsed TOML block"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
     fn checked_in_gateway_config_parses_strictly() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("gateway.toml");
         let raw = std::fs::read_to_string(&path).expect("read checked-in gateway config");
@@ -723,6 +833,82 @@ warm_modelz = true
         );
         assert!(config.quality_logging.path.is_some());
         assert!(config.voice_quality.logging.enabled);
+    }
+
+    #[test]
+    fn docs_live_run_example_configs_parse_strictly() {
+        for relative in [
+            "docs/LIVE_RUN_CONFIG.example.toml",
+            "docs/LIVE_RUN_INBOUND_IDENTITY.example.toml",
+            "docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml",
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let raw = std::fs::read_to_string(&path).expect("read docs live-run example config");
+            let config =
+                LoadedGatewayConfig::load(&path).expect("load docs live-run example config");
+
+            assert!(raw.starts_with("+++\n"), "{relative}");
+            assert!(raw.contains("<telnyx-connection-id>"), "{relative}");
+            assert!(raw.contains("<telnyx-phone-number>"), "{relative}");
+            assert!(raw.contains("<public-host>"), "{relative}");
+            assert!(raw.contains("## Run Results"), "{relative}");
+            assert_eq!(config.telnyx.api_base, DEFAULT_TELNYX_API_BASE);
+            assert_eq!(config.telnyx.api_key_ref, "env:TELNYX_API_KEY");
+            assert_eq!(
+                config.telnyx.selected_connection_id.as_deref(),
+                Some("<telnyx-connection-id>")
+            );
+            assert_eq!(
+                config.telnyx.selected_phone_number.as_deref(),
+                Some("<telnyx-phone-number>")
+            );
+            assert_eq!(
+                config.gateway.webhook_url.as_deref(),
+                Some("https://<public-host>/telnyx/webhooks")
+            );
+            assert_eq!(
+                config.gateway.media_url.as_deref(),
+                Some("wss://<public-host>/telnyx/media")
+            );
+            assert_eq!(
+                config.gateway.from_number.as_deref(),
+                Some("<telnyx-phone-number>")
+            );
+            assert!(config.process.log_file.is_some());
+            assert!(config.gateway.capture_dir.is_some());
+            assert!(config.gateway.state_path.is_some());
+            assert!(config.quality_logging.path.is_some());
+            assert_eq!(config.inbound.mode, InboundMode::Manual);
+            if relative == "docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml" {
+                assert!(!config.conversation.enabled, "{relative}");
+            } else {
+                assert!(config.conversation.enabled, "{relative}");
+            }
+            assert!(config.conversation.final_coalescing_enabled);
+            assert!(!config.conversation.barge_in_enabled);
+            assert_eq!(config.conversation.tts_backend, LiveTtsBackend::Kokoro82m);
+            assert!(config.startup.warm_models);
+            assert_eq!(
+                config.voice_quality.tts.generation_mode,
+                crate::quality::TtsGenerationMode::Streaming
+            );
+            assert!(config.voice_quality.tts.chunking_enabled);
+            assert_eq!(config.voice_quality.tts.max_text_chunk_chars, 70);
+            assert_eq!(config.voice_quality.tts.first_chunk_max_chars, 40);
+            assert_eq!(config.voice_quality.tts.prebuffer_chunks, 1);
+            assert!(config.voice_quality.early_response.enabled);
+            assert_eq!(config.voice_quality.early_response.debounce_ms, 180);
+            assert_eq!(
+                config
+                    .voice_quality
+                    .early_response
+                    .max_updates_per_utterance,
+                1
+            );
+            assert!(!config.voice_quality.barge_in.enabled);
+            assert!(config.voice_quality.echo_suppression.enabled);
+            assert!(config.voice_quality.logging.enabled);
+        }
     }
 
     #[tokio::test]
