@@ -1091,6 +1091,7 @@ async fn queue_conversation_speech(
             source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
             speech_output: Some(speech_output),
+            metadata: crate::operator::state::QualityPlaybackMetadata::default(),
         },
     )
     .await

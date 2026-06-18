@@ -18,7 +18,7 @@ use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{
     asr_warm_key, tts_warm_key, CallStatus, ConversationMode, ConversationStatus, GatewayState,
-    InboundMode, LogLevel, SharedState, SpeechOutputConfig,
+    InboundMode, LogLevel, QualityPlaybackMetadata, SharedState, SpeechOutputConfig,
 };
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
@@ -32,6 +32,21 @@ use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperatorSourceChannel {
+    Tui,
+    Socket,
+}
+
+impl OperatorSourceChannel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tui => "tui",
+            Self::Socket => "socket",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GatewayContext {
     pub state: SharedState,
@@ -42,6 +57,7 @@ pub struct GatewayContext {
     pub conversation: ConversationRuntime,
     pub text_calls: SharedTextCallRegistry,
     pub session: OperatorSession,
+    pub source_channel: OperatorSourceChannel,
 }
 
 impl GatewayContext {
@@ -80,6 +96,7 @@ impl GatewayContext {
             conversation,
             text_calls: SharedTextCallRegistry::default(),
             session: OperatorSession::new(next_asr_backend),
+            source_channel: OperatorSourceChannel::Tui,
         }
     }
 
@@ -110,6 +127,7 @@ impl GatewayContext {
         )
         .with_text_calls(self.text_calls.clone());
         context.session.next_tts_backend = self.session.next_tts_backend;
+        context.source_channel = OperatorSourceChannel::Socket;
         context
     }
 
@@ -1703,8 +1721,8 @@ async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<Comm
             format!("selected call: {gateway_call_id}"),
             "conversation attached in auto mode; smoke-test identity/repeat replies require:".to_string(),
             "  conversation smoke-test on".to_string(),
-            format!("manual TTS smoke test: speak {gateway_call_id} <text to say>"),
-            "use `status` or `call show` to inspect TTS playback; use `speak cancel` to clear active speech".to_string(),
+            format!("manual speech injection: speak {gateway_call_id} <text to say>"),
+            "use `status` or `call show` to inspect injected TTS playback; use `speak cancel` to clear active speech".to_string(),
         ],
         effects: Vec::new(),
     })
@@ -1731,7 +1749,7 @@ async fn start_speech(
 ) -> DriverResult<CommandOutput> {
     if context.text_calls.contains(&gateway_call_id).await {
         return Err(DriverError::message(format!(
-            "manual speak is disabled while a text-call stream is attached for {gateway_call_id}; send agent.turn over the stream or detach it first"
+            "manual speech injection is disabled while a text-call stream is attached for {gateway_call_id}; send agent.turn over the stream or detach it first"
         )));
     }
     let backend = context.session.next_tts_backend;
@@ -1747,7 +1765,7 @@ async fn start_speech(
             tts_backend: speech_output.tts_backend,
             gateway_call_id: gateway_call_id.clone(),
             text,
-            source_label: "speak".to_string(),
+            source_label: "manual speech injection".to_string(),
             conflict_policy: speech::SpeechConflictPolicy::Reject,
             turn_finalized_at: None,
             latest_turn_finalized_at: None,
@@ -1757,12 +1775,13 @@ async fn start_speech(
             source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
             speech_output: Some(speech_output),
+            metadata: QualityPlaybackMetadata::operator_speak(context.source_channel.label()),
         },
     )
     .await
     .map_err(driver_anyhow)?;
     Ok(CommandOutput::line(format!(
-        "speak queued for {gateway_call_id} playback={}",
+        "manual speech injection queued for {gateway_call_id} playback={}",
         queued.playback_id
     )))
 }
@@ -2342,6 +2361,7 @@ async fn approve_conversation_proposal(
             source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
             speech_output: Some(speech_output),
+            metadata: QualityPlaybackMetadata::default(),
         },
     )
     .await;
@@ -3569,7 +3589,7 @@ fn gateway_root_help() -> String {
         "  status [call-id]               Show gateway status or selected call status",
         "  answer [call-id]               Answer one waiting inbound call; auto-attach conversation",
         "  dial <+e164> [--from +e164]    Place an outbound call; auto-attach conversation",
-        "  speak [call-id] <text...>      Queue debug TTS; disabled while a text-call stream is attached",
+        "  speak [call-id] <text...>      Inject manual speech; disabled while a text-call stream is attached",
         "  speak cancel [call-id]         Clear active TTS; allowed as an emergency control",
         "  conversation status [call-id]  Show attachment, mode, processor, and latest turns",
         "  conversation smoke-test on|off Enable or disable test-only identity/repeat replies",
@@ -4039,7 +4059,7 @@ fn outbound_help() -> String {
         "Place an outbound call over the existing bidirectional Telnyx media WebSocket.",
         "`dial` selects the new call and auto-attaches conversation in auto mode. The",
         "built-in conversation processor remains disabled by default, so normal live calls",
-        "transcribe without automatic replies. `speak` is manual, non-blocking, and cancellable;",
+        "transcribe without automatic replies. `speak` is manual speech injection, non-blocking, and cancellable;",
         "`speak cancel` sends Telnyx clear and drops local queued outbound audio.",
         "",
         "Conversation smoke test:",
@@ -4165,7 +4185,7 @@ fn socket_help() -> String {
         "    Detail pane scroll    transcript follow / call show polling",
         "  Outbound and M3 conversation commands are also shared:",
         "    dial <+e164> [--from +e164]",
-        "    speak [call-id] <text...>     blocked while stream attach/app-agent owns the call",
+        "    speak [call-id] <text...>     manual speech injection; blocked while stream attach/app-agent owns the call",
         "    speak cancel [call-id]        emergency clear remains available",
         "    conversation status [call-id]",
         "    conversation attach|detach [call-id]",
@@ -4178,7 +4198,7 @@ fn socket_help() -> String {
         "",
         "Source-local state:",
         "  Each socket connection has its own selected call and next ASR backend.",
-        "  `tts use` changes the source's next manual speak backend and the gateway-wide",
+        "  `tts use` changes the source's next manual speech-injection backend and the gateway-wide",
         "  conversation reply backend, because media-triggered turns are not associated",
         "  with one TUI/socket command source.",
         "  The smoke-test processor mode and barge-in mode are also gateway-wide.",
@@ -4913,8 +4933,10 @@ mod tests {
     #[tokio::test]
     async fn speak_queues_tts_frames_over_media_registry() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let (quality_tx, mut quality_rx) = mpsc::channel(16);
         let call_id = {
             let mut guard = state.write().await;
+            guard.set_quality_event_sink(QualityEventSink::with_sender(quality_tx), None);
             add_streaming_call(&mut guard, "call-1", "stream-1")
         };
         let media = SharedMediaRegistry::default();
@@ -4933,7 +4955,22 @@ mod tests {
             .await
             .expect("speak should queue TTS");
 
-        assert!(output.lines[0].contains("speak queued"));
+        assert!(output.lines[0].contains("manual speech injection queued"));
+        let playback_link = loop {
+            let event = quality_rx
+                .try_recv()
+                .expect("manual speech injection should emit playback linkage");
+            if event.event == "quality.turn.playback_linked"
+                && event.payload["link_stage"] == "queued"
+            {
+                break event;
+            }
+        };
+        assert_eq!(playback_link.payload["source"], "operator_speak");
+        assert_eq!(playback_link.payload["source_channel"], "tui");
+        assert_eq!(playback_link.payload["manual_injection"], true);
+        assert!(playback_link.payload["related_turn_id"].is_null());
+        assert!(playback_link.payload["turn_id"].is_null());
         let mut frames = 0usize;
         let mut mark_playback = None;
         for _ in 0..8 {
@@ -4989,9 +5026,11 @@ mod tests {
         let error = engine
             .run_line("speak this should not interrupt the agent stream")
             .await
-            .expect_err("manual speak should be rejected during text-call stream");
+            .expect_err("manual speech injection should be rejected during text-call stream");
 
-        assert!(error.to_string().contains("manual speak is disabled"));
+        assert!(error
+            .to_string()
+            .contains("manual speech injection is disabled"));
         assert!(error.to_string().contains("text-call stream"));
     }
 

@@ -234,12 +234,32 @@ pub struct TtsPlaybackState {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct QualityPlaybackMetadata {
+    pub source: Option<String>,
+    pub source_channel: Option<String>,
+    pub manual_injection: bool,
+    pub related_turn_id: Option<String>,
+}
+
+impl QualityPlaybackMetadata {
+    pub fn operator_speak(source_channel: impl Into<String>) -> Self {
+        Self {
+            source: Some("operator_speak".to_string()),
+            source_channel: Some(source_channel.into()),
+            manual_injection: true,
+            related_turn_id: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct QualityPlaybackLinkage {
     pub turn_id: Option<String>,
     pub coalesced_turn_ids: Vec<String>,
     pub source_asr_session_ids: Vec<String>,
     pub source_utterance_ids: Vec<String>,
     pub source_label: String,
+    pub metadata: QualityPlaybackMetadata,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -251,6 +271,7 @@ struct QualityPlaybackRecord {
     source_utterance_ids: Vec<String>,
     tts_backend: LiveTtsBackend,
     source_label: String,
+    metadata: QualityPlaybackMetadata,
     first_audio_sent: bool,
     terminal_status: Option<String>,
     terminal_reason: Option<String>,
@@ -309,6 +330,7 @@ impl QualityTurnReportState {
             source_utterance_ids: linkage.source_utterance_ids,
             tts_backend,
             source_label: linkage.source_label,
+            metadata: linkage.metadata,
             first_audio_sent: false,
             terminal_status: None,
             terminal_reason: None,
@@ -1861,6 +1883,10 @@ fn playback_link_payload(
         "source_utterance_ids": record.source_utterance_ids,
         "tts_backend": record.tts_backend.label(),
         "source_label": record.source_label,
+        "source": record.metadata.source,
+        "source_channel": record.metadata.source_channel,
+        "manual_injection": record.metadata.manual_injection,
+        "related_turn_id": record.metadata.related_turn_id,
         "first_audio_sent": record.first_audio_sent,
         "terminal_status": terminal_status,
         "terminal_reason": terminal_reason,
@@ -1998,6 +2024,7 @@ mod tests {
                 source_asr_session_ids: Vec::new(),
                 source_utterance_ids: Vec::new(),
                 source_label: "test".to_string(),
+                metadata: QualityPlaybackMetadata::default(),
             },
             Some("tts_replaced"),
         );

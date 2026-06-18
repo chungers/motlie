@@ -10,8 +10,8 @@ use crate::media::{
     SpeechClearReason, TtsFramePacketizer,
 };
 use crate::operator::state::{
-    CallStatus, LogLevel, QualityPlaybackLinkage, QualitySpanEmission, SharedState,
-    SpeechOutputConfig,
+    CallStatus, LogLevel, QualityPlaybackLinkage, QualityPlaybackMetadata, QualitySpanEmission,
+    SharedState, SpeechOutputConfig,
 };
 use crate::quality::{RedactionMode, TtsGenerationMode};
 use crate::tts::{
@@ -47,6 +47,7 @@ pub struct SpeechQueueRequest {
     pub source_utterance_ids: Vec<String>,
     pub prebuffer_chunks_override: Option<usize>,
     pub speech_output: Option<SpeechOutputConfig>,
+    pub metadata: QualityPlaybackMetadata,
 }
 
 struct SpeechJobConfigSnapshot {
@@ -108,6 +109,7 @@ struct SpeechJobBuild {
     latest_turn_finalized_at: Option<Instant>,
     turn_id: Option<String>,
     coalesced_turn_ids: Vec<String>,
+    metadata: QualityPlaybackMetadata,
     cancel: SpeechCancelToken,
     snapshot: SpeechJobConfigSnapshot,
 }
@@ -136,6 +138,7 @@ impl SpeechJob {
             latest_turn_finalized_at: build.latest_turn_finalized_at,
             turn_id: build.turn_id,
             coalesced_turn_ids: build.coalesced_turn_ids,
+            metadata: build.metadata,
             cancel: build.cancel,
         }
     }
@@ -203,7 +206,8 @@ enum AppendSpeechCommand {
     Cancel,
 }
 
-pub async fn queue_speech(
+#[cfg(test)]
+pub(crate) async fn queue_speech(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
     tts: &SharedTtsRegistry,
@@ -230,6 +234,7 @@ pub async fn queue_speech(
             source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
             speech_output: None,
+            metadata: QualityPlaybackMetadata::default(),
         },
     )
     .await
@@ -255,6 +260,7 @@ pub async fn queue_speech_with_request(
         source_utterance_ids,
         prebuffer_chunks_override,
         speech_output,
+        metadata,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
@@ -309,6 +315,7 @@ pub async fn queue_speech_with_request(
                 source_asr_session_ids: source_asr_session_ids.clone(),
                 source_utterance_ids: source_utterance_ids.clone(),
                 source_label: source_label.clone(),
+                metadata: metadata.clone(),
             },
             replaced_playback_id.as_deref(),
         );
@@ -332,6 +339,7 @@ pub async fn queue_speech_with_request(
         latest_turn_finalized_at,
         turn_id,
         coalesced_turn_ids,
+        metadata,
         cancel,
         snapshot,
     });
@@ -369,6 +377,7 @@ pub async fn queue_append_speech_with_request(
         source_utterance_ids,
         prebuffer_chunks_override,
         speech_output,
+        metadata,
     } = request;
     let request_started_at = Instant::now();
     let playback_id = format!("tts_{}", Uuid::new_v4().simple());
@@ -420,6 +429,7 @@ pub async fn queue_append_speech_with_request(
                 source_asr_session_ids: source_asr_session_ids.clone(),
                 source_utterance_ids: source_utterance_ids.clone(),
                 source_label: source_label.clone(),
+                metadata: metadata.clone(),
             },
             replaced_playback_id.as_deref(),
         );
@@ -450,6 +460,7 @@ pub async fn queue_append_speech_with_request(
             latest_turn_finalized_at,
             turn_id,
             coalesced_turn_ids,
+            metadata,
             cancel,
             snapshot,
         }),
@@ -528,6 +539,7 @@ struct SpeechJob {
     latest_turn_finalized_at: Option<Instant>,
     turn_id: Option<String>,
     coalesced_turn_ids: Vec<String>,
+    metadata: QualityPlaybackMetadata,
     cancel: SpeechCancelToken,
 }
 
@@ -1871,6 +1883,28 @@ async fn emit_speech_span(
         "tts_generation_mode".to_string(),
         serde_json::Value::String(job.tts_generation_mode.label().to_string()),
     );
+    payload.insert(
+        "manual_injection".to_string(),
+        serde_json::Value::Bool(job.metadata.manual_injection),
+    );
+    if let Some(source) = job.metadata.source.as_deref() {
+        payload.insert(
+            "source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+    }
+    if let Some(source_channel) = job.metadata.source_channel.as_deref() {
+        payload.insert(
+            "source_channel".to_string(),
+            serde_json::Value::String(source_channel.to_string()),
+        );
+    }
+    if let Some(related_turn_id) = job.metadata.related_turn_id.as_deref() {
+        payload.insert(
+            "related_turn_id".to_string(),
+            serde_json::Value::String(related_turn_id.to_string()),
+        );
+    }
     job.state.write().await.emit_quality_span_finished(
         &job.gateway_call_id,
         QualitySpanEmission {
@@ -2978,6 +3012,7 @@ mod tests {
                 source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
                 speech_output: None,
+                metadata: QualityPlaybackMetadata::default(),
             },
         )
         .await
@@ -3089,6 +3124,7 @@ mod tests {
                 source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
                 speech_output: None,
+                metadata: QualityPlaybackMetadata::default(),
             },
         )
         .await

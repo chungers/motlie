@@ -868,6 +868,7 @@ async fn start_provisional_speech(
             source_utterance_ids: vec![utterance_id.clone()],
             prebuffer_chunks_override: Some(services.provisional_max_prebuffer_frames),
             speech_output: Some(services.speech_output),
+            metadata: crate::operator::state::QualityPlaybackMetadata::default(),
         },
         vec![text],
     )

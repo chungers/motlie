@@ -5699,6 +5699,7 @@ mod tests {
                     source_asr_session_ids: vec![quality_session.asr_session_id.clone()],
                     source_utterance_ids: vec![quality_session.utterance_id.clone()],
                     source_label: "early response".to_string(),
+                    metadata: crate::operator::state::QualityPlaybackMetadata::default(),
                 },
                 None,
             );

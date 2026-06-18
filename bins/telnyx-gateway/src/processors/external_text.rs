@@ -659,6 +659,7 @@ async fn queue_append_agent_speech_with_media_wait(
                 source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
                 speech_output: Some(speech_output),
+                metadata: crate::operator::state::QualityPlaybackMetadata::default(),
             },
             initial_chunks.clone(),
         )
@@ -722,6 +723,7 @@ async fn queue_agent_speech_with_media_wait(
                 source_utterance_ids: Vec::new(),
                 prebuffer_chunks_override: None,
                 speech_output: Some(speech_output),
+                metadata: crate::operator::state::QualityPlaybackMetadata::default(),
             },
         )
         .await
