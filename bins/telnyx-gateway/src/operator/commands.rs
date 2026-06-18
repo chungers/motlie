@@ -6,7 +6,7 @@ use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegis
 use crate::call_control::{
     AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
 };
-use crate::conversation::{ConversationProcessorKind, ConversationRuntime};
+use crate::conversation::ConversationRuntime;
 use crate::early_response::{
     BoundaryRequirement, EarlyResponseAppendMode, EarlyResponseAudioMode, EarlyResponseStartTiming,
     MissingSignalPolicy,
@@ -20,6 +20,7 @@ use crate::operator::state::{
     asr_warm_key, tts_warm_key, CallStatus, ConversationMode, ConversationStatus, GatewayState,
     InboundMode, LogLevel, SharedState,
 };
+use crate::processors::ConversationProcessorKind;
 use crate::quality::{
     OnsetDuringPlaybackPolicy, QualityEventSink, QualityProfile, RedactionMode, TtsGenerationMode,
     VoiceQualityConfig,

@@ -9,9 +9,9 @@ use gray_matter::{engine::TOML, Matter, ParsedEntity};
 use serde::{Deserialize, Serialize};
 
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
-use crate::conversation::ConversationProcessorKind;
 use crate::operator::script::expand_user_path;
 use crate::operator::state::{GatewayState, InboundMode};
+use crate::processors::ConversationProcessorKind;
 use crate::quality::{QualityEventSink, VoiceQualityConfig};
 use crate::tts::LiveTtsBackend;
 
