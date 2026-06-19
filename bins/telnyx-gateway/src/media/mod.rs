@@ -35,6 +35,7 @@ use crate::operator::state::{
     speech_echo_signature, CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission,
     SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
 };
+use crate::processors::ConversationProcessorKind;
 use crate::quality::{
     insert_transcript_text_fields, transcript_plaintext_included, ActiveAsrQualitySession,
     CallerTurnEventMetadata, EchoSuppressionQualityConfig, OnsetDuringPlaybackPolicy,
@@ -1955,7 +1956,7 @@ async fn ensure_early_response_pipeline(
     media_state: &mut MediaSocketState,
     gateway_call_id: &str,
 ) {
-    if media_state.early_response.is_some() || !media_state.quality_config.early_response.enabled {
+    if media_state.early_response.is_some() {
         return;
     }
     let Some(runtime) = media_state.conversation.as_ref() else {
@@ -1975,6 +1976,11 @@ async fn ensure_early_response_pipeline(
         });
         (speech_output, processor)
     };
+    if !media_state.quality_config.early_response.enabled
+        && processor != ConversationProcessorKind::ExternalTextStream
+    {
+        return;
+    }
     let text_calls = media_state.text_calls.clone().unwrap_or_default();
     let handle = spawn_early_response_pipeline(
         gateway_call_id.to_string(),

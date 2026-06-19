@@ -68,6 +68,7 @@ async fn run_inbound_text_call_flow_inner(
                 call_url,
                 emit_partials,
                 emit_early_turns,
+                aggregation,
             } => {
                 let setup = websocket::TextCallSetup {
                     gateway_call_id: trigger.gateway_call_id.clone(),
@@ -75,6 +76,7 @@ async fn run_inbound_text_call_flow_inner(
                     direction: TextCallDirection::Inbound,
                     emit_partials,
                     emit_early_turns,
+                    aggregation,
                 };
                 if let Err(error) =
                     websocket::connect_application_stream(services.clone(), setup).await

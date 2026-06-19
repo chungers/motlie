@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,22 +8,28 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
+use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::call_control::TelnyxClient;
 use crate::early_response::{AppendOrReplace, EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
-use crate::operator::state::{CallStatus, LogLevel, SharedState, SpeechOutputConfig};
-use crate::processors::ConversationProcessorKind;
+use crate::operator::state::{
+    CallStatus, LogLevel, SharedState, SpeechOutputConfig, TtsPlaybackStatus,
+};
+use crate::processors::{
+    AgentTextStreamInput, ConversationProcessorInput, ConversationProcessorKind,
+};
 use crate::quality::TextCallQualityConfig;
+use crate::speech::{self, SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::SharedTtsRegistry;
 
 use super::offers::validate_call_url;
 use super::turns::{
-    CallerSpeechState, DebugTextStreamFrame, GatewayTextFrame, PlaybackFinishedStatus,
-    TextCallDirection, TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION,
-    TEXT_CALL_PROTOCOL,
+    AgentTextFrame, CallerSpeechState, DebugTextStreamFrame, GatewayTextFrame,
+    PlaybackFinishedStatus, TextCallAggregationPolicy, TextCallDirection,
+    TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
@@ -56,11 +62,6 @@ pub(crate) enum AgentTurnDisposition {
     Invalid,
 }
 
-pub(crate) struct AgentAppendTurn {
-    pub(crate) packer: crate::tts::StreamingSpeechTextPacker,
-    pub(crate) speech: Option<crate::speech::AppendSpeechHandle>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AgentProvisionalTerminal {
     Canceled,
@@ -71,12 +72,6 @@ pub(crate) enum AgentProvisionalTerminal {
 pub(crate) struct AgentProvisionalGeneration {
     pub(crate) generation: u64,
     pub(crate) terminal: Option<AgentProvisionalTerminal>,
-}
-
-pub(crate) struct AgentProvisionalTurn {
-    pub(crate) generation: u64,
-    pub(crate) packer: crate::tts::StreamingSpeechTextPacker,
-    pub(crate) speech: Option<crate::speech::AppendSpeechHandle>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +157,7 @@ impl TextCallTurnTracker {
         superseded
     }
 
+    #[cfg(test)]
     fn agent_turn_disposition(&self, turn_id: &str) -> AgentTurnDisposition {
         match self.turns.get(turn_id).cloned() {
             Some(TextCallTurnState::Pending { timing }) => {
@@ -183,7 +179,8 @@ impl TextCallTurnTracker {
         }
     }
 
-    pub(crate) fn accept_agent_turn(&mut self, turn_id: &str) -> AgentTurnDisposition {
+    #[cfg(test)]
+    fn accept_agent_turn(&mut self, turn_id: &str) -> AgentTurnDisposition {
         let disposition = self.agent_turn_disposition(turn_id);
         if matches!(
             disposition,
@@ -241,12 +238,6 @@ impl TextCallTurnTracker {
         }
     }
 
-    pub(crate) fn remove_turn(&mut self, turn_id: &str) {
-        if let Some(TextCallTurnState::Playing { playback_id, .. }) = self.turns.remove(turn_id) {
-            self.playback_turns.remove(&playback_id);
-        }
-    }
-
     pub(crate) fn is_playback_active(&self, playback_id: &str) -> bool {
         self.playback_turns.contains_key(playback_id)
     }
@@ -265,6 +256,7 @@ impl TextCallTurnTracker {
 #[derive(Clone)]
 pub struct SharedTextCallRegistry {
     inner: Arc<Mutex<BTreeMap<String, TextCallRegistryEntry>>>,
+    processor_inputs: Arc<Mutex<BTreeMap<String, mpsc::Sender<ConversationProcessorInput>>>>,
     next_owner: Arc<AtomicU64>,
 }
 
@@ -272,6 +264,7 @@ impl Default for SharedTextCallRegistry {
     fn default() -> Self {
         Self {
             inner: Arc::new(Mutex::new(BTreeMap::new())),
+            processor_inputs: Arc::new(Mutex::new(BTreeMap::new())),
             next_owner: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -286,6 +279,15 @@ impl SharedTextCallRegistry {
         let mut guard = self.inner.lock().await;
         if guard.contains_key(&gateway_call_id) {
             anyhow::bail!("text-call stream already attached for {gateway_call_id}");
+        }
+        if let Some(processor_tx) = self
+            .processor_inputs
+            .lock()
+            .await
+            .get(&gateway_call_id)
+            .cloned()
+        {
+            *handle.processor_tx.lock().await = Some(processor_tx);
         }
         let owner = TextCallSessionOwner(self.next_owner.fetch_add(1, Ordering::SeqCst));
         guard.insert(gateway_call_id, TextCallRegistryEntry { owner, handle });
@@ -321,21 +323,41 @@ impl SharedTextCallRegistry {
         let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let handle = TextCallSessionHandle {
             tx,
+            processor_tx: Arc::new(Mutex::new(None)),
             sequence: Arc::new(AtomicU64::new(1)),
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
-            append_turns: Arc::new(Mutex::new(BTreeMap::new())),
-            append_turn_canceled: Arc::new(Mutex::new(BTreeSet::new())),
-            provisional_turns: Arc::new(Mutex::new(BTreeMap::new())),
             provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             speech_output: SpeechOutputConfig::default(),
             emit_partials,
             emit_early_turns,
+            aggregation: TextCallAggregationPolicy::GatewayOwned,
         };
         self.claim(gateway_call_id.into(), handle)
             .await
             .expect("test session should claim text-call registry slot");
         rx
+    }
+
+    pub(crate) async fn set_processor_input_sender(
+        &self,
+        gateway_call_id: &str,
+        sender: mpsc::Sender<ConversationProcessorInput>,
+    ) {
+        self.processor_inputs
+            .lock()
+            .await
+            .insert(gateway_call_id.to_string(), sender.clone());
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        if let Some(handle) = handle {
+            *handle.processor_tx.lock().await = Some(sender);
+        }
     }
 
     async fn remove_owner(&self, gateway_call_id: &str, owner: TextCallSessionOwner) -> bool {
@@ -483,11 +505,11 @@ impl SharedTextCallRegistry {
 
     pub async fn cancel_agent_provisional_turn(
         &self,
-        media: &SharedMediaRegistry,
+        _media: &SharedMediaRegistry,
         gateway_call_id: &str,
         provisional_turn_id: &str,
         generation: u64,
-        reason: SpeechClearReason,
+        _reason: SpeechClearReason,
     ) -> bool {
         let handle = {
             self.inner
@@ -499,15 +521,15 @@ impl SharedTextCallRegistry {
         let Some(handle) = handle else {
             return false;
         };
-        crate::processors::external_text::cancel_agent_provisional_turn(
-            media,
-            &handle,
-            gateway_call_id,
-            provisional_turn_id,
-            generation,
-            reason,
-        )
-        .await
+        let mut generations = handle.provisional_generations.lock().await;
+        let Some(current) = generations.get_mut(provisional_turn_id) else {
+            return false;
+        };
+        if current.generation != generation || current.terminal.is_some() {
+            return false;
+        }
+        current.terminal = Some(AgentProvisionalTerminal::Canceled);
+        true
     }
 
     pub async fn finish_agent_provisional_turn(
@@ -526,12 +548,15 @@ impl SharedTextCallRegistry {
         let Some(handle) = handle else {
             return false;
         };
-        crate::processors::external_text::finish_agent_provisional_turn(
-            &handle,
-            provisional_turn_id,
-            generation,
-        )
-        .await
+        let mut generations = handle.provisional_generations.lock().await;
+        let Some(current) = generations.get_mut(provisional_turn_id) else {
+            return false;
+        };
+        if current.generation != generation || current.terminal.is_some() {
+            return false;
+        }
+        current.terminal = Some(AgentProvisionalTerminal::Committed);
+        true
     }
 
     pub async fn send_early_response_playback_started(
@@ -565,6 +590,83 @@ impl SharedTextCallRegistry {
 
     fn normalized_score(score: Option<f32>) -> Option<f32> {
         score.filter(|score| score.is_finite() && *score >= 0.0 && *score <= 1.0)
+    }
+
+    pub async fn send_replaced_playback_canceled(
+        &self,
+        gateway_call_id: &str,
+        replaced_playback_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        let replaced_turn_id = handle
+            .turns
+            .lock()
+            .await
+            .close_playback(replaced_playback_id);
+        if let Some(turn_id) = replaced_turn_id.as_ref() {
+            send_playback_finished(&handle, turn_id.clone(), PlaybackFinishedStatus::Canceled)
+                .await?;
+        }
+        Ok(replaced_turn_id)
+    }
+
+    pub(crate) async fn start_agent_playback_if_active(
+        &self,
+        gateway_call_id: &str,
+        turn_id: &str,
+        playback_id: String,
+        fallback_timing: TextCallTurnTiming,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        let disposition = handle.turns.lock().await.append_turn_disposition(turn_id);
+        match disposition {
+            AgentTurnDisposition::Accepted { timing } => {
+                handle
+                    .turns
+                    .lock()
+                    .await
+                    .start_playback(turn_id.to_string(), playback_id, timing);
+                handle
+                    .send(GatewayTextFrame::PlaybackStarted {
+                        turn_id: turn_id.to_string(),
+                        sequence: handle.next_sequence(),
+                    })
+                    .await?;
+                Ok(true)
+            }
+            AgentTurnDisposition::Superseded => {
+                handle.turns.lock().await.close_superseded(turn_id);
+                send_playback_finished(
+                    &handle,
+                    turn_id.to_string(),
+                    PlaybackFinishedStatus::Superseded,
+                )
+                .await?;
+                Ok(false)
+            }
+            AgentTurnDisposition::Invalid => {
+                let _ = fallback_timing;
+                Ok(false)
+            }
+        }
     }
 
     pub async fn send_caller_turn(
@@ -636,10 +738,23 @@ impl SharedTextCallRegistry {
         let Some(turn_id) = turn_id else {
             return false;
         };
-        crate::processors::external_text::cancel_append_turn(&handle, &turn_id).await;
-        let _ = crate::processors::external_text::send_playback_finished(&handle, turn_id, status)
-            .await;
+        let _ = send_playback_finished(&handle, turn_id, status).await;
         true
+    }
+
+    pub async fn is_playback_active(&self, gateway_call_id: &str, playback_id: &str) -> bool {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return false;
+        };
+        let active = handle.turns.lock().await.is_playback_active(playback_id);
+        active
     }
 
     pub async fn send_session_end(&self, gateway_call_id: &str, reason: impl Into<String>) {
@@ -674,15 +789,14 @@ struct TextCallRegistryEntry {
 pub(crate) struct TextCallSessionHandle {
     pub(crate) tx: mpsc::Sender<GatewayTextFrame>,
     pub(crate) sequence: Arc<AtomicU64>,
+    pub(crate) processor_tx: Arc<Mutex<Option<mpsc::Sender<ConversationProcessorInput>>>>,
     pub(crate) turns: Arc<Mutex<TextCallTurnTracker>>,
-    pub(crate) append_turns: Arc<Mutex<BTreeMap<String, AgentAppendTurn>>>,
-    pub(crate) append_turn_canceled: Arc<Mutex<BTreeSet<String>>>,
-    pub(crate) provisional_turns: Arc<Mutex<BTreeMap<String, AgentProvisionalTurn>>>,
     pub(crate) provisional_generations: Arc<Mutex<BTreeMap<String, AgentProvisionalGeneration>>>,
     pub(crate) config: TextCallSessionConfig,
     pub(crate) speech_output: SpeechOutputConfig,
     pub(crate) emit_partials: bool,
     pub(crate) emit_early_turns: bool,
+    pub(crate) aggregation: TextCallAggregationPolicy,
 }
 
 async fn record_agent_provisional_generation(
@@ -781,6 +895,7 @@ pub struct TextCallSetup {
     pub direction: TextCallDirection,
     pub emit_partials: bool,
     pub emit_early_turns: bool,
+    pub aggregation: TextCallAggregationPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -789,6 +904,7 @@ pub struct DebugTextCallSetup {
     pub direction: TextCallDirection,
     pub emit_partials: bool,
     pub emit_early_turns: bool,
+    pub aggregation: TextCallAggregationPolicy,
 }
 
 fn text_call_session_handle(
@@ -796,22 +912,22 @@ fn text_call_session_handle(
     speech_output: SpeechOutputConfig,
     emit_partials: bool,
     emit_early_turns: bool,
+    aggregation: TextCallAggregationPolicy,
 ) -> (TextCallSessionHandle, mpsc::Receiver<GatewayTextFrame>) {
     let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
     let handle = TextCallSessionHandle {
         tx,
+        processor_tx: Arc::new(Mutex::new(None)),
         sequence: Arc::new(AtomicU64::new(1)),
         turns: Arc::new(Mutex::new(TextCallTurnTracker::new(
             session_config.max_active_turns,
         ))),
-        append_turns: Arc::new(Mutex::new(BTreeMap::new())),
-        append_turn_canceled: Arc::new(Mutex::new(BTreeSet::new())),
-        provisional_turns: Arc::new(Mutex::new(BTreeMap::new())),
         provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
         config: session_config,
         speech_output,
         emit_partials,
         emit_early_turns,
+        aggregation,
     };
     (handle, rx)
 }
@@ -864,6 +980,7 @@ pub async fn connect_application_stream(
         speech_output,
         setup.emit_partials,
         setup.emit_early_turns,
+        setup.aggregation,
     );
     let owner = services
         .registry
@@ -908,6 +1025,7 @@ where
         speech_output,
         setup.emit_partials,
         setup.emit_early_turns,
+        setup.aggregation,
     );
     let owner = services
         .registry
@@ -926,9 +1044,6 @@ where
     )
     .await;
 
-    handle.append_turns.lock().await.clear();
-    handle.append_turn_canceled.lock().await.clear();
-    handle.provisional_turns.lock().await.clear();
     handle.provisional_generations.lock().await.clear();
     handle.turns.lock().await.clear();
     services
@@ -936,6 +1051,230 @@ where
         .remove_owner(&setup.gateway_call_id, owner)
         .await;
     result
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProvisionalGenerationStatus {
+    Active,
+    Stale { current_generation: u64 },
+    Future { current_generation: u64 },
+    Closed(AgentProvisionalTerminal),
+    Unknown,
+}
+
+fn classify_provisional_generation(
+    current_generation: u64,
+    terminal: Option<AgentProvisionalTerminal>,
+    generation: u64,
+) -> ProvisionalGenerationStatus {
+    if generation < current_generation {
+        ProvisionalGenerationStatus::Stale { current_generation }
+    } else if generation > current_generation {
+        ProvisionalGenerationStatus::Future { current_generation }
+    } else if let Some(terminal) = terminal {
+        ProvisionalGenerationStatus::Closed(terminal)
+    } else {
+        ProvisionalGenerationStatus::Active
+    }
+}
+
+async fn ensure_agent_provisional_generation(
+    handle: &TextCallSessionHandle,
+    provisional_turn_id: &str,
+    generation: u64,
+) -> ProvisionalGenerationStatus {
+    let mut guard = handle.provisional_generations.lock().await;
+    let Some(current) = guard.get(provisional_turn_id).copied() else {
+        if handle.aggregation == TextCallAggregationPolicy::AgentOwned {
+            guard.insert(
+                provisional_turn_id.to_string(),
+                AgentProvisionalGeneration {
+                    generation,
+                    terminal: None,
+                },
+            );
+            return ProvisionalGenerationStatus::Active;
+        }
+        return ProvisionalGenerationStatus::Unknown;
+    };
+    classify_provisional_generation(current.generation, current.terminal, generation)
+}
+
+async fn handle_agent_message(
+    services: &TextCallStreamServices,
+    gateway_call_id: &str,
+    handle: &TextCallSessionHandle,
+    text: &str,
+) -> anyhow::Result<()> {
+    let frame: AgentTextFrame = serde_json::from_str(text).context("decode app text-call frame")?;
+    handle_agent_frame(services, gateway_call_id, handle, frame).await
+}
+
+async fn handle_agent_frame(
+    services: &TextCallStreamServices,
+    gateway_call_id: &str,
+    handle: &TextCallSessionHandle,
+    frame: AgentTextFrame,
+) -> anyhow::Result<()> {
+    match &frame {
+        AgentTextFrame::AgentTurnPartial {
+            turn_id, append, ..
+        } => {
+            if !append {
+                send_error_frame(handle, "invalid_partial", "agent.turn.partial must append")
+                    .await?;
+                return Ok(());
+            }
+            let disposition = handle.turns.lock().await.append_turn_disposition(turn_id);
+            let timing = match disposition {
+                AgentTurnDisposition::Accepted { timing } => timing,
+                AgentTurnDisposition::Superseded => {
+                    finish_superseded_turn(handle, turn_id.clone()).await?;
+                    return Ok(());
+                }
+                AgentTurnDisposition::Invalid => {
+                    send_error_frame(handle, "invalid_turn", "turn is not active").await?;
+                    return Ok(());
+                }
+            };
+            send_agent_processor_input(gateway_call_id, handle, frame, Some(timing)).await?;
+        }
+        AgentTextFrame::AgentTurn { turn_id, .. } => {
+            let disposition = handle.turns.lock().await.append_turn_disposition(turn_id);
+            let timing = match disposition {
+                AgentTurnDisposition::Accepted { timing } => timing,
+                AgentTurnDisposition::Superseded => {
+                    finish_superseded_turn(handle, turn_id.clone()).await?;
+                    return Ok(());
+                }
+                AgentTurnDisposition::Invalid => {
+                    send_error_frame(handle, "invalid_turn", "turn is not active").await?;
+                    return Ok(());
+                }
+            };
+            send_agent_processor_input(gateway_call_id, handle, frame, Some(timing)).await?;
+        }
+        AgentTextFrame::AgentTurnProvisionalPartial {
+            provisional_turn_id,
+            generation,
+            append,
+            ..
+        } => {
+            if !append {
+                send_error_frame(
+                    handle,
+                    "invalid_provisional_partial",
+                    "agent.turn.provisional.partial must append",
+                )
+                .await?;
+                return Ok(());
+            }
+            if !agent_provisional_generation_is_active(handle, provisional_turn_id, *generation)
+                .await?
+            {
+                return Ok(());
+            }
+            send_agent_processor_input(gateway_call_id, handle, frame, None).await?;
+        }
+        AgentTextFrame::AgentTurnProvisional {
+            provisional_turn_id,
+            generation,
+            ..
+        } => {
+            if !agent_provisional_generation_is_active(handle, provisional_turn_id, *generation)
+                .await?
+            {
+                return Ok(());
+            }
+            send_agent_processor_input(gateway_call_id, handle, frame, None).await?;
+        }
+        AgentTextFrame::AgentClose { reason } => {
+            handle
+                .send(GatewayTextFrame::SessionEnd {
+                    reason: reason.clone().unwrap_or_else(|| "agent.close".to_string()),
+                    sequence: handle.next_sequence(),
+                })
+                .await?;
+            hangup_gateway_call(services, gateway_call_id, "agent requested close").await?;
+        }
+    }
+    Ok(())
+}
+
+async fn agent_provisional_generation_is_active(
+    handle: &TextCallSessionHandle,
+    provisional_turn_id: &str,
+    generation: u64,
+) -> anyhow::Result<bool> {
+    match ensure_agent_provisional_generation(handle, provisional_turn_id, generation).await {
+        ProvisionalGenerationStatus::Active => Ok(true),
+        ProvisionalGenerationStatus::Stale { .. } => {
+            send_error_frame(
+                handle,
+                "stale_provisional_generation",
+                "provisional generation is older than the active generation",
+            )
+            .await?;
+            Ok(false)
+        }
+        ProvisionalGenerationStatus::Future { .. } => {
+            send_error_frame(
+                handle,
+                "invalid_provisional_generation",
+                "provisional generation is newer than the active gateway generation",
+            )
+            .await?;
+            Ok(false)
+        }
+        ProvisionalGenerationStatus::Closed(_) | ProvisionalGenerationStatus::Unknown => {
+            send_error_frame(
+                handle,
+                "closed_provisional_generation",
+                "provisional generation is no longer active",
+            )
+            .await?;
+            Ok(false)
+        }
+    }
+}
+
+async fn send_agent_processor_input(
+    gateway_call_id: &str,
+    handle: &TextCallSessionHandle,
+    frame: AgentTextFrame,
+    timing: Option<TextCallTurnTiming>,
+) -> anyhow::Result<()> {
+    let processor_tx = handle.processor_tx.lock().await.clone();
+    let Some(processor_tx) = processor_tx else {
+        send_error_frame(
+            handle,
+            "processor_unavailable",
+            "conversation processor pipeline is not ready",
+        )
+        .await?;
+        return Ok(());
+    };
+    processor_tx
+        .send(ConversationProcessorInput::AgentTextStream(
+            AgentTextStreamInput {
+                call_id: gateway_call_id.to_string(),
+                frame,
+                timing,
+                config: handle.config,
+                speech_output: handle.speech_output,
+                aggregation: handle.aggregation,
+            },
+        ))
+        .await
+        .context("send agent frame to conversation processor")
+}
+
+async fn finish_superseded_turn(
+    handle: &TextCallSessionHandle,
+    turn_id: String,
+) -> anyhow::Result<()> {
+    handle.turns.lock().await.close_superseded(&turn_id);
+    send_playback_finished(handle, turn_id, PlaybackFinishedStatus::Superseded).await
 }
 
 async fn run_debug_text_call_session<R, W>(
@@ -1041,7 +1380,7 @@ where
                 }
 
                 if let Err(error) =
-                    crate::processors::external_text::handle_agent_message(&services, &gateway_call_id, &handle, message).await
+                    handle_agent_message(&services, &gateway_call_id, &handle, message).await
                 {
                     log_text_call_error(&services.state, &gateway_call_id, error).await;
                     write_json_line(
@@ -1096,20 +1435,20 @@ async fn run_text_call_session<W, R>(
             message = read.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(error) = crate::processors::external_text::handle_agent_message(
+                        if let Err(error) = handle_agent_message(
                             &services,
                             &gateway_call_id,
                             &handle,
                             text.as_str(),
                         ).await {
                             log_text_call_error(&services.state, &gateway_call_id, error).await;
-                            let _ = crate::processors::external_text::send_error_frame(&handle, "protocol_error", "invalid text-call message").await;
+                            let _ = send_error_frame(&handle, "protocol_error", "invalid text-call message").await;
                             let _ = hangup_gateway_call(&services, &gateway_call_id, "text-call protocol error").await;
                             break;
                         }
                     }
                     Some(Ok(Message::Binary(_))) => {
-                        let _ = crate::processors::external_text::send_error_frame(&handle, "binary_not_allowed", "text-call protocol accepts JSON text frames only").await;
+                        let _ = send_error_frame(&handle, "binary_not_allowed", "text-call protocol accepts JSON text frames only").await;
                         let _ = hangup_gateway_call(&services, &gateway_call_id, "binary text-call frame").await;
                         break;
                     }
@@ -1124,9 +1463,6 @@ async fn run_text_call_session<W, R>(
         }
     }
 
-    handle.append_turns.lock().await.clear();
-    handle.append_turn_canceled.lock().await.clear();
-    handle.provisional_turns.lock().await.clear();
     handle.provisional_generations.lock().await.clear();
     handle.turns.lock().await.clear();
     services
@@ -1144,7 +1480,95 @@ pub async fn queue_fallback_and_wait(
     gateway_call_id: String,
     text: String,
 ) -> anyhow::Result<()> {
-    crate::processors::external_text::queue_fallback_and_wait(services, gateway_call_id, text).await
+    let (config, speech_output) = text_call_session_config(services, &gateway_call_id).await;
+    let queued = speech::queue_speech_with_request(
+        &services.state,
+        &services.media,
+        &services.tts,
+        SpeechQueueRequest {
+            tts_backend: speech_output.tts_backend,
+            gateway_call_id: gateway_call_id.clone(),
+            text: text.clone(),
+            source_label: "text-call fallback".to_string(),
+            conflict_policy: if config.latest_response_wins {
+                SpeechConflictPolicy::CancelAndReplace
+            } else {
+                SpeechConflictPolicy::Reject
+            },
+            turn_finalized_at: None,
+            latest_turn_finalized_at: None,
+            turn_id: None,
+            coalesced_turn_ids: Vec::new(),
+            source_asr_session_ids: Vec::new(),
+            source_utterance_ids: Vec::new(),
+            prebuffer_chunks_override: None,
+            speech_output: Some(speech_output),
+            metadata: crate::operator::state::QualityPlaybackMetadata::default(),
+        },
+    )
+    .await?;
+    wait_for_playback_terminal_without_turn(
+        &services.state,
+        &gateway_call_id,
+        &queued.playback_id,
+        config.playback_wait_timeout,
+    )
+    .await;
+    Ok(())
+}
+
+async fn wait_for_playback_terminal_without_turn(
+    state: &SharedState,
+    gateway_call_id: &str,
+    playback_id: &str,
+    playback_wait_timeout: Duration,
+) {
+    let deadline = Instant::now() + playback_wait_timeout;
+    loop {
+        if playback_terminal_status(state, gateway_call_id, playback_id)
+            .await
+            .is_some()
+            || Instant::now() >= deadline
+        {
+            return;
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn playback_terminal_status(
+    state: &SharedState,
+    gateway_call_id: &str,
+    playback_id: &str,
+) -> Option<PlaybackFinishedStatus> {
+    let guard = state.read().await;
+    let Some(call) = guard.calls.get(gateway_call_id) else {
+        return Some(PlaybackFinishedStatus::Failed);
+    };
+    if matches!(call.status, CallStatus::Ended | CallStatus::Failed) {
+        return Some(PlaybackFinishedStatus::Failed);
+    }
+    call.tts.as_ref().and_then(|tts| {
+        if tts.playback_id == playback_id {
+            playback_finished_status(tts.status)
+        } else {
+            None
+        }
+    })
+}
+
+pub(crate) fn playback_finished_status(
+    status: TtsPlaybackStatus,
+) -> Option<PlaybackFinishedStatus> {
+    match status {
+        TtsPlaybackStatus::Completed => Some(PlaybackFinishedStatus::Completed),
+        TtsPlaybackStatus::Canceled => Some(PlaybackFinishedStatus::Canceled),
+        TtsPlaybackStatus::Failed => Some(PlaybackFinishedStatus::Failed),
+        TtsPlaybackStatus::Queued
+        | TtsPlaybackStatus::Playing
+        | TtsPlaybackStatus::MarkSent
+        | TtsPlaybackStatus::Canceling => None,
+    }
 }
 
 pub fn append_or_replace_label(value: AppendOrReplace) -> &'static str {
@@ -1170,6 +1594,34 @@ fn early_cancel_reason_label(reason: EarlyResponseCancelReason) -> &'static str 
         EarlyResponseCancelReason::SessionEnded => "session_ended",
         EarlyResponseCancelReason::Hangup => "hangup",
     }
+}
+
+pub(crate) async fn send_error_frame(
+    handle: &TextCallSessionHandle,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> anyhow::Result<()> {
+    handle
+        .send(GatewayTextFrame::Error {
+            code: code.into(),
+            message: message.into(),
+            sequence: handle.next_sequence(),
+        })
+        .await
+}
+
+pub(crate) async fn send_playback_finished(
+    handle: &TextCallSessionHandle,
+    turn_id: String,
+    status: PlaybackFinishedStatus,
+) -> anyhow::Result<()> {
+    handle
+        .send(GatewayTextFrame::PlaybackFinished {
+            turn_id,
+            sequence: handle.next_sequence(),
+            status,
+        })
+        .await
 }
 
 pub(crate) async fn hangup_gateway_call(
@@ -1234,8 +1686,11 @@ async fn log_text_call_error(state: &SharedState, gateway_call_id: &str, error: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::early_response::{AppendOrReplace, EarlyResponseEvent};
-    use crate::processors::external_text::playback_finished_status;
+    use crate::early_response::{
+        spawn_early_response_pipeline, AppendOrReplace, EarlyResponseEvent, EarlyResponseInput,
+        EarlyResponsePipelineHandle, EarlyResponsePipelineServices, EarlyResponsePolicy,
+    };
+    use crate::processors::ConversationProcessorKind;
     use crate::text_calls::turns::AgentTextFrame;
     use std::sync::Arc;
     use tokio::time;
@@ -1554,18 +2009,23 @@ mod tests {
 
     #[tokio::test]
     async fn replaced_playback_emits_canceled_finished_frame() {
+        let registry = SharedTextCallRegistry::default();
         let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let handle = test_handle(tx);
+        registry
+            .claim("call-replaced".to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
         handle.turns.lock().await.start_playback(
             "turn-old".to_string(),
             "tts-old".to_string(),
             test_turn_timing(),
         );
 
-        let closed_turn =
-            crate::processors::external_text::send_replaced_playback_canceled(&handle, "tts-old")
-                .await
-                .expect("canceled frame should send");
+        let closed_turn = registry
+            .send_replaced_playback_canceled("call-replaced", "tts-old")
+            .await
+            .expect("canceled frame should send");
 
         assert_eq!(closed_turn.as_deref(), Some("turn-old"));
         assert!(matches!(
@@ -1591,6 +2051,7 @@ mod tests {
         let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let mut handle = test_handle(tx);
         handle.speech_output.tts_backend = LiveTtsBackend::Piper;
+        handle.emit_early_turns = true;
         services
             .registry
             .claim(call_id.to_string(), handle.clone())
@@ -1638,12 +2099,13 @@ mod tests {
         let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let mut handle = test_handle(tx);
         handle.speech_output.tts_backend = LiveTtsBackend::Piper;
+        handle.emit_early_turns = true;
+        handle.aggregation = TextCallAggregationPolicy::AgentOwned;
         services
             .registry
             .claim(call_id.to_string(), handle.clone())
             .await
             .expect("test session should claim registry slot");
-
         send_agent_frame(
             &services,
             call_id,
@@ -1695,12 +2157,15 @@ mod tests {
         let provisional_turn_id = "pt-provisional-cancel";
         let (services, _media_rx) = test_services(call_id).await;
         let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
-        let handle = test_handle(tx);
+        let mut handle = test_handle(tx);
+        handle.emit_early_turns = true;
+        handle.aggregation = TextCallAggregationPolicy::AgentOwned;
         services
             .registry
             .claim(call_id.to_string(), handle.clone())
             .await
             .expect("test session should claim registry slot");
+        let pipeline = attach_agent_processor_pipeline(&services, call_id, &handle).await;
 
         send_agent_frame(
             &services,
@@ -1736,31 +2201,30 @@ mod tests {
         )
         .await;
 
-        assert!(
-            crate::processors::external_text::cancel_agent_provisional_turn(
-                &services.media,
-                &handle,
-                call_id,
-                provisional_turn_id,
-                3,
-                crate::media::SpeechClearReason::CancelAndReplace,
-            )
-            .await
-        );
+        assert!(pipeline.try_send(EarlyResponseInput::CancelProvisional {
+            call_id: call_id.to_string(),
+            provisional_turn_id: provisional_turn_id.to_string(),
+            generation: 3,
+            reason: EarlyResponseCancelReason::CallerBargeIn,
+        }));
+        time::timeout(Duration::from_secs(2), async {
+            loop {
+                if services
+                    .media
+                    .active_speech_playback_id(call_id)
+                    .await
+                    .is_none()
+                {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("provisional cancel should clear active playback");
         assert_eq!(
             services.media.active_speech_playback_id(call_id).await,
             None
-        );
-        assert!(
-            !crate::processors::external_text::cancel_agent_provisional_turn(
-                &services.media,
-                &handle,
-                call_id,
-                provisional_turn_id,
-                3,
-                crate::media::SpeechClearReason::CancelAndReplace,
-            )
-            .await
         );
         let guard = services.state.read().await;
         let call = guard.calls.get(call_id).expect("call exists");
@@ -1920,15 +2384,16 @@ mod tests {
         });
         time::sleep(Duration::from_millis(50)).await;
         assert!(
-            crate::processors::external_text::cancel_agent_provisional_turn(
-                &services.media,
-                &handle,
-                call_id,
-                provisional_turn_id,
-                1,
-                crate::media::SpeechClearReason::CancelAndReplace,
-            )
-            .await
+            services
+                .registry
+                .cancel_agent_provisional_turn(
+                    &services.media,
+                    call_id,
+                    provisional_turn_id,
+                    1,
+                    crate::media::SpeechClearReason::CancelAndReplace,
+                )
+                .await
         );
         let (media_tx, _media_rx) = mpsc::channel(128);
         services
@@ -1945,7 +2410,6 @@ mod tests {
             services.media.active_speech_playback_id(call_id).await,
             None
         );
-        assert!(handle.provisional_turns.lock().await.is_empty());
         assert_eq!(
             handle
                 .provisional_generations
@@ -1994,7 +2458,7 @@ mod tests {
             .await;
         });
         time::sleep(Duration::from_millis(50)).await;
-        crate::processors::external_text::cancel_append_turn(&handle, turn_id).await;
+        handle.turns.lock().await.turns.remove(turn_id);
         let (media_tx, _media_rx) = mpsc::channel(128);
         services
             .media
@@ -2010,8 +2474,6 @@ mod tests {
             services.media.active_speech_playback_id(call_id).await,
             None
         );
-        assert!(handle.append_turns.lock().await.is_empty());
-        assert!(handle.append_turn_canceled.lock().await.contains(turn_id));
     }
 
     #[tokio::test]
@@ -2242,10 +2704,50 @@ mod tests {
         handle: &TextCallSessionHandle,
         frame: AgentTextFrame,
     ) {
+        ensure_agent_processor_pipeline(services, call_id, handle).await;
         let encoded = serde_json::to_string(&frame).expect("agent frame serializes");
-        crate::processors::external_text::handle_agent_message(services, call_id, handle, &encoded)
+        handle_agent_message(services, call_id, handle, &encoded)
             .await
             .expect("agent frame should be handled without protocol error");
+    }
+
+    async fn ensure_agent_processor_pipeline(
+        services: &TextCallStreamServices,
+        call_id: &str,
+        handle: &TextCallSessionHandle,
+    ) {
+        if handle.processor_tx.lock().await.is_some() {
+            return;
+        }
+        let _pipeline = attach_agent_processor_pipeline(services, call_id, handle).await;
+    }
+
+    async fn attach_agent_processor_pipeline(
+        services: &TextCallStreamServices,
+        call_id: &str,
+        handle: &TextCallSessionHandle,
+    ) -> EarlyResponsePipelineHandle {
+        assert!(
+            handle.processor_tx.lock().await.is_none(),
+            "agent processor pipeline already attached"
+        );
+        let pipeline = spawn_early_response_pipeline(
+            call_id.to_string(),
+            EarlyResponsePolicy {
+                enabled: true,
+                ..EarlyResponsePolicy::smoke_identity_test_policy()
+            },
+            EarlyResponsePipelineServices {
+                state: services.state.clone(),
+                media_registry: services.media.clone(),
+                tts: services.tts.clone(),
+                text_calls: services.registry.clone(),
+                speech_output: handle.speech_output,
+                processor: ConversationProcessorKind::ExternalTextStream,
+            },
+        );
+        *handle.processor_tx.lock().await = Some(pipeline.processor_input_sender());
+        pipeline
     }
 
     async fn collect_media_until_mark(
@@ -2302,16 +2804,15 @@ mod tests {
     fn test_handle(tx: mpsc::Sender<GatewayTextFrame>) -> TextCallSessionHandle {
         TextCallSessionHandle {
             tx,
+            processor_tx: Arc::new(Mutex::new(None)),
             sequence: Arc::new(AtomicU64::new(1)),
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
-            append_turns: Arc::new(Mutex::new(BTreeMap::new())),
-            append_turn_canceled: Arc::new(Mutex::new(BTreeSet::new())),
-            provisional_turns: Arc::new(Mutex::new(BTreeMap::new())),
             provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             speech_output: SpeechOutputConfig::default(),
             emit_partials: false,
             emit_early_turns: false,
+            aggregation: TextCallAggregationPolicy::GatewayOwned,
         }
     }
 }

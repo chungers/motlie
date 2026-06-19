@@ -582,6 +582,12 @@ async fn dispatch_final_transcript_to_processor(
                     "conversation.processor.early_response_output_ignored_for_committed_turn"
                 );
             }
+            ConversationProcessorOutput::CommittedSpeech(_) => {
+                tracing::warn!(
+                    gateway_call_id,
+                    "conversation.processor.committed_speech_output_ignored_for_committed_turn"
+                );
+            }
             ConversationProcessorOutput::Error(error) => {
                 state
                     .write()

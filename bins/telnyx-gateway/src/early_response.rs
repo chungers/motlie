@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::{stream, Stream, StreamExt};
@@ -9,16 +10,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
-use crate::operator::state::SharedState;
-use crate::operator::state::SpeechOutputConfig;
+use crate::operator::state::{CallStatus, SharedState, SpeechOutputConfig, TtsPlaybackStatus};
 use crate::processors::{
-    ConversationProcessorInput, ConversationProcessorKind, ConversationProcessorOutput,
+    CommittedSpeechIntent, ConversationProcessorInput, ConversationProcessorKind,
+    ConversationProcessorOutput,
 };
 use crate::speech::{self, AppendSpeechHandle, SpeechConflictPolicy, SpeechQueueRequest};
-use crate::text_calls::turns::CallerSpeechState;
+use crate::text_calls::turns::{CallerSpeechState, PlaybackFinishedStatus};
 use crate::text_calls::SharedTextCallRegistry;
 use crate::tts::SharedTtsRegistry;
 use tokio::sync::{mpsc, Notify};
+use tokio::time;
 
 const EARLY_RESPONSE_INPUT_CAPACITY: usize = 8;
 const EARLY_RESPONSE_EVENT_CAPACITY: usize = 32;
@@ -302,6 +304,7 @@ pub enum EarlyResponseIntent {
         generation: u64,
         text: String,
         append_or_replace: AppendOrReplace,
+        final_fragment: bool,
     },
     Cancel {
         provisional_turn_id: String,
@@ -370,6 +373,7 @@ pub struct EarlyResponsePipelineHandle {
     call_id: String,
     partial_tx: EarlyResponsePartialSender,
     control_tx: mpsc::UnboundedSender<EarlyResponseInput>,
+    _processor_tx: mpsc::Sender<ConversationProcessorInput>,
 }
 
 impl EarlyResponsePipelineHandle {
@@ -395,6 +399,11 @@ impl EarlyResponsePipelineHandle {
             call_id: self.call_id.clone(),
             reason,
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn processor_input_sender(&self) -> mpsc::Sender<ConversationProcessorInput> {
+        self._processor_tx.clone()
     }
 }
 
@@ -604,7 +613,9 @@ pub fn spawn_early_response_pipeline(
     let (partial_tx, partial_rx) = early_response_partial_lane();
     let (control_tx, control_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EARLY_RESPONSE_EVENT_CAPACITY);
+    let (processor_tx, processor_rx) = mpsc::channel(EARLY_RESPONSE_EVENT_CAPACITY);
     let registry = ProvisionalPlaybackRegistry::default();
+    let committed_registry = CommittedPlaybackRegistry::default();
     let cancel_sink = PipelinePriorityCancelSink {
         registry: registry.clone(),
         media_registry: services.media_registry.clone(),
@@ -613,8 +624,17 @@ pub fn spawn_early_response_pipeline(
     let audio_mode = policy.audio_mode;
     let provisional_max_prebuffer_frames = policy.provisional_max_prebuffer_frames;
     let processor = services.processor;
-    let processor_inputs = receiver_stream(event_rx).map(ConversationProcessorInput::EarlyResponse);
+    let processor_inputs = processor_input_stream(event_rx, processor_rx);
     let outputs = processor.process_stream(processor_inputs);
+    let register_text_calls = services.text_calls.clone();
+    let register_call_id = call_id.clone();
+    let register_processor_tx = processor_tx.clone();
+    tokio::spawn(async move {
+        register_text_calls
+            .set_processor_input_sender(&register_call_id, register_processor_tx)
+            .await;
+    });
+
     let intent_services = EarlyResponseIntentServices {
         state: services.state.clone(),
         media_registry: services.media_registry.clone(),
@@ -623,6 +643,7 @@ pub fn spawn_early_response_pipeline(
         text_calls: services.text_calls.clone(),
         registry: registry.clone(),
         audio_mode,
+        committed_registry: committed_registry.clone(),
         provisional_max_prebuffer_frames,
     };
     tokio::spawn(async move {
@@ -633,6 +654,13 @@ pub fn spawn_early_response_pipeline(
                     if let Err(error) = handle_early_response_intent(&intent_services, intent).await
                     {
                         tracing::warn!(error = %error, "early_response.intent.failed");
+                    }
+                }
+                ConversationProcessorOutput::CommittedSpeech(intent) => {
+                    if let Err(error) =
+                        handle_committed_speech_intent(&intent_services, intent).await
+                    {
+                        tracing::warn!(error = %error, "conversation.committed_speech.intent.failed");
                     }
                 }
                 ConversationProcessorOutput::Command(_) => {
@@ -659,9 +687,39 @@ pub fn spawn_early_response_pipeline(
         ));
         while let Some(event) = events.as_mut().next().await {
             event_registry.observe_event(&event);
+            match &event {
+                EarlyResponseEvent::Canceled {
+                    call_id,
+                    provisional_turn_id,
+                    generation,
+                    reason,
+                    ..
+                } => {
+                    cancel_provisional_playback(
+                        &event_registry,
+                        &services.media_registry,
+                        call_id,
+                        provisional_turn_id,
+                        *generation,
+                        *reason,
+                    );
+                }
+                EarlyResponseEvent::Committed {
+                    call_id,
+                    provisional_turn_id,
+                    generation,
+                    ..
+                } => {
+                    if let Some(handle) =
+                        event_registry.finish_generation(call_id, provisional_turn_id, *generation)
+                    {
+                        let _ = handle.finish().await;
+                    }
+                }
+                EarlyResponseEvent::Started { .. } | EarlyResponseEvent::Updated { .. } => {}
+            }
             spawn_early_response_event_forward(
                 event_text_calls.clone(),
-                services.media_registry.clone(),
                 event_call_id.clone(),
                 event.clone(),
             );
@@ -675,55 +733,22 @@ pub fn spawn_early_response_pipeline(
         call_id,
         partial_tx,
         control_tx,
+        _processor_tx: processor_tx,
     }
 }
 
 fn spawn_early_response_event_forward(
     text_calls: SharedTextCallRegistry,
-    media_registry: SharedMediaRegistry,
     call_id: String,
     event: EarlyResponseEvent,
 ) {
     tokio::spawn(async move {
-        let cleanup_event = event.clone();
         if let Err(error) = text_calls.send_early_response_event(&call_id, event).await {
             tracing::warn!(
                 gateway_call_id = call_id.as_str(),
                 error = %error,
                 "text_call.early_response.forward_failed"
             );
-        }
-        match cleanup_event {
-            EarlyResponseEvent::Canceled {
-                provisional_turn_id,
-                generation,
-                reason,
-                ..
-            } => {
-                let clear_reason = match reason {
-                    EarlyResponseCancelReason::CallerBargeIn => SpeechClearReason::BargeIn,
-                    _ => SpeechClearReason::CancelAndReplace,
-                };
-                text_calls
-                    .cancel_agent_provisional_turn(
-                        &media_registry,
-                        &call_id,
-                        &provisional_turn_id,
-                        generation,
-                        clear_reason,
-                    )
-                    .await;
-            }
-            EarlyResponseEvent::Committed {
-                provisional_turn_id,
-                generation,
-                ..
-            } => {
-                text_calls
-                    .finish_agent_provisional_turn(&call_id, &provisional_turn_id, generation)
-                    .await;
-            }
-            EarlyResponseEvent::Started { .. } | EarlyResponseEvent::Updated { .. } => {}
         }
     });
 }
@@ -734,6 +759,16 @@ fn receiver_stream<T>(rx: mpsc::Receiver<T>) -> impl Stream<Item = T> {
     })
 }
 
+fn processor_input_stream(
+    event_rx: mpsc::Receiver<EarlyResponseEvent>,
+    processor_rx: mpsc::Receiver<ConversationProcessorInput>,
+) -> impl Stream<Item = ConversationProcessorInput> {
+    stream::select(
+        receiver_stream(event_rx).map(ConversationProcessorInput::EarlyResponse),
+        receiver_stream(processor_rx),
+    )
+}
+
 struct EarlyResponseIntentServices {
     state: SharedState,
     media_registry: SharedMediaRegistry,
@@ -741,6 +776,7 @@ struct EarlyResponseIntentServices {
     speech_output: SpeechOutputConfig,
     text_calls: SharedTextCallRegistry,
     registry: ProvisionalPlaybackRegistry,
+    committed_registry: CommittedPlaybackRegistry,
     audio_mode: EarlyResponseAudioMode,
     provisional_max_prebuffer_frames: usize,
 }
@@ -757,7 +793,11 @@ async fn handle_early_response_intent(
             generation,
             text,
             append_or_replace,
+            final_fragment,
         } => {
+            services
+                .registry
+                .observe_agent_generation(&call_id, &provisional_turn_id, generation);
             if text.trim().is_empty()
                 || !services
                     .registry
@@ -781,8 +821,10 @@ async fn handle_early_response_intent(
                         services,
                         call_id,
                         provisional_turn_id,
+                        utterance_id,
                         generation,
                         text,
+                        final_fragment,
                     )
                     .await
                 }
@@ -794,6 +836,7 @@ async fn handle_early_response_intent(
                         utterance_id,
                         generation,
                         text,
+                        final_fragment,
                     )
                     .await
                 }
@@ -849,6 +892,7 @@ async fn start_provisional_speech(
     utterance_id: String,
     generation: u64,
     text: String,
+    final_fragment: bool,
 ) -> anyhow::Result<()> {
     let (handle, queued) = speech::queue_append_speech_with_request(
         &services.state,
@@ -901,6 +945,9 @@ async fn start_provisional_speech(
             queued.playback_id.clone(),
         )
         .await?;
+    if final_fragment {
+        handle.finish().await.context("finish provisional speech")?;
+    }
     tracing::info!(
         gateway_call_id = call_id.as_str(),
         utterance_id = utterance_id.as_str(),
@@ -916,27 +963,234 @@ async fn append_provisional_speech(
     services: &EarlyResponseIntentServices,
     call_id: String,
     provisional_turn_id: String,
+    utterance_id: String,
     generation: u64,
     text: String,
+    final_fragment: bool,
 ) -> anyhow::Result<()> {
     let Some(handle) =
         services
             .registry
             .promote_for_append(&call_id, &provisional_turn_id, generation)
     else {
-        tracing::warn!(
-            gateway_call_id = call_id.as_str(),
-            provisional_turn_id = provisional_turn_id.as_str(),
+        return start_provisional_speech(
+            services,
+            call_id,
+            provisional_turn_id,
+            utterance_id,
             generation,
-            "early_response.provisional.append_without_playback"
-        );
-        return Ok(());
+            text,
+            final_fragment,
+        )
+        .await;
     };
     handle
         .append_chunks(vec![text], false)
         .await
         .context("append provisional speech")?;
+    if final_fragment {
+        handle.finish().await.context("finish provisional speech")?;
+    }
     Ok(())
+}
+
+async fn handle_committed_speech_intent(
+    services: &EarlyResponseIntentServices,
+    intent: CommittedSpeechIntent,
+) -> anyhow::Result<()> {
+    let text = intent.text.trim().to_string();
+    if text.is_empty() {
+        if intent.final_fragment {
+            if let Some(handle) = services
+                .committed_registry
+                .remove(&intent.call_id, &intent.turn_id)
+            {
+                handle.finish().await.context("finish committed speech")?;
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(handle) = services
+        .committed_registry
+        .get(&intent.call_id, &intent.turn_id)
+    {
+        handle
+            .append_chunks(vec![text], false)
+            .await
+            .context("append committed speech")?;
+        if intent.final_fragment {
+            handle.finish().await.context("finish committed speech")?;
+            services
+                .committed_registry
+                .remove(&intent.call_id, &intent.turn_id);
+        }
+        return Ok(());
+    }
+
+    let (handle, queued) = queue_committed_speech_with_media_wait(services, &intent, text).await?;
+    if let Some(replaced_playback_id) = queued.replaced_playback_id.as_deref() {
+        services
+            .text_calls
+            .send_replaced_playback_canceled(&intent.call_id, replaced_playback_id)
+            .await?;
+    }
+    if !services
+        .text_calls
+        .start_agent_playback_if_active(
+            &intent.call_id,
+            &intent.turn_id,
+            queued.playback_id.clone(),
+            intent.timing,
+        )
+        .await?
+    {
+        handle.cancel_now();
+        queue_provisional_media_clear(
+            &services.media_registry,
+            &intent.call_id,
+            &queued.playback_id,
+            EarlyResponseCancelReason::StaleGeneration,
+        );
+        return Ok(());
+    }
+    spawn_committed_playback_terminal_waiter(
+        services.state.clone(),
+        services.text_calls.clone(),
+        intent.call_id.clone(),
+        queued.playback_id.clone(),
+        intent.config.playback_wait_timeout,
+    );
+    if intent.final_fragment {
+        handle.finish().await.context("finish committed speech")?;
+    } else {
+        services
+            .committed_registry
+            .insert(intent.call_id, intent.turn_id, handle);
+    }
+    Ok(())
+}
+
+async fn queue_committed_speech_with_media_wait(
+    services: &EarlyResponseIntentServices,
+    intent: &CommittedSpeechIntent,
+    text: String,
+) -> anyhow::Result<(AppendSpeechHandle, speech::QueuedSpeech)> {
+    let media_ready_deadline = Instant::now() + intent.config.media_ready_timeout;
+    let playback_ready_deadline = Instant::now() + intent.config.playback_wait_timeout;
+    let conflict_policy = if intent.config.latest_response_wins {
+        SpeechConflictPolicy::CancelAndReplace
+    } else {
+        SpeechConflictPolicy::Reject
+    };
+    loop {
+        match speech::queue_append_speech_with_request(
+            &services.state,
+            &services.media_registry,
+            &services.tts,
+            SpeechQueueRequest {
+                tts_backend: intent.speech_output.tts_backend,
+                gateway_call_id: intent.call_id.clone(),
+                text: text.clone(),
+                source_label: "text-call agent.turn".to_string(),
+                conflict_policy,
+                turn_finalized_at: Some(intent.timing.finalized_at),
+                latest_turn_finalized_at: Some(intent.timing.finalized_at),
+                turn_id: Some(intent.turn_id.clone()),
+                coalesced_turn_ids: vec![intent.turn_id.clone()],
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
+                prebuffer_chunks_override: None,
+                speech_output: Some(intent.speech_output),
+                metadata: crate::operator::state::QualityPlaybackMetadata::default(),
+            },
+            vec![text.clone()],
+        )
+        .await
+        {
+            Ok(queued) => return Ok(queued),
+            Err(error) => {
+                let detail = format!("{error:#}");
+                if detail.contains("media stream is not ready")
+                    && Instant::now() < media_ready_deadline
+                {
+                    time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                if !intent.config.latest_response_wins
+                    && detail.contains("active speech job")
+                    && Instant::now() < playback_ready_deadline
+                {
+                    time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+}
+
+fn spawn_committed_playback_terminal_waiter(
+    state: SharedState,
+    text_calls: SharedTextCallRegistry,
+    call_id: String,
+    playback_id: String,
+    playback_wait_timeout: Duration,
+) {
+    tokio::spawn(async move {
+        let deadline = Instant::now() + playback_wait_timeout;
+        loop {
+            if !text_calls.is_playback_active(&call_id, &playback_id).await {
+                return;
+            }
+            if let Some(status) = playback_terminal_status(&state, &call_id, &playback_id).await {
+                let _ = text_calls
+                    .finish_playback(&call_id, &playback_id, status)
+                    .await;
+                return;
+            }
+            if Instant::now() >= deadline {
+                let _ = text_calls
+                    .finish_playback(&call_id, &playback_id, PlaybackFinishedStatus::Failed)
+                    .await;
+                return;
+            }
+            time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+}
+
+async fn playback_terminal_status(
+    state: &SharedState,
+    gateway_call_id: &str,
+    playback_id: &str,
+) -> Option<PlaybackFinishedStatus> {
+    let guard = state.read().await;
+    let Some(call) = guard.calls.get(gateway_call_id) else {
+        return Some(PlaybackFinishedStatus::Failed);
+    };
+    if matches!(call.status, CallStatus::Ended | CallStatus::Failed) {
+        return Some(PlaybackFinishedStatus::Failed);
+    }
+    call.tts.as_ref().and_then(|tts| {
+        if tts.playback_id == playback_id {
+            playback_finished_status(tts.status)
+        } else {
+            None
+        }
+    })
+}
+
+fn playback_finished_status(status: TtsPlaybackStatus) -> Option<PlaybackFinishedStatus> {
+    match status {
+        TtsPlaybackStatus::Completed => Some(PlaybackFinishedStatus::Completed),
+        TtsPlaybackStatus::Canceled => Some(PlaybackFinishedStatus::Canceled),
+        TtsPlaybackStatus::Failed => Some(PlaybackFinishedStatus::Failed),
+        TtsPlaybackStatus::Queued
+        | TtsPlaybackStatus::Playing
+        | TtsPlaybackStatus::MarkSent
+        | TtsPlaybackStatus::Canceling => None,
+    }
 }
 
 fn cancel_provisional_playback(
@@ -1077,6 +1331,18 @@ impl ProvisionalPlaybackRegistry {
         }
     }
 
+    fn observe_agent_generation(&self, call_id: &str, provisional_turn_id: &str, generation: u64) {
+        let mut guard = self.inner.lock().expect("early response registry lock");
+        let base = ProvisionalBaseKey {
+            call_id: call_id.to_string(),
+            provisional_turn_id: provisional_turn_id.to_string(),
+        };
+        let entry = guard.latest.entry(base).or_insert(generation);
+        if generation > *entry {
+            *entry = generation;
+        }
+    }
+
     fn is_current(&self, call_id: &str, provisional_turn_id: &str, generation: u64) -> bool {
         let guard = self.inner.lock().expect("early response registry lock");
         let base = ProvisionalBaseKey {
@@ -1123,7 +1389,7 @@ impl ProvisionalPlaybackRegistry {
             provisional_turn_id: provisional_turn_id.to_string(),
         };
         let playback = guard.playbacks.get_mut(&base)?;
-        if generation <= playback.generation {
+        if generation < playback.generation {
             return None;
         }
         playback.generation = generation;
@@ -1163,6 +1429,47 @@ impl ProvisionalPlaybackRegistry {
         };
         let playback = guard.playbacks.remove(&base)?;
         (playback.generation == generation).then_some(playback.handle)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CommittedPlaybackKey {
+    call_id: String,
+    turn_id: String,
+}
+
+#[derive(Clone, Default)]
+struct CommittedPlaybackRegistry {
+    inner: Arc<Mutex<HashMap<CommittedPlaybackKey, AppendSpeechHandle>>>,
+}
+
+impl CommittedPlaybackRegistry {
+    fn get(&self, call_id: &str, turn_id: &str) -> Option<AppendSpeechHandle> {
+        self.inner
+            .lock()
+            .expect("committed playback registry lock")
+            .get(&CommittedPlaybackKey {
+                call_id: call_id.to_string(),
+                turn_id: turn_id.to_string(),
+            })
+            .cloned()
+    }
+
+    fn insert(&self, call_id: String, turn_id: String, handle: AppendSpeechHandle) {
+        self.inner
+            .lock()
+            .expect("committed playback registry lock")
+            .insert(CommittedPlaybackKey { call_id, turn_id }, handle);
+    }
+
+    fn remove(&self, call_id: &str, turn_id: &str) -> Option<AppendSpeechHandle> {
+        self.inner
+            .lock()
+            .expect("committed playback registry lock")
+            .remove(&CommittedPlaybackKey {
+                call_id: call_id.to_string(),
+                turn_id: turn_id.to_string(),
+            })
     }
 }
 
@@ -1433,7 +1740,22 @@ where
             })
             .map(|(key, active)| (key.clone(), active.clone()))
         else {
-            return Vec::new();
+            self.cancel_sink.cancel_provisional(
+                ProvisionalPlaybackKey {
+                    call_id: call_id.to_string(),
+                    provisional_turn_id: provisional_turn_id.to_string(),
+                    generation,
+                    playback_id: None,
+                },
+                reason,
+            );
+            return vec![EarlyResponseEvent::Canceled {
+                provisional_turn_id: provisional_turn_id.to_string(),
+                call_id: call_id.to_string(),
+                utterance_id: provisional_turn_id.to_string(),
+                generation,
+                reason,
+            }];
         };
         self.cancel_active(key, active, reason)
     }
@@ -1780,6 +2102,7 @@ mod tests {
             ),
             text_calls: SharedTextCallRegistry::default(),
             registry: registry.clone(),
+            committed_registry: CommittedPlaybackRegistry::default(),
             audio_mode: EarlyResponseAudioMode::PrepareOnly,
             provisional_max_prebuffer_frames: 1,
         };
@@ -1793,6 +2116,7 @@ mod tests {
                 generation: 1,
                 text: "hello".to_string(),
                 append_or_replace: AppendOrReplace::Replace,
+                final_fragment: false,
             },
         )
         .await

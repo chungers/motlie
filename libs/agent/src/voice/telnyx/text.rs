@@ -8,6 +8,14 @@ pub const TEXT_CALL_PARTIALS_EXTENSION: &str = "motlie.telnyx.text.partials.v1";
 pub const TEXT_CALL_EARLY_TURNS_EXTENSION: &str = "motlie.telnyx.text.early_turns.v1";
 pub const TEXT_CALL_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextCallAggregationPolicy {
+    #[default]
+    GatewayOwned,
+    AgentOwned,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TextCallDirection {
@@ -105,6 +113,8 @@ pub struct AcceptCallResponse {
     pub accept: bool,
     #[serde(default)]
     pub extensions: Vec<String>,
+    #[serde(default)]
+    pub aggregation: TextCallAggregationPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

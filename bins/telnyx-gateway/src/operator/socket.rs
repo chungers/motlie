@@ -11,7 +11,7 @@ use crate::operator::commands::{GatewayCommand, GatewayContext};
 use crate::operator::script::run_operator_line;
 use crate::operator::state::CallDirection;
 use crate::text_calls::turns::{
-    DebugTextStreamFrame, TextCallDirection, TEXT_CALL_DEBUG_EXTENSION,
+    DebugTextStreamFrame, TextCallAggregationPolicy, TextCallDirection, TEXT_CALL_DEBUG_EXTENSION,
     TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 use crate::text_calls::websocket::{run_debug_text_stream, DebugTextCallSetup};
@@ -271,6 +271,7 @@ where
             direction,
             emit_partials: request.emit_partials,
             emit_early_turns: request.emit_early_turns,
+            aggregation: TextCallAggregationPolicy::GatewayOwned,
         },
         reader,
         writer,
