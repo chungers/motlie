@@ -578,12 +578,6 @@ impl NodeById {
     }
 }
 
-impl NodeById {
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<(NodeName, NodeSummary, Version)> {
-        self.execute(processor).await
-    }
-}
 
 impl NodesByIdsMulti {
     /// Create a new batch query request for current versions.
@@ -624,10 +618,6 @@ impl NodeFragmentsByIdTimeRange {
         timestamp_in_range(ts, &self.time_range)
     }
 
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        self.execute(processor).await
-    }
 }
 
 impl EdgeFragmentsByIdTimeRange {
@@ -689,12 +679,6 @@ impl EdgeSummaryBySrcDstName {
     }
 }
 
-impl EdgeSummaryBySrcDstName {
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<(EdgeSummary, Option<EdgeWeight>, Version)> {
-        self.execute(processor).await
-    }
-}
 
 impl OutgoingEdges {
     /// Create a new query request for current versions.
@@ -715,10 +699,6 @@ impl OutgoingEdges {
         }
     }
 
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>> {
-        self.execute(processor).await
-    }
 }
 
 impl IncomingEdges {
@@ -740,10 +720,6 @@ impl IncomingEdges {
         }
     }
 
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>> {
-        self.execute(processor).await
-    }
 }
 
 impl AllNodes {
@@ -1906,10 +1882,6 @@ impl NodesBySummaryHash {
         }
     }
 
-    /// Execute this query directly on a processor (for testing and simple use cases).
-    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<NodeSummaryLookupResult>> {
-        self.execute(processor).await
-    }
 }
 
 /// Query parameters for finding edges by summary hash.

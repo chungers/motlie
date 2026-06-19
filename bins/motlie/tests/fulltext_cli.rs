@@ -23,17 +23,6 @@ struct TestData {
     typescript_id: Id,
 }
 
-impl TestData {
-    fn all_node_ids(&self) -> Vec<Id> {
-        vec![
-            self.rust_id,
-            self.python_id,
-            self.javascript_id,
-            self.typescript_id,
-        ]
-    }
-}
-
 /// Helper to run the motlie CLI command
 fn run_motlie(args: &[&str]) -> (bool, String, String) {
     let output = Command::new("cargo")
