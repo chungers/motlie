@@ -1,6 +1,7 @@
 # DESIGN — #541: Modular conversation-processor pipeline (telnyx-agent on the canonical path)
 
 ## Changelog
+- 2026-06-18 — @ops48-orchestrator — Add §9: David-approved DECISION (modular refactor = #541 closeout; default A, B opt-in, safety always-on) + the two reviewer-required amendments (committed-output coverage; input-contract channel) + migration + cite fixes.
 - 2026-06-18 — @ops48-orchestrator — Initial proposal. Captures the modular-pipeline design that closes the PR #548 P1 concurrency races (A/B/C) and completes #541 structurally, instead of hardening the bespoke agent path in place. For review/validation by @claude-548-rv (software/perf architect) and @codex-548-rv (realtime streaming-voice architect).
 
 ## Status
@@ -88,3 +89,26 @@ Both feed the **same** shared OUTPUT stage. A and B differ only by including/omi
 3. The INPUT-stage composition mechanism — per-`ConversationProcessorKind`? per-call policy? How does `emit_partials` relate?
 4. Any correctness gap in B (agent-owned aggregation) vs the gateway's stale/superseded handling that the gateway must still enforce regardless of placement (e.g. barge-in / final-turn supersede)?
 5. Migration: can this land incrementally on top of `2d54a1e5` (keep its race-safety as a transitional net) or is it a clean replacement of the `external_text` path?
+
+## 9. DECISION + locked amendments (David approved 2026-06-18)
+David approved the **modular refactor as the #541 closeout** (supersedes hardening `2d54a1e` in place). Both reviewers (@claude-548-rv, @codex-548-rv) endorsed the direction. Locked decisions + required amendments to fold into implementation:
+
+### Decision (§6)
+- **Default = A (gateway-owned aggregation).** One generation/cancel/supersede authority; matches the local Identity path; makes P1-A unrepresentable.
+- **B (agent-owned aggregation) = constrained per-call opt-in, experimental** until its frame contract specifies raw-partial-correction / final-supersede / barge-in delivery + gateway enforcement. Expose a single explicit per-call policy field, e.g. `aggregation: GatewayOwned | AgentOwned` — NOT overloaded onto `emit_partials`/`emit_early_turns` (those are bridge-forwarding flags, orthogonal).
+- **HARD INVARIANT:** the gateway-owned **safety-cancel** stage — **barge-in, final-turn supersede, stale-generation rejection** — is **always-on regardless of A/B**. The input stage must be SPLIT into (i) response-trigger aggregation (omittable for B) and (ii) safety cancels/supersede (never omittable), or the safety cancels relocated onto the shared output stage. Omitting the whole input stage for B would silently drop barge-in/supersede.
+
+### Required amendments before/with implementation
+1. **Committed-output coverage (REQUIRED — @codex-548-rv).** The shared output stage must own the **committed** agent streaming path (`AgentTurn`/`AgentTurnPartial`), not only provisional. `EarlyResponseIntent` (early_response.rs ~300-318) currently models provisional speak/cancel/commit only, and the committed transcript path ignores early-response outputs (conversation.rs ~579-583). Add a committed speech-output intent/stage under the same authoritative registry — **otherwise P1-C (committed append-turn race) remains a bespoke path and #541 is only partially closed.**
+2. **Input contract + channel (REQUIRED — @claude-548-rv V-2).** Add a new `ConversationProcessorInput` variant carrying agent **return** frames (`AgentTurnProvisional*`/`AgentTurn`) + a channel from the WS read task into the pipeline input. The WS task decodes/writes frames and feeds bounded channels; it must NOT call `external_text::handle_agent_message` or `speech::queue_*` directly. Preserve in-order delivery + bounded back-pressure (reuse the early-response mpsc model). No session/text-call state removed-and-held across awaits.
+
+### Scope note (V-1 — smaller than §5 implies)
+The shared registry/output spine **already runs per-call for agent calls** (`spawn_early_response_pipeline` gated on `early_response.enabled`, not on kind) — it is live and authoritative but idle while the bespoke `external_text` path does the work. So change #2 (lift the output stage) is largely already present; the real work is change #1 (emit provisional+committed intents from agent frames + the input-contract channel) and change #4 (**delete** the bespoke `provisional_turns`/`append_turns` maps + direct `speech::queue_*`).
+
+### Migration (§8 Q5)
+Flag-gated **clean replacement**, not additive coexistence: introduce the shared-registry agent path behind a per-call flag, **never run both paths for one call** (double-drives TTS), use `2d54a1e`'s race tests as the behavioral oracle for stale/cancel/commit semantics, cut over per-call, then **delete** the bespoke maps + direct queueing. Do not keep the tombstoned bespoke machine as a permanent transitional net.
+
+### Cite corrections (per reviewers; non-substantive)
+At head `2d54a1e`: `ExternalTextStream → None` is `processors/mod.rs:61` (not :68); `ProvisionalPlaybackRegistry` is defined ~`early_response.rs:1031` (the `:9` cite was a `use` line); `process_stream` `processors/mod.rs:65-73`. The pre-`2d54a1e` `remove→await→re-insert` prose in §1 describes the state before the tombstone fix; §7 credits that fix — the duplication critique holds regardless.
+
+— Implementation directive: build per this section; PR into the #548 branch; both reviewers re-validate; shepherd to merge into PR #548.
