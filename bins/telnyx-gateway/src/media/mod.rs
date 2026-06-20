@@ -1966,7 +1966,7 @@ async fn ensure_early_response_pipeline(
         let guard = state.read().await;
         let call = guard.calls.get(gateway_call_id);
         let processor = call
-            .map(|call| call.conversation.processor)
+            .map(|call| call.conversation.processor.clone())
             .unwrap_or_default();
         let speech_output = call.map(|call| call.speech_output).unwrap_or_else(|| {
             crate::operator::state::SpeechOutputConfig::from_quality(

@@ -1,5 +1,7 @@
 use futures_util::{future, Stream, StreamExt};
-use motlie_agent::voice::turn_batching::{Accumulating, Prompt, TurnBatchReset};
+use motlie_agent::voice::turn_batching::{
+    Accumulating, IdentityTurnBatcherConfig, Prompt, TurnBatchReset,
+};
 use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 
 use crate::early_response::{EarlyResponseEvent, EarlyResponseIntent};
@@ -71,13 +73,13 @@ pub enum ConversationProcessorOutput {
 }
 
 /// Static processor selection for a call.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum ConversationProcessorKind {
     /// Repeat accepted caller text exactly for both committed and provisional paths.
     #[default]
     Identity,
     /// Gateway-hosted turn-batching identity/debug processor.
-    TurnBatchedIdentity,
+    TurnBatchedIdentity { config: IdentityTurnBatcherConfig },
     /// External app/telnyx-agent text stream attached through the text-call protocol.
     ///
     /// This is adapter-backed: inbound caller turns are delivered by the text-call
@@ -87,16 +89,27 @@ pub enum ConversationProcessorKind {
 }
 
 impl ConversationProcessorKind {
-    pub fn label(self) -> &'static str {
+    pub fn turn_batched_identity(config: IdentityTurnBatcherConfig) -> Self {
+        Self::TurnBatchedIdentity { config }
+    }
+
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Identity => "identity",
-            Self::TurnBatchedIdentity => "turn_batched_identity",
+            Self::TurnBatchedIdentity { .. } => "turn_batched_identity",
             Self::ExternalTextStream => "external_text_stream",
         }
     }
 
+    pub fn identity_turn_batcher_config(&self) -> Option<&IdentityTurnBatcherConfig> {
+        match self {
+            Self::TurnBatchedIdentity { config } => Some(config),
+            Self::Identity | Self::ExternalTextStream => None,
+        }
+    }
+
     pub fn process_input(
-        self,
+        &self,
         input: ConversationProcessorInput,
     ) -> Option<ConversationProcessorOutput> {
         if matches!(input, ConversationProcessorInput::AgentTextStream(_)) {
@@ -104,8 +117,8 @@ impl ConversationProcessorKind {
         }
         match self {
             Self::Identity => identity::IdentityRepeatConversationProcessor.process_input(input),
-            Self::TurnBatchedIdentity => {
-                turn_batching::TurnBatchedIdentityConversationProcessor::default()
+            Self::TurnBatchedIdentity { config } => {
+                turn_batching::TurnBatchedIdentityConversationProcessor::new(config.clone())
                     .process_input(input)
             }
             Self::ExternalTextStream => {
@@ -121,8 +134,12 @@ impl ConversationProcessorKind {
     where
         S: Stream<Item = ConversationProcessorInput> + Send,
     {
-        let mut turn_batched_processor = (self == Self::TurnBatchedIdentity)
-            .then(turn_batching::TurnBatchedIdentityConversationProcessor::default);
+        let mut turn_batched_processor = match &self {
+            Self::TurnBatchedIdentity { config } => {
+                Some(turn_batching::TurnBatchedIdentityConversationProcessor::new(config.clone()))
+            }
+            Self::Identity | Self::ExternalTextStream => None,
+        };
         inputs.filter_map(move |input| {
             let output = match turn_batched_processor.as_mut() {
                 Some(processor) => processor.process_input(input),
@@ -130,6 +147,53 @@ impl ConversationProcessorKind {
             };
             future::ready(output)
         })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ConversationProcessorHost {
+    kind: ConversationProcessorKind,
+    turn_batched_processor: Option<turn_batching::TurnBatchedIdentityConversationProcessor>,
+}
+
+impl ConversationProcessorHost {
+    pub(crate) fn new(kind: ConversationProcessorKind) -> Self {
+        let turn_batched_processor = match &kind {
+            ConversationProcessorKind::TurnBatchedIdentity { config } => {
+                Some(turn_batching::TurnBatchedIdentityConversationProcessor::new(config.clone()))
+            }
+            ConversationProcessorKind::Identity | ConversationProcessorKind::ExternalTextStream => {
+                None
+            }
+        };
+        Self {
+            kind,
+            turn_batched_processor,
+        }
+    }
+
+    pub(crate) fn is_kind(&self, kind: &ConversationProcessorKind) -> bool {
+        &self.kind == kind
+    }
+
+    pub(crate) fn process_input(
+        &mut self,
+        input: ConversationProcessorInput,
+    ) -> Option<ConversationProcessorOutput> {
+        match self.turn_batched_processor.as_mut() {
+            Some(processor) => processor.process_input(input),
+            None => self.kind.process_input(input),
+        }
+    }
+
+    pub(crate) fn complete_pending(
+        &mut self,
+        batch_id: &str,
+        epoch: u64,
+    ) -> Option<ConversationProcessorOutput> {
+        self.turn_batched_processor
+            .as_mut()
+            .and_then(|processor| processor.complete_pending(batch_id, epoch))
     }
 }
 

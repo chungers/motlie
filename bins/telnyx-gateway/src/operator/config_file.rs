@@ -8,6 +8,8 @@ use chrono::Utc;
 use gray_matter::{engine::TOML, Matter, ParsedEntity};
 use serde::{Deserialize, Serialize};
 
+use motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig;
+
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::operator::script::expand_user_path;
 use crate::operator::state::{GatewayState, InboundMode};
@@ -111,7 +113,7 @@ impl LoadedGatewayConfig {
         state.config.conversation_final_coalescing_enabled =
             self.conversation.final_coalescing_enabled;
         state.config.conversation_barge_in_enabled = self.conversation.barge_in_enabled;
-        state.config.conversation_processor = self.conversation.processor;
+        state.config.conversation_processor = self.conversation.processor.clone();
         state.inbound_mode = self.inbound.mode;
         state.conversation_tts_backend = self.conversation.tts_backend;
         state.set_quality_config(self.voice_quality.clone());
@@ -286,12 +288,27 @@ impl Default for ConversationConfig {
 impl ConversationConfig {
     fn from_document(document: ConversationConfigDocument) -> Result<Self> {
         let defaults = Self::default();
+        let identity_turn_batcher = document.identity_turn_batcher;
         let processor = match document.processor.as_deref().unwrap_or("identity") {
-            "identity" => ConversationProcessorKind::Identity,
+            "identity" => {
+                if identity_turn_batcher.is_some() {
+                    bail!(
+                        "conversation.identity_turn_batcher requires processor = \"turn_batched_identity\""
+                    );
+                }
+                ConversationProcessorKind::Identity
+            }
             "turn_batched_identity" | "turn-batched-identity" => {
-                ConversationProcessorKind::TurnBatchedIdentity
+                ConversationProcessorKind::turn_batched_identity(
+                    identity_turn_batcher.unwrap_or_default(),
+                )
             }
             "external_text_stream" | "external-text-stream" => {
+                if identity_turn_batcher.is_some() {
+                    bail!(
+                        "conversation.identity_turn_batcher requires processor = \"turn_batched_identity\""
+                    );
+                }
                 ConversationProcessorKind::ExternalTextStream
             }
             other => bail!(
@@ -456,6 +473,7 @@ struct ConversationConfigDocument {
     final_coalescing_enabled: Option<bool>,
     barge_in_enabled: Option<bool>,
     processor: Option<String>,
+    identity_turn_batcher: Option<IdentityTurnBatcherConfig>,
     tts_backend: Option<String>,
 }
 
@@ -556,6 +574,10 @@ impl<'a> SerializableGatewayState<'a> {
                 final_coalescing_enabled: state.config.conversation_final_coalescing_enabled,
                 barge_in_enabled: state.config.conversation_barge_in_enabled,
                 processor: state.config.conversation_processor.label(),
+                identity_turn_batcher: state
+                    .config
+                    .conversation_processor
+                    .identity_turn_batcher_config(),
                 tts_backend: state.conversation_tts_backend.label(),
             },
             startup: SerializableStartup {
@@ -620,6 +642,8 @@ struct SerializableConversation<'a> {
     final_coalescing_enabled: bool,
     barge_in_enabled: bool,
     processor: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_turn_batcher: Option<&'a IdentityTurnBatcherConfig>,
     tts_backend: &'a str,
 }
 
@@ -988,5 +1012,63 @@ Mentioning generation_mod here is fine because this is not config.
         assert_eq!(restored.quality.log_path.as_ref(), Some(&log_path));
 
         let _ = std::fs::remove_file(log_path);
+    }
+
+    #[test]
+    fn gateway_config_loads_turn_batched_identity_config() {
+        let raw = r#"
+[conversation]
+enabled = true
+processor = "turn_batched_identity"
+
+[conversation.identity_turn_batcher]
+fixed_batch_size = 3
+max_batch_turns = 5
+max_batch_wait_ms = 250
+"#;
+        let document: GatewayConfigDocument = toml::from_str(raw).expect("parse gateway config");
+        let voice_quality = VoiceQualityConfig::from_toml_str(raw).expect("parse quality config");
+        let config =
+            LoadedGatewayConfig::from_document(document, voice_quality).expect("load config");
+        let expected_config = IdentityTurnBatcherConfig::fixed_batch_size(3)
+            .with_max_batch_turns(5)
+            .with_max_batch_wait_ms(250);
+
+        assert_eq!(
+            config.conversation.processor,
+            ConversationProcessorKind::turn_batched_identity(expected_config.clone())
+        );
+
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        state.config.conversation_processor =
+            ConversationProcessorKind::turn_batched_identity(expected_config);
+        let dump = render_state_toml(&state);
+        assert!(dump.contains("processor = \"turn_batched_identity\""));
+        assert!(dump.contains("[conversation.identity_turn_batcher]"));
+        assert!(dump.contains("fixed_batch_size = 3"));
+        assert!(dump.contains("max_batch_turns = 5"));
+        assert!(dump.contains("max_batch_wait_ms = 250"));
+    }
+
+    #[test]
+    fn gateway_config_rejects_turn_batcher_config_for_other_processors() {
+        let raw = r#"
+[conversation]
+processor = "identity"
+
+[conversation.identity_turn_batcher]
+fixed_batch_size = 2
+"#;
+        let document: GatewayConfigDocument = toml::from_str(raw).expect("parse gateway config");
+        let voice_quality = VoiceQualityConfig::from_toml_str(raw).expect("parse quality config");
+        let error = LoadedGatewayConfig::from_document(document, voice_quality)
+            .expect_err("identity batcher config should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("conversation.identity_turn_batcher requires processor"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -30,6 +30,7 @@ use crate::text_calls::{SharedTextCallRegistry, TextCallStreamServices};
 use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig;
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -407,7 +408,9 @@ impl From<ConversationProcessorArg> for ConversationProcessorKind {
     fn from(processor: ConversationProcessorArg) -> Self {
         match processor {
             ConversationProcessorArg::Identity => Self::Identity,
-            ConversationProcessorArg::TurnBatchedIdentity => Self::TurnBatchedIdentity,
+            ConversationProcessorArg::TurnBatchedIdentity => {
+                Self::turn_batched_identity(IdentityTurnBatcherConfig::default())
+            }
             ConversationProcessorArg::ExternalTextStream => Self::ExternalTextStream,
         }
     }
@@ -423,6 +426,66 @@ impl ConversationSmokeTestArg {
     fn enabled(self) -> bool {
         matches!(self, Self::On)
     }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConversationSmokeTestProcessorArg {
+    Identity,
+    TurnBatchedIdentity,
+}
+
+fn smoke_test_processor_from_args(
+    processor: Option<ConversationSmokeTestProcessorArg>,
+    fixed_batch_size: Option<usize>,
+    max_batch_turns: Option<usize>,
+    max_batch_wait_ms: Option<u64>,
+) -> DriverResult<ConversationProcessorKind> {
+    let has_batcher_options =
+        fixed_batch_size.is_some() || max_batch_turns.is_some() || max_batch_wait_ms.is_some();
+    let processor = processor.unwrap_or(if has_batcher_options {
+        ConversationSmokeTestProcessorArg::TurnBatchedIdentity
+    } else {
+        ConversationSmokeTestProcessorArg::Identity
+    });
+    match processor {
+        ConversationSmokeTestProcessorArg::Identity => {
+            if has_batcher_options {
+                return Err(DriverError::message(
+                    "identity smoke-test does not accept turn-batcher options",
+                ));
+            }
+            Ok(ConversationProcessorKind::Identity)
+        }
+        ConversationSmokeTestProcessorArg::TurnBatchedIdentity => {
+            let mut config = fixed_batch_size
+                .map(IdentityTurnBatcherConfig::fixed_batch_size)
+                .unwrap_or_default();
+            if let Some(max_batch_turns) = max_batch_turns {
+                config = config.with_max_batch_turns(max_batch_turns);
+            }
+            if let Some(max_batch_wait_ms) = max_batch_wait_ms {
+                config = config.with_max_batch_wait_ms(max_batch_wait_ms);
+            }
+            Ok(ConversationProcessorKind::turn_batched_identity(config))
+        }
+    }
+}
+
+fn identity_turn_batcher_config_lines(config: &IdentityTurnBatcherConfig) -> Vec<String> {
+    vec![
+        format!(
+            "identity-turn-batcher.fixed-batch-size: {}",
+            config.fixed_batch_size
+        ),
+        format!(
+            "identity-turn-batcher.max-batch-turns: {}",
+            config.max_batch_turns
+        ),
+        format!(
+            "identity-turn-batcher.max-batch-wait-ms: {}",
+            config.max_batch_wait_ms
+        ),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -461,6 +524,14 @@ pub enum ConversationCommand {
     SmokeTest {
         #[arg(value_enum)]
         state: ConversationSmokeTestArg,
+        #[arg(value_enum)]
+        processor: Option<ConversationSmokeTestProcessorArg>,
+        #[arg(long, value_name = "N")]
+        fixed_batch_size: Option<usize>,
+        #[arg(long, value_name = "N")]
+        max_batch_turns: Option<usize>,
+        #[arg(long, value_name = "MS")]
+        max_batch_wait_ms: Option<u64>,
     },
     BargeIn {
         #[arg(value_enum)]
@@ -2134,24 +2205,64 @@ async fn conversation_command(
                 effects: Vec::new(),
             })
         }
-        ConversationCommand::SmokeTest { state } => {
+        ConversationCommand::SmokeTest {
+            state,
+            processor,
+            fixed_batch_size,
+            max_batch_turns,
+            max_batch_wait_ms,
+        } => {
             let enabled = state.enabled();
+            let has_batcher_options = fixed_batch_size.is_some()
+                || max_batch_turns.is_some()
+                || max_batch_wait_ms.is_some();
+            if !enabled && (processor.is_some() || has_batcher_options) {
+                return Err(DriverError::message(
+                    "conversation smoke-test off does not accept processor or turn-batcher options",
+                ));
+            }
+            let processor_explicit = processor.is_some() || has_batcher_options;
+            let processor_kind = smoke_test_processor_from_args(
+                processor,
+                fixed_batch_size,
+                max_batch_turns,
+                max_batch_wait_ms,
+            )?;
             context.conversation.set_processor_enabled(enabled);
             let label = if enabled { "on" } else { "off" };
+            let selected_call = context.session.selected_call.clone();
             let barge_in_label = {
                 let mut guard = context.state.write().await;
                 guard.config.conversation_enabled = enabled;
                 guard.config.conversation_final_coalescing_enabled =
                     context.conversation.final_coalescing_enabled();
+                if enabled {
+                    guard.config.conversation_processor = processor_kind.clone();
+                    if let Some(id) = selected_call.as_deref() {
+                        if guard.calls.contains_key(id) {
+                            guard.set_conversation_processor(id, processor_kind.clone());
+                        }
+                    }
+                }
                 guard.log(LogLevel::Info, format!("conversation smoke-test {label}"));
                 quality_barge_in_label(&guard).to_string()
             };
             if enabled {
+                let mut lines = vec![
+                    format!("conversation smoke-test: {label}"),
+                    format!("conversation barge-in: {barge_in_label}"),
+                ];
+                if processor_explicit {
+                    lines.push(format!(
+                        "conversation processor: {}",
+                        processor_kind.label()
+                    ));
+                    if let Some(config) = processor_kind.identity_turn_batcher_config() {
+                        lines.extend(identity_turn_batcher_config_lines(config));
+                    }
+                }
                 Ok(CommandOutput {
-                    lines: vec![
-                        format!("conversation smoke-test: {label}"),
-                        format!("conversation barge-in: {barge_in_label}"),
-                    ],
+                    lines,
                     effects: Vec::new(),
                 })
             } else {
@@ -2184,11 +2295,11 @@ async fn conversation_command(
                     name: id,
                 });
             }
+            let label = processor.label();
             guard.set_conversation_processor(&id, processor);
             context.session.selected_call = Some(id.clone());
             Ok(CommandOutput::line(format!(
-                "conversation processor for {id}: {}",
-                processor.label()
+                "conversation processor for {id}: {label}"
             )))
         }
         ConversationCommand::Attach { call } => {
@@ -3594,7 +3705,7 @@ fn gateway_root_help() -> String {
         "  speak [call-id] <text...>      Inject manual speech; disabled while a text-call stream is attached",
         "  speak cancel [call-id]         Clear active TTS; allowed as an emergency control",
         "  conversation status [call-id]  Show attachment, mode, processor, and latest turns",
-        "  conversation smoke-test on|off Enable or disable test-only identity/repeat replies",
+        "  conversation smoke-test on|off [identity|turn-batched-identity] Enable gateway-only smoke replies",
         "  conversation barge-in on|off|status Enable or disable transcript-triggered TTS clear",
         "  conversation processor identity|turn-batched-identity|external-text-stream [call-id] Set per-call conversation processor",
         "  conversation disapprove [call-id] Stop TTS and detach conversation",
@@ -3607,7 +3718,7 @@ fn gateway_root_help() -> String {
         "  quality endpoint trailing-silence-ms <ms>",
         "",
         "Testing:",
-        "  conversation smoke-test on    Enable test-only identity/repeat processor for M3 smoke tests",
+        "  conversation smoke-test on    Enable gateway-only identity/repeat smoke replies",
         "  test dial-transcribe <+e164> [--from +e164]",
         "",
         "Helpful topics:",
@@ -3969,7 +4080,7 @@ fn conversation_help() -> String {
         "Usage:",
         "  conversation help",
         "  conversation status [call-id]",
-        "  conversation smoke-test <on|off>",
+        "  conversation smoke-test <on|off> [identity|turn-batched-identity] [--fixed-batch-size N] [--max-batch-turns N] [--max-batch-wait-ms MS]",
         "  conversation barge-in [on|off|status]",
         "  conversation processor identity|turn-batched-identity|external-text-stream [call-id]",
         "  conversation attach [call-id]",
@@ -3989,8 +4100,9 @@ fn conversation_help() -> String {
         "  conversation status",
         "",
         "Smoke-test two-way loop:",
-        "  conversation smoke-test on   # preserves current barge-in setting",
+        "  conversation smoke-test on   # identity/per-turn default; preserves current barge-in setting",
         "  conversation barge-in off    # deterministic identity/repeat baseline",
+        "  conversation smoke-test on turn-batched-identity --fixed-batch-size 2   # gateway-hosted turn batching",
         "  conversation barge-in on     # explicitly test interruption behavior",
         "  answer    # or: dial <callee-e164>",
         "  conversation status",
@@ -4065,7 +4177,8 @@ fn outbound_help() -> String {
         "`speak cancel` sends Telnyx clear and drops local queued outbound audio.",
         "",
         "Conversation smoke test:",
-        "  conversation smoke-test on enables the test-only identity/repeat reply loop.",
+        "  conversation smoke-test on enables the gateway-only identity/repeat reply loop.",
+        "  conversation smoke-test on turn-batched-identity --fixed-batch-size N validates in-gateway turn batching.",
         "  conversation smoke-test off returns attached calls to transcription-only behavior.",
         "",
         "Prerequisites:",
@@ -4191,7 +4304,7 @@ fn socket_help() -> String {
         "    speak cancel [call-id]        emergency clear remains available",
         "    conversation status [call-id]",
         "    conversation attach|detach [call-id]",
-        "    conversation smoke-test on|off",
+        "    conversation smoke-test on|off [identity|turn-batched-identity] [--fixed-batch-size N]",
         "    conversation barge-in [on|off|status]",
         "    conversation processor identity|turn-batched-identity|external-text-stream [call-id]",
         "    conversation approve [call-id]",
@@ -4203,7 +4316,7 @@ fn socket_help() -> String {
         "  `tts use` changes the source's next manual speech-injection backend and the gateway-wide",
         "  conversation reply backend, because media-triggered turns are not associated",
         "  with one TUI/socket command source.",
-        "  The smoke-test processor mode and barge-in mode are also gateway-wide.",
+        "  The smoke-test processor selection and barge-in mode are also gateway-wide.",
     ]
     .join("\n")
 }
@@ -4345,7 +4458,8 @@ mod tests {
         assert!(rendered.contains("tts list"));
         assert!(rendered.contains("tts use kokoro-82m|piper"));
         assert!(rendered.contains("conversation status [call-id]"));
-        assert!(rendered.contains("test-only identity/repeat processor"));
+        assert!(rendered.contains("gateway-only identity/repeat smoke replies"));
+        assert!(rendered.contains("turn-batched-identity"));
         assert!(rendered.contains("help socket"));
     }
 
@@ -4385,9 +4499,8 @@ mod tests {
         assert!(outbound.contains("conversation smoke-test on"));
         assert!(socket.contains("Receive one JSON object"));
         assert!(socket.contains("Agent workflows"));
-        assert!(
-            socket.contains("smoke-test processor mode and barge-in mode are also gateway-wide")
-        );
+        assert!(socket
+            .contains("smoke-test processor selection and barge-in mode are also gateway-wide"));
         assert!(conversation.contains("Default live behavior"));
         assert!(conversation_alias.contains("Default live behavior"));
         assert!(conversation.contains("Normal inbound TUI/socket flow"));
@@ -5266,6 +5379,51 @@ mod tests {
         assert!(engine.context().conversation.processor_enabled());
         assert!(!engine.context().conversation.barge_in_enabled());
         assert!(!state.read().await.quality.config.barge_in.enabled);
+    }
+
+    #[tokio::test]
+    async fn conversation_smoke_test_selects_turn_batched_identity_for_selected_call() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let output = engine
+            .run_line(
+                "conversation smoke-test on turn-batched-identity --fixed-batch-size 2 --max-batch-turns 4 --max-batch-wait-ms 250",
+            )
+            .await
+            .expect("enable turn-batched smoke test");
+
+        assert_eq!(
+            output.lines,
+            vec![
+                "conversation smoke-test: on",
+                "conversation barge-in: on",
+                "conversation processor: turn_batched_identity",
+                "identity-turn-batcher.fixed-batch-size: 2",
+                "identity-turn-batcher.max-batch-turns: 4",
+                "identity-turn-batcher.max-batch-wait-ms: 250",
+            ]
+        );
+        assert!(engine.context().conversation.processor_enabled());
+        let expected_processor = ConversationProcessorKind::turn_batched_identity(
+            IdentityTurnBatcherConfig::fixed_batch_size(2)
+                .with_max_batch_turns(4)
+                .with_max_batch_wait_ms(250),
+        );
+        let guard = state.read().await;
+        assert_eq!(guard.config.conversation_processor, expected_processor);
+        let call = guard.calls.get(&call_id).expect("call exists");
+        assert_eq!(call.conversation.processor, expected_processor);
     }
 
     #[tokio::test]

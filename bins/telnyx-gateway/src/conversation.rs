@@ -4,17 +4,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context};
-use futures_util::{stream, StreamExt};
 use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 use motlie_voice::telephony::CallAction;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
+use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
     CallStatus, ConversationMode, LogLevel, QualitySpanEmission, SharedState,
 };
+use crate::processors::ConversationProcessorHost;
 pub use crate::processors::{
     ConversationCommittedTurn, ConversationProcessorInput, ConversationProcessorKind,
     ConversationProcessorOutput,
@@ -37,6 +38,7 @@ pub struct ConversationRuntime {
     barge_in_enabled: Arc<AtomicBool>,
     pending_conversation_finals: Arc<Mutex<HashMap<String, PendingConversationFinal>>>,
     deferred_say_generations: Arc<Mutex<HashMap<String, u64>>>,
+    processor_hosts: Arc<Mutex<HashMap<String, ConversationProcessorHost>>>,
 }
 
 impl ConversationRuntime {
@@ -58,6 +60,7 @@ impl ConversationRuntime {
             barge_in_enabled: Arc::new(AtomicBool::new(true)),
             pending_conversation_finals: Arc::new(Mutex::new(HashMap::new())),
             deferred_say_generations: Arc::new(Mutex::new(HashMap::new())),
+            processor_hosts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -101,6 +104,34 @@ impl ConversationRuntime {
 
     pub fn tts_registry(&self) -> SharedTtsRegistry {
         self.tts.clone()
+    }
+
+    async fn process_processor_input(
+        &self,
+        gateway_call_id: &str,
+        kind: ConversationProcessorKind,
+        input: ConversationProcessorInput,
+    ) -> Option<ConversationProcessorOutput> {
+        let mut hosts = self.processor_hosts.lock().await;
+        let host = hosts
+            .entry(gateway_call_id.to_string())
+            .or_insert_with(|| ConversationProcessorHost::new(kind.clone()));
+        if !host.is_kind(&kind) {
+            *host = ConversationProcessorHost::new(kind);
+        }
+        host.process_input(input)
+    }
+
+    async fn complete_pending_processor_batch(
+        &self,
+        gateway_call_id: &str,
+        batch_id: &str,
+        epoch: u64,
+    ) -> Option<ConversationProcessorOutput> {
+        let mut hosts = self.processor_hosts.lock().await;
+        hosts
+            .get_mut(gateway_call_id)
+            .and_then(|host| host.complete_pending(batch_id, epoch))
     }
 }
 
@@ -179,6 +210,7 @@ pub async fn handle_transcript_event_with_turn(
             cancel_active_speech_for_barge_in(
                 state,
                 media_registry,
+                runtime,
                 gateway_call_id,
                 BargeInTrigger::Partial,
                 snapshot.config_id.clone(),
@@ -195,6 +227,7 @@ pub async fn handle_transcript_event_with_turn(
         cancel_active_speech_for_barge_in(
             state,
             media_registry,
+            runtime,
             gateway_call_id,
             BargeInTrigger::Final,
             snapshot.config_id.clone(),
@@ -483,6 +516,169 @@ fn latest_transcript_confidence(event: &TranscriptEvent) -> Option<f32> {
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessorOutputResult {
+    CommandApplied,
+    NoCommand,
+    Stop,
+}
+
+async fn handle_conversation_processor_output(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    target: &ConversationCommandTarget,
+    turn_context: &ConversationTurnContext,
+    output: ConversationProcessorOutput,
+) -> anyhow::Result<ProcessorOutputResult> {
+    match output {
+        ConversationProcessorOutput::Command(command) => {
+            apply_conversation_command_with_timing(
+                state,
+                media_registry,
+                runtime,
+                gateway_call_id,
+                target.clone(),
+                command,
+                turn_context.clone(),
+            )
+            .await?;
+            Ok(ProcessorOutputResult::CommandApplied)
+        }
+        ConversationProcessorOutput::PromptComplete(prompt) => {
+            apply_conversation_command_with_timing(
+                state,
+                media_registry,
+                runtime,
+                gateway_call_id,
+                target.clone(),
+                ConversationCommand::Say { text: prompt.text },
+                turn_context.clone(),
+            )
+            .await?;
+            Ok(ProcessorOutputResult::CommandApplied)
+        }
+        ConversationProcessorOutput::Accumulating(batch) => {
+            tracing::debug!(
+                gateway_call_id,
+                batch_id = batch.batch_id,
+                epoch = batch.epoch,
+                source_turn_count = batch.source_turn_ids.len(),
+                deadline_ms = batch.deadline_ms,
+                "conversation.processor.turn_batch_accumulating"
+            );
+            schedule_turn_batch_timeout(
+                state,
+                media_registry,
+                runtime,
+                gateway_call_id,
+                batch.batch_id,
+                batch.epoch,
+                batch.deadline_ms,
+            );
+            Ok(ProcessorOutputResult::NoCommand)
+        }
+        ConversationProcessorOutput::Reset(reset) => {
+            tracing::debug!(
+                gateway_call_id,
+                reason = reset.reason.as_str(),
+                epoch = reset.epoch,
+                batch_id = reset.batch_id.as_deref(),
+                "conversation.processor.turn_batch_reset"
+            );
+            Ok(ProcessorOutputResult::NoCommand)
+        }
+        ConversationProcessorOutput::EarlyResponse(_) => {
+            tracing::warn!(
+                gateway_call_id,
+                "conversation.processor.early_response_output_ignored_for_committed_turn"
+            );
+            Ok(ProcessorOutputResult::NoCommand)
+        }
+        ConversationProcessorOutput::CommittedSpeech(_) => {
+            tracing::warn!(
+                gateway_call_id,
+                "conversation.processor.committed_speech_output_ignored_for_committed_turn"
+            );
+            Ok(ProcessorOutputResult::NoCommand)
+        }
+        ConversationProcessorOutput::Error(error) => {
+            state
+                .write()
+                .await
+                .record_conversation_failed(gateway_call_id, error.clone());
+            tracing::warn!(gateway_call_id, error, "conversation.processor.failed");
+            Ok(ProcessorOutputResult::Stop)
+        }
+    }
+}
+
+fn schedule_turn_batch_timeout(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    batch_id: String,
+    epoch: u64,
+    deadline_ms: u64,
+) {
+    if deadline_ms == 0 {
+        return;
+    }
+    let state = state.clone();
+    let media_registry = media_registry.clone();
+    let runtime = runtime.clone();
+    let gateway_call_id = gateway_call_id.to_string();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(deadline_ms)).await;
+        if !runtime.processor_enabled() {
+            return;
+        }
+        let Some(output) = runtime
+            .complete_pending_processor_batch(&gateway_call_id, &batch_id, epoch)
+            .await
+        else {
+            return;
+        };
+        let Some(snapshot) = conversation_snapshot(&state, &gateway_call_id, None).await else {
+            return;
+        };
+        if !snapshot.attached {
+            return;
+        }
+        let target = ConversationCommandTarget {
+            mode: snapshot.mode,
+            call_control_id: snapshot.call_control_id,
+            barge_in: snapshot.barge_in,
+        };
+        if let Err(error) = handle_conversation_processor_output(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            &target,
+            &ConversationTurnContext::default(),
+            output,
+        )
+        .await
+        {
+            let error = format!("{error:#}");
+            state
+                .write()
+                .await
+                .record_conversation_failed(&gateway_call_id, error.clone());
+            tracing::warn!(
+                gateway_call_id,
+                batch_id,
+                epoch,
+                error,
+                "conversation.processor.turn_batch_timeout.failed"
+            );
+        }
+    });
+}
+
 async fn emit_conversation_final_debounce_span(
     state: &SharedState,
     gateway_call_id: &str,
@@ -551,82 +747,30 @@ async fn dispatch_final_transcript_to_processor(
         text: transcript_text,
         event,
     });
-    let outputs = snapshot
-        .processor
-        .process_stream(stream::iter(vec![processor_input]));
-    futures_util::pin_mut!(outputs);
     let target = ConversationCommandTarget {
         mode: snapshot.mode,
         call_control_id: snapshot.call_control_id,
         barge_in: snapshot.barge_in,
     };
     let mut saw_command = false;
-    while let Some(output) = outputs.next().await {
-        match output {
-            ConversationProcessorOutput::Command(command) => {
-                saw_command = true;
-                apply_conversation_command_with_timing(
-                    state,
-                    media_registry,
-                    runtime,
-                    gateway_call_id,
-                    target.clone(),
-                    command,
-                    turn_context.clone(),
-                )
-                .await?;
-            }
-            ConversationProcessorOutput::PromptComplete(prompt) => {
-                saw_command = true;
-                apply_conversation_command_with_timing(
-                    state,
-                    media_registry,
-                    runtime,
-                    gateway_call_id,
-                    target.clone(),
-                    ConversationCommand::Say { text: prompt.text },
-                    turn_context.clone(),
-                )
-                .await?;
-            }
-            ConversationProcessorOutput::Accumulating(state) => {
-                tracing::debug!(
-                    gateway_call_id,
-                    batch_id = state.batch_id,
-                    epoch = state.epoch,
-                    source_turn_count = state.source_turn_ids.len(),
-                    "conversation.processor.turn_batch_accumulating"
-                );
-            }
-            ConversationProcessorOutput::Reset(reset) => {
-                tracing::debug!(
-                    gateway_call_id,
-                    reason = reset.reason.as_str(),
-                    epoch = reset.epoch,
-                    batch_id = reset.batch_id.as_deref(),
-                    "conversation.processor.turn_batch_reset"
-                );
-            }
-            ConversationProcessorOutput::EarlyResponse(_) => {
-                tracing::warn!(
-                    gateway_call_id,
-                    "conversation.processor.early_response_output_ignored_for_committed_turn"
-                );
-            }
-            ConversationProcessorOutput::CommittedSpeech(_) => {
-                tracing::warn!(
-                    gateway_call_id,
-                    "conversation.processor.committed_speech_output_ignored_for_committed_turn"
-                );
-            }
-            ConversationProcessorOutput::Error(error) => {
-                state
-                    .write()
-                    .await
-                    .record_conversation_failed(gateway_call_id, error.clone());
-                tracing::warn!(gateway_call_id, error, "conversation.processor.failed");
-                return Ok(());
-            }
+    if let Some(output) = runtime
+        .process_processor_input(gateway_call_id, snapshot.processor, processor_input)
+        .await
+    {
+        match handle_conversation_processor_output(
+            state,
+            media_registry,
+            runtime,
+            gateway_call_id,
+            &target,
+            &turn_context,
+            output,
+        )
+        .await?
+        {
+            ProcessorOutputResult::CommandApplied => saw_command = true,
+            ProcessorOutputResult::NoCommand => {}
+            ProcessorOutputResult::Stop => return Ok(()),
         }
     }
     if !saw_command {
@@ -661,6 +805,7 @@ pub async fn handle_speech_onset(
     cancel_active_speech_for_barge_in(
         state,
         media_registry,
+        _runtime,
         gateway_call_id,
         BargeInTrigger::SpeechOnset,
         snapshot.config_id.clone(),
@@ -722,6 +867,7 @@ fn is_meaningful_partial_barge_in(text: &str) -> bool {
 async fn cancel_active_speech_for_barge_in(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
     gateway_call_id: &str,
     trigger: BargeInTrigger,
     config_id: String,
@@ -773,6 +919,7 @@ async fn cancel_active_speech_for_barge_in(
             },
         );
     }
+    reset_turn_batch_for_barge_in(state, runtime, gateway_call_id).await;
     state
         .write()
         .await
@@ -786,6 +933,46 @@ async fn cancel_active_speech_for_barge_in(
         "conversation.barge_in.cancel_requested"
     );
     Ok(())
+}
+
+async fn reset_turn_batch_for_barge_in(
+    state: &SharedState,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+) {
+    let processor = {
+        let guard = state.read().await;
+        guard
+            .calls
+            .get(gateway_call_id)
+            .map(|call| call.conversation.processor.clone())
+            .unwrap_or_default()
+    };
+    if !matches!(
+        processor,
+        ConversationProcessorKind::TurnBatchedIdentity { .. }
+    ) {
+        return;
+    }
+    let input = ConversationProcessorInput::EarlyResponse(EarlyResponseEvent::Canceled {
+        provisional_turn_id: "barge_in".to_string(),
+        call_id: gateway_call_id.to_string(),
+        utterance_id: "barge_in".to_string(),
+        generation: 0,
+        reason: EarlyResponseCancelReason::CallerBargeIn,
+    });
+    if let Some(ConversationProcessorOutput::Reset(reset)) = runtime
+        .process_processor_input(gateway_call_id, processor, input)
+        .await
+    {
+        tracing::debug!(
+            gateway_call_id,
+            reason = reset.reason.as_str(),
+            epoch = reset.epoch,
+            batch_id = reset.batch_id.as_deref(),
+            "conversation.processor.turn_batch_reset"
+        );
+    }
 }
 
 struct ConversationSnapshot {
@@ -824,7 +1011,7 @@ async fn conversation_snapshot(
     Some(ConversationSnapshot {
         attached: call.conversation.attached,
         mode: call.conversation.mode,
-        processor: call.conversation.processor,
+        processor: call.conversation.processor.clone(),
         call_control_id: call.ids.call_control_id.clone(),
         barge_in,
         config_id,
@@ -1206,7 +1393,9 @@ async fn record_conversation_failed_unless_terminal(
 mod tests {
     use super::*;
     use crate::media::SpeechCancelToken;
-    use crate::operator::state::{shared_state, CallStatus, ConversationStatus, TelnyxIds};
+    use crate::operator::state::{
+        shared_state, CallStatus, ConversationRole, ConversationStatus, TelnyxIds,
+    };
     use crate::tts::{OutboundTtsFactory, TtsAudio, TtsRegistry, PIPER_SAMPLE_RATE_HZ};
     use async_trait::async_trait;
     use tokio::sync::mpsc;
@@ -1368,6 +1557,145 @@ mod tests {
             call.conversation.last_assistant_text.as_deref(),
             Some("this should merge into one processor turn.")
         );
+    }
+
+    #[tokio::test]
+    async fn turn_batched_identity_batches_two_committed_turns_without_reset() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        {
+            let mut guard = state.write().await;
+            let call = guard.calls.get_mut(&gateway_call_id).expect("call exists");
+            call.conversation.processor = ConversationProcessorKind::turn_batched_identity(
+                motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig::fixed_batch_size(2)
+                    .with_max_batch_wait_ms(1_000),
+            );
+        }
+        let runtime = ConversationRuntime::new_with_processor_options(
+            TelnyxClient::new("https://api.example.test", None, true),
+            crate::tts::unavailable_registry(),
+            true,
+            false,
+        );
+        let media_registry = SharedMediaRegistry::default();
+
+        handle_transcript_event_with_turn(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "first".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+            Some("turn-1"),
+        )
+        .await
+        .expect("first turn should accumulate");
+        {
+            let guard = state.read().await;
+            let call = guard.calls.get(&gateway_call_id).expect("call exists");
+            assert_eq!(call.conversation.last_user_text.as_deref(), Some("first"));
+            assert!(call.conversation.last_assistant_text.is_none());
+        }
+
+        handle_transcript_event_with_turn(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "second".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+            Some("turn-2"),
+        )
+        .await
+        .expect("second turn should complete the batch");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.last_user_text.as_deref(), Some("second"));
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some(
+                "first
+second"
+            )
+        );
+        assert_eq!(
+            call.conversation
+                .lines
+                .iter()
+                .filter(|line| line.role == ConversationRole::Assistant)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_batched_identity_completes_pending_batch_after_wait_ceiling() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        {
+            let mut guard = state.write().await;
+            let call = guard.calls.get_mut(&gateway_call_id).expect("call exists");
+            call.conversation.processor = ConversationProcessorKind::turn_batched_identity(
+                motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig::fixed_batch_size(3)
+                    .with_max_batch_wait_ms(25),
+            );
+        }
+        let runtime = ConversationRuntime::new_with_processor_options(
+            TelnyxClient::new("https://api.example.test", None, true),
+            crate::tts::unavailable_registry(),
+            true,
+            false,
+        );
+        let media_registry = SharedMediaRegistry::default();
+
+        handle_transcript_event_with_turn(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "only turn".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+            Some("turn-1"),
+        )
+        .await
+        .expect("turn should accumulate before timeout");
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .conversation
+            .last_assistant_text
+            .is_none());
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state
+                    .read()
+                    .await
+                    .calls
+                    .get(&gateway_call_id)
+                    .and_then(|call| call.conversation.last_assistant_text.as_deref())
+                    == Some("only turn")
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("wait ceiling should complete pending batch");
     }
 
     #[tokio::test]

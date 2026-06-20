@@ -98,7 +98,8 @@ pub trait TurnBatcher {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct IdentityPromptHandlerConfig {
+#[serde(default, deny_unknown_fields)]
+pub struct IdentityTurnBatcherConfig {
     pub fixed_batch_size: usize,
     pub max_batch_turns: usize,
     pub max_batch_wait_ms: u64,
@@ -106,7 +107,7 @@ pub struct IdentityPromptHandlerConfig {
     pub join_separator: String,
 }
 
-impl Default for IdentityPromptHandlerConfig {
+impl Default for IdentityTurnBatcherConfig {
     fn default() -> Self {
         Self {
             fixed_batch_size: DEFAULT_BATCH_SIZE,
@@ -118,7 +119,7 @@ impl Default for IdentityPromptHandlerConfig {
     }
 }
 
-impl IdentityPromptHandlerConfig {
+impl IdentityTurnBatcherConfig {
     pub fn batch_of_one() -> Self {
         Self::default()
     }
@@ -149,26 +150,26 @@ impl IdentityPromptHandlerConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IdentityPromptHandler {
-    config: IdentityPromptHandlerConfig,
+pub struct IdentityTurnBatcher {
+    config: IdentityTurnBatcherConfig,
     epoch: u64,
     next_batch_index: u64,
     pending_batch_id: Option<String>,
     pending_turns: Vec<Turn>,
 }
 
-impl Default for IdentityPromptHandler {
+impl Default for IdentityTurnBatcher {
     fn default() -> Self {
-        Self::new(IdentityPromptHandlerConfig::default())
+        Self::new(IdentityTurnBatcherConfig::default())
     }
 }
 
-impl IdentityPromptHandler {
-    pub fn new(config: IdentityPromptHandlerConfig) -> Self {
+impl IdentityTurnBatcher {
+    pub fn new(config: IdentityTurnBatcherConfig) -> Self {
         let fixed_batch_size = config.fixed_batch_size.max(1);
         let max_batch_turns = config.max_batch_turns.max(1);
         Self {
-            config: IdentityPromptHandlerConfig {
+            config: IdentityTurnBatcherConfig {
                 fixed_batch_size,
                 max_batch_turns,
                 ..config
@@ -182,6 +183,10 @@ impl IdentityPromptHandler {
 
     pub fn has_pending_turns(&self) -> bool {
         !self.pending_turns.is_empty()
+    }
+
+    pub fn pending_batch_id(&self) -> Option<&str> {
+        self.pending_batch_id.as_deref()
     }
 
     pub fn complete_pending(&mut self) -> Option<Prompt> {
@@ -252,7 +257,7 @@ impl IdentityPromptHandler {
     }
 }
 
-impl TurnBatcher for IdentityPromptHandler {
+impl TurnBatcher for IdentityTurnBatcher {
     fn observe(&mut self, mut turn: Turn) -> BatchDecision {
         turn.epoch = self.epoch;
         self.pending_turns.push(turn);
@@ -290,8 +295,8 @@ mod tests {
     }
 
     #[test]
-    fn identity_prompt_handler_batch_of_one_completes_immediately() {
-        let mut handler = IdentityPromptHandler::default();
+    fn identity_turn_batcher_batch_of_one_completes_immediately() {
+        let mut handler = IdentityTurnBatcher::default();
 
         let decision = handler.observe(turn("turn-1", "hello"));
 
@@ -308,9 +313,9 @@ mod tests {
     }
 
     #[test]
-    fn identity_prompt_handler_fixed_n_accumulates_then_completes() {
-        let mut handler = IdentityPromptHandler::new(
-            IdentityPromptHandlerConfig::fixed_batch_size(2).with_max_batch_wait_ms(250),
+    fn identity_turn_batcher_fixed_n_accumulates_then_completes() {
+        let mut handler = IdentityTurnBatcher::new(
+            IdentityTurnBatcherConfig::fixed_batch_size(2).with_max_batch_wait_ms(250),
         );
 
         assert_eq!(
@@ -335,9 +340,8 @@ mod tests {
     }
 
     #[test]
-    fn identity_prompt_handler_reset_drops_pending_and_advances_epoch() {
-        let mut handler =
-            IdentityPromptHandler::new(IdentityPromptHandlerConfig::fixed_batch_size(2));
+    fn identity_turn_batcher_reset_drops_pending_and_advances_epoch() {
+        let mut handler = IdentityTurnBatcher::new(IdentityTurnBatcherConfig::fixed_batch_size(2));
         let _ = handler.observe(turn("turn-1", "first"));
 
         assert_eq!(
@@ -361,9 +365,8 @@ mod tests {
     }
 
     #[test]
-    fn identity_prompt_handler_complete_pending_enforces_latency_fallback() {
-        let mut handler =
-            IdentityPromptHandler::new(IdentityPromptHandlerConfig::fixed_batch_size(3));
+    fn identity_turn_batcher_complete_pending_enforces_latency_fallback() {
+        let mut handler = IdentityTurnBatcher::new(IdentityTurnBatcherConfig::fixed_batch_size(3));
         let _ = handler.observe(turn("turn-1", "first"));
         let _ = handler.observe(turn("turn-2", "second"));
 
@@ -381,10 +384,10 @@ mod tests {
     }
 
     #[test]
-    fn identity_prompt_handler_is_placement_neutral_for_same_turn_sequence() {
-        let config = IdentityPromptHandlerConfig::fixed_batch_size(2);
-        let mut gateway_host = IdentityPromptHandler::new(config.clone());
-        let mut daemon_host = IdentityPromptHandler::new(config);
+    fn identity_turn_batcher_is_placement_neutral_for_same_turn_sequence() {
+        let config = IdentityTurnBatcherConfig::fixed_batch_size(2);
+        let mut gateway_host = IdentityTurnBatcher::new(config.clone());
+        let mut daemon_host = IdentityTurnBatcher::new(config);
         let turns = [turn("turn-1", "first"), turn("turn-2", "second")];
 
         let gateway_decisions = turns

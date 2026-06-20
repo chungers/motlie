@@ -1,5 +1,6 @@
 use motlie_agent::voice::turn_batching::{
-    BatchDecision, IdentityPromptHandler, Turn, TurnBatchResetReason, TurnBatcher,
+    BatchDecision, IdentityTurnBatcher, IdentityTurnBatcherConfig, Turn, TurnBatchResetReason,
+    TurnBatcher,
 };
 use motlie_voice::app::ConversationCommand;
 
@@ -8,10 +9,29 @@ use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TurnBatchedIdentityConversationProcessor {
-    batcher: IdentityPromptHandler,
+    batcher: IdentityTurnBatcher,
 }
 
 impl TurnBatchedIdentityConversationProcessor {
+    pub(crate) fn new(config: IdentityTurnBatcherConfig) -> Self {
+        Self {
+            batcher: IdentityTurnBatcher::new(config),
+        }
+    }
+
+    pub(crate) fn complete_pending(
+        &mut self,
+        batch_id: &str,
+        epoch: u64,
+    ) -> Option<ConversationProcessorOutput> {
+        if self.batcher.epoch() != epoch || self.batcher.pending_batch_id() != Some(batch_id) {
+            return None;
+        }
+        self.batcher
+            .complete_pending()
+            .map(ConversationProcessorOutput::PromptComplete)
+    }
+
     pub(crate) fn process_input(
         &mut self,
         input: ConversationProcessorInput,

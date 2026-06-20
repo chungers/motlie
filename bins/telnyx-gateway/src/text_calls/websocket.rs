@@ -700,7 +700,11 @@ impl SharedTextCallRegistry {
         let turn_id = format!("turn_{}", Uuid::new_v4().simple());
         let mut turns = handle.turns.lock().await;
         turns.ensure_caller_turn_capacity()?;
-        let superseded = turns.mark_pending_superseded();
+        let superseded = if handle.response_mode == ResponseMode::TurnBatched {
+            Vec::new()
+        } else {
+            turns.mark_pending_superseded()
+        };
         if !superseded.is_empty() {
             handle.try_send_turn_batch_reset("final_turn_superseded", None)?;
         }
@@ -891,13 +895,17 @@ impl TextCallSessionHandle {
         if self.response_mode != ResponseMode::TurnBatched {
             return None;
         }
+        let mut active_batches = self
+            .turn_batch_active_batches
+            .lock()
+            .expect("turn batch active set poisoned");
+        if let Some(batch_id) = active_batches.iter().next().cloned() {
+            return Some(batch_id);
+        }
         let epoch = self.turn_batch_epoch.load(Ordering::SeqCst);
         let batch_index = self.turn_batch_next_batch.fetch_add(1, Ordering::SeqCst);
         let batch_id = format!("turn-batch-{epoch}-{batch_index}");
-        self.turn_batch_active_batches
-            .lock()
-            .expect("turn batch active set poisoned")
-            .insert(batch_id.clone());
+        active_batches.insert(batch_id.clone());
         Some(batch_id)
     }
 
@@ -2413,8 +2421,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_batched_session_sends_reset_before_superseding_turn() {
-        let call_id = "gwc-turn-batch-reset-order";
+    async fn turn_batched_session_sends_sequential_turns_without_reset() {
+        let call_id = "gwc-turn-batch-sequential";
         let (services, _media_rx) = test_services(call_id).await;
         let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let mut handle = test_handle(tx);
@@ -2444,24 +2452,14 @@ mod tests {
             .expect("attached session should receive caller turn");
         assert!(matches!(
             outbound_rx.recv().await,
-            Some(GatewayTextFrame::TurnBatchReset {
-                reason,
-                epoch: 1,
-                ..
-            }) if reason == "final_turn_superseded"
-        ));
-        assert!(matches!(
-            outbound_rx.recv().await,
-            Some(GatewayTextFrame::TurnSuperseded {
-                turn_id,
-                superseded_by_turn_id,
-                ..
-            }) if turn_id == first_turn_id && superseded_by_turn_id == second_turn_id
-        ));
-        assert!(matches!(
-            outbound_rx.recv().await,
             Some(GatewayTextFrame::CallerTurn { turn_id, .. }) if turn_id == second_turn_id
         ));
+        assert!(
+            time::timeout(Duration::from_millis(50), outbound_rx.recv())
+                .await
+                .is_err(),
+            "ordinary sequential TurnBatched turns must not reset or supersede"
+        );
     }
 
     #[tokio::test]

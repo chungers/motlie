@@ -1216,7 +1216,7 @@ impl GatewayState {
         }
 
         let mut call = CallSession::pending_inbound(ids.clone(), from, to, status);
-        call.conversation.processor = self.config.conversation_processor;
+        call.conversation.processor = self.config.conversation_processor.clone();
         call.speech_output = SpeechOutputConfig::from_quality(
             self.conversation_tts_backend,
             &self.quality.config.tts,
@@ -1252,7 +1252,7 @@ impl GatewayState {
         }
 
         let mut call = CallSession::outbound(ids.clone(), from, to, status);
-        call.conversation.processor = self.config.conversation_processor;
+        call.conversation.processor = self.config.conversation_processor.clone();
         call.speech_output = SpeechOutputConfig::from_quality(
             self.conversation_tts_backend,
             &self.quality.config.tts,
@@ -1424,9 +1424,10 @@ impl GatewayState {
         processor: ConversationProcessorKind,
     ) {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            let label = processor.label();
             call.conversation.processor = processor;
             call.conversation.updated_at = Utc::now();
-            call.push_timeline(format!("conversation processor -> {}", processor.label()));
+            call.push_timeline(format!("conversation processor -> {label}"));
         }
     }
 

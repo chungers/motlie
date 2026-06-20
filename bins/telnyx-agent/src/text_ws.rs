@@ -4,7 +4,7 @@ use motlie_agent::voice::telnyx::text::{
     AgentTextFrame, CallerSpeechState, GatewayTextFrame, PlaybackFinishedStatus, ResponseMode,
 };
 use motlie_agent::voice::turn_batching::{
-    BatchDecision, IdentityPromptHandler, IdentityPromptHandlerConfig, Turn, TurnBatchResetReason,
+    BatchDecision, IdentityTurnBatcher, IdentityTurnBatcherConfig, Turn, TurnBatchResetReason,
     TurnBatcher,
 };
 use std::collections::BTreeMap;
@@ -151,7 +151,7 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
     let mut partial_context = PartialAdvisoryContext::default();
     let mut committed_provisionals = BTreeMap::<String, String>::new();
     let mut response_mode = ResponseMode::PerTurn;
-    let mut turn_batcher = IdentityPromptHandler::new(IdentityPromptHandlerConfig::batch_of_one());
+    let mut turn_batcher = IdentityTurnBatcher::new(IdentityTurnBatcherConfig::batch_of_one());
 
     while let Some(message) = read.next().await {
         match message {
@@ -338,7 +338,7 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                     }) => {
                         response_mode = mode;
                         turn_batcher =
-                            IdentityPromptHandler::new(IdentityPromptHandlerConfig::batch_of_one());
+                            IdentityTurnBatcher::new(IdentityTurnBatcherConfig::batch_of_one());
                     }
                     Ok(GatewayTextFrame::TurnBatchReset { reason, .. }) => {
                         cancel_active_turn(&mut active);
