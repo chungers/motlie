@@ -1,6 +1,7 @@
 # DESIGN — #557: Explicit pipeline stages + semantic-batching layer (builds on #553/#541)
 
 ## Changelog
+- 2026-06-20 — @ops48-orchestrator — Add §4.1: the semantic-batching logic is a placement-neutral `SemanticBatcher` module in `libs/agent`, droppable on either side of the gateway↔daemon process boundary (host adapts transport only). Reframes "where layer-3 runs" as a deployment choice, not a contract change. Added matching reviewer focus (claude rust architect) + open question §7.6 (sync-vs-async batcher for model-as-endpointer). Per David.
 - 2026-06-20 — @ops48-orchestrator — Initial proposal. Refines the #553 modular pipeline into explicit, contract-enforced stages and adds an optional semantic-batching layer (N turns → 1 coherent prompt). For validation by a codex speech-pipeline architect, a codex streaming-LLM/model expert (turn/streaming LLM integration feasibility), and a claude rust + realtime architect.
 
 ## Status
@@ -47,6 +48,30 @@ Replace `TextCallAggregationPolicy::{GatewayOwned, AgentOwned}` with a layer-3 t
 ## 4. How this builds on #553
 #553 already gives the plug points: the `process_stream` boundary, `ConversationProcessorOutput` intents, the shared registry/speech-output stage, and the call-scoped `SpeechOutputConfig`. This design **adds layer 3 on top**: the new output states, the turn-stream framing, and a stateful turn-accumulator processor. The shared downstream stage (registry → speech → TTS, buffered or streaming) is **unchanged** — semantic batching only changes *when* and *with what prompt* the processor responds, not how speech is produced. No re-architecture; an additive layer.
 
+### 4.1 Placement-neutral semantic batcher (one module, droppable on either side of the process boundary)
+The layer-3 logic is a **standalone module in `libs/agent` (`motlie-agent`)** — the crate **both** `telnyx-gateway` (`default-features = false`) and `telnyx-agent` already depend on — sitting next to the existing turn/frame contract (`libs/agent/src/voice/telnyx/text.rs`). It is a **pure state machine** over the turn-stream contract, with **no gateway internals** (no `ProvisionalPlaybackRegistry` / `SpeechOutputConfig` / early-response pipeline) and **no daemon internals** (no websocket transport). Shape:
+
+```rust
+/// Layer-3 semantic batcher: accumulates clean gateway turns into one prompt.
+pub trait SemanticBatcher {
+    /// Observe one gateway turn (+ advisory partials). Decides hold-vs-respond.
+    fn observe(&mut self, turn: Turn) -> BatchDecision;
+    /// Barge-in / supersede arrived (acoustic, gateway-owned): drop the prompt.
+    fn reset(&mut self);
+}
+
+pub enum BatchDecision {
+    Accumulating,            // hold the floor, keep listening (§3.2)
+    PromptComplete(Prompt),  // semantically complete; respond now (§3.2)
+}
+```
+
+**Same module, hosted on either side — the host only adapts transport, never re-implements the logic:**
+- **In-gateway host:** the `SemanticBatched` processor (`ConversationProcessorKind`) owns a `SemanticBatcher`, feeds it turns from `process_stream`, maps `PromptComplete` → the response trigger / `CommittedSpeech`, and routes gateway barge-in → `reset()`.
+- **In-daemon host:** `telnyx-agent` owns the **same** `SemanticBatcher`, fed by the gateway's turn stream over the text-call websocket; emits `AgentTurn*` return frames on `PromptComplete`; gateway barge-in arrives as a `GatewayTextFrame` → `reset()`.
+
+Because the batcher consumes **only clean turns** (never raw acoustic partials) and the gateway **always** owns acoustic endpointing + safety, the daemon-side placement does **not** re-own acoustic boundaries — preserving the §3.5 invariant that dissolves #556. `ResponseMode::{PerTurn, SemanticBatched}` selects whether a batcher is in the loop at all; **where** it runs (gateway vs daemon) is a host/deployment choice, **not** a contract change. (Tension to resolve: a heuristic batcher is pure/sync as above, but the *model-as-endpointer* option in §5 makes the decision I/O-bound — see §7.6.)
+
 ## 5. Streaming-LLM / turn-LLM integration (feasibility — codex streaming-LLM reviewer)
 The semantic-batched prompt must integrate with whatever produces the response. Open feasibility questions:
 - **Turn-based LLM:** `PromptComplete(prompt)` → one LLM call → response → speech intents (provisional/committed). Straightforward; how does early-response/streaming-TTS compose (LLM streams tokens → processor emits provisional `Speak` chunks → shared streaming-TTS)?
@@ -57,7 +82,7 @@ The semantic-batched prompt must integrate with whatever produces the response. 
 ## 6. Reviewer foci
 - **Codex speech-pipeline architect:** is the stage boundary (acoustic turns vs semantic batching) clean + enforceable? Does the turn-stream contract + the `Accumulating/PromptComplete/Reset` states correctly model real turn-taking (multi-turn prompts, mid-turn corrections, supersede)? Does barge-in compose?
 - **Codex streaming-LLM / model expert:** §5 feasibility — turn-based vs streaming-LLM integration, the model-as-semantic-endpointer option, latency bounds, mid-generation cancel.
-- **Claude rust + realtime architect:** can this be expressed as clean Rust contracts on top of #553 (stateful processor, the new output enum, no leaky abstractions, no new races); realtime correctness (the added accumulation wait vs latency; cancel/reset across awaits); does it keep #553's single-authority/no-detach-across-await property?
+- **Claude rust + realtime architect:** can this be expressed as clean Rust contracts on top of #553 (stateful processor, the new output enum, no leaky abstractions, no new races); realtime correctness (the added accumulation wait vs latency; cancel/reset across awaits); does it keep #553's single-authority/no-detach-across-await property? **Plus §4.1: is the `SemanticBatcher` module genuinely placement-neutral — does it sit in `libs/agent` with zero gateway/daemon coupling, are `Turn`/`Prompt` expressible from the existing contract types, and does the in-gateway host keep no-await-across-lock if the batcher stays sync?**
 
 ## 7. Open questions
 1. Is `Accumulating` an explicit output, or implicit (processor simply doesn't emit a response)? Tradeoff: explicit lets the gateway/UX know "still listening"; implicit is simpler.
@@ -65,5 +90,6 @@ The semantic-batched prompt must integrate with whatever produces the response. 
 3. Does semantic batching need access to **partials** (sub-turn) or only **turns**? (Affects the turn-stream contract.)
 4. How do provisional **responses** interact with semantic batching — can the agent speak a provisional reply while still accumulating (predictive), or only after `PromptComplete`?
 5. Migration: can layer-3 land purely additively on #553 behind the `ResponseMode` toggle (per-turn = today's behavior, byte-for-byte), with semantic-batched as opt-in?
+6. §4.1 sync-vs-async: the heuristic batcher is a pure/sync `observe`, but the *model-as-endpointer* (§5) makes the decision I/O-bound. Does the `SemanticBatcher` contract need an async variant (e.g. `observe` returns a future, or the model decision is driven out-of-band and only its result is fed in)? Whatever the answer, it must hold on **both** host sides and not break the in-gateway no-await-across-lock property.
 
 — Implementation (after sign-off): a new PR based on the #553 branch, additive layer-3 stage + the output-state contract; per-turn remains the default/unchanged path.
