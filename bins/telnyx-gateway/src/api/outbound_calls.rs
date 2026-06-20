@@ -137,12 +137,13 @@ pub async fn post_outbound_call(
     )
     .await;
 
-    let (call_url, emit_partials, emit_early_turns) = match decision {
+    let (call_url, emit_partials, emit_early_turns, aggregation) = match decision {
         CallbackDecision::Accept {
             call_url,
             emit_partials,
             emit_early_turns,
-        } => (call_url, emit_partials, emit_early_turns),
+            aggregation,
+        } => (call_url, emit_partials, emit_early_turns, aggregation),
         CallbackDecision::Decline => {
             let _ = hangup_outbound(&services, &gateway_call_id).await;
             return Err(ApiError::conflict(
@@ -164,6 +165,7 @@ pub async fn post_outbound_call(
             direction: TextCallDirection::Outbound,
             emit_partials,
             emit_early_turns,
+            aggregation,
         },
     )
     .await
@@ -285,6 +287,7 @@ mod tests {
                 call_url: "ws://127.0.0.1:1/unreachable-text-call".to_string(),
                 accept: true,
                 extensions: Vec::new(),
+                aggregation: Default::default(),
             })
         }
 

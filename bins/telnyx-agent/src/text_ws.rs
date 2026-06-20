@@ -37,7 +37,6 @@ impl BridgeTurnTarget {
 struct ActiveBridgeTurn {
     key: String,
     target: BridgeTurnTarget,
-    input_text: String,
     abort: BridgeAbortToken,
     task: JoinHandle<()>,
 }
@@ -250,15 +249,8 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                         provisional_turn_id,
                         generation,
                         text,
-                        append_or_replace,
                         ..
                     }) => {
-                        let updated_text = provisional_update_text(
-                            &active,
-                            &provisional_turn_id,
-                            &append_or_replace,
-                            &text,
-                        );
                         cancel_matching_provisional_id(&mut active, &provisional_turn_id);
                         active = Some(spawn_bridge_turn(
                             bridge.clone(),
@@ -267,7 +259,7 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                                 provisional_turn_id,
                                 generation,
                             },
-                            updated_text,
+                            text,
                         ));
                     }
                     Ok(GatewayTextFrame::CallerTurnProvisionalCancel {
@@ -322,7 +314,6 @@ fn spawn_bridge_turn(
     let abort = BridgeAbortToken::default();
     let task_abort = abort.clone();
     let key = target.bridge_turn_id().to_string();
-    let input_text = text.clone();
     let task_target = target.clone();
     let task_turn_id = key.clone();
     let task = tokio::spawn(async move {
@@ -359,7 +350,6 @@ fn spawn_bridge_turn(
     ActiveBridgeTurn {
         key,
         target,
-        input_text,
         abort,
         task,
     }
@@ -399,24 +389,6 @@ fn agent_final_frame(target: &BridgeTurnTarget, text: String) -> AgentTextFrame 
             text,
         },
     }
-}
-
-fn provisional_update_text(
-    active: &Option<ActiveBridgeTurn>,
-    provisional_turn_id: &str,
-    append_or_replace: &str,
-    text: &str,
-) -> String {
-    if append_or_replace == "append" {
-        if let Some(active) = active.as_ref() {
-            if active_provisional_id_matches(active, provisional_turn_id) {
-                return format!("{} {}", active.input_text.trim_end(), text.trim_start())
-                    .trim()
-                    .to_string();
-            }
-        }
-    }
-    text.to_string()
 }
 
 fn active_provisional_id_matches(active: &ActiveBridgeTurn, provisional_turn_id: &str) -> bool {
@@ -608,33 +580,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn provisional_update_text_reconstructs_append_from_active_input() {
-        let abort = BridgeAbortToken::default();
-        let task = tokio::spawn(async {});
-        let active = Some(ActiveBridgeTurn {
-            key: "pt-test".to_string(),
-            target: BridgeTurnTarget::Provisional {
-                provisional_turn_id: "pt-test".to_string(),
-                generation: 1,
-            },
-            input_text: "need a tow".to_string(),
-            abort,
-            task,
-        });
+    #[test]
+    fn caller_turn_provisional_update_uses_full_text_contract() {
+        let frame = GatewayTextFrame::CallerTurnProvisionalUpdate {
+            provisional_turn_id: "pt-test".to_string(),
+            utterance_id: "utt-test".to_string(),
+            generation: 2,
+            sequence: 10,
+            text: "need a tow truck".to_string(),
+        };
+        let encoded = serde_json::to_value(&frame).expect("frame should serialize");
 
-        assert_eq!(
-            provisional_update_text(&active, "pt-test", "append", "truck"),
-            "need a tow truck"
-        );
-        assert_eq!(
-            provisional_update_text(&active, "pt-test", "replace", "need roadside help"),
-            "need roadside help"
-        );
-        assert_eq!(
-            provisional_update_text(&active, "other", "append", "truck"),
-            "truck"
-        );
+        assert_eq!(encoded["text"], "need a tow truck");
+        assert!(encoded.get("append_or_replace").is_none());
     }
 
     #[tokio::test]
@@ -652,7 +610,6 @@ mod tests {
             target: BridgeTurnTarget::Committed {
                 turn_id: "turn-test".to_string(),
             },
-            input_text: "hello".to_string(),
             abort,
             task,
         });

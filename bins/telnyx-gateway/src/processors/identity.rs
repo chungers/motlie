@@ -19,6 +19,7 @@ impl IdentityRepeatConversationProcessor {
             ConversationProcessorInput::EarlyResponse(event) => {
                 repeat_early_response(event).map(ConversationProcessorOutput::EarlyResponse)
             }
+            ConversationProcessorInput::AgentTextStream(_) => None,
             ConversationProcessorInput::CommittedTurn(turn) => {
                 let text = turn.text.trim().to_string();
                 if text.is_empty() {
@@ -51,6 +52,7 @@ fn repeat_early_response(event: EarlyResponseEvent) -> Option<EarlyResponseInten
             generation,
             text,
             append_or_replace: AppendOrReplace::Replace,
+            final_fragment: false,
         }),
         EarlyResponseEvent::Updated {
             provisional_turn_id,
@@ -59,6 +61,7 @@ fn repeat_early_response(event: EarlyResponseEvent) -> Option<EarlyResponseInten
             generation,
             text,
             append_or_replace,
+            ..
         } => Some(EarlyResponseIntent::Speak {
             provisional_turn_id,
             call_id,
@@ -66,6 +69,7 @@ fn repeat_early_response(event: EarlyResponseEvent) -> Option<EarlyResponseInten
             generation,
             text,
             append_or_replace,
+            final_fragment: false,
         }),
         EarlyResponseEvent::Canceled {
             provisional_turn_id,
@@ -165,6 +169,7 @@ mod tests {
                 generation: 1,
                 text: "I need a tow truck.".to_string(),
                 append_or_replace: AppendOrReplace::Replace,
+                final_fragment: false,
             })
         );
     }
@@ -178,6 +183,7 @@ mod tests {
                 utterance_id: "utt-1".to_string(),
                 generation: 2,
                 text: "I need a tow truck in Oakland.".to_string(),
+                full_text: "I need a tow truck in Oakland.".to_string(),
                 append_or_replace: AppendOrReplace::Replace,
             }),
             Some(EarlyResponseIntent::Speak {
@@ -187,6 +193,7 @@ mod tests {
                 generation: 2,
                 text: "I need a tow truck in Oakland.".to_string(),
                 append_or_replace: AppendOrReplace::Replace,
+                final_fragment: false,
             })
         );
         assert_eq!(

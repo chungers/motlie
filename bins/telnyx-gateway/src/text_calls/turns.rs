@@ -3,8 +3,8 @@
 
 pub use motlie_agent::voice::telnyx::text::{
     AcceptCallResponse, AgentTextFrame, CallConnectedPayload, CallOfferPayload, CallerSpeechState,
-    DebugTextStreamFrame, GatewayTextFrame, PlaybackFinishedStatus, TextCallDirection,
-    TextCallInfo, TextCallMetadata, TextStreamDescriptor, TEXT_CALL_CONTENT_TYPE,
-    TEXT_CALL_DEBUG_EXTENSION, TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION,
-    TEXT_CALL_PROTOCOL,
+    DebugTextStreamFrame, GatewayTextFrame, PlaybackFinishedStatus, TextCallAggregationPolicy,
+    TextCallDirection, TextCallInfo, TextCallMetadata, TextStreamDescriptor,
+    TEXT_CALL_CONTENT_TYPE, TEXT_CALL_DEBUG_EXTENSION, TEXT_CALL_EARLY_TURNS_EXTENSION,
+    TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
