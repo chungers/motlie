@@ -61,6 +61,7 @@ fn repeat_early_response(event: EarlyResponseEvent) -> Option<EarlyResponseInten
             generation,
             text,
             append_or_replace,
+            ..
         } => Some(EarlyResponseIntent::Speak {
             provisional_turn_id,
             call_id,
@@ -182,6 +183,7 @@ mod tests {
                 utterance_id: "utt-1".to_string(),
                 generation: 2,
                 text: "I need a tow truck in Oakland.".to_string(),
+                full_text: "I need a tow truck in Oakland.".to_string(),
                 append_or_replace: AppendOrReplace::Replace,
             }),
             Some(EarlyResponseIntent::Speak {

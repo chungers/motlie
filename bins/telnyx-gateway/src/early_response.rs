@@ -239,6 +239,7 @@ pub enum EarlyResponseEvent {
         utterance_id: String,
         generation: u64,
         text: String,
+        full_text: String,
         append_or_replace: AppendOrReplace,
     },
     Committed {
@@ -1645,6 +1646,7 @@ where
                     utterance_id: active.utterance_id,
                     generation: active.generation,
                     text: output_text,
+                    full_text: accepted_text,
                     append_or_replace,
                 }]
             }
@@ -2206,6 +2208,7 @@ mod tests {
                 utterance_id: "utt-1".to_string(),
                 generation: 2,
                 text: "I need a tow truck in Oakland.".to_string(),
+                full_text: "I need a tow truck in Oakland.".to_string(),
                 append_or_replace: AppendOrReplace::Replace,
             }]
         );
@@ -2295,9 +2298,10 @@ mod tests {
             events.as_slice(),
             [EarlyResponseEvent::Updated {
                 text,
+                full_text,
                 append_or_replace: AppendOrReplace::Append,
                 ..
-            }] if text == "now."
+            }] if text == "now." && full_text == "I need a tow truck. now."
         ));
         assert!(sink.calls().is_empty());
     }

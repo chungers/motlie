@@ -190,7 +190,6 @@ pub enum GatewayTextFrame {
         generation: u64,
         sequence: u64,
         text: String,
-        append_or_replace: String,
     },
     #[serde(rename = "caller.turn.provisional.cancel")]
     CallerTurnProvisionalCancel {

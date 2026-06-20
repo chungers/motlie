@@ -13,7 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::call_control::TelnyxClient;
-use crate::early_response::{AppendOrReplace, EarlyResponseCancelReason, EarlyResponseEvent};
+use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
     CallStatus, LogLevel, SharedState, SpeechOutputConfig, TtsPlaybackStatus,
@@ -458,16 +458,14 @@ impl SharedTextCallRegistry {
                 provisional_turn_id,
                 utterance_id,
                 generation,
-                text,
-                append_or_replace,
+                full_text,
                 ..
             } => handle.try_send(GatewayTextFrame::CallerTurnProvisionalUpdate {
                 provisional_turn_id,
                 utterance_id,
                 generation,
                 sequence: handle.next_sequence(),
-                text,
-                append_or_replace: append_or_replace_label(append_or_replace).to_string(),
+                text: full_text,
             })?,
             EarlyResponseEvent::Canceled {
                 provisional_turn_id,
@@ -1571,13 +1569,6 @@ pub(crate) fn playback_finished_status(
     }
 }
 
-pub fn append_or_replace_label(value: AppendOrReplace) -> &'static str {
-    match value {
-        AppendOrReplace::Append => "append",
-        AppendOrReplace::Replace => "replace",
-    }
-}
-
 fn early_cancel_reason_label(reason: EarlyResponseCancelReason) -> &'static str {
     match reason {
         EarlyResponseCancelReason::AsrCorrection => "asr_correction",
@@ -2280,6 +2271,7 @@ mod tests {
                     utterance_id: "utt-stale".to_string(),
                     generation: 2,
                     text: "second text".to_string(),
+                    full_text: "second text".to_string(),
                     append_or_replace: AppendOrReplace::Replace,
                 },
             )
@@ -2287,7 +2279,11 @@ mod tests {
             .expect("updated event should forward");
         assert!(matches!(
             outbound_rx.recv().await,
-            Some(GatewayTextFrame::CallerTurnProvisionalUpdate { generation: 2, .. })
+            Some(GatewayTextFrame::CallerTurnProvisionalUpdate {
+                generation: 2,
+                text,
+                ..
+            }) if text == "second text"
         ));
 
         send_agent_frame(
