@@ -760,15 +760,6 @@ pub(crate) struct EdgeCfKey(
     pub(crate) HnswLayer,
 );
 
-/// Edges value: serialized RoaringBitmap of neighbor vec_ids.
-///
-/// NOTE: This type isn't constructed directly in most call paths; edge updates
-/// are applied via RocksDB merge operators using raw bytes. We keep the wrapper
-/// to document the CF value shape and for potential future typed access.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct EdgeCfValue(pub(crate) RoaringBitmapBytes);
-
 impl ColumnFamily for Edges {
     const CF_NAME: &'static str = "vector/edges";
 }
@@ -818,20 +809,6 @@ impl Edges {
         let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
         let layer = bytes[12];
         Ok(EdgeCfKey(embedding_code, vec_id, layer))
-    }
-
-    /// Serialize edge value (RoaringBitmap bytes passthrough).
-    /// Not currently used in hot paths; merge ops operate on raw bytes.
-    #[allow(dead_code)]
-    pub fn value_to_bytes(value: &EdgeCfValue) -> Vec<u8> {
-        value.0.clone()
-    }
-
-    /// Deserialize edge value (RoaringBitmap bytes passthrough).
-    /// Not currently used in hot paths; merge ops operate on raw bytes.
-    #[allow(dead_code)]
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<EdgeCfValue> {
-        Ok(EdgeCfValue(bytes.to_vec()))
     }
 }
 
@@ -1055,7 +1032,7 @@ pub(crate) mod VecFlags {
     /// meta.set_replicated(true);  // Mark as replicated
     /// if meta.is_replicated() { ... }  // Check replication status
     /// ```
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub const REPLICATED: u8 = 0b1000_0000; // bit 7
 }
 
@@ -1142,6 +1119,7 @@ impl VecMetadata {
     }
 
     /// Check if vector is fully indexed and active.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn is_indexed(&self) -> bool {
         self.lifecycle() == VecLifecycle::Indexed
@@ -1168,6 +1146,7 @@ impl VecMetadata {
     /// - Pending → Indexed
     /// - PendingDeleted → Deleted
     /// - Indexed/Deleted → unchanged
+    #[cfg(test)]
     pub(crate) fn clear_pending(&mut self) {
         let new_state = match self.lifecycle() {
             VecLifecycle::Pending => VecLifecycle::Indexed,
@@ -1185,7 +1164,7 @@ impl VecMetadata {
     ///
     /// Check if vector has been replicated to another node.
     /// Always returns false until distributed replication is implemented.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[inline]
     pub(crate) fn is_replicated(&self) -> bool {
         self.flags & VecFlags::REPLICATED != 0
@@ -1195,7 +1174,7 @@ impl VecMetadata {
     ///
     /// Set the replicated flag. Has no effect until distributed
     /// replication is implemented.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_replicated(&mut self, replicated: bool) {
         if replicated {
             self.flags |= VecFlags::REPLICATED;
@@ -1733,10 +1712,6 @@ pub(crate) struct PendingCfKey(
     pub(crate) VecId,
 );
 
-/// Pending value: empty (presence in CF indicates pending status)
-#[derive(Debug, Clone)]
-pub(crate) struct PendingCfValue(pub(crate) ());
-
 impl ColumnFamily for Pending {
     const CF_NAME: &'static str = "vector/pending";
 }
@@ -1796,14 +1771,6 @@ impl Pending {
         let timestamp = TimestampMilli(u64::from_be_bytes(bytes[8..16].try_into()?));
         let vec_id = u32::from_be_bytes(bytes[16..20].try_into()?);
         Ok(PendingCfKey(embedding_code, timestamp, vec_id))
-    }
-
-    pub fn value_to_bytes(_value: &PendingCfValue) -> Vec<u8> {
-        Vec::new()
-    }
-
-    pub fn value_from_bytes(_bytes: &[u8]) -> Result<PendingCfValue> {
-        Ok(PendingCfValue(()))
     }
 }
 

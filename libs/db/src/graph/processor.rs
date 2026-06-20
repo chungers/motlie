@@ -97,15 +97,6 @@ impl Processor {
         }
     }
 
-    /// Create a new Processor with explicit cache.
-    ///
-    /// Used when the cache is managed externally (e.g., by Subsystem).
-    pub fn with_cache(storage: Arc<Storage>, name_cache: Arc<NameCache>) -> Self {
-        Self {
-            storage,
-            name_cache,
-        }
-    }
 
     // ========================================================================
     // Storage Access
@@ -138,26 +129,6 @@ impl Processor {
     // Synchronous Mutation API
     // ========================================================================
 
-    /// Process mutations synchronously within a transaction.
-    ///
-    /// This is the core mutation method called by Writer consumers.
-    /// All mutations in the batch are executed atomically in a single
-    /// RocksDB transaction.
-    ///
-    /// # Arguments
-    ///
-    /// * `mutations` - Slice of mutations to process atomically
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Storage is not in read-write mode
-    /// - Any mutation fails to execute
-    /// - Transaction commit fails
-    pub fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-        self.process_mutations_with_options(mutations, ExecOptions::default())
-            .map(|_| ())
-    }
 
     /// Process mutations synchronously within a transaction with execution options.
     pub fn process_mutations_with_options(
@@ -195,22 +166,6 @@ impl Processor {
         Ok(results)
     }
 
-    /// Execute a single mutation in a new transaction.
-    ///
-    /// Convenience method that wraps a single mutation in a slice.
-    pub fn execute_mutation(&self, mutation: &Mutation) -> Result<()> {
-        self.process_mutations(std::slice::from_ref(mutation))
-    }
-
-    /// Execute a single mutation with options, returning a reply.
-    pub fn execute_mutation_with_options(
-        &self,
-        mutation: &Mutation,
-        options: ExecOptions,
-    ) -> Result<MutationResult> {
-        let replies = self.process_mutations_with_options(std::slice::from_ref(mutation), options)?;
-        Ok(replies.into_iter().next().unwrap_or(MutationResult::Flush))
-    }
 
     // ========================================================================
     // Query API
@@ -243,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn test_processor_with_cache() {
+    fn test_processor_uses_storage_cache() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("processor_cache_test");
 
@@ -251,11 +206,11 @@ mod tests {
         storage.ready().unwrap();
         let storage = Arc::new(storage);
 
-        let custom_cache = Arc::new(NameCache::new());
-        let processor = Processor::with_cache(storage.clone(), custom_cache.clone());
+        let storage_cache = storage.cache().clone();
+        let processor = Processor::new(storage.clone());
 
-        // Verify custom cache is used
-        assert!(Arc::ptr_eq(processor.name_cache(), &custom_cache));
+        // Verify the processor uses the storage cache
+        assert!(Arc::ptr_eq(processor.name_cache(), &storage_cache));
     }
 
     #[test]
@@ -270,7 +225,7 @@ mod tests {
         let processor = Processor::new(storage);
 
         // Empty mutations should succeed
-        let result = processor.process_mutations(&[]);
+        let result = processor.process_mutations_with_options(&[], ExecOptions::default());
         assert!(result.is_ok());
     }
 }

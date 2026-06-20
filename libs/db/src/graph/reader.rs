@@ -246,25 +246,6 @@ pub fn spawn_query_consumer(
     spawn_consumer(consumer)
 }
 
-/// Spawn a query consumer pool with shared Processor.
-///
-/// Convenience function that matches the old API signature.
-/// Creates multiple consumers sharing a Processor.
-///
-/// # Arguments
-/// * `receiver` - Query receiver from create_reader_with_storage
-/// * `processor` - Shared GraphProcessor instance
-/// * `num_workers` - Number of query workers to spawn
-///
-/// # Returns
-/// Vec of JoinHandles for spawned workers
-pub(crate) fn spawn_query_consumer_pool_shared(
-    receiver: flume::Receiver<QueryRequest>,
-    processor: Arc<GraphProcessor>,
-    num_workers: usize,
-) -> Vec<JoinHandle<()>> {
-    spawn_consumer_pool_with_processor(receiver, processor, num_workers)
-}
 
 /// Spawn a pool of query consumers, each with its own readonly storage.
 ///
@@ -323,26 +304,6 @@ pub fn spawn_query_consumer_pool_readonly(
     handles
 }
 
-/// Spawn a single query consumer with shared Processor.
-///
-/// Convenience function that matches the old `spawn_query_consumer_with_graph` signature.
-/// Uses the Processor to process queries.
-///
-/// # Arguments
-/// * `receiver` - Query receiver from create_reader_with_storage
-/// * `config` - Reader configuration
-/// * `processor` - Shared GraphProcessor instance
-///
-/// # Returns
-/// JoinHandle for the spawned consumer task
-pub(crate) fn spawn_query_consumer_with_processor(
-    receiver: flume::Receiver<QueryRequest>,
-    config: ReaderConfig,
-    processor: Arc<GraphProcessor>,
-) -> JoinHandle<Result<()>> {
-    let consumer = Consumer::new(receiver, config, processor);
-    spawn_consumer(consumer)
-}
 
 // ============================================================================
 // Processor-based Consumer Functions (ARCH2 Pattern)

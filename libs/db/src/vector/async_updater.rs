@@ -263,13 +263,9 @@ impl AsyncUpdaterConfig {
 /// idempotent: re-processing an item that was partially processed is safe.
 pub struct AsyncGraphUpdater {
     storage: Arc<Storage>,
-    registry: Arc<EmbeddingRegistry>,
-    nav_cache: Arc<NavigationCache>,
     config: AsyncUpdaterConfig,
     shutdown: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
-    /// Counter for round-robin embedding selection
-    embedding_counter: Arc<AtomicU64>,
     /// Metrics: total items processed
     items_processed: Arc<AtomicU64>,
     /// Metrics: total batches processed
@@ -344,12 +340,9 @@ impl AsyncGraphUpdater {
 
         Self {
             storage,
-            registry,
-            nav_cache,
             config,
             shutdown,
             workers,
-            embedding_counter,
             items_processed,
             batches_processed,
         }
@@ -980,7 +973,7 @@ mod tests {
     #[test]
     fn test_insert_async_immediate_searchability() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
+        let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
         let embedding = register_embedding(&registry, 64);
