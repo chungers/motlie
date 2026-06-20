@@ -46,6 +46,7 @@ pub struct Accumulating {
     pub batch_id: String,
     pub epoch: u64,
     pub source_turn_ids: Vec<String>,
+    pub target_turn_count: usize,
     pub deadline_ms: u64,
 }
 
@@ -207,6 +208,12 @@ impl IdentityTurnBatcher {
         }
     }
 
+    fn target_turn_count(&self) -> usize {
+        self.config
+            .fixed_batch_size
+            .min(self.config.max_batch_turns)
+    }
+
     fn accumulating(&mut self) -> BatchDecision {
         let batch_id = self.batch_id();
         BatchDecision::Accumulating(Accumulating {
@@ -217,6 +224,7 @@ impl IdentityTurnBatcher {
                 .iter()
                 .map(|turn| turn.turn_id.clone())
                 .collect(),
+            target_turn_count: self.target_turn_count(),
             deadline_ms: if self.pending_turns.len() <= 1 {
                 self.config.max_batch_wait_ms
             } else {
@@ -324,6 +332,7 @@ mod tests {
                 batch_id: "turn-batch-0-0".to_string(),
                 epoch: 0,
                 source_turn_ids: vec!["turn-1".to_string()],
+                target_turn_count: 2,
                 deadline_ms: 250,
             })
         );
@@ -359,6 +368,7 @@ mod tests {
                 batch_id: "turn-batch-1-1".to_string(),
                 epoch: 1,
                 source_turn_ids: vec!["turn-2".to_string()],
+                target_turn_count: 2,
                 deadline_ms: 0,
             })
         );

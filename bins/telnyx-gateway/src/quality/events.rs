@@ -288,6 +288,24 @@ impl QualityEvent {
         Self::new(context, "voice.span.finished", payload)
     }
 
+    pub fn turn_batch_lifecycle(
+        context: QualityEventContext,
+        lifecycle_event: &'static str,
+        mut payload: Map<String, Value>,
+    ) -> Self {
+        payload.insert(
+            "lifecycle_event".to_string(),
+            Value::String(lifecycle_event.to_string()),
+        );
+        let event = match lifecycle_event {
+            "turn-accumulated" => "turn_batch.turn_accumulated",
+            "prompt-complete" => "turn_batch.prompt_complete",
+            "batch-reset" => "turn_batch.batch_reset",
+            _ => "turn_batch.lifecycle",
+        };
+        Self::new(context, event, payload)
+    }
+
     pub fn inbound_transport_rollup(
         context: QualityEventContext,
         payload: Map<String, Value>,
@@ -679,6 +697,33 @@ mod tests {
         );
         assert_eq!(outbound.event, "media.outbound_pacing.rollup");
         assert_eq!(outbound.payload["underrun_count"], 1);
+    }
+
+    #[test]
+    fn turn_batch_lifecycle_events_use_greppable_names() {
+        let context = QualityEventContext::new(
+            4,
+            "run_test",
+            Some("gwc_test".to_string()),
+            "cfg_test",
+            RedactionMode::MetricsOnly,
+        );
+        let event = QualityEvent::turn_batch_lifecycle(
+            context,
+            "turn-accumulated",
+            map_from_value(json!({
+                "batch_id": "turn-batch-0-0",
+                "epoch": 0,
+                "accumulated_turn_count": 1,
+                "target_turn_count": 3
+            })),
+        );
+
+        assert_eq!(event.event, "turn_batch.turn_accumulated");
+        assert_eq!(event.payload["lifecycle_event"], "turn-accumulated");
+        assert_eq!(event.payload["batch_id"], "turn-batch-0-0");
+        assert_eq!(event.payload["accumulated_turn_count"], 1);
+        assert_eq!(event.payload["target_turn_count"], 3);
     }
 
     #[test]

@@ -1073,6 +1073,23 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
+    pub fn emit_quality_turn_batch_lifecycle(
+        &mut self,
+        gateway_call_id: &str,
+        lifecycle_event: &'static str,
+        payload: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::turn_batch_lifecycle(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            lifecycle_event,
+            payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
     pub fn emit_quality_inbound_transport_rollup(
         &mut self,
         gateway_call_id: &str,

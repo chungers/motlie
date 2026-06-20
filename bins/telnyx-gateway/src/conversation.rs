@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context};
+use motlie_agent::voice::turn_batching::{Accumulating, Prompt, TurnBatchReset};
 use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 use motlie_voice::telephony::CallAction;
 use tokio::sync::Mutex;
@@ -547,6 +548,7 @@ async fn handle_conversation_processor_output(
             Ok(ProcessorOutputResult::CommandApplied)
         }
         ConversationProcessorOutput::PromptComplete(prompt) => {
+            emit_turn_batch_prompt_complete_lifecycle(state, gateway_call_id, &prompt).await;
             apply_conversation_command_with_timing(
                 state,
                 media_registry,
@@ -560,14 +562,7 @@ async fn handle_conversation_processor_output(
             Ok(ProcessorOutputResult::CommandApplied)
         }
         ConversationProcessorOutput::Accumulating(batch) => {
-            tracing::debug!(
-                gateway_call_id,
-                batch_id = batch.batch_id,
-                epoch = batch.epoch,
-                source_turn_count = batch.source_turn_ids.len(),
-                deadline_ms = batch.deadline_ms,
-                "conversation.processor.turn_batch_accumulating"
-            );
+            emit_turn_batch_accumulated_lifecycle(state, gateway_call_id, &batch).await;
             schedule_turn_batch_timeout(
                 state,
                 media_registry,
@@ -580,13 +575,7 @@ async fn handle_conversation_processor_output(
             Ok(ProcessorOutputResult::NoCommand)
         }
         ConversationProcessorOutput::Reset(reset) => {
-            tracing::debug!(
-                gateway_call_id,
-                reason = reset.reason.as_str(),
-                epoch = reset.epoch,
-                batch_id = reset.batch_id.as_deref(),
-                "conversation.processor.turn_batch_reset"
-            );
+            emit_turn_batch_reset_lifecycle(state, gateway_call_id, &reset).await;
             Ok(ProcessorOutputResult::NoCommand)
         }
         ConversationProcessorOutput::EarlyResponse(_) => {
@@ -965,13 +954,101 @@ async fn reset_turn_batch_for_barge_in(
         .process_processor_input(gateway_call_id, processor, input)
         .await
     {
-        tracing::debug!(
-            gateway_call_id,
-            reason = reset.reason.as_str(),
-            epoch = reset.epoch,
-            batch_id = reset.batch_id.as_deref(),
-            "conversation.processor.turn_batch_reset"
-        );
+        emit_turn_batch_reset_lifecycle(state, gateway_call_id, &reset).await;
+    }
+}
+
+async fn emit_turn_batch_accumulated_lifecycle(
+    state: &SharedState,
+    gateway_call_id: &str,
+    batch: &Accumulating,
+) {
+    let accumulated_turn_count = batch.source_turn_ids.len();
+    tracing::info!(
+        gateway_call_id,
+        lifecycle_event = "turn-accumulated",
+        batch_id = %batch.batch_id,
+        epoch = batch.epoch,
+        accumulated_turn_count,
+        target_turn_count = batch.target_turn_count,
+        deadline_ms = batch.deadline_ms,
+        "conversation.processor.turn_batch.turn_accumulated"
+    );
+    let payload = turn_batch_payload(serde_json::json!({
+        "batch_id": &batch.batch_id,
+        "epoch": batch.epoch,
+        "accumulated_turn_count": accumulated_turn_count,
+        "target_turn_count": batch.target_turn_count,
+        "source_turn_ids": &batch.source_turn_ids,
+        "deadline_ms": batch.deadline_ms,
+    }));
+    state.write().await.emit_quality_turn_batch_lifecycle(
+        gateway_call_id,
+        "turn-accumulated",
+        payload,
+    );
+}
+
+async fn emit_turn_batch_prompt_complete_lifecycle(
+    state: &SharedState,
+    gateway_call_id: &str,
+    prompt: &Prompt,
+) {
+    let joined_source_turn_count = prompt.source_turn_ids.len();
+    tracing::info!(
+        gateway_call_id,
+        lifecycle_event = "prompt-complete",
+        batch_id = %prompt.batch_id,
+        epoch = prompt.epoch,
+        joined_source_turn_count,
+        response_turn_id = %prompt.response_turn_id,
+        prompt_chars = prompt.text.chars().count(),
+        "conversation.processor.turn_batch.prompt_complete"
+    );
+    let payload = turn_batch_payload(serde_json::json!({
+        "batch_id": &prompt.batch_id,
+        "epoch": prompt.epoch,
+        "joined_source_turn_count": joined_source_turn_count,
+        "source_turn_ids": &prompt.source_turn_ids,
+        "response_turn_id": &prompt.response_turn_id,
+        "prompt_words": prompt.text.split_whitespace().count(),
+        "prompt_chars": prompt.text.chars().count(),
+    }));
+    state.write().await.emit_quality_turn_batch_lifecycle(
+        gateway_call_id,
+        "prompt-complete",
+        payload,
+    );
+}
+
+async fn emit_turn_batch_reset_lifecycle(
+    state: &SharedState,
+    gateway_call_id: &str,
+    reset: &TurnBatchReset,
+) {
+    tracing::info!(
+        gateway_call_id,
+        lifecycle_event = "batch-reset",
+        reason = reset.reason.as_str(),
+        epoch = reset.epoch,
+        batch_id = ?reset.batch_id.as_deref(),
+        "conversation.processor.turn_batch.batch_reset"
+    );
+    let payload = turn_batch_payload(serde_json::json!({
+        "reason": reset.reason.as_str(),
+        "batch_id": &reset.batch_id,
+        "epoch": reset.epoch,
+    }));
+    state
+        .write()
+        .await
+        .emit_quality_turn_batch_lifecycle(gateway_call_id, "batch-reset", payload);
+}
+
+fn turn_batch_payload(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(payload) => payload,
+        _ => serde_json::Map::new(),
     }
 }
 
