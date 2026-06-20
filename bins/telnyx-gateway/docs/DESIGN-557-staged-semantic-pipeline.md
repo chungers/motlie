@@ -1,6 +1,7 @@
 # DESIGN — #557: Explicit pipeline stages + semantic-batching layer (builds on #553/#541)
 
 ## Changelog
+- 2026-06-20 — @ops48-orchestrator — Add §4.2: `IdentityPromptHandler`, the layer-3 identity/debug module — the `SemanticBatcher` counterpart of `IdentityRepeatConversationProcessor`. Deterministic, model-free; echoes the assembled prompt; default batch-of-1 + opt-in fixed-N accumulation. The validation harness for the new `Accumulating/PromptComplete/Reset` states, the `SemanticReset`/epoch contract, and placement neutrality (same handler in-gateway and in-daemon → identical behavior). Per David.
 - 2026-06-20 — @ops48-orchestrator — Add §4.1: the semantic-batching logic is a placement-neutral `SemanticBatcher` module in `libs/agent`, droppable on either side of the gateway↔daemon process boundary (host adapts transport only). Reframes "where layer-3 runs" as a deployment choice, not a contract change. Added matching reviewer focus (claude rust architect) + open question §7.6 (sync-vs-async batcher for model-as-endpointer). Per David.
 - 2026-06-20 — @ops48-orchestrator — Initial proposal. Refines the #553 modular pipeline into explicit, contract-enforced stages and adds an optional semantic-batching layer (N turns → 1 coherent prompt). For validation by a codex speech-pipeline architect, a codex streaming-LLM/model expert (turn/streaming LLM integration feasibility), and a claude rust + realtime architect.
 
@@ -71,6 +72,17 @@ pub enum BatchDecision {
 - **In-daemon host:** `telnyx-agent` owns the **same** `SemanticBatcher`, fed by the gateway's turn stream over the text-call websocket; emits `AgentTurn*` return frames on `PromptComplete`; gateway barge-in arrives as a `GatewayTextFrame` → `reset()`.
 
 Because the batcher consumes **only clean turns** (never raw acoustic partials) and the gateway **always** owns acoustic endpointing + safety, the daemon-side placement does **not** re-own acoustic boundaries — preserving the §3.5 invariant that dissolves #556. `ResponseMode::{PerTurn, SemanticBatched}` selects whether a batcher is in the loop at all; **where** it runs (gateway vs daemon) is a host/deployment choice, **not** a contract change. (Tension to resolve: a heuristic batcher is pure/sync as above, but the *model-as-endpointer* option in §5 makes the decision I/O-bound — see §7.6.)
+
+### 4.2 `IdentityPromptHandler` — the layer-3 identity/debug module
+The per-turn layers ship a reference identity processor (`IdentityRepeatConversationProcessor`) that echoes partials/turns verbatim — a deterministic, model-free smoke-test for layers 1–2. Layer 3 gets the **same kind of vehicle**: `IdentityPromptHandler`, a trivial `SemanticBatcher` impl (in `libs/agent`, next to the trait) whose only job is to make the new batching plumbing observable and testable end-to-end **without an LLM**.
+
+What it does — the layer-3 analog of "repeat":
+- **Batching:** deterministic, no semantics. Default behavior is **batch-of-1** — every turn yields `PromptComplete(turn.text)` immediately, never `Accumulating` (byte-for-byte the `PerTurn` path, but routed *through* the layer-3 `SemanticBatcher` contract — so it exercises `PromptComplete` + the host's response trigger).
+- **Accumulation mode (opt-in for validation):** a configurable trivial rule — fixed `N` turns, or until a sentinel turn — that emits `Accumulating` for the first N−1 and `PromptComplete(joined_text)` on the Nth. This is what actually drives the *new* code paths: multi-turn→1-prompt assembly, the explicit `Accumulating` state, and `Reset` mid-accumulation.
+- **Response:** echo. The assembled prompt is spoken back verbatim (the host maps `PromptComplete` → `CommittedSpeech`/`AgentTurn`), exactly as `IdentityRepeat` echoes a turn. No model call.
+- **Reset:** honors `reset()` — drops any in-progress accumulation; with epoch/`batch_id` gating, a late echo after reset is dropped. This makes the `SemanticReset` frame + stale-rejection contract directly testable.
+
+Why it's worth specifying now: it is the **deterministic validation harness for layer 3** — it lets us live-validate (a) the new `Accumulating/PromptComplete/Reset` output states, (b) the `SemanticReset` boundary frame and epoch gating, and (c) **placement neutrality** (run the identical `IdentityPromptHandler` in-gateway *and* in-daemon and assert identical observable behavior) before any real LLM/semantic handler exists. It is debug/test scaffolding — gated behind `ResponseMode::SemanticBatched` + a dev/identity selector, never a production default.
 
 ## 5. Streaming-LLM / turn-LLM integration (feasibility — codex streaming-LLM reviewer)
 The semantic-batched prompt must integrate with whatever produces the response. Open feasibility questions:
