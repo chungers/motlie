@@ -1,13 +1,15 @@
-use futures_util::{Stream, StreamExt};
+use futures_util::{future, Stream, StreamExt};
+use motlie_agent::voice::turn_batching::{Accumulating, Prompt, TurnBatchReset};
 use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 
 use crate::early_response::{EarlyResponseEvent, EarlyResponseIntent};
 use crate::operator::state::SpeechOutputConfig;
-use crate::text_calls::turns::{AgentTextFrame, TextCallAggregationPolicy};
+use crate::text_calls::turns::{AgentTextFrame, ResponseMode};
 use crate::text_calls::websocket::{TextCallSessionConfig, TextCallTurnTiming};
 
 pub(crate) mod external_text;
 mod identity;
+mod turn_batching;
 
 /// Events that may drive a conversation processor.
 #[derive(Clone, Debug)]
@@ -36,7 +38,7 @@ pub struct AgentTextStreamInput {
     pub(crate) timing: Option<TextCallTurnTiming>,
     pub(crate) config: TextCallSessionConfig,
     pub speech_output: SpeechOutputConfig,
-    pub aggregation: TextCallAggregationPolicy,
+    pub response_mode: ResponseMode,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +58,12 @@ pub enum ConversationProcessorOutput {
     EarlyResponse(EarlyResponseIntent),
     /// Committed agent speech intent for the shared speech-output stage.
     CommittedSpeech(CommittedSpeechIntent),
+    /// A turn-batching processor is intentionally holding source turns.
+    Accumulating(Accumulating),
+    /// A turn-batching processor completed a prompt for response generation.
+    PromptComplete(Prompt),
+    /// A turn-batching processor reset pending state.
+    Reset(TurnBatchReset),
     /// Committed-turn command for normal conversation state.
     Command(ConversationCommand),
     /// Conversation-scoped failure. This records failed state without failing the media path.
@@ -68,6 +76,8 @@ pub enum ConversationProcessorKind {
     /// Repeat accepted caller text exactly for both committed and provisional paths.
     #[default]
     Identity,
+    /// Gateway-hosted turn-batching identity/debug processor.
+    TurnBatchedIdentity,
     /// External app/telnyx-agent text stream attached through the text-call protocol.
     ///
     /// This is adapter-backed: inbound caller turns are delivered by the text-call
@@ -80,6 +90,7 @@ impl ConversationProcessorKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Identity => "identity",
+            Self::TurnBatchedIdentity => "turn_batched_identity",
             Self::ExternalTextStream => "external_text_stream",
         }
     }
@@ -93,6 +104,10 @@ impl ConversationProcessorKind {
         }
         match self {
             Self::Identity => identity::IdentityRepeatConversationProcessor.process_input(input),
+            Self::TurnBatchedIdentity => {
+                turn_batching::TurnBatchedIdentityConversationProcessor::default()
+                    .process_input(input)
+            }
             Self::ExternalTextStream => {
                 external_text::ExternalTextStreamConversationProcessor.process_input(input)
             }
@@ -106,7 +121,15 @@ impl ConversationProcessorKind {
     where
         S: Stream<Item = ConversationProcessorInput> + Send,
     {
-        inputs.filter_map(move |input| async move { self.process_input(input) })
+        let mut turn_batched_processor = (self == Self::TurnBatchedIdentity)
+            .then(turn_batching::TurnBatchedIdentityConversationProcessor::default);
+        inputs.filter_map(move |input| {
+            let output = match turn_batched_processor.as_mut() {
+                Some(processor) => processor.process_input(input),
+                None => self.process_input(input),
+            };
+            future::ready(output)
+        })
     }
 }
 
@@ -130,7 +153,7 @@ mod tests {
             timing,
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             speech_output: SpeechOutputConfig::default(),
-            aggregation: TextCallAggregationPolicy::GatewayOwned,
+            response_mode: ResponseMode::PerTurn,
         })
     }
 
@@ -149,6 +172,8 @@ mod tests {
                 AgentTextFrame::AgentTurnPartial {
                     turn_id: "turn-1".to_string(),
                     text: "partial".to_string(),
+                    batch_id: None,
+                    epoch: None,
                     append: true,
                 },
                 Some(turn_timing()),
@@ -168,6 +193,8 @@ mod tests {
                 AgentTextFrame::AgentTurn {
                     turn_id: "turn-1".to_string(),
                     text: "final".to_string(),
+                    batch_id: None,
+                    epoch: None,
                 },
                 Some(turn_timing()),
             ));

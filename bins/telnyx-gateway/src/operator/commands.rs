@@ -399,6 +399,7 @@ pub enum ConversationModeArg {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ConversationProcessorArg {
     Identity,
+    TurnBatchedIdentity,
     ExternalTextStream,
 }
 
@@ -406,6 +407,7 @@ impl From<ConversationProcessorArg> for ConversationProcessorKind {
     fn from(processor: ConversationProcessorArg) -> Self {
         match processor {
             ConversationProcessorArg::Identity => Self::Identity,
+            ConversationProcessorArg::TurnBatchedIdentity => Self::TurnBatchedIdentity,
             ConversationProcessorArg::ExternalTextStream => Self::ExternalTextStream,
         }
     }
@@ -3594,7 +3596,7 @@ fn gateway_root_help() -> String {
         "  conversation status [call-id]  Show attachment, mode, processor, and latest turns",
         "  conversation smoke-test on|off Enable or disable test-only identity/repeat replies",
         "  conversation barge-in on|off|status Enable or disable transcript-triggered TTS clear",
-        "  conversation processor identity|external-text-stream [call-id] Set per-call conversation processor",
+        "  conversation processor identity|turn-batched-identity|external-text-stream [call-id] Set per-call conversation processor",
         "  conversation disapprove [call-id] Stop TTS and detach conversation",
         "  reject [call-id]",
         "  hangup [call-id]",
@@ -3969,7 +3971,7 @@ fn conversation_help() -> String {
         "  conversation status [call-id]",
         "  conversation smoke-test <on|off>",
         "  conversation barge-in [on|off|status]",
-        "  conversation processor identity|external-text-stream [call-id]",
+        "  conversation processor identity|turn-batched-identity|external-text-stream [call-id]",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
         "  conversation disapprove [call-id]",
@@ -4191,7 +4193,7 @@ fn socket_help() -> String {
         "    conversation attach|detach [call-id]",
         "    conversation smoke-test on|off",
         "    conversation barge-in [on|off|status]",
-        "    conversation processor identity|external-text-stream [call-id]",
+        "    conversation processor identity|turn-batched-identity|external-text-stream [call-id]",
         "    conversation approve [call-id]",
         "    conversation disapprove [call-id]",
         "    hangup [call-id]",

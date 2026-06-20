@@ -2149,6 +2149,9 @@ async fn cancel_text_call_speech_for_barge_in(
     if !text_calls.contains(gateway_call_id).await {
         return Ok(());
     }
+    let _ = text_calls
+        .send_turn_batch_reset(gateway_call_id, "barge_in")
+        .await;
     if media_registry
         .active_speech_playback_id(gateway_call_id)
         .await

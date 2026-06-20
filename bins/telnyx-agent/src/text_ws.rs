@@ -1,7 +1,11 @@
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use motlie_agent::voice::telnyx::text::{
-    AgentTextFrame, CallerSpeechState, GatewayTextFrame, PlaybackFinishedStatus,
+    AgentTextFrame, CallerSpeechState, GatewayTextFrame, PlaybackFinishedStatus, ResponseMode,
+};
+use motlie_agent::voice::turn_batching::{
+    BatchDecision, IdentityPromptHandler, IdentityPromptHandlerConfig, Turn, TurnBatchResetReason,
+    TurnBatcher,
 };
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -15,6 +19,8 @@ use crate::tmux_bridge::{BridgeAbortToken, BridgeTurnEvent, TmuxBridge};
 enum BridgeTurnTarget {
     Committed {
         turn_id: String,
+        batch_id: Option<String>,
+        epoch: Option<u64>,
     },
     Provisional {
         provisional_turn_id: String,
@@ -25,7 +31,7 @@ enum BridgeTurnTarget {
 impl BridgeTurnTarget {
     fn bridge_turn_id(&self) -> &str {
         match self {
-            Self::Committed { turn_id } => turn_id,
+            Self::Committed { turn_id, .. } => turn_id,
             Self::Provisional {
                 provisional_turn_id,
                 ..
@@ -144,6 +150,8 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
     let mut active: Option<ActiveBridgeTurn> = None;
     let mut partial_context = PartialAdvisoryContext::default();
     let mut committed_provisionals = BTreeMap::<String, String>::new();
+    let mut response_mode = ResponseMode::PerTurn;
+    let mut turn_batcher = IdentityPromptHandler::new(IdentityPromptHandlerConfig::batch_of_one());
 
     while let Some(message) = read.next().await {
         match message {
@@ -154,7 +162,7 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                         turn_id,
                         utterance_id,
                         text,
-                        ..
+                        sequence,
                     }) => {
                         if let Some(summary) =
                             partial_context.take_matching(utterance_id.as_deref())
@@ -179,13 +187,51 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                             );
                             continue;
                         }
-                        cancel_active_turn(&mut active);
-                        active = Some(spawn_bridge_turn(
-                            bridge.clone(),
-                            agent_tx.clone(),
-                            BridgeTurnTarget::Committed { turn_id },
-                            text,
-                        ));
+                        match response_mode {
+                            ResponseMode::PerTurn => {
+                                cancel_active_turn(&mut active);
+                                active = Some(spawn_bridge_turn(
+                                    bridge.clone(),
+                                    agent_tx.clone(),
+                                    BridgeTurnTarget::Committed {
+                                        turn_id,
+                                        batch_id: None,
+                                        epoch: None,
+                                    },
+                                    text,
+                                ));
+                            }
+                            ResponseMode::TurnBatched => match turn_batcher.observe(Turn {
+                                turn_id: turn_id.clone(),
+                                utterance_id,
+                                text,
+                                sequence,
+                                epoch: turn_batcher.epoch(),
+                            }) {
+                                BatchDecision::Accumulating(state) => {
+                                    tracing::debug!(
+                                        batch_id = state.batch_id,
+                                        epoch = state.epoch,
+                                        source_turn_count = state.source_turn_ids.len(),
+                                        "telnyx_agent.text_ws.turn_batch_accumulating"
+                                    );
+                                }
+                                BatchDecision::PromptComplete(prompt) => {
+                                    cancel_active_turn(&mut active);
+                                    active = Some(spawn_bridge_turn(
+                                        bridge.clone(),
+                                        agent_tx.clone(),
+                                        BridgeTurnTarget::Committed {
+                                            turn_id: prompt.response_turn_id,
+                                            batch_id: Some(prompt.batch_id),
+                                            epoch: Some(prompt.epoch),
+                                        },
+                                        prompt.text,
+                                    ));
+                                }
+                                BatchDecision::Reset(_) => {}
+                            },
+                        }
                     }
                     Ok(GatewayTextFrame::PlaybackFinished {
                         turn_id,
@@ -279,12 +325,27 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
                         generation,
                         ..
                     }) => {
+                        if matches!(response_mode, ResponseMode::TurnBatched) {
+                            let _ = turn_batcher.reset(TurnBatchResetReason::FinalTurnSuperseded);
+                        }
                         if active_provisional_matches(&active, &provisional_turn_id, generation) {
                             committed_provisionals.insert(turn_id, provisional_turn_id);
                         }
                     }
-                    Ok(GatewayTextFrame::SessionStart { .. })
-                    | Ok(GatewayTextFrame::ProvisionalPlaybackStarted { .. })
+                    Ok(GatewayTextFrame::SessionStart {
+                        response_mode: mode,
+                        ..
+                    }) => {
+                        response_mode = mode;
+                        turn_batcher =
+                            IdentityPromptHandler::new(IdentityPromptHandlerConfig::batch_of_one());
+                    }
+                    Ok(GatewayTextFrame::TurnBatchReset { reason, .. }) => {
+                        cancel_active_turn(&mut active);
+                        let reset_reason = turn_batch_reset_reason(&reason);
+                        let _ = turn_batcher.reset(reset_reason);
+                    }
+                    Ok(GatewayTextFrame::ProvisionalPlaybackStarted { .. })
                     | Ok(GatewayTextFrame::PlaybackStarted { .. })
                     | Ok(GatewayTextFrame::PlaybackFinished { .. })
                     | Ok(GatewayTextFrame::Error { .. }) => {}
@@ -303,6 +364,16 @@ pub async fn handle_gateway_socket(socket: WebSocket, bridge: TmuxBridge) {
     cancel_active_turn(&mut active);
     drop(agent_tx);
     let _ = writer.await;
+}
+
+fn turn_batch_reset_reason(reason: &str) -> TurnBatchResetReason {
+    match reason {
+        "barge_in" => TurnBatchResetReason::BargeIn,
+        "final_turn_superseded" => TurnBatchResetReason::FinalTurnSuperseded,
+        "stale_generation" => TurnBatchResetReason::StaleGeneration,
+        "session_end" => TurnBatchResetReason::SessionEnd,
+        _ => TurnBatchResetReason::Manual,
+    }
 }
 
 fn spawn_bridge_turn(
@@ -357,9 +428,15 @@ fn spawn_bridge_turn(
 
 fn agent_partial_frame(target: &BridgeTurnTarget, text: String) -> AgentTextFrame {
     match target {
-        BridgeTurnTarget::Committed { turn_id } => AgentTextFrame::AgentTurnPartial {
+        BridgeTurnTarget::Committed {
+            turn_id,
+            batch_id,
+            epoch,
+        } => AgentTextFrame::AgentTurnPartial {
             turn_id: turn_id.clone(),
             text,
+            batch_id: batch_id.clone(),
+            epoch: *epoch,
             append: true,
         },
         BridgeTurnTarget::Provisional {
@@ -376,9 +453,15 @@ fn agent_partial_frame(target: &BridgeTurnTarget, text: String) -> AgentTextFram
 
 fn agent_final_frame(target: &BridgeTurnTarget, text: String) -> AgentTextFrame {
     match target {
-        BridgeTurnTarget::Committed { turn_id } => AgentTextFrame::AgentTurn {
+        BridgeTurnTarget::Committed {
+            turn_id,
+            batch_id,
+            epoch,
+        } => AgentTextFrame::AgentTurn {
             turn_id: turn_id.clone(),
             text,
+            batch_id: batch_id.clone(),
+            epoch: *epoch,
         },
         BridgeTurnTarget::Provisional {
             provisional_turn_id,
@@ -540,12 +623,16 @@ mod tests {
     fn bridge_turn_target_maps_events_to_committed_or_provisional_frames() {
         let committed = BridgeTurnTarget::Committed {
             turn_id: "turn-test".to_string(),
+            batch_id: None,
+            epoch: None,
         };
         assert_eq!(
             agent_partial_frame(&committed, "partial".to_string()),
             AgentTextFrame::AgentTurnPartial {
                 turn_id: "turn-test".to_string(),
                 text: "partial".to_string(),
+                batch_id: None,
+                epoch: None,
                 append: true,
             }
         );
@@ -554,6 +641,8 @@ mod tests {
             AgentTextFrame::AgentTurn {
                 turn_id: "turn-test".to_string(),
                 text: "final".to_string(),
+                batch_id: None,
+                epoch: None,
             }
         );
 
@@ -609,6 +698,8 @@ mod tests {
             key: "turn-test".to_string(),
             target: BridgeTurnTarget::Committed {
                 turn_id: "turn-test".to_string(),
+                batch_id: None,
+                epoch: None,
             },
             abort,
             task,

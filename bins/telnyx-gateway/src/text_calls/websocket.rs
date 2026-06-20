@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -28,8 +28,8 @@ use crate::tts::SharedTtsRegistry;
 use super::offers::validate_call_url;
 use super::turns::{
     AgentTextFrame, CallerSpeechState, DebugTextStreamFrame, GatewayTextFrame,
-    PlaybackFinishedStatus, TextCallAggregationPolicy, TextCallDirection,
-    TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
+    PlaybackFinishedStatus, ResponseMode, TextCallDirection, TEXT_CALL_EARLY_TURNS_EXTENSION,
+    TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
@@ -327,11 +327,14 @@ impl SharedTextCallRegistry {
             sequence: Arc::new(AtomicU64::new(1)),
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
             provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
+            turn_batch_epoch: Arc::new(AtomicU64::new(0)),
+            turn_batch_next_batch: Arc::new(AtomicU64::new(0)),
+            turn_batch_active_batches: Arc::new(StdMutex::new(BTreeSet::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             speech_output: SpeechOutputConfig::default(),
             emit_partials,
             emit_early_turns,
-            aggregation: TextCallAggregationPolicy::GatewayOwned,
+            response_mode: ResponseMode::PerTurn,
         };
         self.claim(gateway_call_id.into(), handle)
             .await
@@ -698,6 +701,10 @@ impl SharedTextCallRegistry {
         let mut turns = handle.turns.lock().await;
         turns.ensure_caller_turn_capacity()?;
         let superseded = turns.mark_pending_superseded();
+        if !superseded.is_empty() {
+            handle.try_send_turn_batch_reset("final_turn_superseded", None)?;
+        }
+        let _turn_batch_id = handle.register_turn_batch_prompt();
         for superseded_turn_id in superseded {
             handle.try_send(GatewayTextFrame::TurnSuperseded {
                 turn_id: superseded_turn_id,
@@ -764,6 +771,7 @@ impl SharedTextCallRegistry {
                 .map(|entry| entry.handle.clone())
         };
         if let Some(handle) = handle {
+            let _ = handle.try_send_turn_batch_reset("session_end", None);
             let _ = handle
                 .send(GatewayTextFrame::SessionEnd {
                     reason: reason.into(),
@@ -771,6 +779,24 @@ impl SharedTextCallRegistry {
                 })
                 .await;
         }
+    }
+
+    pub async fn send_turn_batch_reset(
+        &self,
+        gateway_call_id: &str,
+        reason: impl Into<String>,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        handle.try_send_turn_batch_reset(reason, None)
     }
 }
 
@@ -790,11 +816,14 @@ pub(crate) struct TextCallSessionHandle {
     pub(crate) processor_tx: Arc<Mutex<Option<mpsc::Sender<ConversationProcessorInput>>>>,
     pub(crate) turns: Arc<Mutex<TextCallTurnTracker>>,
     pub(crate) provisional_generations: Arc<Mutex<BTreeMap<String, AgentProvisionalGeneration>>>,
+    pub(crate) turn_batch_epoch: Arc<AtomicU64>,
+    pub(crate) turn_batch_next_batch: Arc<AtomicU64>,
+    pub(crate) turn_batch_active_batches: Arc<StdMutex<BTreeSet<String>>>,
     pub(crate) config: TextCallSessionConfig,
     pub(crate) speech_output: SpeechOutputConfig,
     pub(crate) emit_partials: bool,
     pub(crate) emit_early_turns: bool,
-    pub(crate) aggregation: TextCallAggregationPolicy,
+    pub(crate) response_mode: ResponseMode,
 }
 
 async fn record_agent_provisional_generation(
@@ -858,6 +887,42 @@ impl TextCallSessionHandle {
         self.sequence.fetch_add(1, Ordering::SeqCst)
     }
 
+    pub(crate) fn register_turn_batch_prompt(&self) -> Option<String> {
+        if self.response_mode != ResponseMode::TurnBatched {
+            return None;
+        }
+        let epoch = self.turn_batch_epoch.load(Ordering::SeqCst);
+        let batch_index = self.turn_batch_next_batch.fetch_add(1, Ordering::SeqCst);
+        let batch_id = format!("turn-batch-{epoch}-{batch_index}");
+        self.turn_batch_active_batches
+            .lock()
+            .expect("turn batch active set poisoned")
+            .insert(batch_id.clone());
+        Some(batch_id)
+    }
+
+    pub(crate) fn try_send_turn_batch_reset(
+        &self,
+        reason: impl Into<String>,
+        batch_id: Option<String>,
+    ) -> anyhow::Result<bool> {
+        if self.response_mode != ResponseMode::TurnBatched {
+            return Ok(false);
+        }
+        self.turn_batch_active_batches
+            .lock()
+            .expect("turn batch active set poisoned")
+            .clear();
+        let epoch = self.turn_batch_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.try_send(GatewayTextFrame::TurnBatchReset {
+            reason: reason.into(),
+            batch_id,
+            epoch,
+            sequence: self.next_sequence(),
+        })?;
+        Ok(true)
+    }
+
     pub(crate) async fn send(&self, frame: GatewayTextFrame) -> anyhow::Result<()> {
         self.tx
             .send(frame)
@@ -893,7 +958,7 @@ pub struct TextCallSetup {
     pub direction: TextCallDirection,
     pub emit_partials: bool,
     pub emit_early_turns: bool,
-    pub aggregation: TextCallAggregationPolicy,
+    pub response_mode: ResponseMode,
 }
 
 #[derive(Clone, Debug)]
@@ -902,7 +967,7 @@ pub struct DebugTextCallSetup {
     pub direction: TextCallDirection,
     pub emit_partials: bool,
     pub emit_early_turns: bool,
-    pub aggregation: TextCallAggregationPolicy,
+    pub response_mode: ResponseMode,
 }
 
 fn text_call_session_handle(
@@ -910,7 +975,7 @@ fn text_call_session_handle(
     speech_output: SpeechOutputConfig,
     emit_partials: bool,
     emit_early_turns: bool,
-    aggregation: TextCallAggregationPolicy,
+    response_mode: ResponseMode,
 ) -> (TextCallSessionHandle, mpsc::Receiver<GatewayTextFrame>) {
     let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
     let handle = TextCallSessionHandle {
@@ -921,11 +986,14 @@ fn text_call_session_handle(
             session_config.max_active_turns,
         ))),
         provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
+        turn_batch_epoch: Arc::new(AtomicU64::new(0)),
+        turn_batch_next_batch: Arc::new(AtomicU64::new(0)),
+        turn_batch_active_batches: Arc::new(StdMutex::new(BTreeSet::new())),
         config: session_config,
         speech_output,
         emit_partials,
         emit_early_turns,
-        aggregation,
+        response_mode,
     };
     (handle, rx)
 }
@@ -970,6 +1038,7 @@ pub async fn connect_application_stream(
         protocol: TEXT_CALL_PROTOCOL.to_string(),
         call_id: setup.gateway_call_id.clone(),
         direction: setup.direction,
+        response_mode: setup.response_mode,
     };
     let (session_config, speech_output) =
         text_call_session_config(&services, &setup.gateway_call_id).await;
@@ -978,7 +1047,7 @@ pub async fn connect_application_stream(
         speech_output,
         setup.emit_partials,
         setup.emit_early_turns,
-        setup.aggregation,
+        setup.response_mode,
     );
     let owner = services
         .registry
@@ -1023,7 +1092,7 @@ where
         speech_output,
         setup.emit_partials,
         setup.emit_early_turns,
-        setup.aggregation,
+        setup.response_mode,
     );
     let owner = services
         .registry
@@ -1081,18 +1150,9 @@ async fn ensure_agent_provisional_generation(
     provisional_turn_id: &str,
     generation: u64,
 ) -> ProvisionalGenerationStatus {
-    let mut guard = handle.provisional_generations.lock().await;
+    let guard = handle.provisional_generations.lock().await;
     let Some(current) = guard.get(provisional_turn_id).copied() else {
-        if handle.aggregation == TextCallAggregationPolicy::AgentOwned {
-            guard.insert(
-                provisional_turn_id.to_string(),
-                AgentProvisionalGeneration {
-                    generation,
-                    terminal: None,
-                },
-            );
-            return ProvisionalGenerationStatus::Active;
-        }
+        let _ = generation;
         return ProvisionalGenerationStatus::Unknown;
     };
     classify_provisional_generation(current.generation, current.terminal, generation)
@@ -1116,11 +1176,18 @@ async fn handle_agent_frame(
 ) -> anyhow::Result<()> {
     match &frame {
         AgentTextFrame::AgentTurnPartial {
-            turn_id, append, ..
+            turn_id,
+            append,
+            batch_id,
+            epoch,
+            ..
         } => {
             if !append {
                 send_error_frame(handle, "invalid_partial", "agent.turn.partial must append")
                     .await?;
+                return Ok(());
+            }
+            if !turn_batch_output_is_current(handle, batch_id.as_deref(), *epoch, false).await? {
                 return Ok(());
             }
             let disposition = handle.turns.lock().await.append_turn_disposition(turn_id);
@@ -1137,7 +1204,15 @@ async fn handle_agent_frame(
             };
             send_agent_processor_input(gateway_call_id, handle, frame, Some(timing)).await?;
         }
-        AgentTextFrame::AgentTurn { turn_id, .. } => {
+        AgentTextFrame::AgentTurn {
+            turn_id,
+            batch_id,
+            epoch,
+            ..
+        } => {
+            if !turn_batch_output_is_current(handle, batch_id.as_deref(), *epoch, true).await? {
+                return Ok(());
+            }
             let disposition = handle.turns.lock().await.append_turn_disposition(turn_id);
             let timing = match disposition {
                 AgentTurnDisposition::Accepted { timing } => timing,
@@ -1197,6 +1272,66 @@ async fn handle_agent_frame(
         }
     }
     Ok(())
+}
+
+async fn turn_batch_output_is_current(
+    handle: &TextCallSessionHandle,
+    batch_id: Option<&str>,
+    epoch: Option<u64>,
+    final_fragment: bool,
+) -> anyhow::Result<bool> {
+    if handle.response_mode != ResponseMode::TurnBatched {
+        return Ok(true);
+    }
+    let Some(epoch) = epoch else {
+        send_error_frame(
+            handle,
+            "missing_turn_batch_epoch",
+            "turn-batched agent output must include epoch",
+        )
+        .await?;
+        return Ok(false);
+    };
+    let current_epoch = handle.turn_batch_epoch.load(Ordering::SeqCst);
+    if epoch != current_epoch {
+        send_error_frame(
+            handle,
+            "stale_turn_batch_epoch",
+            "turn-batched agent output epoch is no longer current",
+        )
+        .await?;
+        return Ok(false);
+    }
+    let Some(batch_id) = batch_id else {
+        send_error_frame(
+            handle,
+            "missing_turn_batch_id",
+            "turn-batched agent output must include batch_id",
+        )
+        .await?;
+        return Ok(false);
+    };
+    let active = {
+        let mut active_batches = handle
+            .turn_batch_active_batches
+            .lock()
+            .expect("turn batch active set poisoned");
+        let active = active_batches.contains(batch_id);
+        if active && final_fragment {
+            active_batches.remove(batch_id);
+        }
+        active
+    };
+    if !active {
+        send_error_frame(
+            handle,
+            "stale_turn_batch_id",
+            "turn-batched agent output batch_id is no longer current",
+        )
+        .await?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 async fn agent_provisional_generation_is_active(
@@ -1260,7 +1395,7 @@ async fn send_agent_processor_input(
                 timing,
                 config: handle.config,
                 speech_output: handle.speech_output,
-                aggregation: handle.aggregation,
+                response_mode: handle.response_mode,
             },
         ))
         .await
@@ -1311,6 +1446,7 @@ where
             protocol: TEXT_CALL_PROTOCOL.to_string(),
             call_id: gateway_call_id.clone(),
             direction,
+            response_mode: handle.response_mode,
         },
     )
     .await?;
@@ -1683,7 +1819,7 @@ mod tests {
     };
     use crate::processors::ConversationProcessorKind;
     use crate::text_calls::turns::AgentTextFrame;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use tokio::time;
 
     use crate::media::{OutboundMediaCommand, SharedMediaRegistry};
@@ -2062,6 +2198,8 @@ mod tests {
             AgentTextFrame::AgentTurn {
                 turn_id: turn_id.to_string(),
                 text: "Use the session backend.".to_string(),
+                batch_id: None,
+                epoch: None,
             },
         )
         .await;
@@ -2091,12 +2229,36 @@ mod tests {
         let mut handle = test_handle(tx);
         handle.speech_output.tts_backend = LiveTtsBackend::Piper;
         handle.emit_early_turns = true;
-        handle.aggregation = TextCallAggregationPolicy::AgentOwned;
         services
             .registry
             .claim(call_id.to_string(), handle.clone())
             .await
             .expect("test session should claim registry slot");
+        services
+            .registry
+            .send_early_response_event(
+                call_id,
+                EarlyResponseEvent::Started {
+                    provisional_turn_id: provisional_turn_id.to_string(),
+                    call_id: call_id.to_string(),
+                    utterance_id: "utt-provisional-stream".to_string(),
+                    generation: 7,
+                    text: "caller text".to_string(),
+                    confidence: None,
+                    stability: None,
+                    speech_state: CallerSpeechState::EndpointCandidate,
+                },
+            )
+            .await
+            .expect("started event should forward");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurnProvisional {
+                provisional_turn_id: id,
+                generation: 7,
+                ..
+            }) if id == provisional_turn_id
+        ));
         send_agent_frame(
             &services,
             call_id,
@@ -2150,13 +2312,37 @@ mod tests {
         let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let mut handle = test_handle(tx);
         handle.emit_early_turns = true;
-        handle.aggregation = TextCallAggregationPolicy::AgentOwned;
         services
             .registry
             .claim(call_id.to_string(), handle.clone())
             .await
             .expect("test session should claim registry slot");
         let pipeline = attach_agent_processor_pipeline(&services, call_id, &handle).await;
+        services
+            .registry
+            .send_early_response_event(
+                call_id,
+                EarlyResponseEvent::Started {
+                    provisional_turn_id: provisional_turn_id.to_string(),
+                    call_id: call_id.to_string(),
+                    utterance_id: "utt-provisional-cancel".to_string(),
+                    generation: 3,
+                    text: "caller text".to_string(),
+                    confidence: None,
+                    stability: None,
+                    speech_state: CallerSpeechState::EndpointCandidate,
+                },
+            )
+            .await
+            .expect("started event should forward");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurnProvisional {
+                provisional_turn_id: id,
+                generation: 3,
+                ..
+            }) if id == provisional_turn_id
+        ));
 
         send_agent_frame(
             &services,
@@ -2224,6 +2410,113 @@ mod tests {
             .as_ref()
             .expect("provisional turn should queue TTS");
         assert_eq!(tts.playback_id, playback_id);
+    }
+
+    #[tokio::test]
+    async fn turn_batched_session_sends_reset_before_superseding_turn() {
+        let call_id = "gwc-turn-batch-reset-order";
+        let (services, _media_rx) = test_services(call_id).await;
+        let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.response_mode = ResponseMode::TurnBatched;
+        services
+            .registry
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
+
+        let first_turn_id = services
+            .registry
+            .send_caller_turn(call_id, "first".to_string(), Instant::now())
+            .await
+            .expect("caller turn should send")
+            .expect("attached session should receive caller turn");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurn { turn_id, .. }) if turn_id == first_turn_id
+        ));
+
+        let second_turn_id = services
+            .registry
+            .send_caller_turn(call_id, "second".to_string(), Instant::now())
+            .await
+            .expect("caller turn should send")
+            .expect("attached session should receive caller turn");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::TurnBatchReset {
+                reason,
+                epoch: 1,
+                ..
+            }) if reason == "final_turn_superseded"
+        ));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::TurnSuperseded {
+                turn_id,
+                superseded_by_turn_id,
+                ..
+            }) if turn_id == first_turn_id && superseded_by_turn_id == second_turn_id
+        ));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurn { turn_id, .. }) if turn_id == second_turn_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_turn_batched_agent_epoch_is_rejected_after_reset() {
+        let call_id = "gwc-turn-batch-stale-epoch";
+        let (services, _media_rx) = test_services(call_id).await;
+        let (tx, mut outbound_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.response_mode = ResponseMode::TurnBatched;
+        services
+            .registry
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
+
+        let turn_id = services
+            .registry
+            .send_caller_turn(call_id, "first".to_string(), Instant::now())
+            .await
+            .expect("caller turn should send")
+            .expect("attached session should receive caller turn");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurn { .. })
+        ));
+        services
+            .registry
+            .send_turn_batch_reset(call_id, "barge_in")
+            .await
+            .expect("reset should send");
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::TurnBatchReset {
+                reason,
+                epoch: 1,
+                ..
+            }) if reason == "barge_in"
+        ));
+
+        send_agent_frame(
+            &services,
+            call_id,
+            &handle,
+            AgentTextFrame::AgentTurn {
+                turn_id,
+                text: "late reply".to_string(),
+                batch_id: Some("turn-batch-0-0".to_string()),
+                epoch: Some(0),
+            },
+        )
+        .await;
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(GatewayTextFrame::Error { code, .. }) if code == "stale_turn_batch_epoch"
+        ));
     }
 
     #[tokio::test]
@@ -2448,6 +2741,8 @@ mod tests {
                 AgentTextFrame::AgentTurnPartial {
                     turn_id: turn_id.to_string(),
                     text: "queued while media is missing".to_string(),
+                    batch_id: None,
+                    epoch: None,
                     append: true,
                 },
             )
@@ -2498,6 +2793,8 @@ mod tests {
             AgentTextFrame::AgentTurnPartial {
                 turn_id: turn_id.to_string(),
                 text: "One.".to_string(),
+                batch_id: None,
+                epoch: None,
                 append: true,
             },
         )
@@ -2514,6 +2811,8 @@ mod tests {
             AgentTextFrame::AgentTurnPartial {
                 turn_id: turn_id.to_string(),
                 text: " Two.".to_string(),
+                batch_id: None,
+                epoch: None,
                 append: true,
             },
         )
@@ -2525,6 +2824,8 @@ mod tests {
             AgentTextFrame::AgentTurn {
                 turn_id: turn_id.to_string(),
                 text: " Three.".to_string(),
+                batch_id: None,
+                epoch: None,
             },
         )
         .await;
@@ -2574,6 +2875,8 @@ mod tests {
             AgentTextFrame::AgentTurnPartial {
                 turn_id: turn_id.to_string(),
                 text: "One.".to_string(),
+                batch_id: None,
+                epoch: None,
                 append: true,
             },
         )
@@ -2610,6 +2913,8 @@ mod tests {
             AgentTextFrame::AgentTurnPartial {
                 turn_id: turn_id.to_string(),
                 text: " Two.".to_string(),
+                batch_id: None,
+                epoch: None,
                 append: true,
             },
         )
@@ -2804,11 +3109,14 @@ mod tests {
             sequence: Arc::new(AtomicU64::new(1)),
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
             provisional_generations: Arc::new(Mutex::new(BTreeMap::new())),
+            turn_batch_epoch: Arc::new(AtomicU64::new(0)),
+            turn_batch_next_batch: Arc::new(AtomicU64::new(0)),
+            turn_batch_active_batches: Arc::new(StdMutex::new(BTreeSet::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
             speech_output: SpeechOutputConfig::default(),
             emit_partials: false,
             emit_early_turns: false,
-            aggregation: TextCallAggregationPolicy::GatewayOwned,
+            response_mode: ResponseMode::PerTurn,
         }
     }
 }

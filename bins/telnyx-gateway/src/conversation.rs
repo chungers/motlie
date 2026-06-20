@@ -576,6 +576,37 @@ async fn dispatch_final_transcript_to_processor(
                 )
                 .await?;
             }
+            ConversationProcessorOutput::PromptComplete(prompt) => {
+                saw_command = true;
+                apply_conversation_command_with_timing(
+                    state,
+                    media_registry,
+                    runtime,
+                    gateway_call_id,
+                    target.clone(),
+                    ConversationCommand::Say { text: prompt.text },
+                    turn_context.clone(),
+                )
+                .await?;
+            }
+            ConversationProcessorOutput::Accumulating(state) => {
+                tracing::debug!(
+                    gateway_call_id,
+                    batch_id = state.batch_id,
+                    epoch = state.epoch,
+                    source_turn_count = state.source_turn_ids.len(),
+                    "conversation.processor.turn_batch_accumulating"
+                );
+            }
+            ConversationProcessorOutput::Reset(reset) => {
+                tracing::debug!(
+                    gateway_call_id,
+                    reason = reset.reason.as_str(),
+                    epoch = reset.epoch,
+                    batch_id = reset.batch_id.as_deref(),
+                    "conversation.processor.turn_batch_reset"
+                );
+            }
             ConversationProcessorOutput::EarlyResponse(_) => {
                 tracing::warn!(
                     gateway_call_id,

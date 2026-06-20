@@ -669,6 +669,13 @@ pub fn spawn_early_response_pipeline(
                         "early_response.processor.command_output_ignored_for_provisional_turn"
                     );
                 }
+                ConversationProcessorOutput::Accumulating(_)
+                | ConversationProcessorOutput::PromptComplete(_)
+                | ConversationProcessorOutput::Reset(_) => {
+                    tracing::debug!(
+                        "early_response.processor.turn_batch_output_ignored_for_provisional_turn"
+                    );
+                }
                 ConversationProcessorOutput::Error(error) => {
                     tracing::warn!(error, "early_response.processor.failed");
                 }
