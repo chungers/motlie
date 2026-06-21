@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-20 | @ops48-orchestrator | Protocol B: lead with the global run-config TOML as the single source of all batcher knobs (test protocol fully specified in one place); reframe the `conversation smoke-test --…` form as an OPTIONAL runtime operator TUI/agent socket-command override, explicitly NOT process CLI/argv flags. Per David. |
 | 2026-06-20 | @codex-541-refactor | Reconciled the gateway-alone turn-batching protocols with approved DESIGN-557 §4.3 event names, deadline/status fields, and batcher-owned config knobs. Timestamp: 2026-06-21 00:46:41 UTC. |
 | 2026-06-20 | @codex-541-refactor | Added gateway-alone partials-batching and turns-batching smoke-test protocols plus turn-batch lifecycle observability checks. Timestamp: 2026-06-20 23:27:26 UTC. |
 | 2026-06-17 | @codex-535 | Added structured WER/latency run-record blocks and clarified outbound post-dial activation. |
@@ -487,17 +488,7 @@ Purpose: validate layer 3, where the gateway forms committed caller turns, hosts
 joined prompt without an external agent or LLM. PerTurn/Identity remains the
 default; opt into this protocol only for turn-batching validation.
 
-CLI selector and batcher-owned policy knobs for an attached or selected call:
-
-```text
-conversation smoke-test on turn-batched-identity --fixed-batch-size 3 --max-batch-turns 3 --max-batch-wait-ms 2500 --max-idle-wait-ms 1200 --join-separator " | "
-conversation barge-in off
-conversation status
-```
-
-The command above is the operator-command form of
-`processor=turn_batched_identity fixed_batch_size=3 max_batch_turns=3
-max_batch_wait_ms=2500 max_idle_wait_ms=1200 join_separator=" | "`. In config files, use the strict TOML table instead:
+**Canonical config for the test protocol — the global TOML, fully specified in one place.** None of the batcher knobs are process CLI/argv flags; the run is driven entirely from this run-config file:
 
 ```toml
 [conversation]
@@ -514,6 +505,18 @@ max_batch_wait_ms = 2500
 max_idle_wait_ms = 1200
 join_separator = " | "
 ```
+
+This is the single source for the run; the appended run record stays self-describing. The `[conversation.identity_turn_batcher]` table is the strict, opaque `IdentityTurnBatcherConfig`.
+
+Optional runtime override (not required by this protocol): the same knobs can be set live through the **operator TUI / agent socket command** — these are arguments of the runtime `conversation` socket command, parsed from the socket line, **not** process CLI/argv flags:
+
+```text
+conversation smoke-test on turn-batched-identity --fixed-batch-size 3 --max-batch-turns 3 --max-batch-wait-ms 2500 --max-idle-wait-ms 1200 --join-separator " | "
+conversation barge-in off
+conversation status
+```
+
+Use the socket form only for dynamic per-call experimentation; for a recorded protocol run, specify everything in the run-config TOML above so the run file is the one self-describing source.
 
 Ownership rule: N and all batching policy values are owned by
 `IdentityTurnBatcherConfig`. The gateway is only the host: it constructs the
