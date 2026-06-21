@@ -439,9 +439,14 @@ fn smoke_test_processor_from_args(
     fixed_batch_size: Option<usize>,
     max_batch_turns: Option<usize>,
     max_batch_wait_ms: Option<u64>,
+    max_idle_wait_ms: Option<u64>,
+    join_separator: Option<String>,
 ) -> DriverResult<ConversationProcessorKind> {
-    let has_batcher_options =
-        fixed_batch_size.is_some() || max_batch_turns.is_some() || max_batch_wait_ms.is_some();
+    let has_batcher_options = fixed_batch_size.is_some()
+        || max_batch_turns.is_some()
+        || max_batch_wait_ms.is_some()
+        || max_idle_wait_ms.is_some()
+        || join_separator.is_some();
     let processor = processor.unwrap_or(if has_batcher_options {
         ConversationSmokeTestProcessorArg::TurnBatchedIdentity
     } else {
@@ -466,6 +471,12 @@ fn smoke_test_processor_from_args(
             if let Some(max_batch_wait_ms) = max_batch_wait_ms {
                 config = config.with_max_batch_wait_ms(max_batch_wait_ms);
             }
+            if let Some(max_idle_wait_ms) = max_idle_wait_ms {
+                config = config.with_max_idle_wait_ms(max_idle_wait_ms);
+            }
+            if let Some(join_separator) = join_separator {
+                config.join_separator = join_separator;
+            }
             Ok(ConversationProcessorKind::turn_batched_identity(config))
         }
     }
@@ -484,6 +495,14 @@ fn identity_turn_batcher_config_lines(config: &IdentityTurnBatcherConfig) -> Vec
         format!(
             "identity-turn-batcher.max-batch-wait-ms: {}",
             config.max_batch_wait_ms
+        ),
+        format!(
+            "identity-turn-batcher.max-idle-wait-ms: {}",
+            config.max_idle_wait_ms
+        ),
+        format!(
+            "identity-turn-batcher.join-separator: {:?}",
+            config.join_separator
         ),
     ]
 }
@@ -532,6 +551,10 @@ pub enum ConversationCommand {
         max_batch_turns: Option<usize>,
         #[arg(long, value_name = "MS")]
         max_batch_wait_ms: Option<u64>,
+        #[arg(long, value_name = "MS")]
+        max_idle_wait_ms: Option<u64>,
+        #[arg(long, value_name = "TEXT")]
+        join_separator: Option<String>,
     },
     BargeIn {
         #[arg(value_enum)]
@@ -2211,11 +2234,15 @@ async fn conversation_command(
             fixed_batch_size,
             max_batch_turns,
             max_batch_wait_ms,
+            max_idle_wait_ms,
+            join_separator,
         } => {
             let enabled = state.enabled();
             let has_batcher_options = fixed_batch_size.is_some()
                 || max_batch_turns.is_some()
-                || max_batch_wait_ms.is_some();
+                || max_batch_wait_ms.is_some()
+                || max_idle_wait_ms.is_some()
+                || join_separator.is_some();
             if !enabled && (processor.is_some() || has_batcher_options) {
                 return Err(DriverError::message(
                     "conversation smoke-test off does not accept processor or turn-batcher options",
@@ -2227,6 +2254,8 @@ async fn conversation_command(
                 fixed_batch_size,
                 max_batch_turns,
                 max_batch_wait_ms,
+                max_idle_wait_ms,
+                join_separator,
             )?;
             context.conversation.set_processor_enabled(enabled);
             let label = if enabled { "on" } else { "off" };
@@ -2533,6 +2562,42 @@ fn conversation_status_lines(
             conversation.last_playback_id.as_deref().unwrap_or("<none>")
         ),
     ];
+    if let Some(active) = &conversation.active_turn_batch {
+        let now = chrono::Utc::now();
+        let first_turn_age_ms = (now - active.first_turn_at).num_milliseconds().max(0) as u64;
+        let idle_age_ms = (now - active.last_turn_at).num_milliseconds().max(0) as u64;
+        let deadline_remaining_ms = active
+            .effective_deadline_at
+            .map(|deadline| (deadline - now).num_milliseconds().max(0) as u64);
+        lines.push("turn_batch.accumulating: true".to_string());
+        lines.push(format!("turn_batch.batch_id: {}", active.batch_id));
+        lines.push(format!("turn_batch.epoch: {}", active.epoch));
+        lines.push(format!(
+            "turn_batch.pending_turns: {}",
+            active.pending_turn_count
+        ));
+        lines.push(format!(
+            "turn_batch.target_turns: {}",
+            active.target_turn_count
+        ));
+        lines.push(format!("turn_batch.first_turn_age_ms: {first_turn_age_ms}"));
+        lines.push(format!("turn_batch.idle_age_ms: {idle_age_ms}"));
+        lines.push(format!(
+            "turn_batch.effective_deadline_source: {}",
+            active
+                .effective_deadline_source
+                .as_deref()
+                .unwrap_or("none")
+        ));
+        lines.push(format!(
+            "turn_batch.effective_deadline_remaining_ms: {}",
+            deadline_remaining_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        ));
+    } else {
+        lines.push("turn_batch.accumulating: false".to_string());
+    }
     if let Some(error) = &conversation.last_error {
         lines.push(format!("error: {error}"));
     }
@@ -2550,6 +2615,12 @@ fn call_conversation_status(call: &crate::operator::state::CallSession) -> Strin
     );
     if let Some(playback) = &conversation.last_playback_id {
         status.push_str(&format!(" playback={playback}"));
+    }
+    if let Some(active) = &conversation.active_turn_batch {
+        status.push_str(&format!(
+            " turn_batch={} pending={}",
+            active.batch_id, active.pending_turn_count
+        ));
     }
     if let Some(error) = &conversation.last_error {
         status.push_str(&format!(" error={error}"));
@@ -4080,7 +4151,7 @@ fn conversation_help() -> String {
         "Usage:",
         "  conversation help",
         "  conversation status [call-id]",
-        "  conversation smoke-test <on|off> [identity|turn-batched-identity] [--fixed-batch-size N] [--max-batch-turns N] [--max-batch-wait-ms MS]",
+        "  conversation smoke-test <on|off> [identity|turn-batched-identity] [--fixed-batch-size N] [--max-batch-turns N] [--max-batch-wait-ms MS] [--max-idle-wait-ms MS] [--join-separator TEXT]",
         "  conversation barge-in [on|off|status]",
         "  conversation processor identity|turn-batched-identity|external-text-stream [call-id]",
         "  conversation attach [call-id]",
@@ -4304,7 +4375,7 @@ fn socket_help() -> String {
         "    speak cancel [call-id]        emergency clear remains available",
         "    conversation status [call-id]",
         "    conversation attach|detach [call-id]",
-        "    conversation smoke-test on|off [identity|turn-batched-identity] [--fixed-batch-size N]",
+        "    conversation smoke-test on|off [identity|turn-batched-identity] [--fixed-batch-size N] [--max-batch-turns N] [--max-batch-wait-ms MS] [--max-idle-wait-ms MS] [--join-separator TEXT]",
         "    conversation barge-in [on|off|status]",
         "    conversation processor identity|turn-batched-identity|external-text-stream [call-id]",
         "    conversation approve [call-id]",
@@ -5412,6 +5483,8 @@ mod tests {
                 "identity-turn-batcher.fixed-batch-size: 2",
                 "identity-turn-batcher.max-batch-turns: 4",
                 "identity-turn-batcher.max-batch-wait-ms: 250",
+                "identity-turn-batcher.max-idle-wait-ms: 0",
+                "identity-turn-batcher.join-separator: \"\\n\"",
             ]
         );
         assert!(engine.context().conversation.processor_enabled());

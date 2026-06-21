@@ -4,23 +4,27 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context};
-use motlie_agent::voice::turn_batching::{Accumulating, Prompt, TurnBatchReset};
+use motlie_agent::voice::turn_batching::{
+    Accumulating, Prompt, TurnBatchCompletionReason, TurnBatchReset,
+};
 use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 use motlie_voice::telephony::CallAction;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
 use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
-    CallStatus, ConversationMode, LogLevel, QualitySpanEmission, SharedState,
+    CallStatus, ConversationMode, LogLevel, QualityPlaybackMetadata, QualitySpanEmission,
+    SharedState, TurnBatchActiveState,
 };
-use crate::processors::ConversationProcessorHost;
 pub use crate::processors::{
     ConversationCommittedTurn, ConversationProcessorInput, ConversationProcessorKind,
     ConversationProcessorOutput,
 };
+use crate::processors::{ConversationProcessorHost, TurnBatchOutputRejectionReason};
 use crate::quality::{
     BargeInQualityConfig, EndpointQualityConfig, RedactionMode, VoiceQualityConfig,
 };
@@ -40,6 +44,86 @@ pub struct ConversationRuntime {
     pending_conversation_finals: Arc<Mutex<HashMap<String, PendingConversationFinal>>>,
     deferred_say_generations: Arc<Mutex<HashMap<String, u64>>>,
     processor_hosts: Arc<Mutex<HashMap<String, ConversationProcessorHost>>>,
+    turn_batch_timers: Arc<Mutex<HashMap<String, ActiveTurnBatchTimers>>>,
+}
+
+#[derive(Debug)]
+struct ActiveTurnBatchTimers {
+    batch_id: String,
+    epoch: u64,
+    first_turn_at: Instant,
+    last_turn_at: Instant,
+    source_turn_ids: Vec<String>,
+    pending_turn_count: usize,
+    target_turn_count: usize,
+    batch_wait_ms: u64,
+    idle_wait_ms: u64,
+    batch_wait_handle: Option<JoinHandle<()>>,
+    idle_handle: Option<JoinHandle<()>>,
+}
+
+impl ActiveTurnBatchTimers {
+    fn abort(&mut self) {
+        if let Some(handle) = self.batch_wait_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.idle_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TurnBatchTimingSnapshot {
+    batch_id: String,
+    epoch: u64,
+    pending_turn_count: usize,
+    target_turn_count: usize,
+    source_turn_ids: Vec<String>,
+    first_turn_age_ms: u64,
+    idle_age_ms: u64,
+    accumulation_ms: u64,
+    batch_wait_remaining_ms: Option<u64>,
+    idle_wait_remaining_ms: Option<u64>,
+    effective_deadline_remaining_ms: Option<u64>,
+    effective_deadline_source: Option<&'static str>,
+}
+
+impl TurnBatchTimingSnapshot {
+    fn from_timers(timers: &ActiveTurnBatchTimers, now: Instant) -> Self {
+        let first_turn_age_ms = millis_since(now, timers.first_turn_at);
+        let idle_age_ms = millis_since(now, timers.last_turn_at);
+        let batch_wait_remaining_ms = remaining_ms(timers.batch_wait_ms, first_turn_age_ms);
+        let idle_wait_remaining_ms = remaining_ms(timers.idle_wait_ms, idle_age_ms);
+        let (effective_deadline_remaining_ms, effective_deadline_source) =
+            effective_deadline(batch_wait_remaining_ms, idle_wait_remaining_ms);
+        Self {
+            batch_id: timers.batch_id.clone(),
+            epoch: timers.epoch,
+            pending_turn_count: timers.pending_turn_count,
+            target_turn_count: timers.target_turn_count,
+            source_turn_ids: timers.source_turn_ids.clone(),
+            first_turn_age_ms,
+            idle_age_ms,
+            accumulation_ms: first_turn_age_ms,
+            batch_wait_remaining_ms,
+            idle_wait_remaining_ms,
+            effective_deadline_remaining_ms,
+            effective_deadline_source,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TurnBatchOutputRejection {
+    batch_id: String,
+    epoch: u64,
+    reason: TurnBatchOutputRejectionReason,
+}
+
+enum TurnBatchCompletionAttempt {
+    Completed(ConversationProcessorOutput),
+    Rejected(TurnBatchOutputRejection),
 }
 
 impl ConversationRuntime {
@@ -62,6 +146,7 @@ impl ConversationRuntime {
             pending_conversation_finals: Arc::new(Mutex::new(HashMap::new())),
             deferred_say_generations: Arc::new(Mutex::new(HashMap::new())),
             processor_hosts: Arc::new(Mutex::new(HashMap::new())),
+            turn_batch_timers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -128,11 +213,177 @@ impl ConversationRuntime {
         gateway_call_id: &str,
         batch_id: &str,
         epoch: u64,
-    ) -> Option<ConversationProcessorOutput> {
+        reason: TurnBatchCompletionReason,
+    ) -> TurnBatchCompletionAttempt {
         let mut hosts = self.processor_hosts.lock().await;
-        hosts
-            .get_mut(gateway_call_id)
-            .and_then(|host| host.complete_pending(batch_id, epoch))
+        match hosts.get_mut(gateway_call_id) {
+            Some(host) => match host.complete_pending(batch_id, epoch, reason) {
+                Ok(output) => TurnBatchCompletionAttempt::Completed(output),
+                Err(reason) => TurnBatchCompletionAttempt::Rejected(TurnBatchOutputRejection {
+                    batch_id: batch_id.to_string(),
+                    epoch,
+                    reason,
+                }),
+            },
+            None => TurnBatchCompletionAttempt::Rejected(TurnBatchOutputRejection {
+                batch_id: batch_id.to_string(),
+                epoch,
+                reason: TurnBatchOutputRejectionReason::InactiveBatch,
+            }),
+        }
+    }
+
+    async fn upsert_turn_batch_timers(
+        &self,
+        gateway_call_id: &str,
+        batch: &Accumulating,
+    ) -> (TurnBatchTimingSnapshot, bool, bool) {
+        let now = Instant::now();
+        let mut timers = self.turn_batch_timers.lock().await;
+        let mut spawn_batch_wait = false;
+        let mut spawn_idle = false;
+        let entry = timers
+            .entry(gateway_call_id.to_string())
+            .or_insert_with(|| {
+                spawn_batch_wait = batch.batch_wait_remaining_ms > 0;
+                spawn_idle = batch.idle_wait_ms > 0;
+                ActiveTurnBatchTimers {
+                    batch_id: batch.batch_id.clone(),
+                    epoch: batch.epoch,
+                    first_turn_at: now,
+                    last_turn_at: now,
+                    source_turn_ids: batch.source_turn_ids.clone(),
+                    pending_turn_count: batch.source_turn_ids.len(),
+                    target_turn_count: batch.target_turn_count,
+                    batch_wait_ms: batch.batch_wait_remaining_ms,
+                    idle_wait_ms: batch.idle_wait_ms,
+                    batch_wait_handle: None,
+                    idle_handle: None,
+                }
+            });
+        if entry.batch_id != batch.batch_id || entry.epoch != batch.epoch {
+            entry.abort();
+            *entry = ActiveTurnBatchTimers {
+                batch_id: batch.batch_id.clone(),
+                epoch: batch.epoch,
+                first_turn_at: now,
+                last_turn_at: now,
+                source_turn_ids: batch.source_turn_ids.clone(),
+                pending_turn_count: batch.source_turn_ids.len(),
+                target_turn_count: batch.target_turn_count,
+                batch_wait_ms: batch.batch_wait_remaining_ms,
+                idle_wait_ms: batch.idle_wait_ms,
+                batch_wait_handle: None,
+                idle_handle: None,
+            };
+            spawn_batch_wait = batch.batch_wait_remaining_ms > 0;
+            spawn_idle = batch.idle_wait_ms > 0;
+        } else {
+            entry.last_turn_at = now;
+            entry.source_turn_ids = batch.source_turn_ids.clone();
+            entry.pending_turn_count = batch.source_turn_ids.len();
+            entry.target_turn_count = batch.target_turn_count;
+            entry.batch_wait_ms = batch.batch_wait_remaining_ms;
+            entry.idle_wait_ms = batch.idle_wait_ms;
+            if let Some(handle) = entry.idle_handle.take() {
+                handle.abort();
+            }
+            spawn_idle = batch.idle_wait_ms > 0;
+        }
+        let snapshot = TurnBatchTimingSnapshot::from_timers(entry, now);
+        (snapshot, spawn_batch_wait, spawn_idle)
+    }
+
+    async fn store_batch_wait_handle(
+        &self,
+        gateway_call_id: &str,
+        batch_id: &str,
+        epoch: u64,
+        handle: JoinHandle<()>,
+    ) {
+        let mut timers = self.turn_batch_timers.lock().await;
+        if let Some(entry) = timers.get_mut(gateway_call_id) {
+            if entry.batch_id == batch_id && entry.epoch == epoch {
+                entry.batch_wait_handle = Some(handle);
+                return;
+            }
+        }
+        handle.abort();
+    }
+
+    async fn store_idle_handle(
+        &self,
+        gateway_call_id: &str,
+        batch_id: &str,
+        epoch: u64,
+        handle: JoinHandle<()>,
+    ) {
+        let mut timers = self.turn_batch_timers.lock().await;
+        if let Some(entry) = timers.get_mut(gateway_call_id) {
+            if entry.batch_id == batch_id && entry.epoch == epoch {
+                entry.idle_handle = Some(handle);
+                return;
+            }
+        }
+        handle.abort();
+    }
+
+    async fn finish_turn_batch_timers(
+        &self,
+        gateway_call_id: &str,
+        batch_id: Option<&str>,
+        epoch: u64,
+        completed_by: Option<TurnBatchCompletionReason>,
+    ) -> Option<TurnBatchTimingSnapshot> {
+        let now = Instant::now();
+        let mut timers = self.turn_batch_timers.lock().await;
+        let should_remove = timers.get(gateway_call_id).is_some_and(|entry| {
+            if let Some(batch_id) = batch_id {
+                entry.batch_id == batch_id
+            } else {
+                entry.epoch == epoch
+            }
+        });
+        if !should_remove {
+            return None;
+        }
+        let mut entry = timers.remove(gateway_call_id)?;
+        match completed_by {
+            Some(TurnBatchCompletionReason::MaxBatchWaitTimeout) => {
+                entry.batch_wait_handle.take();
+            }
+            Some(TurnBatchCompletionReason::MaxIdleTimeout) => {
+                entry.idle_handle.take();
+            }
+            _ => {}
+        }
+        entry.abort();
+        Some(TurnBatchTimingSnapshot::from_timers(&entry, now))
+    }
+}
+
+fn millis_since(now: Instant, then: Instant) -> u64 {
+    now.saturating_duration_since(then).as_millis() as u64
+}
+
+fn remaining_ms(limit_ms: u64, elapsed_ms: u64) -> Option<u64> {
+    if limit_ms == 0 {
+        None
+    } else {
+        Some(limit_ms.saturating_sub(elapsed_ms))
+    }
+}
+
+fn effective_deadline(
+    batch_wait_remaining_ms: Option<u64>,
+    idle_wait_remaining_ms: Option<u64>,
+) -> (Option<u64>, Option<&'static str>) {
+    match (batch_wait_remaining_ms, idle_wait_remaining_ms) {
+        (Some(batch), Some(idle)) if batch <= idle => (Some(batch), Some("max_batch_wait_timeout")),
+        (Some(_batch), Some(idle)) => (Some(idle), Some("max_idle_timeout")),
+        (Some(batch), None) => (Some(batch), Some("max_batch_wait_timeout")),
+        (None, Some(idle)) => (Some(idle), Some("max_idle_timeout")),
+        (None, None) => (None, None),
     }
 }
 
@@ -161,6 +412,7 @@ struct ConversationTurnContext {
     latest_finalized_at: Option<Instant>,
     turn_id: Option<String>,
     coalesced_turn_ids: Vec<String>,
+    metadata: QualityPlaybackMetadata,
 }
 
 pub async fn handle_transcript_event(
@@ -268,6 +520,7 @@ pub async fn handle_transcript_event_with_turn(
                 latest_finalized_at: Some(final_transcript_at),
                 turn_id: turn_id.map(str::to_string),
                 coalesced_turn_ids: turn_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
+                metadata: QualityPlaybackMetadata::default(),
             },
         )
         .await;
@@ -415,6 +668,7 @@ async fn schedule_conversation_final(
                     latest_finalized_at: Some(pending.latest_final_transcript_at),
                     turn_id: pending.turn_ids.first().cloned(),
                     coalesced_turn_ids: pending.turn_ids,
+                    metadata: QualityPlaybackMetadata::default(),
                 },
             )
             .await
@@ -548,7 +802,30 @@ async fn handle_conversation_processor_output(
             Ok(ProcessorOutputResult::CommandApplied)
         }
         ConversationProcessorOutput::PromptComplete(prompt) => {
-            emit_turn_batch_prompt_complete_lifecycle(state, gateway_call_id, &prompt).await;
+            let timing = runtime
+                .finish_turn_batch_timers(
+                    gateway_call_id,
+                    Some(&prompt.batch_id),
+                    prompt.epoch,
+                    Some(prompt.completion_reason),
+                )
+                .await;
+            emit_turn_batch_prompt_complete_lifecycle(
+                state,
+                gateway_call_id,
+                &prompt,
+                timing.as_ref(),
+            )
+            .await;
+            let mut prompt_turn_context = turn_context.clone();
+            prompt_turn_context.turn_id = Some(prompt.response_turn_id.clone());
+            prompt_turn_context.coalesced_turn_ids = prompt.source_turn_ids.clone();
+            prompt_turn_context.metadata = QualityPlaybackMetadata::turn_batch(
+                prompt.batch_id.clone(),
+                prompt.epoch,
+                prompt.response_turn_id.clone(),
+                prompt.completion_reason.as_str(),
+            );
             apply_conversation_command_with_timing(
                 state,
                 media_registry,
@@ -556,26 +833,33 @@ async fn handle_conversation_processor_output(
                 gateway_call_id,
                 target.clone(),
                 ConversationCommand::Say { text: prompt.text },
-                turn_context.clone(),
+                prompt_turn_context,
             )
             .await?;
             Ok(ProcessorOutputResult::CommandApplied)
         }
         ConversationProcessorOutput::Accumulating(batch) => {
-            emit_turn_batch_accumulated_lifecycle(state, gateway_call_id, &batch).await;
-            schedule_turn_batch_timeout(
+            let timing = schedule_turn_batch_timeouts(
                 state,
                 media_registry,
                 runtime,
                 gateway_call_id,
-                batch.batch_id,
-                batch.epoch,
-                batch.deadline_ms,
-            );
+                &batch,
+            )
+            .await;
+            emit_turn_batch_accumulated_lifecycle(state, gateway_call_id, &batch, &timing).await;
             Ok(ProcessorOutputResult::NoCommand)
         }
         ConversationProcessorOutput::Reset(reset) => {
-            emit_turn_batch_reset_lifecycle(state, gateway_call_id, &reset).await;
+            let timing = runtime
+                .finish_turn_batch_timers(
+                    gateway_call_id,
+                    reset.batch_id.as_deref(),
+                    reset.epoch,
+                    None,
+                )
+                .await;
+            emit_turn_batch_reset_lifecycle(state, gateway_call_id, &reset, timing.as_ref()).await;
             Ok(ProcessorOutputResult::NoCommand)
         }
         ConversationProcessorOutput::EarlyResponse(_) => {
@@ -603,18 +887,73 @@ async fn handle_conversation_processor_output(
     }
 }
 
-fn schedule_turn_batch_timeout(
+async fn schedule_turn_batch_timeouts(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
+    batch: &Accumulating,
+) -> TurnBatchTimingSnapshot {
+    let (timing, spawn_batch_wait, spawn_idle) = runtime
+        .upsert_turn_batch_timers(gateway_call_id, batch)
+        .await;
+    if spawn_batch_wait {
+        let handle = spawn_turn_batch_completion_timer(
+            state,
+            media_registry,
+            runtime,
+            gateway_call_id,
+            TurnBatchTimerRequest {
+                batch_id: batch.batch_id.clone(),
+                epoch: batch.epoch,
+                deadline_ms: batch.batch_wait_remaining_ms,
+                reason: TurnBatchCompletionReason::MaxBatchWaitTimeout,
+            },
+        );
+        runtime
+            .store_batch_wait_handle(gateway_call_id, &batch.batch_id, batch.epoch, handle)
+            .await;
+    }
+    if spawn_idle {
+        let handle = spawn_turn_batch_completion_timer(
+            state,
+            media_registry,
+            runtime,
+            gateway_call_id,
+            TurnBatchTimerRequest {
+                batch_id: batch.batch_id.clone(),
+                epoch: batch.epoch,
+                deadline_ms: batch.idle_wait_ms,
+                reason: TurnBatchCompletionReason::MaxIdleTimeout,
+            },
+        );
+        runtime
+            .store_idle_handle(gateway_call_id, &batch.batch_id, batch.epoch, handle)
+            .await;
+    }
+    timing
+}
+
+struct TurnBatchTimerRequest {
     batch_id: String,
     epoch: u64,
     deadline_ms: u64,
-) {
-    if deadline_ms == 0 {
-        return;
-    }
+    reason: TurnBatchCompletionReason,
+}
+
+fn spawn_turn_batch_completion_timer(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    request: TurnBatchTimerRequest,
+) -> JoinHandle<()> {
+    let TurnBatchTimerRequest {
+        batch_id,
+        epoch,
+        deadline_ms,
+        reason,
+    } = request;
     let state = state.clone();
     let media_registry = media_registry.clone();
     let runtime = runtime.clone();
@@ -624,11 +963,16 @@ fn schedule_turn_batch_timeout(
         if !runtime.processor_enabled() {
             return;
         }
-        let Some(output) = runtime
-            .complete_pending_processor_batch(&gateway_call_id, &batch_id, epoch)
-            .await
-        else {
-            return;
+        let attempt = runtime
+            .complete_pending_processor_batch(&gateway_call_id, &batch_id, epoch, reason)
+            .await;
+        let output = match attempt {
+            TurnBatchCompletionAttempt::Completed(output) => output,
+            TurnBatchCompletionAttempt::Rejected(rejection) => {
+                emit_turn_batch_output_rejected_lifecycle(&state, &gateway_call_id, &rejection)
+                    .await;
+                return;
+            }
         };
         let Some(snapshot) = conversation_snapshot(&state, &gateway_call_id, None).await else {
             return;
@@ -665,7 +1009,7 @@ fn schedule_turn_batch_timeout(
                 "conversation.processor.turn_batch_timeout.failed"
             );
         }
-    });
+    })
 }
 
 async fn emit_conversation_final_debounce_span(
@@ -954,7 +1298,15 @@ async fn reset_turn_batch_for_barge_in(
         .process_processor_input(gateway_call_id, processor, input)
         .await
     {
-        emit_turn_batch_reset_lifecycle(state, gateway_call_id, &reset).await;
+        let timing = runtime
+            .finish_turn_batch_timers(
+                gateway_call_id,
+                reset.batch_id.as_deref(),
+                reset.epoch,
+                None,
+            )
+            .await;
+        emit_turn_batch_reset_lifecycle(state, gateway_call_id, &reset, timing.as_ref()).await;
     }
 }
 
@@ -962,45 +1314,63 @@ async fn emit_turn_batch_accumulated_lifecycle(
     state: &SharedState,
     gateway_call_id: &str,
     batch: &Accumulating,
+    timing: &TurnBatchTimingSnapshot,
 ) {
-    let accumulated_turn_count = batch.source_turn_ids.len();
     tracing::info!(
         gateway_call_id,
-        lifecycle_event = "turn-accumulated",
+        lifecycle_event = "accumulated",
         batch_id = %batch.batch_id,
         epoch = batch.epoch,
-        accumulated_turn_count,
-        target_turn_count = batch.target_turn_count,
-        deadline_ms = batch.deadline_ms,
-        "conversation.processor.turn_batch.turn_accumulated"
+        pending_turn_count = timing.pending_turn_count,
+        target_turn_count = timing.target_turn_count,
+        first_turn_age_ms = timing.first_turn_age_ms,
+        idle_age_ms = timing.idle_age_ms,
+        batch_wait_remaining_ms = ?timing.batch_wait_remaining_ms,
+        idle_wait_remaining_ms = ?timing.idle_wait_remaining_ms,
+        effective_deadline_remaining_ms = ?timing.effective_deadline_remaining_ms,
+        effective_deadline_source = ?timing.effective_deadline_source,
+        "conversation.processor.turn_batch.accumulated"
     );
     let payload = turn_batch_payload(serde_json::json!({
         "batch_id": &batch.batch_id,
         "epoch": batch.epoch,
-        "accumulated_turn_count": accumulated_turn_count,
-        "target_turn_count": batch.target_turn_count,
+        "pending_turn_count": timing.pending_turn_count,
+        "target_turn_count": timing.target_turn_count,
+        "k_of_n": { "k": timing.pending_turn_count, "n": timing.target_turn_count },
+        "turn_id": batch.source_turn_ids.last(),
         "source_turn_ids": &batch.source_turn_ids,
-        "deadline_ms": batch.deadline_ms,
+        "first_turn_age_ms": timing.first_turn_age_ms,
+        "idle_age_ms": timing.idle_age_ms,
+        "batch_wait_remaining_ms": timing.batch_wait_remaining_ms,
+        "idle_wait_ms": batch.idle_wait_ms,
+        "idle_wait_remaining_ms": timing.idle_wait_remaining_ms,
+        "effective_deadline_remaining_ms": timing.effective_deadline_remaining_ms,
+        "effective_deadline_source": timing.effective_deadline_source,
     }));
-    state.write().await.emit_quality_turn_batch_lifecycle(
-        gateway_call_id,
-        "turn-accumulated",
-        payload,
-    );
+    let active = turn_batch_active_state(timing);
+    let mut guard = state.write().await;
+    guard.record_turn_batch_active(gateway_call_id, active);
+    guard.emit_quality_turn_batch_lifecycle(gateway_call_id, "accumulated", payload);
 }
 
 async fn emit_turn_batch_prompt_complete_lifecycle(
     state: &SharedState,
     gateway_call_id: &str,
     prompt: &Prompt,
+    timing: Option<&TurnBatchTimingSnapshot>,
 ) {
-    let joined_source_turn_count = prompt.source_turn_ids.len();
+    let source_turn_count = prompt.source_turn_ids.len();
+    let accumulation_ms = timing
+        .map(|timing| timing.accumulation_ms)
+        .unwrap_or_default();
     tracing::info!(
         gateway_call_id,
-        lifecycle_event = "prompt-complete",
+        lifecycle_event = "prompt_complete",
         batch_id = %prompt.batch_id,
         epoch = prompt.epoch,
-        joined_source_turn_count,
+        source_turn_count,
+        completion_reason = prompt.completion_reason.as_str(),
+        accumulation_ms,
         response_turn_id = %prompt.response_turn_id,
         prompt_chars = prompt.text.chars().count(),
         "conversation.processor.turn_batch.prompt_complete"
@@ -1008,41 +1378,111 @@ async fn emit_turn_batch_prompt_complete_lifecycle(
     let payload = turn_batch_payload(serde_json::json!({
         "batch_id": &prompt.batch_id,
         "epoch": prompt.epoch,
-        "joined_source_turn_count": joined_source_turn_count,
+        "source_turn_count": source_turn_count,
+        "joined_source_turn_count": source_turn_count,
         "source_turn_ids": &prompt.source_turn_ids,
         "response_turn_id": &prompt.response_turn_id,
+        "completion_reason": prompt.completion_reason.as_str(),
+        "accumulation_ms": accumulation_ms,
+        "first_turn_age_ms": timing.map(|timing| timing.first_turn_age_ms),
+        "idle_age_ms": timing.map(|timing| timing.idle_age_ms),
+        "effective_deadline_remaining_ms": timing.and_then(|timing| timing.effective_deadline_remaining_ms),
+        "effective_deadline_source": timing.and_then(|timing| timing.effective_deadline_source),
         "prompt_words": prompt.text.split_whitespace().count(),
         "prompt_chars": prompt.text.chars().count(),
     }));
-    state.write().await.emit_quality_turn_batch_lifecycle(
+    let mut guard = state.write().await;
+    guard.clear_turn_batch_active(gateway_call_id);
+    guard.record_quality_turn_batch_prompt_complete(
         gateway_call_id,
-        "prompt-complete",
-        payload,
+        source_turn_count,
+        accumulation_ms,
+        prompt.completion_reason.as_str(),
     );
+    guard.emit_quality_turn_batch_lifecycle(gateway_call_id, "prompt_complete", payload);
 }
 
 async fn emit_turn_batch_reset_lifecycle(
     state: &SharedState,
     gateway_call_id: &str,
     reset: &TurnBatchReset,
+    timing: Option<&TurnBatchTimingSnapshot>,
 ) {
+    let accumulation_ms = timing
+        .map(|timing| timing.accumulation_ms)
+        .unwrap_or_default();
     tracing::info!(
         gateway_call_id,
-        lifecycle_event = "batch-reset",
+        lifecycle_event = "reset",
         reason = reset.reason.as_str(),
         epoch = reset.epoch,
         batch_id = ?reset.batch_id.as_deref(),
-        "conversation.processor.turn_batch.batch_reset"
+        discarded_turn_count = reset.discarded_turn_count,
+        accumulation_ms,
+        "conversation.processor.turn_batch.reset"
     );
     let payload = turn_batch_payload(serde_json::json!({
         "reason": reset.reason.as_str(),
         "batch_id": &reset.batch_id,
         "epoch": reset.epoch,
+        "discarded_turn_count": reset.discarded_turn_count,
+        "accumulation_ms": accumulation_ms,
+        "first_turn_age_ms": timing.map(|timing| timing.first_turn_age_ms),
+        "idle_age_ms": timing.map(|timing| timing.idle_age_ms),
+        "pending_turn_count": timing.map(|timing| timing.pending_turn_count),
+        "source_turn_ids": timing.map(|timing| timing.source_turn_ids.as_slice()),
+        "effective_deadline_remaining_ms": timing.and_then(|timing| timing.effective_deadline_remaining_ms),
+        "effective_deadline_source": timing.and_then(|timing| timing.effective_deadline_source),
     }));
-    state
-        .write()
-        .await
-        .emit_quality_turn_batch_lifecycle(gateway_call_id, "batch-reset", payload);
+    let mut guard = state.write().await;
+    guard.clear_turn_batch_active(gateway_call_id);
+    guard.record_quality_turn_batch_reset(
+        gateway_call_id,
+        reset.reason.as_str(),
+        reset.discarded_turn_count,
+    );
+    guard.emit_quality_turn_batch_lifecycle(gateway_call_id, "reset", payload);
+}
+
+async fn emit_turn_batch_output_rejected_lifecycle(
+    state: &SharedState,
+    gateway_call_id: &str,
+    rejection: &TurnBatchOutputRejection,
+) {
+    tracing::info!(
+        gateway_call_id,
+        lifecycle_event = "output_rejected",
+        batch_id = %rejection.batch_id,
+        epoch = rejection.epoch,
+        reason = rejection.reason.as_str(),
+        "conversation.processor.turn_batch.output_rejected"
+    );
+    let payload = turn_batch_payload(serde_json::json!({
+        "batch_id": &rejection.batch_id,
+        "epoch": rejection.epoch,
+        "reason": rejection.reason.as_str(),
+    }));
+    let mut guard = state.write().await;
+    guard.record_quality_turn_batch_output_rejected(gateway_call_id, rejection.reason.as_str());
+    guard.emit_quality_turn_batch_lifecycle(gateway_call_id, "output_rejected", payload);
+}
+
+fn turn_batch_active_state(timing: &TurnBatchTimingSnapshot) -> TurnBatchActiveState {
+    let now = chrono::Utc::now();
+    let effective_deadline_at = timing
+        .effective_deadline_remaining_ms
+        .map(|remaining| now + chrono::Duration::milliseconds(remaining as i64));
+    TurnBatchActiveState {
+        batch_id: timing.batch_id.clone(),
+        epoch: timing.epoch,
+        pending_turn_count: timing.pending_turn_count,
+        target_turn_count: timing.target_turn_count,
+        source_turn_ids: timing.source_turn_ids.clone(),
+        first_turn_at: now - chrono::Duration::milliseconds(timing.first_turn_age_ms as i64),
+        last_turn_at: now - chrono::Duration::milliseconds(timing.idle_age_ms as i64),
+        effective_deadline_at,
+        effective_deadline_source: timing.effective_deadline_source.map(str::to_string),
+    }
 }
 
 fn turn_batch_payload(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
@@ -1392,7 +1832,7 @@ async fn queue_conversation_speech(
             source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
             speech_output: Some(speech_output),
-            metadata: crate::operator::state::QualityPlaybackMetadata::default(),
+            metadata: turn_context.metadata,
         },
     )
     .await
@@ -1773,6 +2213,158 @@ second"
         })
         .await
         .expect("wait ceiling should complete pending batch");
+    }
+
+    #[tokio::test]
+    async fn turn_batched_identity_max_batch_wait_is_anchored_to_first_turn() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        {
+            let mut guard = state.write().await;
+            let call = guard.calls.get_mut(&gateway_call_id).expect("call exists");
+            call.conversation.processor = ConversationProcessorKind::turn_batched_identity(
+                motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig::fixed_batch_size(3)
+                    .with_max_batch_wait_ms(80)
+                    .with_max_idle_wait_ms(500),
+            );
+        }
+        let runtime = ConversationRuntime::new_with_processor_options(
+            TelnyxClient::new("https://api.example.test", None, true),
+            crate::tts::unavailable_registry(),
+            true,
+            false,
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let started = Instant::now();
+
+        handle_transcript_event_with_turn(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "first".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+            Some("turn-1"),
+        )
+        .await
+        .expect("first turn should accumulate");
+        sleep(Duration::from_millis(40)).await;
+        handle_transcript_event_with_turn(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "second".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+            Some("turn-2"),
+        )
+        .await
+        .expect("second turn should not reset max batch wait");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state
+                    .read()
+                    .await
+                    .calls
+                    .get(&gateway_call_id)
+                    .and_then(|call| call.conversation.last_assistant_text.as_deref())
+                    == Some("first\nsecond")
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first-turn max batch wait should complete pending batch");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "max_batch_wait_ms must not restart on the second turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_batched_identity_idle_wait_resets_on_new_turn() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        {
+            let mut guard = state.write().await;
+            let call = guard.calls.get_mut(&gateway_call_id).expect("call exists");
+            call.conversation.processor = ConversationProcessorKind::turn_batched_identity(
+                motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig::fixed_batch_size(3)
+                    .with_max_batch_wait_ms(500)
+                    .with_max_idle_wait_ms(50),
+            );
+        }
+        let runtime = ConversationRuntime::new_with_processor_options(
+            TelnyxClient::new("https://api.example.test", None, true),
+            crate::tts::unavailable_registry(),
+            true,
+            false,
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let started = Instant::now();
+
+        handle_transcript_event_with_turn(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "first".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+            Some("turn-1"),
+        )
+        .await
+        .expect("first turn should accumulate");
+        sleep(Duration::from_millis(30)).await;
+        handle_transcript_event_with_turn(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "second".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+            Some("turn-2"),
+        )
+        .await
+        .expect("second turn should reset idle wait");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state
+                    .read()
+                    .await
+                    .calls
+                    .get(&gateway_call_id)
+                    .and_then(|call| call.conversation.last_assistant_text.as_deref())
+                    == Some("first\nsecond")
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("idle wait should complete pending batch before batch wait ceiling");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "max_idle_wait_ms should fire before the first-turn batch ceiling"
+        );
     }
 
     #[tokio::test]
@@ -2463,6 +3055,7 @@ second"
                 latest_finalized_at: None,
                 turn_id: Some("turn_test".to_string()),
                 coalesced_turn_ids: vec!["turn_test".to_string()],
+                metadata: QualityPlaybackMetadata::default(),
             },
         )
         .await;

@@ -1,10 +1,12 @@
 use motlie_agent::voice::turn_batching::{
-    BatchDecision, IdentityTurnBatcher, IdentityTurnBatcherConfig, Turn, TurnBatchResetReason,
-    TurnBatcher,
+    BatchDecision, IdentityTurnBatcher, IdentityTurnBatcherConfig, Turn, TurnBatchCompletionReason,
+    TurnBatchResetReason, TurnBatcher,
 };
 use motlie_voice::app::ConversationCommand;
 
-use super::{ConversationProcessorInput, ConversationProcessorOutput};
+use super::{
+    ConversationProcessorInput, ConversationProcessorOutput, TurnBatchOutputRejectionReason,
+};
 use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
 
 #[derive(Clone, Debug, Default)]
@@ -23,13 +25,18 @@ impl TurnBatchedIdentityConversationProcessor {
         &mut self,
         batch_id: &str,
         epoch: u64,
-    ) -> Option<ConversationProcessorOutput> {
-        if self.batcher.epoch() != epoch || self.batcher.pending_batch_id() != Some(batch_id) {
-            return None;
+        reason: TurnBatchCompletionReason,
+    ) -> Result<ConversationProcessorOutput, TurnBatchOutputRejectionReason> {
+        if self.batcher.epoch() != epoch {
+            return Err(TurnBatchOutputRejectionReason::StaleEpoch);
+        }
+        if self.batcher.pending_batch_id() != Some(batch_id) {
+            return Err(TurnBatchOutputRejectionReason::InactiveBatch);
         }
         self.batcher
-            .complete_pending()
+            .complete_pending(reason)
             .map(ConversationProcessorOutput::PromptComplete)
+            .ok_or(TurnBatchOutputRejectionReason::InactiveBatch)
     }
 
     pub(crate) fn process_input(

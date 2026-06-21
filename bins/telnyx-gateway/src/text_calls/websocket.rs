@@ -1195,7 +1195,16 @@ async fn handle_agent_frame(
                     .await?;
                 return Ok(());
             }
-            if !turn_batch_output_is_current(handle, batch_id.as_deref(), *epoch, false).await? {
+            if !turn_batch_output_is_current(
+                services,
+                gateway_call_id,
+                handle,
+                batch_id.as_deref(),
+                *epoch,
+                false,
+            )
+            .await?
+            {
                 return Ok(());
             }
             let disposition = handle.turns.lock().await.append_turn_disposition(turn_id);
@@ -1218,7 +1227,16 @@ async fn handle_agent_frame(
             epoch,
             ..
         } => {
-            if !turn_batch_output_is_current(handle, batch_id.as_deref(), *epoch, true).await? {
+            if !turn_batch_output_is_current(
+                services,
+                gateway_call_id,
+                handle,
+                batch_id.as_deref(),
+                *epoch,
+                true,
+            )
+            .await?
+            {
                 return Ok(());
             }
             let disposition = handle.turns.lock().await.append_turn_disposition(turn_id);
@@ -1283,6 +1301,8 @@ async fn handle_agent_frame(
 }
 
 async fn turn_batch_output_is_current(
+    services: &TextCallStreamServices,
+    gateway_call_id: &str,
     handle: &TextCallSessionHandle,
     batch_id: Option<&str>,
     epoch: Option<u64>,
@@ -1302,6 +1322,14 @@ async fn turn_batch_output_is_current(
     };
     let current_epoch = handle.turn_batch_epoch.load(Ordering::SeqCst);
     if epoch != current_epoch {
+        emit_turn_batch_output_rejected(
+            services,
+            gateway_call_id,
+            batch_id,
+            Some(epoch),
+            "stale_epoch",
+        )
+        .await;
         send_error_frame(
             handle,
             "stale_turn_batch_epoch",
@@ -1331,6 +1359,14 @@ async fn turn_batch_output_is_current(
         active
     };
     if !active {
+        emit_turn_batch_output_rejected(
+            services,
+            gateway_call_id,
+            Some(batch_id),
+            Some(epoch),
+            "inactive_batch",
+        )
+        .await;
         send_error_frame(
             handle,
             "stale_turn_batch_id",
@@ -1340,6 +1376,26 @@ async fn turn_batch_output_is_current(
         return Ok(false);
     }
     Ok(true)
+}
+
+async fn emit_turn_batch_output_rejected(
+    services: &TextCallStreamServices,
+    gateway_call_id: &str,
+    batch_id: Option<&str>,
+    epoch: Option<u64>,
+    reason: &'static str,
+) {
+    let payload = match serde_json::json!({
+        "batch_id": batch_id,
+        "epoch": epoch,
+        "reason": reason,
+    }) {
+        serde_json::Value::Object(payload) => payload,
+        _ => serde_json::Map::new(),
+    };
+    let mut guard = services.state.write().await;
+    guard.record_quality_turn_batch_output_rejected(gateway_call_id, reason);
+    guard.emit_quality_turn_batch_lifecycle(gateway_call_id, "output_rejected", payload);
 }
 
 async fn agent_provisional_generation_is_active(

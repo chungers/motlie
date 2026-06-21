@@ -37,7 +37,28 @@ pub struct Prompt {
     pub epoch: u64,
     pub response_turn_id: String,
     pub source_turn_ids: Vec<String>,
+    pub completion_reason: TurnBatchCompletionReason,
     pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnBatchCompletionReason {
+    FixedSizeReached,
+    MaxBatchTurns,
+    MaxBatchWaitTimeout,
+    MaxIdleTimeout,
+}
+
+impl TurnBatchCompletionReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FixedSizeReached => "fixed_size_reached",
+            Self::MaxBatchTurns => "max_batch_turns",
+            Self::MaxBatchWaitTimeout => "max_batch_wait_timeout",
+            Self::MaxIdleTimeout => "max_idle_timeout",
+        }
+    }
 }
 
 /// Accumulation state emitted while the batcher is intentionally withholding a prompt.
@@ -47,7 +68,8 @@ pub struct Accumulating {
     pub epoch: u64,
     pub source_turn_ids: Vec<String>,
     pub target_turn_count: usize,
-    pub deadline_ms: u64,
+    pub batch_wait_remaining_ms: u64,
+    pub idle_wait_ms: u64,
 }
 
 /// Reset state for hosts that need to publish an ordered turn batch reset.
@@ -55,6 +77,7 @@ pub struct Accumulating {
 pub struct TurnBatchReset {
     pub reason: TurnBatchResetReason,
     pub epoch: u64,
+    pub discarded_turn_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
 }
@@ -190,11 +213,11 @@ impl IdentityTurnBatcher {
         self.pending_batch_id.as_deref()
     }
 
-    pub fn complete_pending(&mut self) -> Option<Prompt> {
+    pub fn complete_pending(&mut self, reason: TurnBatchCompletionReason) -> Option<Prompt> {
         if self.pending_turns.is_empty() {
             return None;
         }
-        Some(self.complete_current_batch())
+        Some(self.complete_current_batch(reason))
     }
 
     fn batch_id(&mut self) -> String {
@@ -225,17 +248,12 @@ impl IdentityTurnBatcher {
                 .map(|turn| turn.turn_id.clone())
                 .collect(),
             target_turn_count: self.target_turn_count(),
-            deadline_ms: if self.pending_turns.len() <= 1 {
-                self.config.max_batch_wait_ms
-            } else {
-                self.config
-                    .max_idle_wait_ms
-                    .max(self.config.max_batch_wait_ms)
-            },
+            batch_wait_remaining_ms: self.config.max_batch_wait_ms,
+            idle_wait_ms: self.config.max_idle_wait_ms,
         })
     }
 
-    fn complete_current_batch(&mut self) -> Prompt {
+    fn complete_current_batch(&mut self, completion_reason: TurnBatchCompletionReason) -> Prompt {
         let batch_id = self.batch_id();
         let source_turn_ids = self
             .pending_turns
@@ -260,6 +278,7 @@ impl IdentityTurnBatcher {
             epoch: self.epoch,
             response_turn_id,
             source_turn_ids,
+            completion_reason,
             text,
         }
     }
@@ -269,10 +288,15 @@ impl TurnBatcher for IdentityTurnBatcher {
     fn observe(&mut self, mut turn: Turn) -> BatchDecision {
         turn.epoch = self.epoch;
         self.pending_turns.push(turn);
-        if self.pending_turns.len() >= self.config.fixed_batch_size
-            || self.pending_turns.len() >= self.config.max_batch_turns
-        {
-            BatchDecision::PromptComplete(self.complete_current_batch())
+        let fixed_size_reached = self.pending_turns.len() >= self.config.fixed_batch_size;
+        let max_batch_turns_reached = self.pending_turns.len() >= self.config.max_batch_turns;
+        if fixed_size_reached || max_batch_turns_reached {
+            let reason = if fixed_size_reached {
+                TurnBatchCompletionReason::FixedSizeReached
+            } else {
+                TurnBatchCompletionReason::MaxBatchTurns
+            };
+            BatchDecision::PromptComplete(self.complete_current_batch(reason))
         } else {
             self.accumulating()
         }
@@ -280,11 +304,13 @@ impl TurnBatcher for IdentityTurnBatcher {
 
     fn reset(&mut self, reason: TurnBatchResetReason) -> BatchDecision {
         let batch_id = self.pending_batch_id.take();
+        let discarded_turn_count = self.pending_turns.len();
         self.pending_turns.clear();
         self.epoch = self.epoch.saturating_add(1);
         BatchDecision::Reset(TurnBatchReset {
             reason,
             epoch: self.epoch,
+            discarded_turn_count,
             batch_id,
         })
     }
@@ -315,6 +341,7 @@ mod tests {
                 epoch: 0,
                 response_turn_id: "turn-1".to_string(),
                 source_turn_ids: vec!["turn-1".to_string()],
+                completion_reason: TurnBatchCompletionReason::FixedSizeReached,
                 text: "hello".to_string(),
             })
         );
@@ -333,7 +360,8 @@ mod tests {
                 epoch: 0,
                 source_turn_ids: vec!["turn-1".to_string()],
                 target_turn_count: 2,
-                deadline_ms: 250,
+                batch_wait_remaining_ms: 250,
+                idle_wait_ms: 0,
             })
         );
         assert_eq!(
@@ -343,6 +371,7 @@ mod tests {
                 epoch: 0,
                 response_turn_id: "turn-2".to_string(),
                 source_turn_ids: vec!["turn-1".to_string(), "turn-2".to_string()],
+                completion_reason: TurnBatchCompletionReason::FixedSizeReached,
                 text: "first\nsecond".to_string(),
             })
         );
@@ -358,6 +387,7 @@ mod tests {
             BatchDecision::Reset(TurnBatchReset {
                 reason: TurnBatchResetReason::BargeIn,
                 epoch: 1,
+                discarded_turn_count: 1,
                 batch_id: Some("turn-batch-0-0".to_string()),
             })
         );
@@ -369,7 +399,8 @@ mod tests {
                 epoch: 1,
                 source_turn_ids: vec!["turn-2".to_string()],
                 target_turn_count: 2,
-                deadline_ms: 0,
+                batch_wait_remaining_ms: 0,
+                idle_wait_ms: 0,
             })
         );
     }
@@ -381,16 +412,37 @@ mod tests {
         let _ = handler.observe(turn("turn-2", "second"));
 
         assert_eq!(
-            handler.complete_pending(),
+            handler.complete_pending(TurnBatchCompletionReason::MaxBatchWaitTimeout),
             Some(Prompt {
                 batch_id: "turn-batch-0-0".to_string(),
                 epoch: 0,
                 response_turn_id: "turn-2".to_string(),
                 source_turn_ids: vec!["turn-1".to_string(), "turn-2".to_string()],
+                completion_reason: TurnBatchCompletionReason::MaxBatchWaitTimeout,
                 text: "first\nsecond".to_string(),
             })
         );
         assert!(!handler.has_pending_turns());
+    }
+
+    #[test]
+    fn identity_turn_batcher_max_batch_turns_forces_completion() {
+        let mut handler = IdentityTurnBatcher::new(
+            IdentityTurnBatcherConfig::fixed_batch_size(4).with_max_batch_turns(2),
+        );
+        let _ = handler.observe(turn("turn-1", "first"));
+
+        assert_eq!(
+            handler.observe(turn("turn-2", "second")),
+            BatchDecision::PromptComplete(Prompt {
+                batch_id: "turn-batch-0-0".to_string(),
+                epoch: 0,
+                response_turn_id: "turn-2".to_string(),
+                source_turn_ids: vec!["turn-1".to_string(), "turn-2".to_string()],
+                completion_reason: TurnBatchCompletionReason::MaxBatchTurns,
+                text: "first\nsecond".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -433,6 +485,7 @@ mod tests {
             epoch: 3,
             response_turn_id: "turn-1".to_string(),
             source_turn_ids: vec!["turn-1".to_string()],
+            completion_reason: TurnBatchCompletionReason::FixedSizeReached,
             text: "hello".to_string(),
         };
         let encoded = serde_json::to_value(&prompt).expect("prompt serializes");

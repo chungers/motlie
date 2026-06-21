@@ -1,6 +1,6 @@
 use futures_util::{future, Stream, StreamExt};
 use motlie_agent::voice::turn_batching::{
-    Accumulating, IdentityTurnBatcherConfig, Prompt, TurnBatchReset,
+    Accumulating, IdentityTurnBatcherConfig, Prompt, TurnBatchCompletionReason, TurnBatchReset,
 };
 use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 
@@ -52,6 +52,21 @@ pub struct CommittedSpeechIntent {
     pub(crate) timing: TextCallTurnTiming,
     pub(crate) config: TextCallSessionConfig,
     pub speech_output: SpeechOutputConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TurnBatchOutputRejectionReason {
+    StaleEpoch,
+    InactiveBatch,
+}
+
+impl TurnBatchOutputRejectionReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleEpoch => "stale_epoch",
+            Self::InactiveBatch => "inactive_batch",
+        }
+    }
 }
 
 /// Processor output accepted by the gateway.
@@ -106,6 +121,19 @@ impl ConversationProcessorKind {
             Self::TurnBatchedIdentity { config } => Some(config),
             Self::Identity | Self::ExternalTextStream => None,
         }
+    }
+
+    pub fn response_mode_label(&self) -> &'static str {
+        match self {
+            Self::TurnBatchedIdentity { .. } => "turn_batched",
+            Self::Identity | Self::ExternalTextStream => "per_turn",
+        }
+    }
+
+    pub fn resolved_identity_turn_batcher_config(&self) -> IdentityTurnBatcherConfig {
+        self.identity_turn_batcher_config()
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn process_input(
@@ -190,10 +218,12 @@ impl ConversationProcessorHost {
         &mut self,
         batch_id: &str,
         epoch: u64,
-    ) -> Option<ConversationProcessorOutput> {
+        reason: TurnBatchCompletionReason,
+    ) -> Result<ConversationProcessorOutput, TurnBatchOutputRejectionReason> {
         self.turn_batched_processor
             .as_mut()
-            .and_then(|processor| processor.complete_pending(batch_id, epoch))
+            .ok_or(TurnBatchOutputRejectionReason::InactiveBatch)
+            .and_then(|processor| processor.complete_pending(batch_id, epoch, reason))
     }
 }
 

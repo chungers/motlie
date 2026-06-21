@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-20 | @codex-541-refactor | Reconciled the gateway-alone turn-batching protocols with approved DESIGN-557 §4.3 event names, deadline/status fields, and batcher-owned config knobs. Timestamp: 2026-06-21 00:46:41 UTC. |
 | 2026-06-20 | @codex-541-refactor | Added gateway-alone partials-batching and turns-batching smoke-test protocols plus turn-batch lifecycle observability checks. Timestamp: 2026-06-20 23:27:26 UTC. |
 | 2026-06-17 | @codex-535 | Added structured WER/latency run-record blocks and clarified outbound post-dial activation. |
 | 2026-06-17 | @codex-535 | Clarified that smoke-test preserves barge-in and live tests must set barge-in explicitly. |
@@ -489,14 +490,14 @@ default; opt into this protocol only for turn-batching validation.
 CLI selector and batcher-owned policy knobs for an attached or selected call:
 
 ```text
-conversation smoke-test on turn-batched-identity --fixed-batch-size 3 --max-batch-turns 3 --max-batch-wait-ms 2500
+conversation smoke-test on turn-batched-identity --fixed-batch-size 3 --max-batch-turns 3 --max-batch-wait-ms 2500 --max-idle-wait-ms 1200 --join-separator " | "
 conversation barge-in off
 conversation status
 ```
 
 The command above is the operator-command form of
 `processor=turn_batched_identity fixed_batch_size=3 max_batch_turns=3
-max_batch_wait_ms=2500`. In config files, use the strict TOML table instead:
+max_batch_wait_ms=2500 max_idle_wait_ms=1200 join_separator=" | "`. In config files, use the strict TOML table instead:
 
 ```toml
 [conversation]
@@ -510,6 +511,8 @@ tts_backend = "kokoro-82m"
 fixed_batch_size = 3
 max_batch_turns = 3
 max_batch_wait_ms = 2500
+max_idle_wait_ms = 1200
+join_separator = " | "
 ```
 
 Ownership rule: N and all batching policy values are owned by
@@ -520,12 +523,22 @@ complete.
 
 Readiness check: `conversation status` must show `attached: true`,
 `processor: turn_batched_identity`, and `processor_state: turn_batched_identity`.
+While the batch is holding the floor it must also show
+`turn_batch.accumulating: true`, the active `turn_batch.batch_id`,
+`turn_batch.epoch`, pending/target counts, first-turn age, idle age, and the
+effective deadline source/remaining time.
+
 Monitor the run log and quality JSONL for the lifecycle events
-`turn_batch.turn_accumulated`, `turn_batch.prompt_complete`, and
-`turn_batch.batch_reset`. The trace log messages use
-`conversation.processor.turn_batch.turn_accumulated`,
-`conversation.processor.turn_batch.prompt_complete`, and
-`conversation.processor.turn_batch.batch_reset`.
+`turn_batch_accumulated`, `turn_batch_prompt_complete`, `turn_batch_reset`, and
+`turn_batch_output_rejected`. The trace log messages use
+`conversation.processor.turn_batch.accumulated`,
+`conversation.processor.turn_batch.prompt_complete`,
+`conversation.processor.turn_batch.reset`, and
+`conversation.processor.turn_batch.output_rejected`. The accumulated/prompt/reset
+events carry `batch_id`, `epoch`, pending/source-turn counts, first-turn age,
+idle age, effective deadline source, and deadline remaining data so the
+`max_batch_wait_ms` vs `max_idle_wait_ms` behavior can be validated from logs
+alone.
 
 Caller script for fixed-N validation, using N short distinct turns with clear
 endpoint pauses:
@@ -540,22 +553,35 @@ Turn three: cedar marker.
 ```
 
 Expected behavior: turns 1 through N-1 are silent while the batch accumulates.
-The log and JSONL show `turn-accumulated` with k of N, `batch_id`, and `epoch`.
-After turn N, the gateway emits one `prompt-complete` event with the joined
-source-turn count, then speaks one joined echo.
+The log and JSONL show `turn_batch_accumulated` with k of N, `batch_id`,
+`epoch`, first-turn age, idle age, and the effective deadline source. After turn
+N, the gateway emits one `turn_batch_prompt_complete` event with source-turn
+count, `completion_reason`, and `accumulation_ms`, then speaks one joined echo.
+The existing `quality.turn.playback_linked` event includes the turn-batch id,
+epoch, response turn id, and completion reason so delivery/cancel outcome can be
+joined back to the prompt.
 
 Run three variants when validating a change:
 
 - Fixed-N batch: speak exactly N turns and expect one joined echo after turn N.
-- Timeout fallback: speak fewer than N turns, wait longer than
-  `max_batch_wait_ms`, and expect one partial-batch joined echo after the wait.
+- Fixed first-turn ceiling: speak fewer than N turns, wait longer than
+  `max_batch_wait_ms`, and expect one partial-batch joined echo with
+  `completion_reason=max_batch_wait_timeout`. Later turns must not reset this
+  ceiling.
+- Idle fallback: speak fewer than N turns, pause longer than `max_idle_wait_ms`
+  but shorter than `max_batch_wait_ms`, and expect one partial-batch joined echo
+  with `completion_reason=max_idle_timeout`. A new turn resets only this idle
+  timer.
 - Barge-in reset: while an existing playback is interruptible and a new batch is
-  accumulating, barge in and expect `batch-reset` with reason `barge_in`; the
-  accumulated pending turns must not be echoed after the reset.
+  accumulating, barge in and expect `turn_batch_reset` with reason `barge_in`,
+  `discarded_turn_count`, and accumulation age; the accumulated pending turns
+  must not be echoed after the reset.
 
 Record these layer-3 observations in the run results: accumulation count,
-`batch_id`/`epoch` continuity, joined source-turn count, whether timeout fallback
-fired, and whether reset-on-barge-in dropped the pending batch.
+`batch_id`/`epoch` continuity, joined source-turn count, completion-reason
+histogram, turns-per-prompt rollup, accumulation latency rollup,
+resets-by-reason, stale/output-rejection count, whether timeout fallback fired,
+and whether reset-on-barge-in dropped the pending batch.
 
 ## Log Monitoring
 
@@ -618,8 +644,11 @@ Quantitative:
   measurement.
 - Layer 3 turn batching: accumulation count matches k of N, `batch_id` and
   `epoch` stay stable until completion/reset, prompt assembly joins the expected
-  source turns, timeout fallback fires when expected, and barge-in reset drops
-  pending accumulated turns without a later echo.
+  source turns, `max_batch_wait_ms` is measured from the first turn,
+  `max_idle_wait_ms` resets on each new turn, timeout completion reasons match
+  the observed deadline source, `quality.turn.playback_linked` can be joined to
+  `turn_batch_prompt_complete`, and barge-in reset records discarded turns
+  without a later echo.
 
 Qualitative:
 

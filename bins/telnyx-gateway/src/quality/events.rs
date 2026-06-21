@@ -90,6 +90,7 @@ impl QualityEvent {
         snapshot_reason: &'static str,
         effective_scope: &'static str,
         effective_after_asr_session_id: Option<String>,
+        mut extra: Map<String, Value>,
     ) -> Self {
         let mut payload = Map::new();
         payload.insert(
@@ -114,6 +115,7 @@ impl QualityEvent {
             "resolved_config".to_string(),
             serde_json::to_value(config).expect("quality config serializes"),
         );
+        payload.append(&mut extra);
         Self::new(context, "call.config.snapshot", payload)
     }
 
@@ -298,10 +300,11 @@ impl QualityEvent {
             Value::String(lifecycle_event.to_string()),
         );
         let event = match lifecycle_event {
-            "turn-accumulated" => "turn_batch.turn_accumulated",
-            "prompt-complete" => "turn_batch.prompt_complete",
-            "batch-reset" => "turn_batch.batch_reset",
-            _ => "turn_batch.lifecycle",
+            "accumulated" => "turn_batch_accumulated",
+            "prompt_complete" => "turn_batch_prompt_complete",
+            "reset" => "turn_batch_reset",
+            "output_rejected" => "turn_batch_output_rejected",
+            _ => "turn_batch_lifecycle",
         };
         Self::new(context, event, payload)
     }
@@ -710,7 +713,7 @@ mod tests {
         );
         let event = QualityEvent::turn_batch_lifecycle(
             context,
-            "turn-accumulated",
+            "accumulated",
             map_from_value(json!({
                 "batch_id": "turn-batch-0-0",
                 "epoch": 0,
@@ -719,8 +722,8 @@ mod tests {
             })),
         );
 
-        assert_eq!(event.event, "turn_batch.turn_accumulated");
-        assert_eq!(event.payload["lifecycle_event"], "turn-accumulated");
+        assert_eq!(event.event, "turn_batch_accumulated");
+        assert_eq!(event.payload["lifecycle_event"], "accumulated");
         assert_eq!(event.payload["batch_id"], "turn-batch-0-0");
         assert_eq!(event.payload["accumulated_turn_count"], 1);
         assert_eq!(event.payload["target_turn_count"], 3);
@@ -775,6 +778,7 @@ mod tests {
             "stream_start",
             "new_asr_sessions",
             None,
+            Map::new(),
         );
         assert_eq!(event.event, "call.config.snapshot");
         assert!(event.payload.contains_key("resolved_config"));
