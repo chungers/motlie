@@ -1,6 +1,7 @@
 # DESIGN — #557: Explicit pipeline stages + turn-batching layer (builds on #553/#541)
 
 ## Changelog
+- 2026-06-20 — @ops48-orchestrator — Doc-accuracy pass (codex-548-rv audit): reconciled the design's pre-implementation API shapes to the SHIPPED Rust API — §3.1 `Turn` (`turn_id`/`utterance_id?`/`text`/`sequence`/`epoch`, host-projected, no unified struct); §4.1 `TurnBatcher` (`observe`/`reset(reason)->BatchDecision`/`epoch()`) + `BatchDecision::{Accumulating(..), PromptComplete(..), Reset(..)}` with real fields; gateway-local kind = `TurnBatchedIdentity`, `PromptComplete`→`ConversationCommand::Say` (CommittedSpeech = external-text path); removed sentinel-turn mode; gate = `ConversationProcessorKind::TurnBatchedIdentity` not `ResponseMode::TurnBatched`; §4.2 ownership lists all 5 knobs; §4.3.5 deadline note updated to the shipped two-bound impl; live status on `conversation status` (`call show` is compact). Code + TESTING.md verified accurate (10 matches).
 - 2026-06-20 — @ops48-orchestrator — §4.3 APPROVED 2/2 (codex-548-rv + claude-548-rv). Added §4.3.2 forward-contract note (semantic config drops (T) knobs, carries (B) knobs). Carry-through impl requirements for the #560 fold: (d, MANDATORY) split `Accumulating` into two relative deadlines (first-turn `batch_wait_remaining` + this-turn `idle`) + host-tracked first-turn wall time — the single `deadline_ms` cannot express the contract (confirmed real bug @ 87b03be3); (c) `turn_batch_reset` carries `discarded_turn_count` (+ accumulation_ms-at-reset), link `prompt_complete` to `playback_linked`, `config_snapshot` records `response_mode` + fully-resolved `IdentityTurnBatcherConfig`; events carry deadline/age data (batch_id/epoch, pending count, first-turn age, idle age, effective deadline) to validate the timeout from logs alone.
 - 2026-06-20 — @ops48-orchestrator — Add §4.3 (David): config-knob ownership/taxonomy (gateway owns NO batcher knobs; each knob classed (T) identity-test vs (B) behavior/perf bound), exposure consistency (TUI/socket command + global TOML self-describing + `config_snapshot`; NO static CLI flags for per-call config), full observability metrics/logging spec (turn-batch `QualityEvent`s + rollups + live status), and tightened `max_batch_wait_ms` contract (genuine first-turn ceiling vs `max_idle_wait_ms`). Design-first: architects approve §4.3 before $122 implements into #560. "No PR complete without clear knobs/ownership + enough observability for live validation + tuning."
 - 2026-06-20 — @ops48-orchestrator — §4.2 ownership rule (David): the gateway owns NO turn-batching logic. `N` and all batching-policy params live in `IdentityTurnBatcherConfig` (`libs/agent`); the smoke-test/gateway config only selects the `ConversationProcessorKind` and passes an opaque batcher config through. Gateway is a dumb host.
@@ -31,7 +32,7 @@ This makes the boundary you want enforceable: **gateway = acoustic endpoints/tur
 
 ## 3. Stage contracts to add/enforce
 ### 3.1 Turn-stream input contract (gateway → processor)
-The processor's unit becomes a **turn**, not a raw partial: `{ call_id, turn_id, utterance_id, text, finality: Provisional|Final, supersede/cancel signal, timing }`. Raw partials remain available **advisory** (for richer context) but are not the unit of work. (Today the processor receives `EarlyResponse(event)` + `CommittedTurn` + `AgentTextStream`; this formalizes "turn" as the consumed unit and keeps partials advisory.)
+The processor's unit is a **turn**, not a raw partial. **As shipped**, the placement-neutral `Turn` (`libs/agent/src/voice/turn_batching.rs`) is `{ turn_id, utterance_id: Option<…>, text, sequence, epoch }` — neutral serde only; no `call_id`/`finality`/timing types leak in (those stay host-side, per I7). Raw partials remain **advisory**. The gateway processor input is still split across `EarlyResponse(event)` + `CommittedTurn` + `AgentTextStream` (`processors/mod.rs`); the host **projects** these into `Turn` at the batcher boundary rather than there being one unified turn struct.
 
 ### 3.2 Processor output states (the key addition)
 Today `ConversationProcessorOutput` only models per-turn `Speak/Cancel/Commit/CommittedSpeech`. Add the layer-3 states the turn-batching stage needs:
@@ -57,23 +58,26 @@ Replace `TextCallAggregationPolicy::{GatewayOwned, AgentOwned}` with a layer-3 t
 ### 4.1 Placement-neutral turn batcher (one module, droppable on either side of the process boundary)
 The layer-3 logic is a **standalone module in `libs/agent` (`motlie-agent`)** — the crate **both** `telnyx-gateway` (`default-features = false`) and `telnyx-agent` already depend on — sitting next to the existing turn/frame contract (`libs/agent/src/voice/telnyx/text.rs`). It is a **pure state machine** over the turn-stream contract, with **no gateway internals** (no `ProvisionalPlaybackRegistry` / `SpeechOutputConfig` / early-response pipeline) and **no daemon internals** (no websocket transport). Shape:
 
+As shipped (`libs/agent/src/voice/turn_batching.rs`):
+
 ```rust
 /// Layer-3 turn batcher: accumulates clean gateway turns into one prompt.
 pub trait TurnBatcher {
-    /// Observe one gateway turn (+ advisory partials). Decides hold-vs-respond.
     fn observe(&mut self, turn: Turn) -> BatchDecision;
-    /// Barge-in / supersede arrived (acoustic, gateway-owned): drop the prompt.
-    fn reset(&mut self);
+    fn reset(&mut self, reason: TurnBatchResetReason) -> BatchDecision;  // reasoned reset is part of the contract
+    fn epoch(&self) -> u64;
 }
 
 pub enum BatchDecision {
-    Accumulating,            // hold the floor, keep listening (§3.2)
-    PromptComplete(Prompt),  // semantically complete; respond now (§3.2)
+    Accumulating(Accumulating),   // { batch_id, epoch, source_turn_ids, target_turn_count,
+                                  //   batch_wait_remaining_ms, idle_wait_ms } — hold the floor (§3.2)
+    PromptComplete(Prompt),       // { …, completion_reason } — respond now (§3.2)
+    Reset(TurnBatchReset),        // { reason, epoch, discarded_turn_count, batch_id: Option } (§3.4)
 }
 ```
 
 **Same module, hosted on either side — the host only adapts transport, never re-implements the logic:**
-- **In-gateway host:** the `TurnBatched` processor (`ConversationProcessorKind`) owns a `TurnBatcher`, feeds it turns from `process_stream`, maps `PromptComplete` → the response trigger / `CommittedSpeech`, and routes gateway barge-in → `reset()`.
+- **In-gateway host:** the `ConversationProcessorKind::TurnBatchedIdentity` kind owns a `TurnBatcher` via the persistent per-call host, feeds it committed turns, maps `PromptComplete` → `ConversationCommand::Say { text }` (with turn-batch playback metadata), and routes gateway barge-in → `reset()`. (`CommittedSpeech` is the *external-text* processor path, not this gateway-local one.)
 - **In-daemon host:** `telnyx-agent` owns the **same** `TurnBatcher`, fed by the gateway's turn stream over the text-call websocket; emits `AgentTurn*` return frames on `PromptComplete`; gateway barge-in arrives as a `GatewayTextFrame` → `reset()`.
 
 Because the batcher consumes **only clean turns** (never raw acoustic partials) and the gateway **always** owns acoustic endpointing + safety, the daemon-side placement does **not** re-own acoustic boundaries — preserving the §3.5 invariant that dissolves #556. `ResponseMode::{PerTurn, TurnBatched}` selects whether a batcher is in the loop at all; **where** it runs (gateway vs daemon) is a host/deployment choice, **not** a contract change. (Tension to resolve: a heuristic batcher is pure/sync as above, but the *model-as-endpointer* option in §5 makes the decision I/O-bound — see §7.6.)
@@ -83,17 +87,17 @@ The per-turn layers ship a reference identity processor (`IdentityRepeatConversa
 
 What it does — the layer-3 analog of "repeat":
 - **Batching:** deterministic, no semantics. Default behavior is **batch-of-1** — every turn yields `PromptComplete(turn.text)` immediately, never `Accumulating` (byte-for-byte the `PerTurn` path, but routed *through* the layer-3 `TurnBatcher` contract — so it exercises `PromptComplete` + the host's response trigger).
-- **Accumulation mode (opt-in for validation):** a configurable trivial rule — fixed `N` turns, or until a sentinel turn — that emits `Accumulating` for the first N−1 and `PromptComplete(joined_text)` on the Nth. This is what actually drives the *new* code paths: multi-turn→1-prompt assembly, the explicit `Accumulating` state, and `Reset` mid-accumulation.
-- **Response:** echo. The assembled prompt is spoken back verbatim (the host maps `PromptComplete` → `CommittedSpeech`/`AgentTurn`), exactly as `IdentityRepeat` echoes a turn. No model call.
+- **Accumulation mode (opt-in for validation):** a configurable rule — `fixed_batch_size = N`, with the `max_batch_turns` ceiling and host-driven `max_batch_wait_ms` / `max_idle_wait_ms` timeout completion — emits `Accumulating` for the first N−1 turns and `PromptComplete(joined_text)` on the Nth (or on timeout). (No sentinel-turn mode.) This drives the *new* code paths: multi-turn→1-prompt assembly, the explicit `Accumulating` state, and `Reset` mid-accumulation.
+- **Response:** echo. The assembled prompt is spoken back verbatim — the host maps `PromptComplete` → speech (gateway-local: `ConversationCommand::Say`; daemon: `AgentTurn`), exactly as `IdentityRepeat` echoes a turn. No model call.
 - **Reset:** honors `reset()` — drops any in-progress accumulation; with epoch/`batch_id` gating, a late echo after reset is dropped. This makes the `TurnBatchReset` frame + stale-rejection contract directly testable.
 
-Why it's worth specifying now: it is the **deterministic validation harness for layer 3** — it lets us live-validate (a) the new `Accumulating/PromptComplete/Reset` output states, (b) the `TurnBatchReset` boundary frame and epoch gating, and (c) **placement neutrality** (run the identical `IdentityTurnBatcher` in-gateway *and* in-daemon and assert identical observable behavior) before any real LLM/semantic-endpointing handler exists. It is debug/test scaffolding — gated behind `ResponseMode::TurnBatched` + a dev/identity selector, never a production default.
+Why it's worth specifying now: it is the **deterministic validation harness for layer 3** — it lets us live-validate (a) the new `Accumulating/PromptComplete/Reset` output states, (b) the `TurnBatchReset` boundary frame and epoch gating, and (c) **placement neutrality** (run the identical `IdentityTurnBatcher` in-gateway *and* in-daemon and assert identical observable behavior) before any real LLM/semantic-endpointing handler exists. It is debug/test scaffolding — selected for the gateway-only path by `ConversationProcessorKind::TurnBatchedIdentity` (via the `conversation smoke-test` operator command or the `[conversation]` TOML), never a production default. (`ResponseMode::TurnBatched` is the separate text-call websocket/daemon mode, not the gateway-local smoke gate.)
 
 **Gateway-only smoke test (no external agent, no LLM).** The simplest live-call validation of layer 3 is *batch N turns into one prompt and echo it*. The gateway smoke-test surface (the `conversation smoke-test` operator command / live-run config) MUST be configurable to run the gateway **in isolation** in either of two modes — so each layer is independently exercisable on a real call with no daemon and no model:
 - **(a) `Identity` processor** — gateway-owned partial→turn formation, echo per turn. Validates layers 1–2 (ASR partials → turn → early-response/commit → streaming TTS → media). This is today's identity/repeat smoke test.
 - **(b) gateway-owned partial→turn formation + in-gateway `IdentityTurnBatcher`** (`ConversationProcessorKind::TurnBatchedIdentity`) — accumulates N turns into one prompt and echoes it. Validates layer 3 (**batched turns as prompts**) end-to-end, still entirely inside the gateway.
 
-**Ownership rule: the gateway owns NO turn-batching logic.** The batch size `N` and every batching-policy parameter (`fixed_batch_size`, `max_batch_turns`, `max_batch_wait_ms`) belong to `IdentityTurnBatcher` — they are fields of its own `IdentityTurnBatcherConfig` in `libs/agent`. The smoke-test/gateway config does **not** decide N or hold any batch logic; it only (1) selects the `ConversationProcessorKind` and (2) for mode (b) supplies an opaque `IdentityTurnBatcherConfig` value handed straight to the batcher at construction. The gateway is a dumb host — it constructs the batcher with that config, feeds it turns, and maps `PromptComplete` to speech; all "how to batch" decisions live in the batcher. (Only gateway-side safety stays acoustic: barge-in → `reset()`.) Both modes are gateway-only and model-free; the only difference is whether the layer-3 `IdentityTurnBatcher` stage is engaged. This makes the new turn-batching layer live-validatable before any agent/LLM exists, the same way mode (a) validates the acoustic substrate today.
+**Ownership rule: the gateway owns NO turn-batching logic.** The batch size `N` and every batching-policy parameter (`fixed_batch_size`, `max_batch_turns`, `max_batch_wait_ms`, `max_idle_wait_ms`, `join_separator` — full set per §4.3.2) belong to `IdentityTurnBatcher` — they are fields of its own `IdentityTurnBatcherConfig` in `libs/agent`. The smoke-test/gateway config does **not** decide N or hold any batch logic; it only (1) selects the `ConversationProcessorKind` and (2) for mode (b) supplies an opaque `IdentityTurnBatcherConfig` value handed straight to the batcher at construction. The gateway is a dumb host — it constructs the batcher with that config, feeds it turns, and maps `PromptComplete` to speech; all "how to batch" decisions live in the batcher. (Only gateway-side safety stays acoustic: barge-in → `reset()`.) Both modes are gateway-only and model-free; the only difference is whether the layer-3 `IdentityTurnBatcher` stage is engaged. This makes the new turn-batching layer live-validatable before any agent/LLM exists, the same way mode (a) validates the acoustic substrate today.
 
 ### 4.3 Config-knob ownership/taxonomy, observability metrics, and timeout contracts
 *A PR is not complete without clear config knobs + ownership and enough observability to live-validate and tune via live calls + log monitoring + post-call analysis.* This section is the contract for that, to be approved before implementation.
@@ -123,13 +127,13 @@ The taxonomy is a **forward contract on config-type composition**: when the real
 - `turn_batch_output_rejected { call_id, batch_id, epoch, reason: stale_epoch | inactive_batch }`
 - `completion_reason ∈ { fixed_size_reached, max_batch_turns, max_batch_wait_timeout, max_idle_timeout }`.
 - **Rollup (report summary):** batches formed, mean/p95 turns-per-prompt, mean/p95 accumulation latency, completion-reason histogram, resets-by-reason, stale-rejection count.
-- **Live `conversation status` / `call show`:** active batch state (pending turn count, current `batch_id`, accumulating yes/no) so the §3.2 "still listening" state is observable mid-call.
+- **Live status:** `conversation status` exposes the full active-batch state (`turn_batch.accumulating`, `batch_id`, `epoch`, `pending_turns`/`target_turns`, `first_turn_age_ms`, `idle_age_ms`, `effective_deadline_source`/`_remaining_ms`) so the §3.2 "still listening" state is observable mid-call. (`call show` carries only a compact `turn_batch=<batch_id> pending=<count>` summary — not the full set.)
 
 **4.3.5 `max_batch_wait_ms` tightened contract.**
 - `max_batch_wait_ms` = hard wall-clock ceiling measured from the **first** turn of the current batch; it does **not** reset when later turns arrive.
 - `max_idle_wait_ms` = timeout from the **most recent** turn; it **does** reset on each new turn.
 - Both may be active; effective deadline = `min(first_turn + max_batch_wait_ms, last_turn + max_idle_wait_ms)`, with immediate completion on `fixed_batch_size` / `max_batch_turns`.
-- The batcher stays **clockless** (host owns the clock — preserves placement-neutrality): on each `observe` it returns the relative deadline(s) referenced to first-turn and last-turn; the **host** tracks the first-turn wall time and must **not** reset the `max_batch_wait` timer on new turns (only the idle timer resets). *(Today `deadline_ms = max(idle, batch_wait)` recomputed per-observe collapses the two — fix so `max_batch_wait_ms` is a genuine first-turn ceiling.)*
+- The batcher stays **clockless** (host owns the clock — preserves placement-neutrality): on each `observe` it returns the relative deadline(s) referenced to first-turn and last-turn; the **host** tracks the first-turn wall time and must **not** reset the `max_batch_wait` timer on new turns (only the idle timer resets). *(Implemented as shipped: `Accumulating` carries separate `batch_wait_remaining_ms` (first-turn-anchored) + `idle_wait_ms` (this-turn) bounds; the host preserves `first_turn_at`, updates `last_turn_at`, and respawns only the idle timer on later turns — the earlier single-`deadline_ms` collapse is gone.)*
 
 ## 5. Streaming-LLM / turn-LLM integration (feasibility — codex streaming-LLM reviewer)
 The turn-batched prompt must integrate with whatever produces the response. Open feasibility questions:
