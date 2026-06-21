@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-21 | @codex-535 | Added run-by-run live tuning ladder for identity/repeat endpoint and playback-hold knobs after PR #558 live test. |
 | 2026-06-20 | @ops48-orchestrator | Protocol B: lead with the global run-config TOML as the single source of all batcher knobs (test protocol fully specified in one place); reframe the `conversation smoke-test --…` form as an OPTIONAL runtime operator TUI/agent socket-command override, explicitly NOT process CLI/argv flags. Per David. |
 | 2026-06-20 | @codex-541-refactor | Reconciled the gateway-alone turn-batching protocols with approved DESIGN-557 §4.3 event names, deadline/status fields, and batcher-owned config knobs. Timestamp: 2026-06-21 00:46:41 UTC. |
 | 2026-06-20 | @codex-541-refactor | Added gateway-alone partials-batching and turns-batching smoke-test protocols plus turn-batch lifecycle observability checks. Timestamp: 2026-06-20 23:27:26 UTC. |
@@ -157,6 +158,83 @@ Recent live-run finding: the clause/coalescing profile reduced repeated
 identity fragments. Do not assume early-response is active just because the
 config enables it; verify accepted/rejected provisional-response quality events.
 
+## Run-By-Run Tuning Ladder
+
+Change one hypothesis per live run and record the exact knob values in that
+run's local TOML record. Keep the identity/repeat smoke test conservative:
+streaming TTS, early response on, no turn batching, and barge-in disabled unless
+the run is explicitly a barge-in stress test.
+
+### Current Playback-Hold Profile
+
+Use this profile when validating PR #558 no-barge-in playback backlog behavior:
+
+```toml
+[conversation]
+enabled = true
+final_coalescing_enabled = true
+barge_in_enabled = false
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[voice_quality.tts]
+generation_mode = "streaming"
+chunking_enabled = true
+first_chunk_max_chars = 40
+prebuffer_chunks = 1
+
+[voice_quality.early_response]
+enabled = true
+audio_mode = "speak_provisionally"
+boundary = "clause"
+start_timing = "while_speaking"
+debounce_ms = 180
+max_updates_per_utterance = 1
+
+[voice_quality.endpoint]
+trailing_silence_ms = 750
+merge_window_ms = 120
+final_settle_ms = 500
+conversation_incomplete_tail_hold_ms = 250
+conversation_playback_hold_poll_ms = 10
+conversation_playback_max_hold_ms = 500
+```
+
+Observed on 2026-06-21 by @codex-535: this profile capped the old serial
+identity-repeat backlog. `conversation.final_debounce` recorded playback hold
+limit hits and `conversation.say.deferred_playback_hold` recorded max-hold drops
+instead of unbounded queuing. Transport was clean, but caller feedback and ASR
+finals still showed tail truncation and missing words. Treat this as a known
+intermediate point, not the final quality target.
+
+### Next Endpoint-Completeness A/B
+
+For the next no-barge-in identity run, keep the playback cap fixed and vary only
+the endpoint tail:
+
+```toml
+[voice_quality.endpoint]
+trailing_silence_ms = 850  # run A; use 900 for run B if tails are still cut
+merge_window_ms = 120
+final_settle_ms = 500
+conversation_incomplete_tail_hold_ms = 250
+conversation_playback_hold_poll_ms = 10
+conversation_playback_max_hold_ms = 500
+```
+
+Success criteria:
+
+- Fewer truncated ASR finals at phrase tails.
+- No return of long serial identity-repeat backlog.
+- Median `turn.finalize_to_first_audio` remains close to the previous tuned run.
+- `conversation.final_debounce` still reports playback holds explicitly when
+  they happen.
+
+After endpoint completeness is acceptable, tune TTS first-audio latency
+separately. Do not change `first_chunk_max_chars`, `prebuffer_chunks`, or TTS
+backend in the same run as endpoint-tail changes unless the goal is explicitly a
+multi-factor stress test.
+
 ## Readiness Check
 
 Use targeted operator commands to confirm settings before a call. Avoid broad
@@ -171,6 +249,7 @@ commands = [
     "tts status",
     "quality tts status",
     "quality early-response status",
+    "quality endpoint status",
     "warm all",
 ]
 
