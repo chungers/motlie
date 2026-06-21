@@ -454,7 +454,7 @@ Boundary rules:
 - The end is the finalization decision, not the later transcript-to-turn handoff.
 - Hot-reloaded ASR/endpoint config applies only when the next `asr.session.started` event is created.
 - `asr.finish_pad_ms` is separate from endpoint trailing silence. It is a short ASR flush pad after the endpoint decision, not another full endpoint wait.
-- `endpoint.merge_window_ms` may label adjacent turns as likely merge candidates in reports and may be used by coalescing conversation processors as a processor-local committed-turn debounce, but it must not merge live M4 `caller.turn` events on the app-agent protocol. Conversation-only continuation holds are governed by `endpoint.conversation_tail_words`, `endpoint.conversation_incomplete_tail_hold_ms`, `endpoint.conversation_low_confidence_threshold_percent`, and `endpoint.conversation_playback_hold_poll_ms`.
+- `endpoint.merge_window_ms` may label adjacent turns as likely merge candidates in reports and may be used by coalescing conversation processors as a processor-local committed-turn debounce, but it must not merge live M4 `caller.turn` events on the app-agent protocol. Conversation-only continuation holds are governed by `endpoint.conversation_tail_words`, `endpoint.conversation_incomplete_tail_hold_ms`, `endpoint.conversation_low_confidence_threshold_percent`, `endpoint.conversation_playback_hold_poll_ms`, and `endpoint.conversation_playback_max_hold_ms`.
 - `endpoint.final_settle_ms` is the live media-path hold window for structurally incomplete final fragments. The holdable-fragment classifier is policy-backed by `endpoint.final_settle_trailing_punctuation`, `endpoint.final_settle_lead_words`, `endpoint.final_settle_tail_words`, and `endpoint.final_settle_dangling_suffixes`. It runs before `caller.turn` / `ConversationProcessor` dispatch, merges a pending fragment with a continuation final when one arrives, and otherwise flushes on timeout or stream end.
 
 ## Text-Call and App-Agent Spans
@@ -475,7 +475,8 @@ The strict M4 protocol remains turn-based. The gateway should not require apps t
 |---|---|---|---|---|---|
 | `tts.media_ready_wait` | queue requested while media is not ready | media becomes ready or timeout | `queue_wait` | yes if it delays the first response audio | Distinguish setup waiting from TTS generation. |
 | `tts.conflict_cancel_replace` | new speech replaces active playback | prior playback terminal `canceled` emitted | `barge_in` | concurrent | Measure latest-response-wins behavior. |
-| `conversation.final_debounce` | first final transcript for a coalescing conversation processor | processor-local debounce expires or adjacent final merges | `intentional_delay` | yes when coalescing is enabled | Exposes committed-turn coalescing instead of hiding it in processor latency. |
+| `conversation.final_debounce` | first final transcript for a coalescing conversation processor | processor-local debounce expires or adjacent final merges | `intentional_delay` | yes when coalescing is enabled | Exposes committed-turn coalescing instead of hiding it in processor latency. Payload includes `playback_hold_ms`, `playback_hold_count`, `incomplete_tail_hold_ms`, `incomplete_tail_hold_count`, and whether the playback hold cap fired. |
+| `conversation.say.deferred_playback_hold` | processor emits `ConversationCommand::Say` while active playback exists and barge-in is disabled | active playback clears, the request is superseded, times out, or reaches `conversation_playback_max_hold_ms` | `intentional_delay` | yes | Separates post-processor no-barge-in serialization from TTS generation latency. |
 | `tts.synthesis_first_chunk` | TTS synthesis starts | first audio chunk available | `tts_generation` | yes | Time to first audio. |
 | `tts.synthesis_full` | TTS synthesis starts | all chunks available | `tts_generation` | concurrent after first chunk | Full generation cost. |
 | `tts.packetize_first_chunk` | first audio chunk available | first media packet queued | `media_packetization` | yes | Resample/packetization overhead. |
@@ -757,7 +758,7 @@ Report-only/advisory analysis knobs:
 | `endpoint.merge_window_ms` | Suggest adjacent-turn merge candidates in reports; processor-local committed-turn debounce for coalescing conversation processors. | None for M4 app-agent `caller.turn`; coalescing conversation processors may delay/merge only their local processor input. |
 | `endpoint.final_settle_ms` | Explain bounded live holds for dangling-tail final fragments. | Holds only structurally incomplete finals before `caller.turn`; merges with a continuation final or flushes on timeout/stream end. |
 | `endpoint.final_settle_trailing_punctuation` / `endpoint.final_settle_lead_words` / `endpoint.final_settle_tail_words` / `endpoint.final_settle_dangling_suffixes` | Explain why a final was considered structurally incomplete. | TOML/replay policy only; defaults preserve the live-tuned English fragment classifier. |
-| `endpoint.conversation_tail_words` / `endpoint.conversation_incomplete_tail_hold_ms` / `endpoint.conversation_low_confidence_threshold_percent` / `endpoint.conversation_playback_hold_poll_ms` | Explain processor-local final coalescing holds. | Applies only to coalescing conversation processors; no M4 app-agent `caller.turn` merge. |
+| `endpoint.conversation_tail_words` / `endpoint.conversation_incomplete_tail_hold_ms` / `endpoint.conversation_low_confidence_threshold_percent` / `endpoint.conversation_playback_hold_poll_ms` / `endpoint.conversation_playback_max_hold_ms` | Explain processor-local final coalescing holds and no-barge-in deferred playback holds. | Applies only to coalescing conversation processors and deferred conversation speech; no M4 app-agent `caller.turn` merge. |
 | `endpoint.max_turn_words` | Flag likely overmerged turns. | None; must not split live turns. |
 | `endpoint.max_turn_duration_ms` | Flag long utterance or late endpointing. | None; must not force live endpointing. |
 
@@ -1017,7 +1018,8 @@ Prompt requirements:
 | `endpoint.conversation_tail_words` | `StringList` | max 64 entries, 256 chars each | `a,an,and,...` | reject oversize | new conversation turn | Handler-local incomplete-tail policy. |
 | `endpoint.conversation_incomplete_tail_hold_ms` | `DurationMs` | `0..10000` | `2500` | clamp to range | new conversation turn | Max processor-local hold for incomplete tails or low-confidence non-terminal finals. |
 | `endpoint.conversation_low_confidence_threshold_percent` | `Percent` | `0..100` | `45` | clamp to range | new conversation turn | Backend-native confidence threshold for processor-local non-terminal holds. |
-| `endpoint.conversation_playback_hold_poll_ms` | `DurationMs` | `10..1000` | `100` | clamp to range | new conversation turn | Recheck cadence while a coalescing handler waits for active playback to finish. |
+| `endpoint.conversation_playback_hold_poll_ms` | `DurationMs` | `10..1000` | `100` | clamp to range | new conversation turn | Recheck cadence while a coalescing handler or deferred conversation `Say` waits for active playback to finish. |
+| `endpoint.conversation_playback_max_hold_ms` | `DurationMs` | `0..180000` | `0` | clamp to range | new conversation turn | Max active-playback hold for processor-local final debounce and deferred conversation `Say`; `0` preserves the historical unbounded wait. |
 | `endpoint.max_turn_words` | `ReportOnlyCount` | `1..500` | `80` | clamp to range | report only | Overmerged-turn label threshold only. |
 | `endpoint.max_turn_duration_ms` | `ReportOnlyDurationMs` | `1000..120000` | `12000` | clamp to range | report only | Long-turn label threshold only. |
 | `asr.finish_pad_ms` | `DurationMs` | `0..2000` | `320` | clamp to range | next ASR session | Short final ASR flush pad after endpoint decision; separate from endpoint tail. |
@@ -1105,6 +1107,7 @@ conversation_tail_words = ["a", "an", "and", "are", "as", "at", "be", "been", "b
 conversation_incomplete_tail_hold_ms = 2500
 conversation_low_confidence_threshold_percent = 45
 conversation_playback_hold_poll_ms = 100
+conversation_playback_max_hold_ms = 0
 max_turn_words = 80
 max_turn_duration_ms = 12000
 

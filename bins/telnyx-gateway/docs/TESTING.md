@@ -143,6 +143,7 @@ The current default live identity/repeat tuning profile is:
 - `voice_quality.tts.chunking_enabled = true`
 - `voice_quality.tts.first_chunk_max_chars = 40`
 - `voice_quality.tts.prebuffer_chunks = 1`
+- `voice_quality.endpoint.conversation_playback_max_hold_ms = 0` for baseline compatibility, or a positive cap for a tuned no-barge-in run that should drop stale deferred repeats instead of building playback backlog.
 - `voice_quality.early_response.enabled = true`
 - `voice_quality.early_response.boundary = "clause"`
 - `voice_quality.early_response.start_timing = "while_speaking"`
@@ -290,6 +291,22 @@ max_ms = 0
 
 [[result_latency.span]]
 name = "tts.request_to_first_audio"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+
+[[result_latency.span]]
+name = "conversation.final_debounce"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+
+[[result_latency.span]]
+name = "conversation.say.deferred_playback_hold"
 n = 0
 min_ms = 0
 p50_ms = 0

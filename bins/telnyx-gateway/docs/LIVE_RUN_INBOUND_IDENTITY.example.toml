@@ -117,6 +117,8 @@ conversation_incomplete_tail_hold_ms = 1800
 conversation_low_confidence_threshold_percent = 45
 # Poll cadence while waiting for active playback before dispatch.
 conversation_playback_hold_poll_ms = 50
+# Max active-playback hold before dispatch/deferred Say gives up; 0 preserves unbounded wait.
+conversation_playback_max_hold_ms = 0
 # Hard cap for committed turn words.
 max_turn_words = 80
 # Hard cap for committed turn duration.

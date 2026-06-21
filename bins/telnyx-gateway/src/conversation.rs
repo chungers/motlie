@@ -396,6 +396,12 @@ struct ConversationFinalInput {
     turn_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversationFinalHoldKind {
+    Playback,
+    IncompleteTail,
+}
+
 #[derive(Clone, Debug)]
 struct PendingConversationFinal {
     event: TranscriptEvent,
@@ -404,6 +410,13 @@ struct PendingConversationFinal {
     latest_final_transcript_at: Instant,
     generation: u64,
     turn_ids: Vec<String>,
+    active_hold_kind: Option<ConversationFinalHoldKind>,
+    active_hold_started_at: Option<Instant>,
+    playback_hold_count: u64,
+    playback_hold_ms: u64,
+    incomplete_tail_hold_count: u64,
+    incomplete_tail_hold_ms: u64,
+    playback_hold_limit_reached: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -572,6 +585,13 @@ async fn schedule_conversation_final(
                 latest_final_transcript_at: input.final_transcript_at,
                 generation: 0,
                 turn_ids: input.turn_id.iter().cloned().collect(),
+                active_hold_kind: None,
+                active_hold_started_at: None,
+                playback_hold_count: 0,
+                playback_hold_ms: 0,
+                incomplete_tail_hold_count: 0,
+                incomplete_tail_hold_ms: 0,
+                playback_hold_limit_reached: false,
             });
         if entry.generation == 0 {
             entry.event = input.event;
@@ -607,19 +627,40 @@ async fn schedule_conversation_final(
                 .await
                 .is_some()
             {
-                let Some((next_generation, next_delay)) =
-                    defer_ready_conversation_final(&runtime, &gateway_call_id, generation).await
+                let Some(limit_reached) = conversation_playback_hold_limit_reached(
+                    &runtime,
+                    &gateway_call_id,
+                    generation,
+                )
+                .await
                 else {
                     return;
                 };
-                generation = next_generation;
-                delay = next_delay;
+                if !limit_reached {
+                    let Some((next_generation, next_delay)) = defer_ready_conversation_final(
+                        &runtime,
+                        &gateway_call_id,
+                        generation,
+                        ConversationFinalHoldKind::Playback,
+                    )
+                    .await
+                    else {
+                        return;
+                    };
+                    generation = next_generation;
+                    delay = next_delay;
+                    tracing::debug!(
+                        gateway_call_id,
+                        generation,
+                        "conversation.final_debounce.held_for_playback"
+                    );
+                    continue;
+                }
                 tracing::debug!(
                     gateway_call_id,
                     generation,
-                    "conversation.final_debounce.held_for_playback"
+                    "conversation.final_debounce.playback_hold_limit_reached"
                 );
-                continue;
             }
 
             let hold_reason = {
@@ -633,8 +674,13 @@ async fn schedule_conversation_final(
                 conversation_final_hold_reason(entry)
             };
             if let Some(reason) = hold_reason {
-                let Some((next_generation, next_delay)) =
-                    defer_ready_conversation_final(&runtime, &gateway_call_id, generation).await
+                let Some((next_generation, next_delay)) = defer_ready_conversation_final(
+                    &runtime,
+                    &gateway_call_id,
+                    generation,
+                    ConversationFinalHoldKind::IncompleteTail,
+                )
+                .await
                 else {
                     return;
                 };
@@ -685,14 +731,42 @@ async fn schedule_conversation_final(
     });
 }
 
+async fn conversation_playback_hold_limit_reached(
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    generation: u64,
+) -> Option<bool> {
+    let mut pending = runtime.pending_conversation_finals.lock().await;
+    let entry = match pending.get_mut(gateway_call_id) {
+        Some(entry) if entry.generation == generation => entry,
+        _ => return None,
+    };
+    let max_hold_ms = entry
+        .quality_config
+        .endpoint
+        .conversation_playback_max_hold_ms;
+    if max_hold_ms == 0 {
+        return Some(false);
+    }
+    let max_hold = Duration::from_millis(max_hold_ms);
+    if conversation_final_hold_elapsed(entry, ConversationFinalHoldKind::Playback) < max_hold {
+        return Some(false);
+    }
+    finish_conversation_final_hold(entry);
+    entry.playback_hold_limit_reached = true;
+    Some(true)
+}
+
 async fn defer_ready_conversation_final(
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
     generation: u64,
+    hold_kind: ConversationFinalHoldKind,
 ) -> Option<(u64, Duration)> {
     let mut pending = runtime.pending_conversation_finals.lock().await;
     match pending.get_mut(gateway_call_id) {
         Some(entry) if entry.generation == generation => {
+            mark_conversation_final_hold(entry, hold_kind);
             entry.generation = entry.generation.saturating_add(1);
             let delay = Duration::from_millis(
                 entry
@@ -706,6 +780,64 @@ async fn defer_ready_conversation_final(
     }
 }
 
+fn mark_conversation_final_hold(
+    pending: &mut PendingConversationFinal,
+    hold_kind: ConversationFinalHoldKind,
+) {
+    if pending.active_hold_kind == Some(hold_kind) {
+        return;
+    }
+    finish_conversation_final_hold(pending);
+    pending.active_hold_kind = Some(hold_kind);
+    pending.active_hold_started_at = Some(Instant::now());
+    match hold_kind {
+        ConversationFinalHoldKind::Playback => {
+            pending.playback_hold_count = pending.playback_hold_count.saturating_add(1);
+        }
+        ConversationFinalHoldKind::IncompleteTail => {
+            pending.incomplete_tail_hold_count =
+                pending.incomplete_tail_hold_count.saturating_add(1);
+        }
+    }
+}
+
+fn finish_conversation_final_hold(pending: &mut PendingConversationFinal) {
+    let Some(hold_kind) = pending.active_hold_kind.take() else {
+        pending.active_hold_started_at = None;
+        return;
+    };
+    let Some(started_at) = pending.active_hold_started_at.take() else {
+        return;
+    };
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    match hold_kind {
+        ConversationFinalHoldKind::Playback => {
+            pending.playback_hold_ms = pending.playback_hold_ms.saturating_add(elapsed_ms);
+        }
+        ConversationFinalHoldKind::IncompleteTail => {
+            pending.incomplete_tail_hold_ms =
+                pending.incomplete_tail_hold_ms.saturating_add(elapsed_ms);
+        }
+    }
+}
+
+fn conversation_final_hold_elapsed(
+    pending: &PendingConversationFinal,
+    hold_kind: ConversationFinalHoldKind,
+) -> Duration {
+    let base_ms = match hold_kind {
+        ConversationFinalHoldKind::Playback => pending.playback_hold_ms,
+        ConversationFinalHoldKind::IncompleteTail => pending.incomplete_tail_hold_ms,
+    };
+    let mut elapsed = Duration::from_millis(base_ms);
+    if pending.active_hold_kind == Some(hold_kind) {
+        if let Some(started_at) = pending.active_hold_started_at {
+            elapsed = elapsed.saturating_add(started_at.elapsed());
+        }
+    }
+    elapsed
+}
+
 async fn take_ready_conversation_final(
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
@@ -713,7 +845,11 @@ async fn take_ready_conversation_final(
 ) -> Option<PendingConversationFinal> {
     let mut pending = runtime.pending_conversation_finals.lock().await;
     match pending.get(gateway_call_id) {
-        Some(entry) if entry.generation == generation => pending.remove(gateway_call_id),
+        Some(entry) if entry.generation == generation => {
+            let mut entry = pending.remove(gateway_call_id)?;
+            finish_conversation_final_hold(&mut entry);
+            Some(entry)
+        }
         _ => None,
     }
 }
@@ -1027,6 +1163,11 @@ async fn emit_conversation_final_debounce_span(
         "coalesced_turn_count": pending.turn_ids.len(),
         "coalesced_turn_ids": pending.turn_ids.as_slice(),
         "latest_final_to_dispatch_ms": pending.latest_final_transcript_at.elapsed().as_millis() as u64,
+        "playback_hold_ms": pending.playback_hold_ms,
+        "playback_hold_count": pending.playback_hold_count,
+        "playback_hold_limit_reached": pending.playback_hold_limit_reached,
+        "incomplete_tail_hold_ms": pending.incomplete_tail_hold_ms,
+        "incomplete_tail_hold_count": pending.incomplete_tail_hold_count,
     });
     let payload = match payload {
         serde_json::Value::Object(map) => map,
@@ -1731,13 +1872,22 @@ async fn wait_and_queue_deferred_conversation_say(
     response_text: String,
     turn_context: ConversationTurnContext,
 ) {
-    let timeout_ms = state
-        .read()
-        .await
-        .quality
-        .config
-        .text_call
-        .playback_wait_timeout_ms;
+    let hold_config = {
+        let guard = state.read().await;
+        let config = &guard.quality.config;
+        DeferredSayPlaybackHoldConfig {
+            config_id: config.config_id(),
+            redaction_mode: config.logging.redaction_mode,
+            timeout_ms: config.text_call.playback_wait_timeout_ms,
+            max_hold_ms: config.endpoint.conversation_playback_max_hold_ms,
+            poll_ms: config.endpoint.conversation_playback_hold_poll_ms,
+        }
+    };
+    let wait_limit_ms = if hold_config.max_hold_ms == 0 {
+        hold_config.timeout_ms
+    } else {
+        hold_config.timeout_ms.min(hold_config.max_hold_ms)
+    };
     let started = Instant::now();
     while media_registry
         .active_speech_playback_id(gateway_call_id)
@@ -1745,6 +1895,18 @@ async fn wait_and_queue_deferred_conversation_say(
         .is_some()
     {
         if !is_latest_deferred_say_generation(runtime, gateway_call_id, generation).await {
+            emit_deferred_say_playback_hold_span(
+                state,
+                gateway_call_id,
+                DeferredSayPlaybackHoldSpan {
+                    config: &hold_config,
+                    started,
+                    generation,
+                    result: "superseded",
+                    turn_context: &turn_context,
+                },
+            )
+            .await;
             tracing::debug!(
                 gateway_call_id,
                 generation,
@@ -1752,7 +1914,43 @@ async fn wait_and_queue_deferred_conversation_say(
             );
             return;
         }
-        if started.elapsed() >= Duration::from_millis(timeout_ms) {
+        if started.elapsed() >= Duration::from_millis(wait_limit_ms) {
+            if hold_config.max_hold_ms > 0 && hold_config.max_hold_ms <= hold_config.timeout_ms {
+                let _ =
+                    take_latest_deferred_say_generation(runtime, gateway_call_id, generation).await;
+                emit_deferred_say_playback_hold_span(
+                    state,
+                    gateway_call_id,
+                    DeferredSayPlaybackHoldSpan {
+                        config: &hold_config,
+                        started,
+                        generation,
+                        result: "max_hold_reached",
+                        turn_context: &turn_context,
+                    },
+                )
+                .await;
+                tracing::info!(
+                    gateway_call_id,
+                    generation,
+                    max_hold_ms = hold_config.max_hold_ms,
+                    "conversation.say.deferred_playback_max_hold_reached"
+                );
+                return;
+            }
+            emit_deferred_say_playback_hold_span(
+                state,
+                gateway_call_id,
+                DeferredSayPlaybackHoldSpan {
+                    config: &hold_config,
+                    started,
+                    generation,
+                    result: "timeout",
+                    turn_context: &turn_context,
+                },
+            )
+            .await;
+            let timeout_ms = hold_config.timeout_ms;
             let error = format!(
                 "deferred conversation response timed out after {timeout_ms}ms waiting for active playback"
             );
@@ -1769,9 +1967,21 @@ async fn wait_and_queue_deferred_conversation_say(
             tracing::warn!(gateway_call_id, error, "conversation.say.deferred_timeout");
             return;
         }
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(hold_config.poll_ms)).await;
     }
     if !take_latest_deferred_say_generation(runtime, gateway_call_id, generation).await {
+        emit_deferred_say_playback_hold_span(
+            state,
+            gateway_call_id,
+            DeferredSayPlaybackHoldSpan {
+                config: &hold_config,
+                started,
+                generation,
+                result: "superseded",
+                turn_context: &turn_context,
+            },
+        )
+        .await;
         tracing::debug!(
             gateway_call_id,
             generation,
@@ -1779,6 +1989,18 @@ async fn wait_and_queue_deferred_conversation_say(
         );
         return;
     }
+    emit_deferred_say_playback_hold_span(
+        state,
+        gateway_call_id,
+        DeferredSayPlaybackHoldSpan {
+            config: &hold_config,
+            started,
+            generation,
+            result: "playback_cleared",
+            turn_context: &turn_context,
+        },
+    )
+    .await;
 
     queue_conversation_speech(
         state,
@@ -1790,6 +2012,58 @@ async fn wait_and_queue_deferred_conversation_say(
         turn_context,
     )
     .await;
+}
+
+struct DeferredSayPlaybackHoldConfig {
+    config_id: String,
+    redaction_mode: RedactionMode,
+    timeout_ms: u64,
+    max_hold_ms: u64,
+    poll_ms: u64,
+}
+
+struct DeferredSayPlaybackHoldSpan<'a> {
+    config: &'a DeferredSayPlaybackHoldConfig,
+    started: Instant,
+    generation: u64,
+    result: &'static str,
+    turn_context: &'a ConversationTurnContext,
+}
+
+async fn emit_deferred_say_playback_hold_span(
+    state: &SharedState,
+    gateway_call_id: &str,
+    span: DeferredSayPlaybackHoldSpan<'_>,
+) {
+    let payload = serde_json::json!({
+        "generation": span.generation,
+        "result": span.result,
+        "timeout_ms": span.config.timeout_ms,
+        "max_hold_ms": span.config.max_hold_ms,
+        "poll_ms": span.config.poll_ms,
+        "turn_id": span.turn_context.turn_id.as_deref(),
+        "coalesced_turn_count": span.turn_context.coalesced_turn_ids.len(),
+        "coalesced_turn_ids": span.turn_context.coalesced_turn_ids.as_slice(),
+        "final_to_deferred_ms": span.turn_context.finalized_at.map(|instant| instant.elapsed().as_millis() as u64),
+        "latest_final_to_deferred_ms": span.turn_context.latest_finalized_at.map(|instant| instant.elapsed().as_millis() as u64),
+    });
+    let payload = match payload {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    state.write().await.emit_quality_span_finished(
+        gateway_call_id,
+        QualitySpanEmission {
+            config_id: span.config.config_id.clone(),
+            redaction_mode: span.config.redaction_mode,
+            span_name: "conversation.say.deferred_playback_hold",
+            category: "intentional_delay",
+            duration: span.started.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload,
+        },
+    );
 }
 
 async fn queue_conversation_speech(
@@ -2730,6 +3004,84 @@ second"
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
             Some("second")
+        );
+        assert!(call.conversation.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_barge_in_deferred_auto_say_drops_after_playback_max_hold() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        state.write().await.record_conversation_speaking(
+            &gateway_call_id,
+            "assistant is speaking".to_string(),
+            "tts_test".to_string(),
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(&gateway_call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        let runtime = test_runtime_with_tts();
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_barge_in_enabled(false);
+            guard.quality.config.set_endpoint_merge_window_ms(0);
+            guard
+                .quality
+                .config
+                .set_endpoint_conversation_playback_hold_poll_ms(10);
+            guard
+                .quality
+                .config
+                .set_endpoint_conversation_playback_max_hold_ms(30);
+            guard.quality.config_id = guard.quality.config.config_id();
+        }
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "drop stale repeat".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+        )
+        .await
+        .expect("disabled barge-in should defer overlapping final turn");
+        sleep(Duration::from_millis(250)).await;
+
+        assert!(!cancel.is_canceled());
+        assert_eq!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .as_deref(),
+            Some("tts_test")
+        );
+        assert!(
+            timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "max hold should drop stale deferred speech instead of queueing behind active playback"
+        );
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Proposed);
+        assert_eq!(
+            call.conversation.last_user_text.as_deref(),
+            Some("drop stale repeat")
+        );
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("drop stale repeat")
         );
         assert!(call.conversation.last_error.is_none());
     }

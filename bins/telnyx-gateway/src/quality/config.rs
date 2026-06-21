@@ -200,6 +200,10 @@ fn default_conversation_playback_hold_poll_ms() -> u64 {
     100
 }
 
+fn default_conversation_playback_max_hold_ms() -> u64 {
+    0
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EndpointQualityConfig {
     pub trailing_silence_ms: u64,
@@ -223,6 +227,8 @@ pub struct EndpointQualityConfig {
     pub conversation_low_confidence_threshold_percent: u64,
     #[serde(default = "default_conversation_playback_hold_poll_ms")]
     pub conversation_playback_hold_poll_ms: u64,
+    #[serde(default = "default_conversation_playback_max_hold_ms")]
+    pub conversation_playback_max_hold_ms: u64,
     pub max_turn_words: usize,
     pub max_turn_duration_ms: u64,
 }
@@ -244,6 +250,7 @@ impl Default for EndpointQualityConfig {
             conversation_low_confidence_threshold_percent:
                 default_conversation_low_confidence_threshold_percent(),
             conversation_playback_hold_poll_ms: default_conversation_playback_hold_poll_ms(),
+            conversation_playback_max_hold_ms: default_conversation_playback_max_hold_ms(),
             max_turn_words: 80,
             max_turn_duration_ms: 12_000,
         }
@@ -736,6 +743,12 @@ impl VoiceQualityConfig {
             10,
             1_000,
         )?;
+        ensure_u64(
+            "endpoint.conversation_playback_max_hold_ms",
+            self.endpoint.conversation_playback_max_hold_ms,
+            0,
+            180_000,
+        )?;
         ensure_usize(
             "endpoint.max_turn_words",
             self.endpoint.max_turn_words,
@@ -1026,6 +1039,9 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = endpoint.conversation_playback_hold_poll_ms {
                 self.set_endpoint_conversation_playback_hold_poll_ms(value);
+            }
+            if let Some(value) = endpoint.conversation_playback_max_hold_ms {
+                self.set_endpoint_conversation_playback_max_hold_ms(value);
             }
             if let Some(value) = endpoint.max_turn_words {
                 self.set_endpoint_max_turn_words(value);
@@ -1335,6 +1351,20 @@ impl VoiceQualityConfig {
         self.endpoint.conversation_playback_hold_poll_ms = clamped.value;
         self.outcome(
             "endpoint.conversation_playback_hold_poll_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_endpoint_conversation_playback_max_hold_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 180_000);
+        self.endpoint.conversation_playback_max_hold_ms = clamped.value;
+        self.outcome(
+            "endpoint.conversation_playback_max_hold_ms",
             clamped.value,
             ApplyBoundary::NewTurn,
             clamped.clamped,
@@ -2025,6 +2055,7 @@ pub struct EndpointQualityConfigPatch {
     pub conversation_incomplete_tail_hold_ms: Option<u64>,
     pub conversation_low_confidence_threshold_percent: Option<u64>,
     pub conversation_playback_hold_poll_ms: Option<u64>,
+    pub conversation_playback_max_hold_ms: Option<u64>,
     pub max_turn_words: Option<usize>,
     pub max_turn_duration_ms: Option<u64>,
 }
