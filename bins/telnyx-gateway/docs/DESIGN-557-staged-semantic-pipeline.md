@@ -1,6 +1,7 @@
 # DESIGN — #557: Explicit pipeline stages + turn-batching layer (builds on #553/#541)
 
 ## Changelog
+- 2026-06-20 — @ops48-orchestrator — Add §4.3 (David): config-knob ownership/taxonomy (gateway owns NO batcher knobs; each knob classed (T) identity-test vs (B) behavior/perf bound), exposure consistency (TUI/socket command + global TOML self-describing + `config_snapshot`; NO static CLI flags for per-call config), full observability metrics/logging spec (turn-batch `QualityEvent`s + rollups + live status), and tightened `max_batch_wait_ms` contract (genuine first-turn ceiling vs `max_idle_wait_ms`). Design-first: architects approve §4.3 before $122 implements into #560. "No PR complete without clear knobs/ownership + enough observability for live validation + tuning."
 - 2026-06-20 — @ops48-orchestrator — §4.2 ownership rule (David): the gateway owns NO turn-batching logic. `N` and all batching-policy params live in `IdentityTurnBatcherConfig` (`libs/agent`); the smoke-test/gateway config only selects the `ConversationProcessorKind` and passes an opaque batcher config through. Gateway is a dumb host.
 - 2026-06-20 — @ops48-orchestrator — §4.2: rename `IdentityPromptHandler` → `IdentityTurnBatcher` (consistent with `TurnBatcher`); add the **gateway-only smoke-test** requirement — the `conversation smoke-test` surface must be configurable to run the gateway in isolation in either mode (a) `Identity` (per-turn echo, validates layers 1–2) or (b) gateway turns + in-gateway `IdentityTurnBatcher` with `fixed_batch_size=N` (validates batched-turns-as-prompts), both model-free / no external agent. Per David.
 - 2026-06-20 — @ops48-orchestrator — **Rename: `Semantic*` → `Turn*`** (`SemanticBatcher`→`TurnBatcher`, `ResponseMode::SemanticBatched`→`TurnBatched`, `SemanticReset`→`TurnBatchReset`, "semantic-batching layer"→"turn-batching layer"). Precision per David: **turns** are what get batched; *semantic endpointing* is only **one completion strategy** (alongside fixed-N heuristic and model-as-endpointer), not the name of the mechanism. "Semantic endpointing" / "semantically-complete" retained where they denote that strategy. (File name kept to preserve #558 links.)
@@ -93,6 +94,40 @@ Why it's worth specifying now: it is the **deterministic validation harness for 
 
 **Ownership rule: the gateway owns NO turn-batching logic.** The batch size `N` and every batching-policy parameter (`fixed_batch_size`, `max_batch_turns`, `max_batch_wait_ms`) belong to `IdentityTurnBatcher` — they are fields of its own `IdentityTurnBatcherConfig` in `libs/agent`. The smoke-test/gateway config does **not** decide N or hold any batch logic; it only (1) selects the `ConversationProcessorKind` and (2) for mode (b) supplies an opaque `IdentityTurnBatcherConfig` value handed straight to the batcher at construction. The gateway is a dumb host — it constructs the batcher with that config, feeds it turns, and maps `PromptComplete` to speech; all "how to batch" decisions live in the batcher. (Only gateway-side safety stays acoustic: barge-in → `reset()`.) Both modes are gateway-only and model-free; the only difference is whether the layer-3 `IdentityTurnBatcher` stage is engaged. This makes the new turn-batching layer live-validatable before any agent/LLM exists, the same way mode (a) validates the acoustic substrate today.
 
+### 4.3 Config-knob ownership/taxonomy, observability metrics, and timeout contracts
+*A PR is not complete without clear config knobs + ownership and enough observability to live-validate and tune via live calls + log monitoring + post-call analysis.* This section is the contract for that, to be approved before implementation.
+
+**4.3.1 Ownership & separation of concerns.** The gateway owns **only** pure telephony / voice-processing knobs (acoustic endpointing/VAD, barge-in, TTS generation mode/chunking, media). It owns **no** turn-batching knobs. **Every** turn-batching knob lives in `IdentityTurnBatcherConfig` (`libs/agent`) and is passed through opaquely; the gateway never interprets one.
+
+**4.3.2 Knob taxonomy.** Each batcher knob is explicitly one of:
+- **(T) Identity-module test/validation/tuning knob** — only meaningful for the *identity* batcher; a real semantic batcher would not use it:
+  - `fixed_batch_size` — the validation scenario (N turns → 1 prompt). Identity-only; a semantic batcher decides completion semantically.
+  - `join_separator` — how the identity batcher concatenates N turns into the echoed prompt. Identity formatting only.
+- **(B) True behavior/performance bound** — applies to *any* turn-batcher (safety / latency); a real tuning knob:
+  - `max_batch_turns` — hard ceiling on turns per batch (unbounded-accumulation safety).
+  - `max_batch_wait_ms` — latency ceiling measured from the **first** turn of the batch.
+  - `max_idle_wait_ms` — idle/endpoint timeout measured from the **most recent** turn.
+
+**4.3.3 Exposure surfaces — consistent across all three, no static CLI flags for per-call config.**
+1. **Runtime TUI/socket command interface** (dynamic, per-call): the `conversation` operator command sets the active batcher config for a call. Dynamic/per-call config **must not** be exposed as static process CLI (argv) flags, even if used to initialize startup.
+2. **Global TOML schema** (static defaults, self-describing): `[conversation.identity_turn_batcher]` carries **every** knob with documented semantics. The global TOML is the single self-describing source for **all** tuning + performance analysis, including post-call follow-up.
+3. **`config_snapshot`**: every run records the resolved `response_mode` + the full `IdentityTurnBatcherConfig`, so a run file is self-describing for post-call analysis.
+
+**4.3.4 Observability metrics & logging** (must be sufficient for live validation + tuning from log monitoring + post-call analysis; first-class `QualityEvent`s in the run JSONL, consistent with the existing `caller_turn`/`caller_partial`/rollup schema):
+- `turn_batch_accumulated { call_id, batch_id, epoch, k_of_n, turn_id }`
+- `turn_batch_prompt_complete { call_id, batch_id, epoch, source_turn_count, completion_reason, accumulation_ms }`
+- `turn_batch_reset { call_id, batch_id, epoch, reason }`
+- `turn_batch_output_rejected { call_id, batch_id, epoch, reason: stale_epoch | inactive_batch }`
+- `completion_reason ∈ { fixed_size_reached, max_batch_turns, max_batch_wait_timeout, max_idle_timeout }`.
+- **Rollup (report summary):** batches formed, mean/p95 turns-per-prompt, mean/p95 accumulation latency, completion-reason histogram, resets-by-reason, stale-rejection count.
+- **Live `conversation status` / `call show`:** active batch state (pending turn count, current `batch_id`, accumulating yes/no) so the §3.2 "still listening" state is observable mid-call.
+
+**4.3.5 `max_batch_wait_ms` tightened contract.**
+- `max_batch_wait_ms` = hard wall-clock ceiling measured from the **first** turn of the current batch; it does **not** reset when later turns arrive.
+- `max_idle_wait_ms` = timeout from the **most recent** turn; it **does** reset on each new turn.
+- Both may be active; effective deadline = `min(first_turn + max_batch_wait_ms, last_turn + max_idle_wait_ms)`, with immediate completion on `fixed_batch_size` / `max_batch_turns`.
+- The batcher stays **clockless** (host owns the clock — preserves placement-neutrality): on each `observe` it returns the relative deadline(s) referenced to first-turn and last-turn; the **host** tracks the first-turn wall time and must **not** reset the `max_batch_wait` timer on new turns (only the idle timer resets). *(Today `deadline_ms = max(idle, batch_wait)` recomputed per-observe collapses the two — fix so `max_batch_wait_ms` is a genuine first-turn ceiling.)*
+
 ## 5. Streaming-LLM / turn-LLM integration (feasibility — codex streaming-LLM reviewer)
 The turn-batched prompt must integrate with whatever produces the response. Open feasibility questions:
 - **Turn-based LLM:** `PromptComplete(prompt)` → one LLM call → response → speech intents (provisional/committed). Straightforward; how does early-response/streaming-TTS compose (LLM streams tokens → processor emits provisional `Speak` chunks → shared streaming-TTS)?
@@ -104,6 +139,7 @@ The turn-batched prompt must integrate with whatever produces the response. Open
 - **Codex speech-pipeline architect:** is the stage boundary (acoustic turns vs turn batching) clean + enforceable? Does the turn-stream contract + the `Accumulating/PromptComplete/Reset` states correctly model real turn-taking (multi-turn prompts, mid-turn corrections, supersede)? Does barge-in compose?
 - **Codex streaming-LLM / model expert:** §5 feasibility — turn-based vs streaming-LLM integration, the model-as-semantic-endpointer option, latency bounds, mid-generation cancel.
 - **Claude rust + realtime architect:** can this be expressed as clean Rust contracts on top of #553 (stateful processor, the new output enum, no leaky abstractions, no new races); realtime correctness (the added accumulation wait vs latency; cancel/reset across awaits); does it keep #553's single-authority/no-detach-across-await property? **Plus §4.1: is the `TurnBatcher` module genuinely placement-neutral — does it sit in `libs/agent` with zero gateway/daemon coupling, are `Turn`/`Prompt` expressible from the existing contract types, and does the in-gateway host keep no-await-across-lock if the batcher stays sync?**
+- **§4.3 review focus (both architects):** (a) **knob ownership/taxonomy** — is the gateway truly free of all turn-batching knobs, and is each knob correctly classed (T) identity-test vs (B) behavior/perf bound? (b) **exposure consistency** — knobs reachable via TUI/socket command + global TOML, no static CLI flags for per-call config, and `config_snapshot` makes a run self-describing for post-call analysis? (c) **observability sufficiency** — are the `QualityEvent`s + rollups + live status enough to validate/tune layer 3 from a live call + logs alone? (d) **`max_batch_wait_ms` semantics** — is it a genuine first-turn ceiling distinct from `max_idle_wait_ms`, with the clockless-batcher/host-clock split correct?
 
 ## 7. Open questions
 1. Is `Accumulating` an explicit output, or implicit (processor simply doesn't emit a response)? Tradeoff: explicit lets the gateway/UX know "still listening"; implicit is simpler.
