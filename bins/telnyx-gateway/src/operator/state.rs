@@ -323,6 +323,8 @@ pub struct QualityTurnReportState {
     turn_batch_accumulation_ms: Vec<u64>,
     turn_batch_completion_reasons: BTreeMap<String, usize>,
     turn_batch_resets_by_reason: BTreeMap<String, usize>,
+    turn_batch_reset_discarded_turns_total: usize,
+    turn_batch_reset_discarded_turns_by_reason: BTreeMap<String, usize>,
     turn_batch_output_rejections_by_reason: BTreeMap<String, usize>,
 }
 
@@ -432,8 +434,16 @@ impl QualityTurnReportState {
         increment_counter(&mut self.turn_batch_completion_reasons, completion_reason);
     }
 
-    pub fn record_turn_batch_reset(&mut self, reason: &str, _discarded_turn_count: usize) {
+    pub fn record_turn_batch_reset(&mut self, reason: &str, discarded_turn_count: usize) {
         increment_counter(&mut self.turn_batch_resets_by_reason, reason);
+        self.turn_batch_reset_discarded_turns_total = self
+            .turn_batch_reset_discarded_turns_total
+            .saturating_add(discarded_turn_count);
+        add_to_counter(
+            &mut self.turn_batch_reset_discarded_turns_by_reason,
+            reason,
+            discarded_turn_count,
+        );
     }
 
     pub fn record_turn_batch_output_rejected(&mut self, reason: &str) {
@@ -470,6 +480,16 @@ impl QualityTurnReportState {
             "turn_batch_accumulation_latency_ms_p95": percentile_u64_local(&self.turn_batch_accumulation_ms, 95),
             "turn_batch_completion_reason_histogram": &self.turn_batch_completion_reasons,
             "turn_batch_resets_by_reason": &self.turn_batch_resets_by_reason,
+            "turn_batch_reset_discarded_turns_total": self.turn_batch_reset_discarded_turns_total,
+            "turn_batch_reset_discarded_turns_mean_per_reset": mean_reset_discarded_turns(
+                self.turn_batch_reset_discarded_turns_total,
+                &self.turn_batch_resets_by_reason,
+            ),
+            "turn_batch_reset_discarded_turns_by_reason": &self.turn_batch_reset_discarded_turns_by_reason,
+            "turn_batch_reset_discarded_turns_mean_per_reset_by_reason": mean_reset_discarded_turns_by_reason(
+                &self.turn_batch_reset_discarded_turns_by_reason,
+                &self.turn_batch_resets_by_reason,
+            ),
             "turn_batch_output_rejections_by_reason": &self.turn_batch_output_rejections_by_reason,
             "turn_batch_stale_rejections": self.turn_batch_output_rejections_by_reason.get("stale_epoch").copied().unwrap_or(0),
         }))
@@ -477,8 +497,41 @@ impl QualityTurnReportState {
 }
 
 fn increment_counter(counters: &mut BTreeMap<String, usize>, key: &str) {
+    add_to_counter(counters, key, 1);
+}
+
+fn add_to_counter(counters: &mut BTreeMap<String, usize>, key: &str, increment: usize) {
     let counter = counters.entry(key.to_string()).or_insert(0);
-    *counter = counter.saturating_add(1);
+    *counter = counter.saturating_add(increment);
+}
+
+fn mean_reset_discarded_turns(
+    discarded_turn_count: usize,
+    resets_by_reason: &BTreeMap<String, usize>,
+) -> Option<f64> {
+    let reset_count = resets_by_reason.values().sum::<usize>();
+    if reset_count == 0 {
+        return None;
+    }
+    Some(discarded_turn_count as f64 / reset_count as f64)
+}
+
+fn mean_reset_discarded_turns_by_reason(
+    discarded_turns_by_reason: &BTreeMap<String, usize>,
+    resets_by_reason: &BTreeMap<String, usize>,
+) -> BTreeMap<String, f64> {
+    discarded_turns_by_reason
+        .iter()
+        .filter_map(|(reason, discarded_turn_count)| {
+            let reset_count = resets_by_reason.get(reason).copied().unwrap_or_default();
+            (reset_count > 0).then(|| {
+                (
+                    reason.clone(),
+                    *discarded_turn_count as f64 / reset_count as f64,
+                )
+            })
+        })
+        .collect()
 }
 
 fn mean_usize(values: &[usize]) -> Option<f64> {
@@ -2250,6 +2303,8 @@ mod tests {
         );
         state.record_quality_turn_batch_prompt_complete(&call_id, 2, 123, "fixed_size_reached");
         state.record_quality_turn_batch_reset(&call_id, "barge_in", 1);
+        state.record_quality_turn_batch_reset(&call_id, "barge_in", 3);
+        state.record_quality_turn_batch_reset(&call_id, "final_turn_superseded", 2);
         state.record_quality_turn_batch_output_rejected(&call_id, "stale_epoch");
         state.mark_tts_first_audio_latency_and_pacing(&call_id, "tts_test", 42, 0, 0);
         state.mark_tts_canceled_with_reason(&call_id, "tts_test", Some("canceled_after_call_end"));
@@ -2331,7 +2386,34 @@ mod tests {
         );
         assert_eq!(
             summary.payload["turn_batch_resets_by_reason"]["barge_in"],
+            2
+        );
+        assert_eq!(
+            summary.payload["turn_batch_resets_by_reason"]["final_turn_superseded"],
             1
+        );
+        assert_eq!(summary.payload["turn_batch_reset_discarded_turns_total"], 6);
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset"],
+            2.0
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_by_reason"]["barge_in"],
+            4
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_by_reason"]["final_turn_superseded"],
+            2
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset_by_reason"]
+                ["barge_in"],
+            2.0
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset_by_reason"]
+                ["final_turn_superseded"],
+            2.0
         );
         assert_eq!(
             summary.payload["turn_batch_output_rejections_by_reason"]["stale_epoch"],
