@@ -12,9 +12,8 @@ use uuid::Uuid;
 use crate::operator::state::InboundSubscription;
 
 use super::turns::{
-    AcceptCallResponse, CallConnectedPayload, CallOfferPayload, TextCallAggregationPolicy,
-    TextCallInfo, TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION,
-    TEXT_CALL_PROTOCOL,
+    AcceptCallResponse, CallConnectedPayload, CallOfferPayload, ResponseMode, TextCallInfo,
+    TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -25,7 +24,7 @@ pub enum CallbackDecision {
         call_url: String,
         emit_partials: bool,
         emit_early_turns: bool,
-        aggregation: TextCallAggregationPolicy,
+        response_mode: ResponseMode,
     },
     Decline,
     Failed {
@@ -171,7 +170,7 @@ async fn classify_callback_response(response: reqwest::Response) -> CallbackDeci
             call_url: accepted.call_url,
             emit_partials,
             emit_early_turns,
-            aggregation: accepted.aggregation,
+            response_mode: accepted.response_mode,
         },
         Err(error) => CallbackDecision::Failed {
             reason: format!("invalid call_url: {error:#}"),
@@ -331,7 +330,7 @@ mod tests {
                 call_url: "ws://127.0.0.1/text-call".to_string(),
                 emit_partials: false,
                 emit_early_turns: false,
-                aggregation: TextCallAggregationPolicy::GatewayOwned,
+                response_mode: ResponseMode::PerTurn,
             }
         );
     }
@@ -371,7 +370,7 @@ mod tests {
                 call_url: "ws://127.0.0.1/text-call".to_string(),
                 emit_partials: true,
                 emit_early_turns: false,
-                aggregation: TextCallAggregationPolicy::GatewayOwned,
+                response_mode: ResponseMode::PerTurn,
             }
         );
     }
@@ -411,7 +410,7 @@ mod tests {
                 call_url: "ws://127.0.0.1/text-call".to_string(),
                 emit_partials: false,
                 emit_early_turns: true,
-                aggregation: TextCallAggregationPolicy::GatewayOwned,
+                response_mode: ResponseMode::PerTurn,
             }
         );
     }

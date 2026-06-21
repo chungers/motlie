@@ -239,6 +239,10 @@ pub struct QualityPlaybackMetadata {
     pub source_channel: Option<String>,
     pub manual_injection: bool,
     pub related_turn_id: Option<String>,
+    pub turn_batch_id: Option<String>,
+    pub turn_batch_epoch: Option<u64>,
+    pub turn_batch_response_turn_id: Option<String>,
+    pub turn_batch_completion_reason: Option<String>,
 }
 
 impl QualityPlaybackMetadata {
@@ -248,6 +252,28 @@ impl QualityPlaybackMetadata {
             source_channel: Some(source_channel.into()),
             manual_injection: true,
             related_turn_id: None,
+            turn_batch_id: None,
+            turn_batch_epoch: None,
+            turn_batch_response_turn_id: None,
+            turn_batch_completion_reason: None,
+        }
+    }
+
+    pub fn turn_batch(
+        batch_id: impl Into<String>,
+        epoch: u64,
+        response_turn_id: impl Into<String>,
+        completion_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: Some("turn_batch_prompt_complete".to_string()),
+            source_channel: Some("conversation".to_string()),
+            manual_injection: false,
+            related_turn_id: None,
+            turn_batch_id: Some(batch_id.into()),
+            turn_batch_epoch: Some(epoch),
+            turn_batch_response_turn_id: Some(response_turn_id.into()),
+            turn_batch_completion_reason: Some(completion_reason.into()),
         }
     }
 }
@@ -293,6 +319,13 @@ pub struct QualityTurnReportState {
     canceled_after_call_end_turn_ids: BTreeSet<String>,
     canceled_after_call_end_playback_ids: BTreeSet<String>,
     playback_records: BTreeMap<String, QualityPlaybackRecord>,
+    turn_batch_turns_per_prompt: Vec<usize>,
+    turn_batch_accumulation_ms: Vec<u64>,
+    turn_batch_completion_reasons: BTreeMap<String, usize>,
+    turn_batch_resets_by_reason: BTreeMap<String, usize>,
+    turn_batch_reset_discarded_turns_total: usize,
+    turn_batch_reset_discarded_turns_by_reason: BTreeMap<String, usize>,
+    turn_batch_output_rejections_by_reason: BTreeMap<String, usize>,
 }
 
 impl QualityTurnReportState {
@@ -390,6 +423,33 @@ impl QualityTurnReportState {
         Some(record.clone())
     }
 
+    pub fn record_turn_batch_prompt_complete(
+        &mut self,
+        source_turn_count: usize,
+        accumulation_ms: u64,
+        completion_reason: &str,
+    ) {
+        self.turn_batch_turns_per_prompt.push(source_turn_count);
+        self.turn_batch_accumulation_ms.push(accumulation_ms);
+        increment_counter(&mut self.turn_batch_completion_reasons, completion_reason);
+    }
+
+    pub fn record_turn_batch_reset(&mut self, reason: &str, discarded_turn_count: usize) {
+        increment_counter(&mut self.turn_batch_resets_by_reason, reason);
+        self.turn_batch_reset_discarded_turns_total = self
+            .turn_batch_reset_discarded_turns_total
+            .saturating_add(discarded_turn_count);
+        add_to_counter(
+            &mut self.turn_batch_reset_discarded_turns_by_reason,
+            reason,
+            discarded_turn_count,
+        );
+    }
+
+    pub fn record_turn_batch_output_rejected(&mut self, reason: &str) {
+        increment_counter(&mut self.turn_batch_output_rejections_by_reason, reason);
+    }
+
     fn summary_payload(&self, summary_reason: &str, call: &CallSession) -> Map<String, Value> {
         let turns_without_playback = self
             .caller_turn_ids
@@ -413,8 +473,99 @@ impl QualityTurnReportState {
             "canceled_after_call_end_turns": self.canceled_after_call_end_turn_ids.len(),
             "canceled_after_call_end_playbacks": self.canceled_after_call_end_playback_ids.len(),
             "excluded_turns_without_playback": turns_without_playback,
+            "turn_batch_batches_formed": self.turn_batch_turns_per_prompt.len(),
+            "turn_batch_turns_per_prompt_mean": mean_usize(&self.turn_batch_turns_per_prompt),
+            "turn_batch_turns_per_prompt_p95": percentile_usize(&self.turn_batch_turns_per_prompt, 95),
+            "turn_batch_accumulation_latency_ms_mean": mean_u64(&self.turn_batch_accumulation_ms),
+            "turn_batch_accumulation_latency_ms_p95": percentile_u64_local(&self.turn_batch_accumulation_ms, 95),
+            "turn_batch_completion_reason_histogram": &self.turn_batch_completion_reasons,
+            "turn_batch_resets_by_reason": &self.turn_batch_resets_by_reason,
+            "turn_batch_reset_discarded_turns_total": self.turn_batch_reset_discarded_turns_total,
+            "turn_batch_reset_discarded_turns_mean_per_reset": mean_reset_discarded_turns(
+                self.turn_batch_reset_discarded_turns_total,
+                &self.turn_batch_resets_by_reason,
+            ),
+            "turn_batch_reset_discarded_turns_by_reason": &self.turn_batch_reset_discarded_turns_by_reason,
+            "turn_batch_reset_discarded_turns_mean_per_reset_by_reason": mean_reset_discarded_turns_by_reason(
+                &self.turn_batch_reset_discarded_turns_by_reason,
+                &self.turn_batch_resets_by_reason,
+            ),
+            "turn_batch_output_rejections_by_reason": &self.turn_batch_output_rejections_by_reason,
+            "turn_batch_stale_rejections": self.turn_batch_output_rejections_by_reason.get("stale_epoch").copied().unwrap_or(0),
         }))
     }
+}
+
+fn increment_counter(counters: &mut BTreeMap<String, usize>, key: &str) {
+    add_to_counter(counters, key, 1);
+}
+
+fn add_to_counter(counters: &mut BTreeMap<String, usize>, key: &str, increment: usize) {
+    let counter = counters.entry(key.to_string()).or_insert(0);
+    *counter = counter.saturating_add(increment);
+}
+
+fn mean_reset_discarded_turns(
+    discarded_turn_count: usize,
+    resets_by_reason: &BTreeMap<String, usize>,
+) -> Option<f64> {
+    let reset_count = resets_by_reason.values().sum::<usize>();
+    if reset_count == 0 {
+        return None;
+    }
+    Some(discarded_turn_count as f64 / reset_count as f64)
+}
+
+fn mean_reset_discarded_turns_by_reason(
+    discarded_turns_by_reason: &BTreeMap<String, usize>,
+    resets_by_reason: &BTreeMap<String, usize>,
+) -> BTreeMap<String, f64> {
+    discarded_turns_by_reason
+        .iter()
+        .filter_map(|(reason, discarded_turn_count)| {
+            let reset_count = resets_by_reason.get(reason).copied().unwrap_or_default();
+            (reset_count > 0).then(|| {
+                (
+                    reason.clone(),
+                    *discarded_turn_count as f64 / reset_count as f64,
+                )
+            })
+        })
+        .collect()
+}
+
+fn mean_usize(values: &[usize]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<usize>() as f64 / values.len() as f64)
+}
+
+fn mean_u64(values: &[u64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<u64>() as f64 / values.len() as f64)
+}
+
+fn percentile_usize(values: &[usize], percentile: usize) -> Option<usize> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = ((sorted.len() - 1) * percentile) / 100;
+    sorted.get(index).copied()
+}
+
+fn percentile_u64_local(values: &[u64], percentile: usize) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = ((sorted.len() - 1) * percentile) / 100;
+    sorted.get(index).copied()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -492,7 +643,21 @@ pub struct ConversationState {
     pub last_assistant_text: Option<String>,
     pub last_playback_id: Option<String>,
     pub last_error: Option<String>,
+    pub active_turn_batch: Option<TurnBatchActiveState>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnBatchActiveState {
+    pub batch_id: String,
+    pub epoch: u64,
+    pub pending_turn_count: usize,
+    pub target_turn_count: usize,
+    pub source_turn_ids: Vec<String>,
+    pub first_turn_at: DateTime<Utc>,
+    pub last_turn_at: DateTime<Utc>,
+    pub effective_deadline_at: Option<DateTime<Utc>>,
+    pub effective_deadline_source: Option<String>,
 }
 
 impl Default for ConversationState {
@@ -507,6 +672,7 @@ impl Default for ConversationState {
             last_assistant_text: None,
             last_playback_id: None,
             last_error: None,
+            active_turn_batch: None,
             updated_at: Utc::now(),
         }
     }
@@ -871,14 +1037,38 @@ impl GatewayState {
         if !self.quality.event_sink.is_enabled() {
             return;
         }
+        let extra = self.conversation_config_snapshot_payload(gateway_call_id);
         let event = QualityEvent::config_snapshot(
             self.quality_event_context(Some(gateway_call_id.to_string())),
             &self.quality.config,
             snapshot_reason,
             effective_scope,
             effective_after_asr_session_id,
+            extra,
         );
         self.quality.event_sink.emit(event);
+    }
+
+    fn conversation_config_snapshot_payload(&self, gateway_call_id: &str) -> Map<String, Value> {
+        let mut payload = Map::new();
+        let Some(call) = self.calls.get(gateway_call_id) else {
+            return payload;
+        };
+        let processor = &call.conversation.processor;
+        payload.insert(
+            "conversation_processor".to_string(),
+            Value::String(processor.label().to_string()),
+        );
+        payload.insert(
+            "response_mode".to_string(),
+            Value::String(processor.response_mode_label().to_string()),
+        );
+        payload.insert(
+            "identity_turn_batcher".to_string(),
+            serde_json::to_value(processor.resolved_identity_turn_batcher_config())
+                .expect("identity turn batcher config serializes"),
+        );
+        payload
     }
 
     pub fn start_quality_asr_session(
@@ -1073,6 +1263,23 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
+    pub fn emit_quality_turn_batch_lifecycle(
+        &mut self,
+        gateway_call_id: &str,
+        lifecycle_event: &'static str,
+        payload: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::turn_batch_lifecycle(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            lifecycle_event,
+            payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
     pub fn emit_quality_inbound_transport_rollup(
         &mut self,
         gateway_call_id: &str,
@@ -1216,7 +1423,7 @@ impl GatewayState {
         }
 
         let mut call = CallSession::pending_inbound(ids.clone(), from, to, status);
-        call.conversation.processor = self.config.conversation_processor;
+        call.conversation.processor = self.config.conversation_processor.clone();
         call.speech_output = SpeechOutputConfig::from_quality(
             self.conversation_tts_backend,
             &self.quality.config.tts,
@@ -1252,7 +1459,7 @@ impl GatewayState {
         }
 
         let mut call = CallSession::outbound(ids.clone(), from, to, status);
-        call.conversation.processor = self.config.conversation_processor;
+        call.conversation.processor = self.config.conversation_processor.clone();
         call.speech_output = SpeechOutputConfig::from_quality(
             self.conversation_tts_backend,
             &self.quality.config.tts,
@@ -1424,9 +1631,10 @@ impl GatewayState {
         processor: ConversationProcessorKind,
     ) {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            let label = processor.label();
             call.conversation.processor = processor;
             call.conversation.updated_at = Utc::now();
-            call.push_timeline(format!("conversation processor -> {}", processor.label()));
+            call.push_timeline(format!("conversation processor -> {label}"));
         }
     }
 
@@ -1437,6 +1645,62 @@ impl GatewayState {
             call.conversation.last_error = None;
             call.conversation.push_line(ConversationRole::User, text);
             call.push_timeline("conversation user turn");
+        }
+    }
+
+    pub fn record_turn_batch_active(
+        &mut self,
+        gateway_call_id: &str,
+        active: TurnBatchActiveState,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.active_turn_batch = Some(active);
+            call.conversation.updated_at = Utc::now();
+        }
+    }
+
+    pub fn clear_turn_batch_active(&mut self, gateway_call_id: &str) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.active_turn_batch = None;
+            call.conversation.updated_at = Utc::now();
+        }
+    }
+
+    pub fn record_quality_turn_batch_prompt_complete(
+        &mut self,
+        gateway_call_id: &str,
+        source_turn_count: usize,
+        accumulation_ms: u64,
+        completion_reason: &str,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.quality_turns.record_turn_batch_prompt_complete(
+                source_turn_count,
+                accumulation_ms,
+                completion_reason,
+            );
+        }
+    }
+
+    pub fn record_quality_turn_batch_reset(
+        &mut self,
+        gateway_call_id: &str,
+        reason: &str,
+        discarded_turn_count: usize,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.quality_turns
+                .record_turn_batch_reset(reason, discarded_turn_count);
+        }
+    }
+
+    pub fn record_quality_turn_batch_output_rejected(
+        &mut self,
+        gateway_call_id: &str,
+        reason: &str,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.quality_turns.record_turn_batch_output_rejected(reason);
         }
     }
 
@@ -1887,6 +2151,10 @@ fn playback_link_payload(
         "source_channel": record.metadata.source_channel,
         "manual_injection": record.metadata.manual_injection,
         "related_turn_id": record.metadata.related_turn_id,
+        "turn_batch_id": record.metadata.turn_batch_id,
+        "turn_batch_epoch": record.metadata.turn_batch_epoch,
+        "turn_batch_response_turn_id": record.metadata.turn_batch_response_turn_id,
+        "turn_batch_completion_reason": record.metadata.turn_batch_completion_reason,
         "first_audio_sent": record.first_audio_sent,
         "terminal_status": terminal_status,
         "terminal_reason": terminal_reason,
@@ -2024,10 +2292,20 @@ mod tests {
                 source_asr_session_ids: Vec::new(),
                 source_utterance_ids: Vec::new(),
                 source_label: "test".to_string(),
-                metadata: QualityPlaybackMetadata::default(),
+                metadata: QualityPlaybackMetadata::turn_batch(
+                    "turn-batch-0-0",
+                    0,
+                    "turn_selected",
+                    "fixed_size_reached",
+                ),
             },
             Some("tts_replaced"),
         );
+        state.record_quality_turn_batch_prompt_complete(&call_id, 2, 123, "fixed_size_reached");
+        state.record_quality_turn_batch_reset(&call_id, "barge_in", 1);
+        state.record_quality_turn_batch_reset(&call_id, "barge_in", 3);
+        state.record_quality_turn_batch_reset(&call_id, "final_turn_superseded", 2);
+        state.record_quality_turn_batch_output_rejected(&call_id, "stale_epoch");
         state.mark_tts_first_audio_latency_and_pacing(&call_id, "tts_test", 42, 0, 0);
         state.mark_tts_canceled_with_reason(&call_id, "tts_test", Some("canceled_after_call_end"));
         state.emit_quality_report_summary(&call_id, "test");
@@ -2055,6 +2333,16 @@ mod tests {
         assert_eq!(queued.payload["source_turn_ids"][0], "turn_selected");
         assert_eq!(queued.payload["source_turn_ids"][1], "turn_next");
         assert_eq!(queued.payload["replaced_playback_id"], "tts_replaced");
+        assert_eq!(queued.payload["turn_batch_id"], "turn-batch-0-0");
+        assert_eq!(queued.payload["turn_batch_epoch"], 0);
+        assert_eq!(
+            queued.payload["turn_batch_response_turn_id"],
+            "turn_selected"
+        );
+        assert_eq!(
+            queued.payload["turn_batch_completion_reason"],
+            "fixed_size_reached"
+        );
 
         let terminal = events
             .iter()
@@ -2086,6 +2374,104 @@ mod tests {
         assert_eq!(summary.payload["canceled_after_call_end_turns"], 1);
         assert_eq!(summary.payload["canceled_after_call_end_playbacks"], 1);
         assert_eq!(summary.payload["excluded_turns_without_playback"], 0);
+        assert_eq!(summary.payload["turn_batch_batches_formed"], 1);
+        assert_eq!(summary.payload["turn_batch_turns_per_prompt_p95"], 2);
+        assert_eq!(
+            summary.payload["turn_batch_accumulation_latency_ms_p95"],
+            123
+        );
+        assert_eq!(
+            summary.payload["turn_batch_completion_reason_histogram"]["fixed_size_reached"],
+            1
+        );
+        assert_eq!(
+            summary.payload["turn_batch_resets_by_reason"]["barge_in"],
+            2
+        );
+        assert_eq!(
+            summary.payload["turn_batch_resets_by_reason"]["final_turn_superseded"],
+            1
+        );
+        assert_eq!(summary.payload["turn_batch_reset_discarded_turns_total"], 6);
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset"],
+            2.0
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_by_reason"]["barge_in"],
+            4
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_by_reason"]["final_turn_superseded"],
+            2
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset_by_reason"]
+                ["barge_in"],
+            2.0
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset_by_reason"]
+                ["final_turn_superseded"],
+            2.0
+        );
+        assert_eq!(
+            summary.payload["turn_batch_output_rejections_by_reason"]["stale_epoch"],
+            1
+        );
+        assert_eq!(summary.payload["turn_batch_stale_rejections"], 1);
+    }
+
+    #[test]
+    fn config_snapshot_records_response_mode_and_resolved_turn_batcher_config() {
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state.set_quality_event_sink(QualityEventSink::with_sender(tx), None);
+        let call_id = state.add_or_update_outbound_call(
+            TelnyxIds {
+                call_control_id: "call-1".to_string(),
+                call_session_id: Some("session-1".to_string()),
+                call_leg_id: Some("leg-1".to_string()),
+                stream_id: Some("stream-1".to_string()),
+            },
+            None,
+            None,
+            CallStatus::MediaStarted,
+        );
+        let config =
+            motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig::fixed_batch_size(3)
+                .with_max_batch_wait_ms(250)
+                .with_max_idle_wait_ms(75);
+        state.set_conversation_processor(
+            &call_id,
+            ConversationProcessorKind::turn_batched_identity(config),
+        );
+
+        state.emit_quality_config_snapshot(&call_id, "test", "call", None);
+
+        let event = rx.try_recv().expect("config snapshot event");
+        assert_eq!(event.event, "call.config.snapshot");
+        assert_eq!(
+            event.payload["conversation_processor"],
+            "turn_batched_identity"
+        );
+        assert_eq!(event.payload["response_mode"], "turn_batched");
+        assert_eq!(
+            event.payload["identity_turn_batcher"]["fixed_batch_size"],
+            3
+        );
+        assert_eq!(
+            event.payload["identity_turn_batcher"]["max_batch_wait_ms"],
+            250
+        );
+        assert_eq!(
+            event.payload["identity_turn_batcher"]["max_idle_wait_ms"],
+            75
+        );
+        assert_eq!(
+            event.payload["identity_turn_batcher"]["join_separator"],
+            "\n"
+        );
     }
 
     #[test]

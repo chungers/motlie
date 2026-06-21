@@ -1966,7 +1966,7 @@ async fn ensure_early_response_pipeline(
         let guard = state.read().await;
         let call = guard.calls.get(gateway_call_id);
         let processor = call
-            .map(|call| call.conversation.processor)
+            .map(|call| call.conversation.processor.clone())
             .unwrap_or_default();
         let speech_output = call.map(|call| call.speech_output).unwrap_or_else(|| {
             crate::operator::state::SpeechOutputConfig::from_quality(
@@ -2149,6 +2149,9 @@ async fn cancel_text_call_speech_for_barge_in(
     if !text_calls.contains(gateway_call_id).await {
         return Ok(());
     }
+    let _ = text_calls
+        .send_turn_batch_reset(gateway_call_id, "barge_in")
+        .await;
     if media_registry
         .active_speech_playback_id(gateway_call_id)
         .await
