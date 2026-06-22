@@ -26,6 +26,7 @@ use crate::adapter::{
 };
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::{self, ConversationRuntime};
+use crate::conversation_policy::BargeInTrigger;
 use crate::early_response::{
     spawn_early_response_pipeline, EarlyResponseCancelReason, EarlyResponseCommitBoundary,
     EarlyResponseCommitMember, EarlyResponseInput, EarlyResponsePartial,
@@ -2042,7 +2043,10 @@ struct SpeechOnsetEchoDecision {
 }
 
 fn speech_onset_barge_in_enabled(config: &VoiceQualityConfig) -> bool {
-    config.barge_in.enabled && config.barge_in.speech_onset_cancel_enabled
+    config
+        .conversation_policy
+        .decide_barge_in(&config.barge_in, BargeInTrigger::SpeechOnset)
+        .cancels_playback()
 }
 
 async fn speech_onset_echo_decision(

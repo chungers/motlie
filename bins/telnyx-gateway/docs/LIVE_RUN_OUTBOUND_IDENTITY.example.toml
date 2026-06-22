@@ -202,6 +202,18 @@ final_asr_cancel_enabled = false
 # Time allowed for media clear/mark handling.
 clear_timeout_ms = 1000
 
+[voice_quality.conversation_policy]
+# Identity smoke tests keep barge-in off and drain a bounded FIFO repeat queue.
+mode = "no_barge_in_bounded_pending"
+# Diagnostic hold budget before recording retained max-hold telemetry.
+active_playback_hold_ms = 1000
+# Maximum completed processor outputs retained behind active playback.
+max_pending_outputs = 3
+# FIFO preserves deterministic repeat order for WER/smoke-test scripts.
+pending_output_order = "fifo"
+# Reserved for barge-in coalescing profiles; inactive for this no-barge-in mode.
+post_barge_in_silence_ms = 1200
+
 [voice_quality.echo_suppression]
 # Suppress transcripts that match active assistant TTS, except same-source provisional audio.
 enabled = true

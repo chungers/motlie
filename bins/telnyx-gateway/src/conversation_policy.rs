@@ -1,7 +1,206 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use crate::quality::{ConversationPolicyConfig, PendingOutputOrder};
+use crate::quality::{
+    BargeInQualityConfig, ConversationPolicyConfig, ConversationPolicyMode, PendingOutputOrder,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BargeInTrigger {
+    Partial,
+    Final,
+    SpeechOnset,
+}
+
+impl BargeInTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Partial => "partial",
+            Self::Final => "final",
+            Self::SpeechOnset => "speech_onset",
+        }
+    }
+
+    pub fn source_label(self) -> &'static str {
+        match self {
+            Self::Partial => "conversation partial barge-in",
+            Self::Final => "conversation final barge-in",
+            Self::SpeechOnset => "conversation speech-onset barge-in",
+        }
+    }
+
+    pub fn cancel_span_name(self) -> &'static str {
+        match self {
+            Self::Partial => "barge_in.partial_to_cancel_request",
+            Self::Final => "barge_in.final_to_cancel_request",
+            Self::SpeechOnset => "barge_in.speech_onset_to_cancel_request",
+        }
+    }
+
+    fn enabled_by(self, config: &BargeInQualityConfig) -> bool {
+        config.enabled
+            && match self {
+                Self::Partial => config.partial_asr_cancel_enabled,
+                Self::Final => config.final_asr_cancel_enabled,
+                Self::SpeechOnset => config.speech_onset_cancel_enabled,
+            }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaybackPolicyAction {
+    Continue,
+    CancelActive,
+}
+
+impl PlaybackPolicyAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::CancelActive => "cancel_active",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GenerationPolicyAction {
+    Continue,
+    CancelActive,
+}
+
+impl GenerationPolicyAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::CancelActive => "cancel_active",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallerTurnPolicyAction {
+    Preserve,
+    CoalesceAfterSilence { silence_ms: u64 },
+}
+
+impl CallerTurnPolicyAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Preserve => "preserve",
+            Self::CoalesceAfterSilence { .. } => "coalesce_after_silence",
+        }
+    }
+
+    pub fn silence_ms(self) -> Option<u64> {
+        match self {
+            Self::Preserve => None,
+            Self::CoalesceAfterSilence { silence_ms } => Some(silence_ms),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssistantOutputPolicyAction {
+    QueueNow,
+    LegacyDeferLatest,
+    RetainBoundedPending,
+}
+
+impl AssistantOutputPolicyAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::QueueNow => "queue_now",
+            Self::LegacyDeferLatest => "legacy_defer_latest",
+            Self::RetainBoundedPending => "retain_bounded_pending",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BargeInPolicyDecision {
+    pub allowed: bool,
+    pub trigger: BargeInTrigger,
+    pub mode: ConversationPolicyMode,
+    pub playback: PlaybackPolicyAction,
+    pub generation: GenerationPolicyAction,
+    pub caller_turn: CallerTurnPolicyAction,
+    pub reset_turn_batch: bool,
+}
+
+impl BargeInPolicyDecision {
+    pub fn inactive(trigger: BargeInTrigger, mode: ConversationPolicyMode) -> Self {
+        Self {
+            allowed: false,
+            trigger,
+            mode,
+            playback: PlaybackPolicyAction::Continue,
+            generation: GenerationPolicyAction::Continue,
+            caller_turn: CallerTurnPolicyAction::Preserve,
+            reset_turn_batch: false,
+        }
+    }
+
+    pub fn cancels_playback(self) -> bool {
+        self.allowed && self.playback == PlaybackPolicyAction::CancelActive
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SayOverlapPolicyDecision {
+    pub mode: ConversationPolicyMode,
+    pub assistant_output: AssistantOutputPolicyAction,
+}
+
+impl ConversationPolicyConfig {
+    pub fn decide_barge_in(
+        &self,
+        barge_in: &BargeInQualityConfig,
+        trigger: BargeInTrigger,
+    ) -> BargeInPolicyDecision {
+        if !trigger.enabled_by(barge_in) {
+            return BargeInPolicyDecision::inactive(trigger, self.mode);
+        }
+
+        let caller_turn = match self.mode {
+            ConversationPolicyMode::BargeInCoalesceAfterSilence => {
+                CallerTurnPolicyAction::CoalesceAfterSilence {
+                    silence_ms: self.post_barge_in_silence_ms,
+                }
+            }
+            ConversationPolicyMode::CurrentCompat
+            | ConversationPolicyMode::NoBargeInBoundedPending
+            | ConversationPolicyMode::BargeInCancelOnly => CallerTurnPolicyAction::Preserve,
+        };
+
+        BargeInPolicyDecision {
+            allowed: true,
+            trigger,
+            mode: self.mode,
+            playback: PlaybackPolicyAction::CancelActive,
+            generation: GenerationPolicyAction::CancelActive,
+            caller_turn,
+            reset_turn_batch: true,
+        }
+    }
+
+    pub fn decide_say_overlap(
+        &self,
+        barge_in_enabled: bool,
+        active_playback: bool,
+    ) -> SayOverlapPolicyDecision {
+        let assistant_output = if !active_playback || barge_in_enabled {
+            AssistantOutputPolicyAction::QueueNow
+        } else if self.mode == ConversationPolicyMode::NoBargeInBoundedPending {
+            AssistantOutputPolicyAction::RetainBoundedPending
+        } else {
+            AssistantOutputPolicyAction::LegacyDeferLatest
+        };
+        SayOverlapPolicyDecision {
+            mode: self.mode,
+            assistant_output,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct PendingPolicyOutput<T> {
@@ -143,5 +342,59 @@ mod tests {
         assert_eq!(queue.take_next().expect("second output").payload, "second");
         assert_eq!(queue.take_next().expect("third output").payload, "third");
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn current_compat_barge_in_preserves_current_cancel_semantics() {
+        let policy = ConversationPolicyConfig::default();
+        let decision =
+            policy.decide_barge_in(&BargeInQualityConfig::default(), BargeInTrigger::Partial);
+
+        assert!(decision.allowed);
+        assert_eq!(decision.playback, PlaybackPolicyAction::CancelActive);
+        assert_eq!(decision.generation, GenerationPolicyAction::CancelActive);
+        assert_eq!(decision.caller_turn, CallerTurnPolicyAction::Preserve);
+        assert!(decision.reset_turn_batch);
+    }
+
+    #[test]
+    fn coalesce_policy_preserves_caller_audio_after_cancel() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCoalesceAfterSilence,
+            active_playback_hold_ms: 1_000,
+            max_pending_outputs: 1,
+            pending_output_order: PendingOutputOrder::LatestOnly,
+            post_barge_in_silence_ms: 1_500,
+        };
+        let decision =
+            policy.decide_barge_in(&BargeInQualityConfig::default(), BargeInTrigger::Final);
+
+        assert!(decision.cancels_playback());
+        assert_eq!(
+            decision.caller_turn,
+            CallerTurnPolicyAction::CoalesceAfterSilence { silence_ms: 1_500 }
+        );
+    }
+
+    #[test]
+    fn say_overlap_decision_keeps_default_compat_behavior() {
+        let policy = ConversationPolicyConfig::default();
+        let decision = policy.decide_say_overlap(false, true);
+
+        assert_eq!(
+            decision.assistant_output,
+            AssistantOutputPolicyAction::LegacyDeferLatest
+        );
+    }
+
+    #[test]
+    fn say_overlap_decision_can_retain_bounded_pending() {
+        let policy = config(PendingOutputOrder::Fifo, 3);
+        let decision = policy.decide_say_overlap(false, true);
+
+        assert_eq!(
+            decision.assistant_output,
+            AssistantOutputPolicyAction::RetainBoundedPending
+        );
     }
 }

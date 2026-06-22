@@ -1044,6 +1044,11 @@ Prompt requirements:
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
 | `barge_in.final_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Final ASR cancel path. |
 | `barge_in.clear_timeout_ms` | `DurationMs` | `100..10000` | `1000` | clamp to range | new cancel request | Clear/terminal wait. |
+| `conversation_policy.mode` | enum | `current_compat,no_barge_in_bounded_pending,barge_in_cancel_only,barge_in_coalesce_after_silence` | `current_compat` | reject unknown | new policy decision | Selects the conversation arbitration policy for no-barge-in output overlap and valid barge-in cancellation/coalescing triggers. |
+| `conversation_policy.active_playback_hold_ms` | `DurationMs` | `0..180000` | `1000` | clamp to range | new policy decision | Diagnostic hold budget for policy-managed pending assistant output behind active playback; bounded-pending mode records retained max-hold telemetry instead of dropping. |
+| `conversation_policy.max_pending_outputs` | `Count` | `1..64` | `1` | clamp to range | new policy decision | Maximum assistant outputs retained by bounded pending policies. |
+| `conversation_policy.pending_output_order` | enum | `latest_only,fifo` | `latest_only` | reject unknown | new policy decision | Ordering policy for retained assistant output; identity smoke tests use `fifo`, normal agent behavior usually uses `latest_only`. |
+| `conversation_policy.post_barge_in_silence_ms` | `DurationMs` | `0..30000` | `1200` | clamp to range | post-barge-in final dispatch | Silence/coalescing window for `barge_in_coalesce_after_silence`. |
 | `echo_suppression.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables the text-domain last line of defense for assistant echo suppression before forwarding transcripts. |
 | `echo_suppression.min_text_chars` | `Count` | `1..500` | `10` | clamp to range | next ASR session | Minimum normalized transcript length before text-similarity echo suppression is considered. |
 | `echo_suppression.tail_window_ms` | `DurationMs` | `0..10000` | `2000` | clamp to range | next ASR session | Window after outbound TTS tail in which normalized text-similarity echo suppression is eligible. |
@@ -1136,6 +1141,13 @@ onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
 clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+mode = "current_compat"
+active_playback_hold_ms = 1000
+max_pending_outputs = 1
+pending_output_order = "latest_only"
+post_barge_in_silence_ms = 1200
 
 [voice_quality.echo_suppression]
 enabled = true

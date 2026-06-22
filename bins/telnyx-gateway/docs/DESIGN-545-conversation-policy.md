@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 | --- | --- | --- |
 | 2026-06-22 PDT | @codex-535 | Started issue #545 design for a unified conversation policy that covers barge-in and no-barge-in playback overlap, with an initial PR #558 implementation slice for bounded pending repeats. |
+| 2026-06-22 PDT | @codex-535 | Expanded the design to shipped behavior: enum-backed policy decisions now cover no-barge-in pending output, cancel-only barge-in, and post-barge-in silence coalescing through global TOML config. |
 
 ## Problem
 
@@ -77,15 +78,55 @@ max_pending_outputs = 3
 pending_output_order = "fifo"
 ```
 
-## Initial Implementation Slice
+## Implemented Policy Boundary
 
-PR #558 starts with the no-barge-in output path only:
+The implementation is enum-backed rather than trait-backed. `conversation_policy.rs` defines typed policy events/decisions for the stable arbitration boundaries, while the existing pipeline keeps ownership of ASR, early response, processor/turn batching, TTS generation, and media playback.
 
-1. Add typed `ConversationPolicyConfig` to `VoiceQualityConfig`.
-2. Add a `conversation_policy` module for policy enums and pending-output queue mechanics.
-3. Keep `current_compat` routed through the existing deferred generation code.
-4. Route `no_barge_in_bounded_pending` through a per-call bounded pending queue.
-5. Drain at most one pending output at a time after active playback clears; further pending outputs wait for the speech registry to clear the playback that was just queued.
+Implemented decisions:
+
+1. `decide_say_overlap`: chooses `queue_now`, `legacy_defer_latest`, or `retain_bounded_pending` when a processor emits `ConversationCommand::Say` while playback may be active.
+2. `decide_barge_in`: chooses playback cancellation, generation cancellation, caller-turn handling, and turn-batch reset behavior for speech-onset, partial-ASR, and final-ASR barge-in triggers.
+3. `current_compat`: preserves existing latest-only no-barge-in deferral and existing barge-in cancel semantics.
+4. `no_barge_in_bounded_pending`: retains a bounded pending output queue and drains one assistant output at a time after playback clears.
+5. `barge_in_cancel_only`: makes today's cancel behavior explicit through the policy boundary: cancel active playback, preserve ASR, reset turn batching, and do not replay stale assistant output automatically.
+6. `barge_in_coalesce_after_silence`: cancels active playback, preserves ASR, and coalesces post-barge-in finals until `post_barge_in_silence_ms` before processor dispatch.
+
+Media still owns frame-level speech onset and echo-guard classification. When echo guard classifies onset as likely assistant echo, media defers cancellation to partial/final ASR as before. Once a trigger is valid, the policy decides whether cancellation/coalescing proceeds.
+
+## Global TOML Surface
+
+All policy tuning is exposed through strict global config:
+
+```toml
+[voice_quality.conversation_policy]
+mode = "current_compat"
+active_playback_hold_ms = 1000
+max_pending_outputs = 1
+pending_output_order = "latest_only"
+post_barge_in_silence_ms = 1200
+```
+
+Live no-barge-in identity smoke tests should use:
+
+```toml
+[voice_quality.conversation_policy]
+mode = "no_barge_in_bounded_pending"
+active_playback_hold_ms = 1000
+max_pending_outputs = 3
+pending_output_order = "fifo"
+post_barge_in_silence_ms = 1200
+```
+
+Barge-in coalescing tests should use:
+
+```toml
+[voice_quality.conversation_policy]
+mode = "barge_in_coalesce_after_silence"
+active_playback_hold_ms = 1000
+max_pending_outputs = 1
+pending_output_order = "latest_only"
+post_barge_in_silence_ms = 1200
+```
 
 ## Testing
 
@@ -95,12 +136,14 @@ Unit coverage must verify:
 - unknown policy keys fail strict config parsing;
 - compatibility mode still drops after positive max hold;
 - bounded pending FIFO queues multiple no-barge-in outputs behind active playback and drains them in order;
-- pending output is bounded and does not grow without limit.
+- pending output is bounded and does not grow without limit;
+- `barge_in_cancel_only` preserves current cancellation behavior through policy decisions;
+- `barge_in_coalesce_after_silence` merges multiple post-interruption finals before dispatch.
 
 Live validation should compare repeat reliability before and after enabling `no_barge_in_bounded_pending`, while keeping barge-in off and using the same identity/repeat script protocol in `TESTING.md`.
 
 ## Open Questions
 
 - For non-identity processors, should overflow drop oldest, drop newest, or summarize pending outputs?
-- Should barge-in policy buffer caller ASR chunks, assistant output, or both?
-- Should policy decisions be exposed as operator commands or only TOML-configured for now?
+- Future pause/duck/resume modes need media support beyond current clear/cancel semantics.
+- Operator commands for policy tuning may be useful later; the current PR intentionally exposes policy through global TOML only.

@@ -1202,19 +1202,19 @@ impl VoiceQualityConfig {
         }
         if let Some(policy) = patch.conversation_policy {
             if let Some(value) = policy.mode {
-                self.conversation_policy.mode = value;
+                self.set_conversation_policy_mode(value);
             }
             if let Some(value) = policy.active_playback_hold_ms {
-                self.conversation_policy.active_playback_hold_ms = value;
+                self.set_conversation_policy_active_playback_hold_ms(value);
             }
             if let Some(value) = policy.max_pending_outputs {
-                self.conversation_policy.max_pending_outputs = value;
+                self.set_conversation_policy_max_pending_outputs(value);
             }
             if let Some(value) = policy.pending_output_order {
-                self.conversation_policy.pending_output_order = value;
+                self.set_conversation_policy_pending_output_order(value);
             }
             if let Some(value) = policy.post_barge_in_silence_ms {
-                self.conversation_policy.post_barge_in_silence_ms = value;
+                self.set_conversation_policy_post_barge_in_silence_ms(value);
             }
         }
         if let Some(echo) = patch.echo_suppression {
@@ -1746,6 +1746,74 @@ impl VoiceQualityConfig {
         self.barge_in.clear_timeout_ms = clamped.value;
         self.outcome(
             "barge_in.clear_timeout_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_mode(
+        &mut self,
+        value: ConversationPolicyMode,
+    ) -> QualityMutationOutcome {
+        self.conversation_policy.mode = value;
+        self.outcome(
+            "conversation_policy.mode",
+            value.label(),
+            ApplyBoundary::NewTurn,
+            false,
+        )
+    }
+
+    pub fn set_conversation_policy_active_playback_hold_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 180_000);
+        self.conversation_policy.active_playback_hold_ms = clamped.value;
+        self.outcome(
+            "conversation_policy.active_playback_hold_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_max_pending_outputs(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 64);
+        self.conversation_policy.max_pending_outputs = clamped.value;
+        self.outcome(
+            "conversation_policy.max_pending_outputs",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_pending_output_order(
+        &mut self,
+        value: PendingOutputOrder,
+    ) -> QualityMutationOutcome {
+        self.conversation_policy.pending_output_order = value;
+        self.outcome(
+            "conversation_policy.pending_output_order",
+            value.label(),
+            ApplyBoundary::NewTurn,
+            false,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_silence_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 30_000);
+        self.conversation_policy.post_barge_in_silence_ms = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_silence_ms",
             clamped.value,
             ApplyBoundary::NewTurn,
             clamped.clamped,
@@ -2474,6 +2542,23 @@ mod tests {
             config.conversation_policy.pending_output_order,
             PendingOutputOrder::Fifo
         );
+    }
+
+    #[test]
+    fn conversation_policy_numeric_toml_knobs_clamp() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.conversation_policy]
+            active_playback_hold_ms = 999999
+            max_pending_outputs = 0
+            post_barge_in_silence_ms = 999999
+            "#,
+        )
+        .expect("conversation policy numeric knobs clamp");
+
+        assert_eq!(config.conversation_policy.active_playback_hold_ms, 180_000);
+        assert_eq!(config.conversation_policy.max_pending_outputs, 1);
+        assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 30_000);
     }
 
     #[test]

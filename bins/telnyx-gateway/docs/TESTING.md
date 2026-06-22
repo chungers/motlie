@@ -251,6 +251,62 @@ Success criteria:
 - Queue growth remains bounded by `max_pending_outputs`; overflow should be
   recorded as dropped pending output rather than unbounded serial playback.
 
+### Barge-In Policy Profiles
+
+Use `barge_in_cancel_only` when validating today's interrupt semantics through
+the unified policy boundary. Caller speech cancels active assistant playback,
+ASR is preserved, and the next stable final dispatches normally through the
+configured processor.
+
+```toml
+[voice_quality.barge_in]
+enabled = true
+speech_onset_cancel_enabled = true
+onset_during_playback = "defer_to_partial"
+partial_asr_cancel_enabled = true
+final_asr_cancel_enabled = true
+clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+mode = "barge_in_cancel_only"
+active_playback_hold_ms = 1000
+max_pending_outputs = 1
+pending_output_order = "latest_only"
+post_barge_in_silence_ms = 1200
+```
+
+Use `barge_in_coalesce_after_silence` when validating interruption followed by
+one consolidated caller turn. This mode cancels active assistant playback,
+preserves caller ASR, and holds post-barge-in finals until the configured
+silence window closes before processor dispatch.
+
+```toml
+[voice_quality.barge_in]
+enabled = true
+speech_onset_cancel_enabled = true
+onset_during_playback = "defer_to_partial"
+partial_asr_cancel_enabled = true
+final_asr_cancel_enabled = true
+clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+mode = "barge_in_coalesce_after_silence"
+active_playback_hold_ms = 1000
+max_pending_outputs = 1
+pending_output_order = "latest_only"
+post_barge_in_silence_ms = 1200
+```
+
+Success criteria:
+
+- Barge-in cancel spans include `policy_mode`, `playback_action`,
+  `generation_action`, and `caller_turn_action`.
+- `barge_in_cancel_only` does not replay stale assistant output automatically.
+- `barge_in_coalesce_after_silence` emits one processor turn after the silence
+  window when multiple finals arrive during the post-barge-in window.
+- Echo-guard still defers likely assistant echo to partial/final ASR before
+  cancellation.
+
 ### Next Endpoint-Completeness A/B
 
 For the next no-barge-in identity run, keep the playback cap fixed and vary only
