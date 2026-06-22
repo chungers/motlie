@@ -144,7 +144,9 @@ The current default live identity/repeat tuning profile is:
 - `voice_quality.tts.chunking_enabled = true`
 - `voice_quality.tts.first_chunk_max_chars = 40`
 - `voice_quality.tts.prebuffer_chunks = 1`
-- `voice_quality.endpoint.conversation_playback_max_hold_ms = 0` for baseline compatibility, or a positive cap for a tuned no-barge-in run that should drop stale deferred repeats instead of building playback backlog.
+- `voice_quality.endpoint.conversation_playback_max_hold_ms = 0` for baseline compatibility, or a positive cap only when intentionally reproducing the legacy dropped-repeat cap behavior.
+- `voice_quality.conversation_policy.mode = "current_compat"` for baseline runs; use `"no_barge_in_bounded_pending"` with bounded FIFO pending output for repeat-reliability runs.
+- `voice_quality.conversation_policy.max_pending_outputs = 3` and `pending_output_order = "fifo"` for identity/repeat reliability validation with barge-in off.
 - `voice_quality.early_response.enabled = true`
 - `voice_quality.early_response.boundary = "clause"`
 - `voice_quality.early_response.start_timing = "while_speaking"`
@@ -198,6 +200,13 @@ final_settle_ms = 500
 conversation_incomplete_tail_hold_ms = 250
 conversation_playback_hold_poll_ms = 10
 conversation_playback_max_hold_ms = 500
+
+[voice_quality.conversation_policy]
+mode = "current_compat"
+active_playback_hold_ms = 1000
+max_pending_outputs = 1
+pending_output_order = "latest_only"
+post_barge_in_silence_ms = 1200
 ```
 
 Observed on 2026-06-21 by @codex-535: this profile capped the old serial
@@ -206,6 +215,41 @@ limit hits and `conversation.say.deferred_playback_hold` recorded max-hold drops
 instead of unbounded queuing. Transport was clean, but caller feedback and ASR
 finals still showed tail truncation and missing words. Treat this as a known
 intermediate point, not the final quality target.
+
+### Bounded Pending Repeat-Reliability Profile
+
+Use this profile when validating issue #545 / PR #558 no-barge-in repeat
+reliability. It keeps barge-in disabled, but retains a small FIFO queue of
+completed processor outputs while active playback is draining. This tests
+whether missed repeats were caused by the legacy max-hold drop policy rather
+than ASR loss.
+
+```toml
+[voice_quality.endpoint]
+trailing_silence_ms = 850
+merge_window_ms = 120
+final_settle_ms = 500
+conversation_incomplete_tail_hold_ms = 250
+conversation_playback_hold_poll_ms = 10
+conversation_playback_max_hold_ms = 0
+
+[voice_quality.conversation_policy]
+mode = "no_barge_in_bounded_pending"
+active_playback_hold_ms = 1000
+max_pending_outputs = 3
+pending_output_order = "fifo"
+post_barge_in_silence_ms = 1200
+```
+
+Success criteria:
+
+- ASR finals appear in the transcript and each expected identity repeat is
+  played once after prior playback clears.
+- `conversation.say.deferred_playback_hold` may report
+  `max_hold_reached_retained`, but should not report legacy
+  `max_hold_reached` drops for the policy-managed path.
+- Queue growth remains bounded by `max_pending_outputs`; overflow should be
+  recorded as dropped pending output rather than unbounded serial playback.
 
 ### Next Endpoint-Completeness A/B
 

@@ -467,6 +467,67 @@ impl Default for BargeInQualityConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationPolicyMode {
+    #[default]
+    CurrentCompat,
+    NoBargeInBoundedPending,
+    BargeInCancelOnly,
+    BargeInCoalesceAfterSilence,
+}
+
+impl ConversationPolicyMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CurrentCompat => "current_compat",
+            Self::NoBargeInBoundedPending => "no_barge_in_bounded_pending",
+            Self::BargeInCancelOnly => "barge_in_cancel_only",
+            Self::BargeInCoalesceAfterSilence => "barge_in_coalesce_after_silence",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingOutputOrder {
+    #[default]
+    LatestOnly,
+    Fifo,
+}
+
+impl PendingOutputOrder {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LatestOnly => "latest_only",
+            Self::Fifo => "fifo",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ConversationPolicyConfig {
+    #[serde(default)]
+    pub mode: ConversationPolicyMode,
+    pub active_playback_hold_ms: u64,
+    pub max_pending_outputs: usize,
+    #[serde(default)]
+    pub pending_output_order: PendingOutputOrder,
+    pub post_barge_in_silence_ms: u64,
+}
+
+impl Default for ConversationPolicyConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConversationPolicyMode::CurrentCompat,
+            active_playback_hold_ms: 1_000,
+            max_pending_outputs: 1,
+            pending_output_order: PendingOutputOrder::LatestOnly,
+            post_barge_in_silence_ms: 1_200,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EchoSuppressionQualityConfig {
     pub enabled: bool,
@@ -577,6 +638,8 @@ pub struct VoiceQualityConfig {
     pub early_response: EarlyResponsePolicy,
     pub barge_in: BargeInQualityConfig,
     #[serde(default)]
+    pub conversation_policy: ConversationPolicyConfig,
+    #[serde(default)]
     pub echo_suppression: EchoSuppressionQualityConfig,
     pub logging: LoggingQualityConfig,
     pub quality_judge: QualityJudgeConfig,
@@ -609,6 +672,7 @@ impl VoiceQualityConfig {
             tts: TtsQualityConfig::default(),
             early_response: EarlyResponsePolicy::default(),
             barge_in: BargeInQualityConfig::default(),
+            conversation_policy: ConversationPolicyConfig::default(),
             echo_suppression: EchoSuppressionQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
             quality_judge: QualityJudgeConfig::default(),
@@ -854,6 +918,24 @@ impl VoiceQualityConfig {
             self.barge_in.clear_timeout_ms,
             100,
             10_000,
+        )?;
+        ensure_u64(
+            "conversation_policy.active_playback_hold_ms",
+            self.conversation_policy.active_playback_hold_ms,
+            0,
+            180_000,
+        )?;
+        ensure_usize(
+            "conversation_policy.max_pending_outputs",
+            self.conversation_policy.max_pending_outputs,
+            1,
+            64,
+        )?;
+        ensure_u64(
+            "conversation_policy.post_barge_in_silence_ms",
+            self.conversation_policy.post_barge_in_silence_ms,
+            0,
+            30_000,
         )?;
         ensure_usize(
             "echo_suppression.min_text_chars",
@@ -1116,6 +1198,23 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = barge_in.clear_timeout_ms {
                 self.set_barge_in_clear_timeout_ms(value);
+            }
+        }
+        if let Some(policy) = patch.conversation_policy {
+            if let Some(value) = policy.mode {
+                self.conversation_policy.mode = value;
+            }
+            if let Some(value) = policy.active_playback_hold_ms {
+                self.conversation_policy.active_playback_hold_ms = value;
+            }
+            if let Some(value) = policy.max_pending_outputs {
+                self.conversation_policy.max_pending_outputs = value;
+            }
+            if let Some(value) = policy.pending_output_order {
+                self.conversation_policy.pending_output_order = value;
+            }
+            if let Some(value) = policy.post_barge_in_silence_ms {
+                self.conversation_policy.post_barge_in_silence_ms = value;
             }
         }
         if let Some(echo) = patch.echo_suppression {
@@ -2020,6 +2119,8 @@ pub struct QualityConfigPatch {
     #[serde(default)]
     pub barge_in: Option<BargeInQualityConfigPatch>,
     #[serde(default)]
+    pub conversation_policy: Option<ConversationPolicyConfigPatch>,
+    #[serde(default)]
     pub echo_suppression: Option<EchoSuppressionQualityConfigPatch>,
     #[serde(default)]
     pub logging: Option<LoggingQualityConfigPatch>,
@@ -2097,6 +2198,16 @@ pub struct BargeInQualityConfigPatch {
     pub partial_asr_cancel_enabled: Option<bool>,
     pub final_asr_cancel_enabled: Option<bool>,
     pub clear_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConversationPolicyConfigPatch {
+    pub mode: Option<ConversationPolicyMode>,
+    pub active_playback_hold_ms: Option<u64>,
+    pub max_pending_outputs: Option<usize>,
+    pub pending_output_order: Option<PendingOutputOrder>,
+    pub post_barge_in_silence_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2303,6 +2414,10 @@ mod tests {
             [voice_quality.early_response]
             start_timng = "endpoint_candidate_only"
             "#,
+            r#"
+            [voice_quality.conversation_policy]
+            max_pending_output = 3
+            "#,
         ] {
             let error = VoiceQualityConfig::from_toml_str(raw)
                 .expect_err("unknown voice_quality keys should fail closed");
@@ -2333,6 +2448,32 @@ mod tests {
         .expect("quality parser should accept full gateway TOML metadata");
 
         assert_eq!(config.tts.generation_mode, TtsGenerationMode::Streaming);
+    }
+
+    #[test]
+    fn toml_accepts_conversation_policy_config() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.conversation_policy]
+            mode = "no_barge_in_bounded_pending"
+            active_playback_hold_ms = 1000
+            max_pending_outputs = 3
+            pending_output_order = "fifo"
+            post_barge_in_silence_ms = 1200
+            "#,
+        )
+        .expect("conversation policy config parses");
+
+        assert_eq!(
+            config.conversation_policy.mode,
+            ConversationPolicyMode::NoBargeInBoundedPending
+        );
+        assert_eq!(config.conversation_policy.active_playback_hold_ms, 1_000);
+        assert_eq!(config.conversation_policy.max_pending_outputs, 3);
+        assert_eq!(
+            config.conversation_policy.pending_output_order,
+            PendingOutputOrder::Fifo
+        );
     }
 
     #[test]

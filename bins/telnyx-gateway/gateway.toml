@@ -194,6 +194,18 @@ final_asr_cancel_enabled = true
 # Time allowed for media clear/mark handling.
 clear_timeout_ms = 1000
 
+[voice_quality.conversation_policy]
+# `current_compat` preserves historical latest-only deferred Say behavior.
+mode = "current_compat"
+# Diagnostic hold budget for policy-managed pending output behind active playback.
+active_playback_hold_ms = 1000
+# Maximum assistant outputs retained by bounded pending policies.
+max_pending_outputs = 1
+# `latest_only` replaces pending output; `fifo` drains retained outputs in order.
+pending_output_order = "latest_only"
+# Reserved silence window for future barge-in regenerate/coalesce policies.
+post_barge_in_silence_ms = 1200
+
 [voice_quality.echo_suppression]
 # Suppress transcripts that match active assistant TTS, except same-source provisional audio.
 enabled = true

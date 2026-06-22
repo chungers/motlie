@@ -2,8 +2,9 @@ pub mod config;
 pub mod events;
 
 pub use config::{
-    ApplyBoundary, BargeInQualityConfig, EchoSuppressionQualityConfig, EndpointQualityConfig,
-    LoggingQualityConfig, OnsetDuringPlaybackPolicy, QualityConfigPatch, QualityJudgeConfig,
+    ApplyBoundary, BargeInQualityConfig, ConversationPolicyConfig, ConversationPolicyMode,
+    EchoSuppressionQualityConfig, EndpointQualityConfig, LoggingQualityConfig,
+    OnsetDuringPlaybackPolicy, PendingOutputOrder, QualityConfigPatch, QualityJudgeConfig,
     QualityProfile, RedactionMode, SpeechQualityConfig, TextCallQualityConfig, TtsGenerationMode,
     TtsQualityConfig, VoiceQualityConfig,
 };
