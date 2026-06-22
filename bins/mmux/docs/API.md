@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-562-impl | Documented issue #562 reality: session rows render stable tmux ids and list-focused `/` search jumps by session name in current sort order. |
 | 2026-06-11 | @mstream453-impl | Added `SessionSortMode::Name` for list-pane `s` sorting and Help shortcut coverage. |
 | 2026-05-20 | @codex | Added `Cli.alias` and host-label override behavior so mmux can display operator-provided labels without changing host routing identity. |
 | 2026-05-16 | @codex-tmux-tl | Added insertion-point cursor state for mmux modal text fields so focused Left/Right edit inside the field, with single-line and wrapped Send Keys rendering keeping the terminal cursor aligned. |
@@ -323,7 +324,8 @@ right-justified.
 The Sessions pane title is derived only from the live session list length:
 `Sessions [n]`. List rows show the display name, attached marker, optional
 multi-host color-square column, and right-aligned `<active> / <age>` recency
-text with a small right margin; stable session ids stay internal for dispatch.
+text with a small right margin. Rows also show the stable tmux session id as
+`[$id]` next to the display name while retaining the same id for dispatch.
 The attached marker is `*` when `SessionInfo::is_attached()` is true.
 The list is sorted by
 `activity_observed_at_local` descending — operator-side wall clock at the
@@ -345,6 +347,13 @@ for the activity column (`local_now − activity_observed_at_local`) and
 clock assumption — see `DESIGN.md` §Clock Handling for the rationale.
 Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
+
+When the session list has focus, `/` starts quick search. `AppState` stores the
+transient search query, printable characters extend it, and
+`SessionListState` selects the first row whose session display name contains
+the query, case-insensitively, in the current row order. Another `/`, Up, or
+Down cancels search mode without moving the highlight; non-text command keys
+first leave search mode before normal handling.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
 the bottom status start with `tab ↑/↓`, then `help`, `prompt`, `attach`,

@@ -892,6 +892,20 @@ impl SessionListState {
         self.selected = next;
         old != next
     }
+
+    pub(crate) fn select_first_name_match(&mut self, query: &str) -> Option<bool> {
+        if query.is_empty() {
+            return None;
+        }
+        let query = query.to_lowercase();
+        let index = self
+            .rows
+            .iter()
+            .position(|row| row.session.name.to_lowercase().contains(&query))?;
+        let changed = self.selected != index;
+        self.selected = index;
+        Some(changed)
+    }
 }
 
 fn sort_rows_by_activity(rows: &mut [SessionRow]) {
@@ -1081,6 +1095,7 @@ pub(crate) struct AppState {
     pub(crate) modal: Option<ModalState>,
     pub(crate) activity_tracker: ActivityTracker,
     pub(crate) pending_list_shortcut: Option<PendingListShortcut>,
+    pub(crate) session_search: Option<String>,
 }
 
 impl AppState {
@@ -1104,6 +1119,7 @@ impl AppState {
             modal: None,
             activity_tracker: ActivityTracker::default(),
             pending_list_shortcut: None,
+            session_search: None,
         }
     }
 

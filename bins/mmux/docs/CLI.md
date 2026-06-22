@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-562-impl | Documented issue #562 TUI updates: visible stable session ids in rows and list-focused `/` quick search. |
 | 2026-06-11 | @mstream453-impl | Added list-pane `s` name sorting and documented the Help shortcut. |
 | 2026-05-30 | @codex | Added the local macOS release-build install sequence, including re-signing `/usr/local/bin/mmux` before ForceCommand use. |
 | 2026-05-28 | @gpt55-342-og | Removed positional `--alias` overrides; SSH targets now use endpoint identity labels including user, host, non-default port, and non-default tmux socket. |
@@ -232,10 +233,10 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
   attached marker and the session name:
 
   ```
-  > * ■ dev          1m / 12d
-    * ■ jarvis       4h / 19d
-      ■ build        2d / 5d
-      ■ logs         3d / 7d
+  > * ■ dev    [$1]       1m / 12d
+    * ■ jarvis [$2]       4h / 19d
+      ■ build  [$3]       2d / 5d
+      ■ logs   [$4]       3d / 7d
   ```
 
   Host colors are assigned from configured host order using a five-color
@@ -244,7 +245,7 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
 - All command keys (`Up`/`Down`, `u`/`b`, `PgUp`/`PgDn`, `Home`/`End`,
-  `a`, `p`, `n`, `k`, `r`, `t`, `g`, `$` then `0`…`9`, `$` then `!`, `Ctrl-C`/`q`, `l`,
+  `/`, `a`, `p`, `n`, `k`, `r`, `t`, `g`, `$` then `0`…`9`, `$` then `!`, `Ctrl-C`/`q`, `l`,
   `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
@@ -290,6 +291,7 @@ Main-view keys:
 | PgUp / PgDn | Page session list | Page detail buffer |
 | Home / End | First / last session | Top / bottom detail; End resumes live tail |
 | Enter | Refresh live preview now | No-op |
+| `/` then chars | Search session names and jump to the first matching row in current sort order; `/`, Up, or Down cancels search | No-op |
 | Tab | Focus detail pane | Focus session list |
 | Left / Right | No-op | No-op |
 | `Esc` | Focus session list | Focus session list |
@@ -326,9 +328,10 @@ state in the same snapshot. The selector no longer starts a
 separate `watch_host_events()` poller for its TUI list. Direct tmux
 control-mode host notifications remain future work.
 
-Each session row includes the display name, an attached-client marker, and a
-right-aligned recency column. The attached marker is `*` when tmux reports one
-or more clients attached to the session. Rows are sorted by
+Each session row includes the display name, stable tmux session id in `[$id]`
+form, an attached-client marker, and a right-aligned recency column. The
+attached marker is `*` when tmux reports one or more clients attached to the
+session. Rows are sorted by
 `activity_observed_at_local` (operator-side wall clock at last observed
 `session.activity` advance) descending so the most recently active session
 appears first by default. Pressing `g` while the list pane is focused toggles
@@ -339,6 +342,10 @@ Empty checked-tag values are treated like no displayed tag. The toggle selects
 the first row in the new order so the grouped top is visible immediately.
 Pressing `g` again restores activity sort. Pressing `s` while the list pane is
 focused sorts sessions by session name and selects the first row in name order.
+Pressing `/` while the list pane is focused starts quick search; typed
+characters match session names case-insensitively and move the highlight to the
+first matching row in the current sort order. Another `/`, Up, or Down cancels
+search mode without moving the highlighted row.
 The recency column is formatted as
 `  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`

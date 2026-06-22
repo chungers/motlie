@@ -487,13 +487,18 @@ pub(crate) async fn handle_key(
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             app.pending_list_shortcut = None;
+            app.session_search = None;
             return Ok(KeyOutcome::Cancel);
         }
-        (KeyCode::Char('q'), _) => {
+        (KeyCode::Char('q'), _) if app.session_search.is_none() => {
             app.pending_list_shortcut = None;
+            app.session_search = None;
             return Ok(KeyOutcome::Cancel);
         }
         _ => {}
+    }
+    if let Some(outcome) = handle_session_search_key(fleet, app, key).await? {
+        return Ok(outcome);
     }
     if let Some(shortcut) = app.pending_list_shortcut.take() {
         return handle_pending_list_shortcut(fleet, app, key, shortcut).await;
@@ -544,6 +549,7 @@ pub(crate) async fn handle_key(
         }
         (KeyCode::Char('$'), _) if app.layout.focus == Focus::List => {
             if app.selected_session().is_some() {
+                app.session_search = None;
                 app.pending_list_shortcut = Some(PendingListShortcut::SendKeysImmediate);
             } else {
                 app.status = StatusBanner::info("no session selected");
@@ -679,6 +685,94 @@ pub(crate) async fn handle_key(
     }
 
     Ok(KeyOutcome::Continue)
+}
+
+async fn handle_session_search_key(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    key: KeyEvent,
+) -> Result<Option<KeyOutcome>> {
+    if app.layout.focus == Focus::List
+        && app.session_search.is_none()
+        && key.code == KeyCode::Char('/')
+        && text_key_modifiers(key.modifiers)
+    {
+        app.session_search = Some(String::new());
+        app.status = StatusBanner::info("search: /");
+        return Ok(Some(KeyOutcome::Continue));
+    }
+
+    if app.session_search.is_none() {
+        return Ok(None);
+    }
+    if app.layout.focus != Focus::List {
+        app.session_search = None;
+        return Ok(None);
+    }
+
+    match key.code {
+        KeyCode::Char('/') if text_key_modifiers(key.modifiers) => {
+            cancel_session_search(app);
+            Ok(Some(KeyOutcome::Continue))
+        }
+        KeyCode::Up | KeyCode::Down => {
+            cancel_session_search(app);
+            Ok(Some(KeyOutcome::Continue))
+        }
+        KeyCode::Esc => {
+            cancel_session_search(app);
+            Ok(Some(KeyOutcome::Continue))
+        }
+        KeyCode::Backspace => {
+            if let Some(query) = &mut app.session_search {
+                query.pop();
+            }
+            apply_session_search(fleet, app).await?;
+            Ok(Some(KeyOutcome::Continue))
+        }
+        KeyCode::Char(ch) if text_key_modifiers(key.modifiers) => {
+            if let Some(query) = &mut app.session_search {
+                query.push(ch);
+            }
+            apply_session_search(fleet, app).await?;
+            Ok(Some(KeyOutcome::Continue))
+        }
+        _ => {
+            app.session_search = None;
+            Ok(None)
+        }
+    }
+}
+
+fn text_key_modifiers(modifiers: KeyModifiers) -> bool {
+    !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+fn cancel_session_search(app: &mut AppState) {
+    app.session_search = None;
+    app.status = StatusBanner::info("search canceled");
+}
+
+async fn apply_session_search(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
+    let query = app.session_search.clone().unwrap_or_default();
+    if query.is_empty() {
+        app.status = StatusBanner::info("search: /");
+        return Ok(());
+    }
+
+    match app.session_list.select_first_name_match(&query) {
+        Some(true) => {
+            refresh_selected_detail(fleet, app).await?;
+            app.status = StatusBanner::info(format!("search: /{query}"));
+        }
+        Some(false) => {
+            app.status = StatusBanner::info(format!("search: /{query}"));
+        }
+        None => {
+            app.status = StatusBanner::info(format!("search: /{query} (no match)"));
+        }
+    }
+    Ok(())
 }
 
 async fn handle_pending_list_shortcut(

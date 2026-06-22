@@ -256,10 +256,10 @@ fn session_row_name_field(row: &SessionRow, width: usize) -> String {
         return String::new();
     }
     let Some(value) = row.displayed_tag_value() else {
-        return truncate_chars(&row.session.name, width);
+        return session_identity_field(row, width);
     };
     if width < 3 {
-        return truncate_chars(&row.session.name, width);
+        return session_identity_field(row, width);
     }
 
     let value_budget = width.saturating_sub(2);
@@ -270,11 +270,30 @@ fn session_row_name_field(row: &SessionRow, width: usize) -> String {
     }
 
     let name_width = width.saturating_sub(value_width + 1);
-    let name = truncate_chars(&row.session.name, name_width);
+    let name = session_identity_field(row, name_width);
     let gap = width
         .saturating_sub(char_width(&name))
         .saturating_sub(value_width);
     format!("{name}{}{value}", " ".repeat(gap))
+}
+
+fn session_identity_field(row: &SessionRow, width: usize) -> String {
+    const SESSION_ID_GAP: usize = 4;
+
+    if width == 0 {
+        return String::new();
+    }
+
+    let id = format!("[{}]", row.session.id.as_str());
+    let id_width = char_width(&id);
+    if width <= id_width {
+        return truncate_chars(&id, width);
+    }
+
+    let gap = SESSION_ID_GAP.min(width.saturating_sub(id_width + 1));
+    let name_width = width.saturating_sub(id_width).saturating_sub(gap);
+    let name = truncate_chars(&row.session.name, name_width);
+    format!("{name}{}{id}", " ".repeat(gap))
 }
 
 fn session_row_metadata_gap(row: &SessionRow, metadata: &str, default_gap: usize) -> usize {

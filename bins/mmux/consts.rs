@@ -107,6 +107,7 @@ pub(crate) const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 pub(crate) const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑ (u) / ↓ (b) select session or scroll detail
+/ search session names (list pane)
 Enter refresh highlighted session preview (list pane)
 tab cycle panes
 l toggle layout

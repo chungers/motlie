@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-562-impl | Added issue #562 design updates: session rows show stable tmux ids and list-focused `/` search jumps to the first matching session name in current sort order. |
 | 2026-05-28 | @gpt55-342-og | Updated multi-host identity for issue #342: SSH labels and aliases now use endpoint identity and positional `--alias` overrides are removed. |
 | 2026-05-20 | @codex | Added issue #317 host-label override design: `--alias` maps comma-separated display overrides to localhost plus SSH URI order, while empty entries preserve discovered labels. |
 | 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts so `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
@@ -135,6 +136,13 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 
 - The TUI body is split into a left pane `L` and right pane `R`.
 - `L` lists tmux sessions on the target host and has default focus.
+- `L` session rows show the display name and stable tmux session id, for
+  example `486-rv-llm    [$42]`, so users can distinguish renamed or similarly
+  named sessions while mmux still dispatches by stable id internally.
+- When `L` has focus, `/` enters quick session search. Typed characters after
+  `/` match session display names, and the highlight jumps to the first
+  matching row in the current sort order. Typing another `/`, Up, or Down
+  cancels search mode and leaves the highlight where it is.
 - `R` shows a live active-pane preview for the highlighted session.
 - `L` and `R` participate in pane focus cycling in landscape mode.
 - `L` and `R` are both scrollable. The `L` viewport scrolls automatically to
@@ -665,8 +673,9 @@ The body area is split horizontally into `L` and `R`.
 
 - `L`: session list. The viewport scrolls to keep the highlighted row visible.
   Rows render display names, attachment markers, optional checked-tag values,
-  and optional multi-host markers; stable tmux session ids are retained in state
-  for dispatch but not shown.
+  optional multi-host markers, and stable tmux session ids in `[$id]` form.
+  The same id remains the dispatch key for attach, kill, rename, tags, and
+  detail refresh.
 - `R`: detail pane for selected-session active-pane live preview.
 
 **Focus model.** The landscape main view has two focus states: `L` (default)
@@ -693,6 +702,7 @@ Main-selector keymap (focus-aware):
 | PgUp / PgDn | Page through session list | Page through R buffer |
 | Home / End | First / last session | Top / bottom of buffer; `End` re-engages live tail |
 | Enter | Refresh live preview now for the highlighted session | No-op |
+| `/` then chars | Search session names and jump highlight to the first match in current sort order; `/`, Up, or Down cancels search | No-op |
 | Tab | Focus → `R` | Focus → `L` |
 | Left / Right | No-op | No-op |
 | `Esc` | Focus → `L` outside modal; `Cancel` inside modal | Focus → `L` outside modal; `Cancel` inside modal |
