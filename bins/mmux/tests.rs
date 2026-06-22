@@ -2032,7 +2032,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
     assert!(body.contains("↑ (u) / ↓ (b) select session or scroll detail"));
-    assert!(body.contains("/ search session names (list pane)"));
+    assert!(body.contains("/ then chars: case-insensitive substring; sorted first; /,↑,↓ cancel"));
     assert!(body.contains("Enter refresh highlighted session preview (list pane)"));
     assert!(!body.contains("monitor highlighted session"));
     assert!(body.contains("  $0..$9 send digit to highlight"));
