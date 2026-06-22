@@ -4,8 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-561-design | Simplified David's boot design: `new-session -d -P -F` is the correct-by-construction create-session fix, and remain-on-exit is only genuine boot-exit diagnostics. |
 | 2026-06-22 | @codex-561-design | Addressed PR #563 review: made boot items 9-10 first-class acceptance criteria, chose remain-on-exit diagnostics, bounded per-host reconcile, documented handle semantics, promoted `new-session -P -F`, named migration consumer, and distinguished reused session ids. |
-| 2026-06-22 | @codex-561-design | Folded in broadened #561 scope for boot-liveness settle/retry and genuine boot-death diagnostics. |
+| 2026-06-22 | @codex-561-design | Folded in broadened #561 scope for create-session fidelity and genuine boot-exit diagnostics. |
 | 2026-06-22 | @codex-561-design | Initial design for reconciling canonical agent names and liveness against live tmux state, with stable session-id binding, drift signals, doctor output, and #401 lifecycle hygiene. |
 
 ## Status
@@ -16,11 +17,11 @@ This is brownfield design work for
 (`$N`), session metadata tags, `Target::rename()` by stable id, OutputBus
 routing by session id, and #401 quarantine/reclaim lifecycle commands. This
 design tightens the session-state contract without replacing those layers. The
-same fidelity principle also applies during session creation: a newly created
-tmux session must be reconciled with settle/retry and useful diagnostics, not a
-single immediate probe. David explicitly folded these boot-fidelity items into #561
-on 2026-06-22, so they are in scope for this DESIGN and for the follow-on
-PLAN.
+same fidelity principle also applies during session creation: mstream must take
+the stable id and name from tmux's `new-session -d -P -F` output instead of
+creating by name and then running a separate list probe. David explicitly folded
+these boot-fidelity items into #561 on 2026-06-22, so they are in scope
+for this DESIGN and for the follow-on PLAN.
 
 ## Problem
 
@@ -35,9 +36,9 @@ operators can see stale identity or stale existence:
   reconciliation contract
 - host unreachable, tmux server unavailable, and confirmed missing session are
   not surfaced consistently enough for safe cleanup
-- `libs/tmux::HostHandle::create_session()` treats one immediate
-  `list_sessions()` miss after `new-session` as boot death, which can false-fail
-  a live agent that needs a short settle window
+- `libs/tmux::HostHandle::create_session()` runs bare `new-session -d -s` and
+  then a separate `list_sessions()` to learn the stable id; if that second read
+  is empty or stale, mstream can false-fail a live session
 - when startup genuinely fails, `mstream new` reports a generic "exited
   immediately" message without pane output or exit diagnostics
 
@@ -101,21 +102,24 @@ target, writes tags, and keeps the stable target unchanged. In `libs/tmux`,
 `Target::rename()` calls `rename-session -t <stable-session-id> <new-name>` for
 session targets.
 
-### create_session boot liveness
+### create_session stable-id discovery
 
 `libs/tmux/src/host.rs::HostHandle::create_session()` currently runs
 `control::create_session_with_prefix()`, then immediately calls
-`self.list_sessions()` once and looks up the requested name. If that one listing
-does not contain the new session, it returns a generic created-but-not-found
-state error.
+`self.list_sessions()` once and looks up the requested name. If that separate
+listing does not contain the new session, it returns a generic
+created-but-not-found state error.
 
 `mstream new` catches that exact message through
 `is_created_session_not_found()` and turns it into a generic exited-immediately
 startup error.
 
-This is a boot-time version of the same fidelity bug: a single immediate tmux
-read is treated as truth. It also erases the diagnostic evidence an operator
-needs to distinguish "alive but not listed yet" from a real startup failure.
+This is a boot-time version of the same fidelity bug: mstream creates the
+session in tmux but then asks a separate cached/lagging listing to prove what
+tmux already knows. The fix is to make `create_session_with_prefix()` use
+`new-session -d -P -F`, parse the stable id/name from tmux's create output,
+and key by that stable id immediately. Genuine process exit remains a separate
+diagnostics problem.
 
 ### status, snapshot, and events
 
@@ -163,8 +167,9 @@ Two concepts are conflated:
 - canonical live tmux name: mutable, authoritative, read from live tmux
 - stored identity/self-report: cached metadata, useful for detecting drift but
   not authoritative
-- boot liveness: a just-created tmux session needs a short reconciliation
-  window before mstream can conclude that the agent died
+- create-session identity discovery: tmux can return the stable id/name from
+  `new-session -d -P -F`, but the current wrapper creates by name and then
+  separately lists sessions to discover the id
 
 The daemon also has a session ledger that can outlive tmux reality. A stable
 target `host::$N` is a good key, but serving the ledger without a live inventory
@@ -186,8 +191,9 @@ The design must satisfy the ten #561 points:
 6. Reconcile liveness as `live`, `dead`, or `unreachable`.
 7. Provide an in-band drift/death query.
 8. Tie cleanup to the #401 quarantine/reclaim lifecycle.
-9. Make `create_session` boot-liveness settle/retry instead of single-probe.
-10. On genuine boot-death, capture and report pane output/exit diagnostics.
+9. Make `create_session` use `new-session -d -P -F` and parse the stable id/name
+   from tmux's create output, with no post-create list probe.
+10. On genuine agent boot-exit, capture and report pane output/exit diagnostics.
 
 ## Acceptance Criteria
 
@@ -207,10 +213,12 @@ implementation:
    unreachable hosts, and reused-session-id cases.
 8. Confirmed-dead cleanup is explicit and tied to the #401 quarantine/reclaim
    lifecycle; unreachable hosts are never pruned as dead.
-9. `HostHandle::create_session()` / `mstream new` use a bounded settle/retry
-   startup probe, not one immediate `list_sessions()` read.
-10. Genuine boot-death returns bounded pane output and exit/process diagnostics
-    collected through the chosen remain-on-exit startup diagnostic path.
+9. `HostHandle::create_session()` / `mstream new` use tmux
+   `new-session -d -P -F` and parse stable id/name from the create command
+   output, with no post-create `list_sessions()` probe required to prove
+   existence.
+10. Genuine agent boot-exit returns bounded pane output and exit/process
+    diagnostics collected through remain-on-exit plus post-exit pane capture.
 
 ## Alternatives Considered
 
@@ -548,75 +556,80 @@ Unreachable example:
 }
 ```
 
-### 8. Boot-liveness settle/retry
+### 8. Create-session stable-id capture
 
-`libs/tmux::HostHandle::create_session()` must stop treating one immediate
-post-`new-session` listing as authoritative. After `new-session` succeeds, it
-should reconcile for a bounded startup window:
+`libs/tmux::HostHandle::create_session()` must stop creating by name and then
+running a separate `list_sessions()` probe to discover the stable id. The
+correct-by-construction fix is to make `control::create_session_with_prefix()`
+use tmux print-format output:
 
-```rust
-struct CreateSessionProbe {
-    settle_ms: u64,
-    retry_interval_ms: u64,
-    max_attempts: u8,
-}
+```sh
+tmux new-session -d -P -F "#{q:session_id} #{q:session_name}" -s <name> ...
 ```
 
-Default behavior should be conservative and fast, for example an immediate
-probe plus retries over roughly 1-2 seconds. The exact values belong in PLAN,
-but the contract is:
+If constructing the existing `Target::Session(SessionInfo)` needs more fields,
+the format should include the required tmux values such as
+`#{q:session_created}` and `#{q:session_activity}`. The invariant is that all
+creation identity fields come from the `new-session` command output itself, not
+from a later inventory pass.
+
+Contract:
 
 1. run `tmux new-session -d -P -F` through `create_session_with_prefix`
-2. capture at least `#{q:session_id}` and `#{q:session_name}` from tmux at
-   create time
-3. poll live inventory for that stable session id over the settle window
-4. if found, return the live `Target`
-5. if inventory is transiently unreachable, retry inside the same bounded
-   window
-6. only after the window expires, classify startup as failed or diagnostically
-   uncertain
+2. parse the returned stable `session_id` and live `session_name`
+3. construct the returned `Target` keyed by stable id immediately
+4. do not call `list_sessions()` to prove the just-created session exists
+5. if `new-session` fails, return the command error with context
+6. if parsing fails, return a typed parse/state error rather than falling back to
+   a racing name lookup
 
-Recommended boot path: promote `control::create_session_with_prefix()` to the
-same `-P -F` pattern already used by `new_window_with_prefix()` and
-`split_pane_with_prefix()` in `libs/tmux/src/control.rs`. The retry loop keys
-by stable id immediately; lookup by requested name is only a fallback for parse
-failure or older tmux behavior. This removes the name-to-id race caused by
-`new-session` followed by a separate immediate `list_sessions()` call.
+This is an internal breaking change and is acceptable for #561. `new-window` and
+`split-pane` already use the same `-P -F` pattern in
+`libs/tmux/src/control.rs`; `create_session_with_prefix()` is the holdout. Once
+create returns the stable id/name atomically, the alive-but-not-listed race is
+eliminated. No post-create discovery loop remains in the design because such a
+loop only patched the old create-then-separately-list pattern.
 
-`mstream new` should surface this as boot reconciliation, not as an
-agent-authored state transition. A live session that appears on a retry is a
-successful boot. It must not be marked dead, quarantined, or removed because the
-first probe missed it.
+`mstream new` should surface this as create-session fidelity, not as an
+agent-authored liveness transition. A successful `new-session -P -F` is enough
+to key the daemon record as `host::$N`; later normal reconciliation can refresh
+activity and liveness, but it must not be required to accept the boot.
 
-### 9. Boot-death diagnostics
+### 9. Genuine boot-exit diagnostics
 
-When the bounded boot probe expires, mstream must collect diagnostics before
-returning a boot-death error. The diagnostic attempt should be best-effort and
-bounded:
+The create-session fix and boot diagnostics are orthogonal mechanisms:
 
-- try to resolve the session by requested name and, if known, stable id
-- capture the primary pane scrollback with a small cap
-- query pane/process death fields when available, such as pane dead status,
-  current command, or exit status
-- include the tmux command error if inventory itself failed
-- return diagnostics in structured JSONL and in the human error message
+- `new-session -d -P -F` solves the alive-but-not-listed race by returning the
+  stable id/name from the tmux create command itself
+- `remain-on-exit` plus bounded post-exit capture preserves evidence only when
+  the managed agent process genuinely exits during boot
 
 For managed `mstream new` agent sessions, the bootstrap path should preserve
 short-lived failure evidence long enough to capture it. Decision: use tmux
-`remain-on-exit` plus bounded post-exit pane capture. The implementation should
-create or identify the session with the `new-session -P -F` boot path, enable
-`remain-on-exit` for the startup window before spawning or respawning the
-managed command as the pane foreground workload, and run the bounded startup
-probe. When the probe observes a healthy live session, clear the diagnostic
-option so normal later exits are not held. When the probe expires, capture a
-bounded pane tail and pane/process fields before cleanup.
+`remain-on-exit` plus bounded post-exit pane capture for the startup diagnostic
+window. This diagnostic path must not decide whether the session exists; it only
+explains real process exit after tmux has created the session.
+
+When a managed agent exits during that diagnostic window, mstream collects
+best-effort bounded diagnostics before returning `agent_boot_failed`:
+
+- capture the primary pane scrollback with a small cap
+- query pane/process death fields when available, such as pane dead status,
+  current command, or exit status
+- include the tmux command error if the diagnostic query itself failed
+- return diagnostics in structured JSONL and in the human error message
+
+When the managed agent remains alive past the diagnostic window, clear the
+`remain-on-exit` diagnostic option so normal later exits are not held. The
+healthy agent keeps the direct pane foreground process model; no shell wrapper
+is introduced for every managed agent boot.
 
 Decision criteria:
 
 - failed startup panes remain capturable long enough to report useful output
 - healthy agents keep the direct pane foreground process model
 - diagnostic retention is bounded and explicitly cleaned up
-- no shell wrapper is introduced for every managed agent boot
+- diagnostics do not mask or replace the `new-session -P -F` creation contract
 
 Example genuine failure response:
 
@@ -626,15 +639,14 @@ Example genuine failure response:
   "code": "agent_boot_failed",
   "target": "mac1::codex-562-impl",
   "agent_executable": "/opt/homebrew/bin/codex",
-  "boot_probe_attempts": 8,
-  "boot_probe_elapsed_ms": 1500,
-  "tmux_present": false,
+  "tmux_session_id": "$42",
+  "tmux_present": true,
   "exit_status": 127,
   "pane_output": "sh: /opt/homebrew/bin/codex: No such file or directory\n"
 }
 ```
 
-Example delayed-but-live response:
+Example successful create response:
 
 ```json
 {
@@ -642,15 +654,15 @@ Example delayed-but-live response:
   "op": "new",
   "target": "mac1::$42",
   "agent": "codex-562-impl",
-  "boot_probe_attempts": 3,
-  "boot_probe_elapsed_ms": 320,
+  "tmux_session_id": "$42",
+  "create_source": "tmux_new_session_print",
   "liveness": "live"
 }
 ```
 
-This keeps boot behavior aligned with the rest of #561: live tmux/pane state is
-the source of truth, and mstream reconciles with retry plus real diagnostics
-before making an operator-visible claim.
+This keeps boot behavior aligned with the rest of #561: tmux stable id/name are
+the source of truth for creation, and pane diagnostics explain only genuine
+managed-process death.
 
 ### 10. In-band doctor query
 
@@ -754,14 +766,15 @@ not classify an unreachable host as a set of dead sessions.
 1. `mstream new` builds the managed bootstrap command and calls
    `HostHandle::create_session()`.
 2. `libs/tmux` runs `tmux new-session -d -P -F` and captures the created
-   `session_id` and `session_name`.
-3. `libs/tmux` polls live tmux inventory by stable id over the startup probe
-   window.
-4. If the session appears, `libs/tmux` returns a `Target` with live
-   `SessionInfo`; mstream normalizes it to `host::$N`.
-5. If the session does not appear, mstream captures remain-on-exit startup
-   diagnostics before returning `agent_boot_failed`.
-6. A single missed listing is never enough to classify boot death.
+   `session_id` and `session_name` from the command output.
+3. `libs/tmux` constructs the returned `Target` from that output and returns it
+   keyed by stable id; no post-create `list_sessions()` proof is needed.
+4. mstream normalizes the target to `host::$N`, writes assignment tags, and
+   starts normal monitoring/reconciliation.
+5. If the managed agent process exits during the bounded diagnostic window,
+   mstream captures remain-on-exit pane output and process fields before
+   returning `agent_boot_failed`.
+6. Creation fidelity and process-exit diagnostics stay separate.
 
 ### Reconcile on read
 
@@ -791,7 +804,7 @@ not classify an unreachable host as a set of dead sessions.
 ### `mstream new`
 
 `mstream new` keeps the same user-facing command shape, but its result and
-errors include boot reconciliation fields:
+errors include create-session fidelity and genuine boot-exit diagnostic fields:
 
 ```json
 {
@@ -800,8 +813,8 @@ errors include boot reconciliation fields:
   "workstream": "issue-561-mstream-fidelity",
   "target": "mac1::$42",
   "agent": "codex-562-impl",
-  "boot_probe_attempts": 3,
-  "boot_probe_elapsed_ms": 320,
+  "tmux_session_id": "$42",
+  "create_source": "tmux_new_session_print",
   "liveness": "live",
   "cursor": "..."
 }
@@ -815,9 +828,8 @@ On genuine boot failure:
   "code": "agent_boot_failed",
   "target": "mac1::codex-562-impl",
   "agent_executable": "/opt/homebrew/bin/codex",
-  "boot_probe_attempts": 8,
-  "boot_probe_elapsed_ms": 1500,
-  "tmux_present": false,
+  "tmux_session_id": "$42",
+  "tmux_present": true,
   "exit_status": 127,
   "pane_output": "..."
 }
@@ -955,9 +967,9 @@ Migration plan:
 5. Keep deprecated aliases for one release only if needed by known callers.
 6. Update `bins/mstream/docs/API.md` and `PLAN.md` during implementation.
 7. Remove any remaining code path that treats cached identity as canonical.
-8. Replace the string-matched `is_created_session_not_found()` boot-death path
-   with typed startup probe errors and the selected remain-on-exit diagnostics
-   surfaced through `libs/tmux` / `mstream new`.
+8. Replace the string-matched `is_created_session_not_found()` startup-error path
+   with parsed `new-session -d -P -F` create output and the selected
+   remain-on-exit diagnostics surfaced through `libs/tmux` / `mstream new`.
 
 No tmux tag migration is required for existing sessions. The first scan or
 status after the change derives `live_name` from tmux and reuses existing tags
@@ -980,8 +992,9 @@ for `self_reported_handle`.
   observed replacement live name, distinct from absent ids.
 - `mstream rename` keeps the stable target, calls tmux rename before daemon
   mutation, and returns drift-free fields.
-- `mstream new` succeeds when a session appears on a later startup probe rather
-  than the first post-create listing.
+- `mstream new` keys the daemon record from the stable id returned by
+  `new-session -d -P -F`, without requiring a post-create `list_sessions()`
+  success.
 - `mstream new` reports `agent_boot_failed` with bounded pane output and exit
   diagnostics from the remain-on-exit path on genuine startup failure.
 - scan rehydrates by `SessionInfo.name` even when `@mstream/identity` is stale.
@@ -995,13 +1008,14 @@ for `self_reported_handle`.
 - new inventory API distinguishes successful empty inventory from tmux server
   unavailable when tmux reports "no server running" or equivalent.
 - existing `HostHandle::list_sessions()` behavior remains backward compatible.
-- `HostHandle::create_session()` uses `new-session -P -F` to capture the
-  created session id/name, retries discovery over the startup probe window, and
-  returns the live target when a delayed listing appears.
-- startup probe exhaustion returns a typed or inspectable diagnostic error
-  instead of only `session created but not found in list`.
-- remain-on-exit startup diagnostics preserve failed pane output without
-  leaving healthy sessions held after successful boot.
+- `HostHandle::create_session()` uses `new-session -d -P -F` to capture the
+  created session id/name and returns a stable-id target without calling
+  `list_sessions()` to prove creation.
+- malformed or missing `new-session -P -F` output returns a typed or inspectable
+  parse/state error instead of falling back to a racing name lookup.
+- remain-on-exit startup diagnostics preserve failed pane output for genuine
+  process exit without being part of the creation liveness path or leaving
+  healthy sessions held after successful boot.
 - `Target::rename()` continues using stable session id in the tmux command.
 - mock transport coverage for host command errors and no-server diagnostics.
 
@@ -1020,8 +1034,9 @@ for `self_reported_handle`.
 - Scan after daemon restart and verify live tmux names are ground truth.
 - Doctor reports drift/dead/unreachable and distinguishes absent ids from
   reused ids without direct tmux probing.
-- Create a session whose first `list_sessions()` response omits the new session
-  but a later response includes it; verify mstream does not boot-death.
+- Create a session in a test harness where any post-create `list_sessions()`
+  response would be empty; verify mstream still records `host::$N` from
+  `new-session -d -P -F` output and does not report `agent_boot_failed`.
 - Create a managed agent command that exits immediately; verify mstream reports
   captured output and exit status.
 
