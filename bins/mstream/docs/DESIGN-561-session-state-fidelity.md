@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-561-design | Addressed PR #563 review: made boot items 9-10 first-class acceptance criteria, chose remain-on-exit diagnostics, bounded per-host reconcile, documented handle semantics, promoted `new-session -P -F`, named migration consumer, and distinguished reused session ids. |
 | 2026-06-22 | @codex-561-design | Folded in broadened #561 scope for boot-liveness settle/retry and genuine boot-death diagnostics. |
 | 2026-06-22 | @codex-561-design | Initial design for reconciling canonical agent names and liveness against live tmux state, with stable session-id binding, drift signals, doctor output, and #401 lifecycle hygiene. |
 
@@ -17,7 +18,9 @@ routing by session id, and #401 quarantine/reclaim lifecycle commands. This
 design tightens the session-state contract without replacing those layers. The
 same fidelity principle also applies during session creation: a newly created
 tmux session must be reconciled with settle/retry and useful diagnostics, not a
-single immediate probe.
+single immediate probe. David explicitly folded these boot-fidelity items into #561
+on 2026-06-22, so they are in scope for this DESIGN and for the follow-on
+PLAN.
 
 ## Problem
 
@@ -186,6 +189,29 @@ The design must satisfy the ten #561 points:
 9. Make `create_session` boot-liveness settle/retry instead of single-probe.
 10. On genuine boot-death, capture and report pane output/exit diagnostics.
 
+## Acceptance Criteria
+
+The issue is accepted only when all ten points are covered by PLAN and
+implementation:
+
+1. `session list`, `status`, `snapshot`, and `events` derive canonical `agent`
+   from live tmux session name by stable session id.
+2. Monitoring reads refresh names without a manual `scan`.
+3. `scan` treats live tmux name as ground truth after daemon restart.
+4. Public rows expose live `agent`, `self_reported_handle`, and `name_drift`
+   with documented handle semantics.
+5. `mstream rename` performs tmux `rename-session` by stable id before daemon
+   identity mutation.
+6. Reconciliation distinguishes `live`, `dead`, and `unreachable`.
+7. `session list`/`doctor` expose in-band name drift, dead sessions,
+   unreachable hosts, and reused-session-id cases.
+8. Confirmed-dead cleanup is explicit and tied to the #401 quarantine/reclaim
+   lifecycle; unreachable hosts are never pruned as dead.
+9. `HostHandle::create_session()` / `mstream new` use a bounded settle/retry
+   startup probe, not one immediate `list_sessions()` read.
+10. Genuine boot-death returns bounded pane output and exit/process diagnostics
+    collected through the chosen remain-on-exit startup diagnostic path.
+
 ## Alternatives Considered
 
 ### A. Refresh on read, chosen
@@ -263,13 +289,16 @@ resolves a live `SessionInfo`.
 `SessionRecord` should separate:
 
 - `live_name: Option<String>`: last name observed from live tmux
-- `self_reported_handle: Option<String>`: cached/self metadata, initially
-  migrated from existing `identity` tag/field
+- `self_reported_handle: Option<String>`: mstream-authored last-written
+  `@mstream/identity` handle. Until a real agent self-report channel
+  exists, this is assigned state, not an agent assertion
 - `agent_executable: Option<String>`: current meaning of `agent`
 
 Implementation can keep the stored tag name `@mstream/identity` for migration,
 but public JSON must not call it canonical identity. Render it as
-`self_reported_handle`.
+`self_reported_handle`. The field name is retained because #561 asks for it,
+but consumers must read it as the last assigned handle until an explicit
+agent self-report channel exists.
 
 `observe_tmux_session(&SessionInfo)` updates only live tmux facts:
 
@@ -302,9 +331,10 @@ enum SessionLiveness {
 ```
 
 The helper groups requested `SessionTarget`s by host, inventories each host
-once, indexes returned `SessionInfo` by stable `session.id`, updates
-`SessionRecord.live_name` for live rows, and returns per-session reconciliation
-results.
+once under a bounded timeout, indexes returned `SessionInfo` by stable
+`session.id`, updates `SessionRecord.live_name` for live rows, and returns
+per-session reconciliation results. A host timeout or inventory error is
+contained to that host; it must not delay or poison rows for other hosts.
 
 Classification:
 
@@ -313,6 +343,12 @@ Classification:
 - `dead`: host inventory succeeded, stable `$N` is absent, or `$N` was reused
   with a different `session_created`
 - `unreachable`: host/SSH/tmux inventory could not prove absence
+
+Dead rows include `death_kind`. Use `absent_session_id` when stable `$N` is
+not present in a reachable inventory. Use `reused_session_id` when stable
+`$N` is present but `SessionInfo.created` differs from the record; include the
+observed live name so doctor/scan can report "tracked agent gone, id reused by
+X" instead of treating it as a simple absence.
 
 For the no-server case, add a small `libs/tmux` API that preserves diagnostic
 state instead of only returning `Vec<SessionInfo>`:
@@ -337,9 +373,17 @@ mass dead/prune.
 
 `session list`:
 
-- reconciles all daemon-known sessions for connected hosts
+- reconciles all daemon-known sessions for connected hosts by default
+- inventories hosts concurrently under a bounded per-host inventory timeout
+- isolates timeout/error to that host: those rows render `liveness=unreachable`,
+  `tmux_present=null`, `activity_hint=unknown`, and `liveness_error`
+- never waits indefinitely on one bad or hanging host; other hosts render normally
 - returns `liveness`, live name fields, and drift flags
 - marks disconnected host records as `unreachable`
+- supports `--cached` with alias `--no-reconcile` for high-frequency
+  orchestrator polls; cached output skips host I/O, returns last observed
+  ledger facts, and marks rows with `reconciled=false` and
+  `agent_source=last_observed`
 
 `status`:
 
@@ -390,8 +434,9 @@ Rules:
 - `agent` is `null` when the session is `dead` or `unreachable`
 - `last_observed_agent` may show the last cached live name, but never implies
   current liveness
-- `self_reported_handle` is the old `@mstream/identity` value or future
-  self-report value
+- `self_reported_handle` is the last mstream-authored `@mstream/identity`
+  value until a future explicit agent self-report channel exists; it is not
+  an agent assertion today
 - `name_drift=true` only when the row is live and
   `self_reported_handle != agent`
 - `name_drift=null` when mstream cannot compare because the session is not live
@@ -414,8 +459,9 @@ tests should treat `agent` as the only canonical name.
 7. start monitoring by stable session id
 
 If a live tmux name differs from `@mstream/identity`, scan does not overwrite
-the self-reported handle. It returns a drift issue so the orchestrator can
-message the agent to re-self-identify as `@<live tmux name>`.
+the assigned handle. It returns a drift issue so the orchestrator can remind
+the agent to use `@<live tmux name>` in future commits, comments, and
+operator-visible self-identification.
 
 ### 6. Rename semantics
 
@@ -482,6 +528,7 @@ Dead example:
   "name_drift": null,
   "liveness": "dead",
   "tmux_present": false,
+  "death_kind": "absent_session_id",
   "death_reason": "stable tmux session id not present in reachable host inventory"
 }
 ```
@@ -519,20 +566,22 @@ Default behavior should be conservative and fast, for example an immediate
 probe plus retries over roughly 1-2 seconds. The exact values belong in PLAN,
 but the contract is:
 
-1. run `tmux new-session`
-2. poll `list_sessions()` for the requested name and stable id
-3. if found, return the live `Target`
-4. if inventory is transiently unreachable, retry inside the same bounded
+1. run `tmux new-session -d -P -F` through `create_session_with_prefix`
+2. capture at least `#{q:session_id}` and `#{q:session_name}` from tmux at
+   create time
+3. poll live inventory for that stable session id over the settle window
+4. if found, return the live `Target`
+5. if inventory is transiently unreachable, retry inside the same bounded
    window
-5. only after the window expires, classify startup as failed or diagnostically
+6. only after the window expires, classify startup as failed or diagnostically
    uncertain
 
-The retry loop should prefer stable id after it is known, but the first lookup
-can still be by requested name because tmux does not return the new session id
-from the current `new-session` wrapper. A follow-up implementation may improve
-this by using `tmux new-session -P -F` with `session_id` and `session_name`, but
-the design does not require changing the public `HostHandle::create_session()`
-return type.
+Recommended boot path: promote `control::create_session_with_prefix()` to the
+same `-P -F` pattern already used by `new_window_with_prefix()` and
+`split_pane_with_prefix()` in `libs/tmux/src/control.rs`. The retry loop keys
+by stable id immediately; lookup by requested name is only a fallback for parse
+failure or older tmux behavior. This removes the name-to-id race caused by
+`new-session` followed by a separate immediate `list_sessions()` call.
 
 `mstream new` should surface this as boot reconciliation, not as an
 agent-authored state transition. A live session that appears on a retry is a
@@ -553,19 +602,21 @@ bounded:
 - return diagnostics in structured JSONL and in the human error message
 
 For managed `mstream new` agent sessions, the bootstrap path should preserve
-short-lived failure evidence long enough to capture it. A genuine immediate
-exit often removes the tmux session before a later capture can run, so the
-implementation should use one of these equivalent strategies:
+short-lived failure evidence long enough to capture it. Decision: use tmux
+`remain-on-exit` plus bounded post-exit pane capture. The implementation should
+create or identify the session with the `new-session -P -F` boot path, enable
+`remain-on-exit` for the startup window before spawning or respawning the
+managed command as the pane foreground workload, and run the bounded startup
+probe. When the probe observes a healthy live session, clear the diagnostic
+option so normal later exits are not held. When the probe expires, capture a
+bounded pane tail and pane/process fields before cleanup.
 
-- a tmux remain-on-exit/startup diagnostic option that leaves the pane
-  capturable until mstream classifies the boot result, then clears/cleans it up
-- a narrow managed-agent bootstrap that records exit status and holds the pane
-  briefly only on failure
+Decision criteria:
 
-The normal long-running agent process must still become the pane foreground
-workload. The diagnostic mechanism is only for startup failure evidence; it
-must not turn a healthy agent into a shell-supervised process with different
-runtime semantics unless that tradeoff is explicitly documented in PLAN.
+- failed startup panes remain capturable long enough to report useful output
+- healthy agents keep the direct pane foreground process model
+- diagnostic retention is bounded and explicitly cleaned up
+- no shell wrapper is introduced for every managed agent boot
 
 Example genuine failure response:
 
@@ -634,7 +685,15 @@ It returns one bounded JSONL record:
     {
       "target": "local::$12",
       "last_observed_agent": "opus47-543-rv",
+      "death_kind": "absent_session_id",
       "death_reason": "stable tmux session id not present"
+    },
+    {
+      "target": "amd1::$69",
+      "last_observed_agent": "codex-535",
+      "death_kind": "reused_session_id",
+      "death_reason": "tracked agent gone; stable id now belongs to codex-541",
+      "reused_by_agent": "codex-541"
     }
   ],
   "unreachable_hosts": [
@@ -648,7 +707,9 @@ It returns one bounded JSONL record:
 
 `session list` and `status` also include per-row flags so an orchestrator does
 not have to run doctor for every poll. Doctor is the aggregate audit/query
-surface for drift and death.
+surface for drift and death. Doctor and scan output must distinguish
+`absent_session_id` from `reused_session_id`; reused-id reports include the
+current live tmux name that owns the stable id.
 
 ### 11. Hygiene and #401 lifecycle
 
@@ -672,8 +733,9 @@ dead. Live managed sessions still use the #401 `retire` then gated `reclaim`
 path because reclaim is the destructive tmux kill operation.
 
 `scan` can continue to clean up stale id reuse for safety, but it should report
-which records were quarantined/pruned in its JSON output. It must not classify
-an unreachable host as a set of dead sessions.
+which records were quarantined/pruned in its JSON output, and whether each
+confirmed-dead record was `absent_session_id` or `reused_session_id`. It must
+not classify an unreachable host as a set of dead sessions.
 
 ## Data Flow
 
@@ -691,23 +753,27 @@ an unreachable host as a set of dead sessions.
 
 1. `mstream new` builds the managed bootstrap command and calls
    `HostHandle::create_session()`.
-2. `libs/tmux` runs `tmux new-session`.
-3. `libs/tmux` polls live tmux inventory over the startup probe window.
+2. `libs/tmux` runs `tmux new-session -d -P -F` and captures the created
+   `session_id` and `session_name`.
+3. `libs/tmux` polls live tmux inventory by stable id over the startup probe
+   window.
 4. If the session appears, `libs/tmux` returns a `Target` with live
    `SessionInfo`; mstream normalizes it to `host::$N`.
-5. If the session does not appear, mstream captures startup diagnostics before
-   returning `agent_boot_failed`.
+5. If the session does not appear, mstream captures remain-on-exit startup
+   diagnostics before returning `agent_boot_failed`.
 6. A single missed listing is never enough to classify boot death.
 
 ### Reconcile on read
 
 1. mstream snapshots all relevant `SessionTarget`s.
 2. Targets are grouped by host.
-3. Each host is inventoried once.
-4. Returned sessions are indexed by `SessionInfo.id`.
-5. Records are updated with live facts for present sessions.
-6. Rows are rendered with canonical `agent`, drift, and liveness fields.
-7. Confirmed dead and unreachable are surfaced distinctly.
+3. Each host is inventoried once under a per-host timeout.
+4. A timeout or error marks only that host rows as `unreachable`; other hosts
+   continue rendering.
+5. Returned sessions are indexed by `SessionInfo.id`.
+6. Records are updated with live facts for present sessions.
+7. Rows are rendered with canonical `agent`, drift, and liveness fields.
+8. Confirmed dead and unreachable are surfaced distinctly.
 
 ### Out-of-band tmux rename
 
@@ -767,6 +833,7 @@ rendering:
 
 ```sh
 mstream session list
+mstream session list --cached        # alias: --no-reconcile
 ```
 
 ```json
@@ -788,6 +855,11 @@ mstream session list
   "tmux_session_id": "$69"
 }
 ```
+
+`--cached` / `--no-reconcile` is the high-frequency poll path. It skips host
+I/O, never blocks on a slow host, and renders the last observed ledger with
+`reconciled=false` and `agent_source=last_observed`. The default path reconciles
+with live tmux and marks only the timed-out host rows as `unreachable`.
 
 ### `mstream status <workstream>`
 
@@ -868,11 +940,15 @@ Default doctor is read-only. Cleanup flags are explicit.
 ## Migration Strategy
 
 This is a brownfield API change because current JSON uses `agent` for the
-executable and `identity` for a cached name.
+executable and `identity` for a cached name. The known in-repo consumer is the
+project/orchestrator skill and its mstream command references, which currently
+read `agent` from status/session rows. During the one-release alias window,
+update that skill and related CLI docs to consume canonical `agent` and
+`agent_executable` explicitly.
 
 Migration plan:
 
-1. Add internal fields for live tmux name, self-reported handle, and executable.
+1. Add internal fields for live tmux name, assigned handle, and executable.
 2. Keep reading existing `@mstream/identity` tags as `self_reported_handle`.
 3. Emit new canonical fields in all changed commands.
 4. Move executable metadata to `agent_executable`.
@@ -880,8 +956,8 @@ Migration plan:
 6. Update `bins/mstream/docs/API.md` and `PLAN.md` during implementation.
 7. Remove any remaining code path that treats cached identity as canonical.
 8. Replace the string-matched `is_created_session_not_found()` boot-death path
-   with typed startup probe and diagnostic errors from `libs/tmux` or a narrow
-   mstream wrapper.
+   with typed startup probe errors and the selected remain-on-exit diagnostics
+   surfaced through `libs/tmux` / `mstream new`.
 
 No tmux tag migration is required for existing sessions. The first scan or
 status after the change derives `live_name` from tmux and reuses existing tags
@@ -895,15 +971,19 @@ for `self_reported_handle`.
   `self_reported_handle`.
 - `session list` reconciles and renders `agent`, `self_reported_handle`,
   `name_drift`, and `agent_executable`.
+- `session list --cached` / `--no-reconcile` skips host I/O and marks
+  `reconciled=false` with last-observed identity fields.
 - `status` updates live name from `LiveActivity::Present`.
-- dead vs unreachable classification maps to `tmux_present` and
-  `activity_hint` correctly.
+- live vs dead vs unreachable classification maps to `tmux_present` and
+  `activity_hint` correctly, including host-local timeout isolation.
+- reused stable session ids render `death_kind=reused_session_id` and the
+  observed replacement live name, distinct from absent ids.
 - `mstream rename` keeps the stable target, calls tmux rename before daemon
   mutation, and returns drift-free fields.
 - `mstream new` succeeds when a session appears on a later startup probe rather
   than the first post-create listing.
 - `mstream new` reports `agent_boot_failed` with bounded pane output and exit
-  diagnostics on genuine startup failure.
+  diagnostics from the remain-on-exit path on genuine startup failure.
 - scan rehydrates by `SessionInfo.name` even when `@mstream/identity` is stale.
 - OutputBus `TargetOutput` with a stable session id refreshes `live_name` and
   routes output after an out-of-band rename.
@@ -915,10 +995,13 @@ for `self_reported_handle`.
 - new inventory API distinguishes successful empty inventory from tmux server
   unavailable when tmux reports "no server running" or equivalent.
 - existing `HostHandle::list_sessions()` behavior remains backward compatible.
-- `HostHandle::create_session()` retries session discovery over the startup
-  probe window and returns the live target when a delayed listing appears.
+- `HostHandle::create_session()` uses `new-session -P -F` to capture the
+  created session id/name, retries discovery over the startup probe window, and
+  returns the live target when a delayed listing appears.
 - startup probe exhaustion returns a typed or inspectable diagnostic error
   instead of only `session created but not found in list`.
+- remain-on-exit startup diagnostics preserve failed pane output without
+  leaving healthy sessions held after successful boot.
 - `Target::rename()` continues using stable session id in the tmux command.
 - mock transport coverage for host command errors and no-server diagnostics.
 
@@ -930,9 +1013,13 @@ for `self_reported_handle`.
 - Run `mstream rename` and verify live tmux `list-sessions` shows the new name,
   while mstream target remains `host::$N`.
 - Kill a joined tmux session and verify `liveness=dead` on the next reconcile.
-- Simulate SSH/host failure and verify `liveness=unreachable`, not dead.
+- Simulate SSH/host failure and verify `liveness=unreachable`, not dead, while
+  other hosts still render normally.
+- Run `mstream session list --cached` during a simulated hanging host inventory
+  and verify it returns without host I/O.
 - Scan after daemon restart and verify live tmux names are ground truth.
-- Doctor reports drift/dead/unreachable without direct tmux probing.
+- Doctor reports drift/dead/unreachable and distinguishes absent ids from
+  reused ids without direct tmux probing.
 - Create a session whose first `list_sessions()` response omits the new session
   but a later response includes it; verify mstream does not boot-death.
 - Create a managed agent command that exits immediately; verify mstream reports
@@ -950,6 +1037,6 @@ for `self_reported_handle`.
 - Cleanup can destroy useful forensic state if automatic. Mitigate by keeping
   reconciliation read-only by default and requiring explicit doctor cleanup
   flags tied to #401 lifecycle semantics.
-- Boot diagnostics can perturb healthy agent process semantics if implemented
-  as a permanent wrapper. Mitigate by limiting diagnostic hold behavior to the
-  startup window and documenting any bootstrap tradeoff in PLAN.
+- Boot diagnostics can leave failed panes or `remain-on-exit` options behind if
+  cleanup fails. Mitigate with bounded diagnostic retention, explicit cleanup
+  after live boot, and tests that prove healthy agents are not shell-wrapped.
