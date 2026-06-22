@@ -10,7 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-22 | @codex-562-impl | Documented issue #562 reality: session rows render stable tmux ids and list-focused `/` search jumps by session name in current sort order. |
+| 2026-06-22 | @codex-562-impl | Documented issue #562 reality: session rows render stable tmux ids and list-focused `/` search uses case-insensitive substring matching in current sort order. |
 | 2026-06-11 | @mstream453-impl | Added `SessionSortMode::Name` for list-pane `s` sorting and Help shortcut coverage. |
 | 2026-05-20 | @codex | Added `Cli.alias` and host-label override behavior so mmux can display operator-provided labels without changing host routing identity. |
 | 2026-05-16 | @codex-tmux-tl | Added insertion-point cursor state for mmux modal text fields so focused Left/Right edit inside the field, with single-line and wrapped Send Keys rendering keeping the terminal cursor aligned. |
@@ -354,6 +354,10 @@ transient search query, printable characters extend it, and
 the query, case-insensitively, in the current row order. Another `/`, Up, or
 Down cancels search mode without moving the highlight; non-text command keys
 first leave search mode before normal handling.
+This is substring (`contains`) matching, not prefix matching, following the
+vi/vim/less `/` convention: search is unanchored/match-anywhere, while prefix
+matching is a typeahead/completion idiom. Iterating matches with `n`/`N` is a
+possible future follow-up and is out of scope for #562.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
 the bottom status start with `tab ↑/↓`, then `help`, `prompt`, `attach`,

@@ -8,7 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-22 | @codex-562-impl | Documented issue #562 TUI updates: visible stable session ids in rows and list-focused `/` quick search. |
+| 2026-06-22 | @codex-562-impl | Documented issue #562 TUI updates: visible stable session ids in rows and list-focused `/` quick search with case-insensitive substring matching. |
 | 2026-06-11 | @mstream453-impl | Added list-pane `s` name sorting and documented the Help shortcut. |
 | 2026-05-30 | @codex | Added the local macOS release-build install sequence, including re-signing `/usr/local/bin/mmux` before ForceCommand use. |
 | 2026-05-28 | @gpt55-342-og | Removed positional `--alias` overrides; SSH targets now use endpoint identity labels including user, host, non-default port, and non-default tmux socket. |
@@ -346,6 +346,10 @@ Pressing `/` while the list pane is focused starts quick search; typed
 characters match session names case-insensitively and move the highlight to the
 first matching row in the current sort order. Another `/`, Up, or Down cancels
 search mode without moving the highlighted row.
+Matching is substring (`contains`), not prefix, following the vi/vim/less `/`
+convention: search is unanchored/match-anywhere, while prefix matching is a
+typeahead/completion idiom. Iterating matches with `n`/`N` is a possible future
+follow-up and is out of scope for #562.
 The recency column is formatted as
 `  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`

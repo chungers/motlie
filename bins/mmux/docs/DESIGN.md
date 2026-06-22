@@ -8,7 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-22 | @codex-562-impl | Added issue #562 design updates: session rows show stable tmux ids and list-focused `/` search jumps to the first matching session name in current sort order. |
+| 2026-06-22 | @codex-562-impl | Added issue #562 design updates: session rows show stable tmux ids and list-focused `/` search uses case-insensitive substring matching in current sort order. |
 | 2026-05-28 | @gpt55-342-og | Updated multi-host identity for issue #342: SSH labels and aliases now use endpoint identity and positional `--alias` overrides are removed. |
 | 2026-05-20 | @codex | Added issue #317 host-label override design: `--alias` maps comma-separated display overrides to localhost plus SSH URI order, while empty entries preserve discovered labels. |
 | 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts so `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
@@ -143,6 +143,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `/` match session display names, and the highlight jumps to the first
   matching row in the current sort order. Typing another `/`, Up, or Down
   cancels search mode and leaves the highlight where it is.
+  Matching is case-insensitive substring (`contains`), not prefix, following
+  the vi/vim/less `/` convention: search is unanchored/match-anywhere, while
+  prefix matching is a typeahead/completion idiom. Iterating matches with
+  `n`/`N` is a possible future follow-up and is out of scope for #562.
 - `R` shows a live active-pane preview for the highlighted session.
 - `L` and `R` participate in pane focus cycling in landscape mode.
 - `L` and `R` are both scrollable. The `L` viewport scrolls automatically to
