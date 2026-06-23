@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-23 | @codex-561-design | Implemented B3 cleanup contract: `doctor --quarantine-dead` and `--prune-quarantined` operate only on confirmed-dead rows and preserve unreachable rows per #401 lifecycle hygiene. |
 | 2026-06-22 | @codex-561-design | Simplified David's boot design: `new-session -d -P -F` is the correct-by-construction create-session fix, and remain-on-exit is only genuine boot-exit diagnostics. |
 | 2026-06-22 | @codex-561-design | Addressed PR #563 review: made boot items 9-10 first-class acceptance criteria, chose remain-on-exit diagnostics, bounded per-host reconcile, documented handle semantics, promoted `new-session -P -F`, named migration consumer, and distinguished reused session ids. |
 | 2026-06-22 | @codex-561-design | Folded in broadened #561 scope for create-session fidelity and genuine boot-exit diagnostics. |
@@ -212,7 +213,11 @@ implementation:
 7. `session list`/`doctor` expose in-band name drift, dead sessions,
    unreachable hosts, and reused-session-id cases.
 8. Confirmed-dead cleanup is explicit and tied to the #401 quarantine/reclaim
-   lifecycle; unreachable hosts are never pruned as dead.
+   lifecycle: `doctor --quarantine-dead` moves only `dead` rows with
+   `death_kind=absent_session_id|reused_session_id` into the quarantined
+   lifecycle state, `doctor --prune-quarantined` removes only rows already
+   quarantined and still confirmed dead, and unreachable hosts are never
+   quarantined or pruned as dead.
 9. `HostHandle::create_session()` / `mstream new` use tmux
    `new-session -d -P -F` and parse stable id/name from the create command
    output, with no post-create `list_sessions()` probe required to prove
@@ -736,13 +741,18 @@ mstream doctor --prune-quarantined
 ```
 
 `--quarantine-dead` applies only to confirmed `dead` sessions, never
-`unreachable` sessions. It removes them from recruitable rosters, cancels
-handoffs/timers using the existing `deregister_session_target` behavior, and
-marks/reports them as quarantined in daemon memory where a record remains.
+`unreachable` sessions. Confirmed dead means `death_kind=absent_session_id` or
+`death_kind=reused_session_id` from a fresh live reconcile. It removes them from
+agent channels and recruitable rosters, cancels dependent handoffs/timers through
+the existing #401 lifecycle cleanup path, and marks/reports the daemon record as
+`quarantined` where the record remains. Cleanup rejects `--cached`/`--no-reconcile`
+because cached rows cannot prove death.
 
-`--prune-quarantined` removes daemon records that are already quarantined and
-dead. Live managed sessions still use the #401 `retire` then gated `reclaim`
-path because reclaim is the destructive tmux kill operation.
+`--prune-quarantined` removes daemon records only when they are already
+`quarantined` and still confirmed dead after a fresh reconcile. It must leave
+live quarantined records for the #401 gated `reclaim` path, because reclaim is
+the destructive tmux kill operation. It must also leave unreachable quarantined
+records in place because an unreachable host is not proof of death.
 
 `scan` can continue to clean up stale id reuse for safety, but it should report
 which records were quarantined/pruned in its JSON output, and whether each
@@ -945,9 +955,10 @@ Doctor is the aggregate in-band check for #561 drift/death:
 ```sh
 mstream doctor --workstream issue-561-mstream-fidelity
 mstream doctor --host amd1 --quarantine-dead
+mstream doctor --host amd1 --prune-quarantined
 ```
 
-Default doctor is read-only. Cleanup flags are explicit.
+Default doctor is read-only. Cleanup flags are explicit and require live reconciliation; `--cached`/`--no-reconcile` is rejected when a cleanup flag is present.
 
 ## Migration Strategy
 
@@ -1001,7 +1012,8 @@ for `self_reported_handle`.
 - OutputBus `TargetOutput` with a stable session id refreshes `live_name` and
   routes output after an out-of-band rename.
 - doctor summary counts live, drift, dead, and unreachable rows.
-- `doctor --quarantine-dead` never applies to unreachable rows.
+- `doctor --quarantine-dead` quarantines confirmed-dead rows and never applies to unreachable rows.
+- `doctor --prune-quarantined` removes only already-quarantined confirmed-dead rows and leaves live or unreachable rows intact.
 
 ### libs/tmux tests
 

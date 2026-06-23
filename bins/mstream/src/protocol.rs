@@ -291,6 +291,10 @@ pub struct SessionListRequest {
 pub struct DoctorRequest {
     #[serde(default)]
     pub cached: bool,
+    #[serde(default)]
+    pub quarantine_dead: bool,
+    #[serde(default)]
+    pub prune_quarantined: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

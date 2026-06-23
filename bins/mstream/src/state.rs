@@ -760,6 +760,65 @@ enum LiveActivity {
     Error(String),
 }
 
+#[derive(Debug, Clone)]
+struct ConfirmedDeadSession {
+    target: SessionTarget,
+    death_kind: &'static str,
+    death_reason: String,
+    reused_by_agent: Option<String>,
+}
+
+impl ConfirmedDeadSession {
+    fn from_live(target: &SessionTarget, live: Option<&LiveActivity>) -> Option<Self> {
+        match live? {
+            LiveActivity::Missing => Some(Self {
+                target: target.clone(),
+                death_kind: "absent_session_id",
+                death_reason: "tracked tmux session id is absent".to_string(),
+                reused_by_agent: None,
+            }),
+            LiveActivity::Reused { observed, reason } => Some(Self {
+                target: target.clone(),
+                death_kind: "reused_session_id",
+                death_reason: reason.clone(),
+                reused_by_agent: Some(observed.name.clone()),
+            }),
+            LiveActivity::Present(_) | LiveActivity::Error(_) => None,
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "target": self.target.to_string(),
+            "death_kind": self.death_kind,
+            "death_reason": self.death_reason.clone(),
+            "reused_by": self.reused_by_agent.clone(),
+            "reused_by_agent": self.reused_by_agent.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct DoctorCleanupReport {
+    quarantine_dead: bool,
+    prune_quarantined: bool,
+    quarantined: Vec<Value>,
+    pruned: Vec<Value>,
+}
+
+impl DoctorCleanupReport {
+    fn to_json(&self) -> Value {
+        json!({
+            "quarantine_dead": self.quarantine_dead,
+            "prune_quarantined": self.prune_quarantined,
+            "quarantined_count": self.quarantined.len(),
+            "pruned_count": self.pruned.len(),
+            "quarantined": self.quarantined.clone(),
+            "pruned": self.pruned.clone(),
+        })
+    }
+}
+
 impl DaemonState {
     pub async fn handle_shared(
         shared: Arc<Mutex<Self>>,
@@ -2978,23 +3037,126 @@ impl DaemonState {
         shared: Arc<Mutex<Self>>,
         request: DoctorRequest,
     ) -> anyhow::Result<Vec<Value>> {
-        let sessions = if request.cached {
-            shared.lock().await.session_list_json()
+        let cleanup_requested = request.quarantine_dead || request.prune_quarantined;
+        if cleanup_requested && request.cached {
+            bail!("doctor cleanup requires live reconciliation; remove --cached/--no-reconcile");
+        }
+
+        let mut live = BTreeMap::new();
+        let cleanup = if request.cached {
+            DoctorCleanupReport {
+                quarantine_dead: request.quarantine_dead,
+                prune_quarantined: request.prune_quarantined,
+                ..Default::default()
+            }
         } else {
             let targets = {
                 let state = shared.lock().await;
                 state.sessions.keys().cloned().collect::<Vec<_>>()
             };
-            let live = Self::reconcile_targets_shared(Arc::clone(&shared), targets).await?;
+            live = Self::reconcile_targets_shared(Arc::clone(&shared), targets).await?;
+            let (cleanup, abort_tasks) = {
+                let mut state = shared.lock().await;
+                state.apply_doctor_cleanup(
+                    &live,
+                    request.quarantine_dead,
+                    request.prune_quarantined,
+                )
+            };
+            for task in abort_tasks {
+                task.abort();
+            }
+            cleanup
+        };
+
+        let sessions = {
             let state = shared.lock().await;
-            state.session_list_json_with_live(&live)
+            if request.cached {
+                state.session_list_json()
+            } else {
+                state.session_list_json_with_live(&live)
+            }
         };
         Ok(vec![json!({
             "type": "doctor",
             "scope": "sessions",
             "sessions": sessions["sessions"].clone(),
             "reconciled": sessions["reconciled"].clone(),
+            "cleanup": cleanup.to_json(),
         })])
+    }
+
+    fn apply_doctor_cleanup(
+        &mut self,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+        quarantine_dead: bool,
+        prune_quarantined: bool,
+    ) -> (DoctorCleanupReport, Vec<JoinHandle<()>>) {
+        let mut report = DoctorCleanupReport {
+            quarantine_dead,
+            prune_quarantined,
+            ..Default::default()
+        };
+        let mut abort_tasks = Vec::new();
+
+        if quarantine_dead {
+            let confirmed_dead = self
+                .sessions
+                .iter()
+                .filter(|(_, record)| record.state != AgentState::Quarantined)
+                .filter_map(|(target, _)| ConfirmedDeadSession::from_live(target, live.get(target)))
+                .collect::<Vec<_>>();
+            for dead in confirmed_dead {
+                let reason = format!(
+                    "confirmed-dead target {} quarantined by mstream doctor for #401 lifecycle cleanup ({})",
+                    dead.target, dead.death_kind
+                );
+                abort_tasks
+                    .extend(self.quarantine_confirmed_dead_session_target(&dead.target, &reason));
+                let mut row = dead.to_json();
+                if let Value::Object(fields) = &mut row {
+                    fields.insert("state".to_string(), json!(AgentState::Quarantined.as_str()));
+                }
+                report.quarantined.push(row);
+            }
+        }
+
+        if prune_quarantined {
+            let confirmed_dead = self
+                .sessions
+                .iter()
+                .filter(|(_, record)| record.state == AgentState::Quarantined)
+                .filter_map(|(target, _)| ConfirmedDeadSession::from_live(target, live.get(target)))
+                .collect::<Vec<_>>();
+            for dead in confirmed_dead {
+                let reason = format!(
+                    "confirmed-dead quarantined target {} pruned by mstream doctor for #401 lifecycle cleanup ({})",
+                    dead.target, dead.death_kind
+                );
+                abort_tasks.extend(self.deregister_session_target(&dead.target, &reason, None));
+                report.pruned.push(dead.to_json());
+            }
+        }
+
+        (report, abort_tasks)
+    }
+
+    fn quarantine_confirmed_dead_session_target(
+        &mut self,
+        target: &SessionTarget,
+        reason: &str,
+    ) -> Vec<JoinHandle<()>> {
+        // #401 lifecycle: doctor quarantine is the non-destructive retire state
+        // for sessions proven dead by a fresh tmux reconciliation. It must not
+        // run for unreachable rows, which are not confirmed dead.
+        self.remove_agent_channels_for_target(target);
+        if let Some(record) = self.sessions.get_mut(target) {
+            record.state = AgentState::Quarantined;
+            record.last_report_kind = Some("doctor_quarantine_dead".to_string());
+            record.last_report_summary = Some(reason.to_string());
+            record.updated_at = Utc::now();
+        }
+        self.cancel_target_dependents(target, reason, None)
     }
 
     async fn reconcile_workstream_live_names_shared(
@@ -5121,6 +5283,17 @@ impl DaemonState {
         self.sessions.remove(target);
         for workstream in self.workstreams.values_mut() {
             workstream.sessions.remove(target);
+        }
+        self.cancel_target_dependents(target, reason, active_timer)
+    }
+
+    fn cancel_target_dependents(
+        &mut self,
+        target: &SessionTarget,
+        reason: &str,
+        active_timer: Option<(&str, ActiveTimer)>,
+    ) -> Vec<JoinHandle<()>> {
+        for workstream in self.workstreams.values_mut() {
             for handoff in workstream.handoffs.values_mut() {
                 if handoff.canceled_reason.is_none()
                     && (handoff.from == *target || handoff.to == *target)
@@ -6524,6 +6697,16 @@ mod tests {
         }
     }
 
+    fn doctor_session_row<'a>(record: &'a Value, target: &SessionTarget) -> &'a Value {
+        let target = target.to_string();
+        record["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .find(|row| row["target"].as_str() == Some(target.as_str()))
+            .expect("session row")
+    }
+
     fn open_test_workstream(state: &mut DaemonState, workstream: &str) {
         state
             .open(OpenRequest {
@@ -7695,6 +7878,193 @@ mod tests {
             .expect("workstream")
             .sessions
             .contains(&target));
+    }
+
+    #[tokio::test]
+    async fn doctor_quarantine_dead_only_confirmed_dead_sessions() {
+        let dead = SessionTarget::session_id("local", "$1").expect("target");
+        let live = SessionTarget::session_id("local", "$2").expect("target");
+        let unreachable = SessionTarget::session_id("down", "$9").expect("target");
+        let local = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ live $2 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", local);
+        register_mock_host(&mut state, "down", no_tmux_server_mock());
+        open_test_workstream(&mut state, "issue-561");
+        for target in [&dead, &live, &unreachable] {
+            state
+                .add_session_to_workstream(
+                    "issue-561",
+                    target.clone(),
+                    "implementer".to_string(),
+                    Some("codex".to_string()),
+                    None,
+                    AgentState::Busy,
+                )
+                .expect("add session");
+        }
+        state
+            .sessions
+            .get_mut(&dead)
+            .expect("dead session")
+            .observe_tmux_session(&session_info("dead", "$1", 100, 120));
+        state
+            .sessions
+            .get_mut(&live)
+            .expect("live session")
+            .observe_tmux_session(&session_info("live", "$2", 100, 150));
+        state
+            .sessions
+            .get_mut(&unreachable)
+            .expect("unreachable session")
+            .observe_tmux_session(&session_info("unreachable", "$9", 100, 130));
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::doctor_shared(
+            Arc::clone(&shared),
+            DoctorRequest {
+                cached: false,
+                quarantine_dead: true,
+                prune_quarantined: false,
+            },
+        )
+        .await
+        .expect("doctor");
+
+        assert_eq!(records[0]["cleanup"]["quarantined_count"], 1);
+        assert_eq!(
+            records[0]["cleanup"]["quarantined"][0]["target"],
+            dead.to_string()
+        );
+        assert_eq!(
+            records[0]["cleanup"]["quarantined"][0]["death_kind"],
+            "absent_session_id"
+        );
+        let dead_row = doctor_session_row(&records[0], &dead);
+        assert_eq!(dead_row["state"], "quarantined");
+        assert_eq!(dead_row["liveness"], "dead");
+        assert_eq!(dead_row["death_kind"], "absent_session_id");
+        let live_row = doctor_session_row(&records[0], &live);
+        assert_eq!(live_row["state"], "busy");
+        assert_eq!(live_row["liveness"], "live");
+        let unreachable_row = doctor_session_row(&records[0], &unreachable);
+        assert_eq!(unreachable_row["state"], "busy");
+        assert_eq!(unreachable_row["liveness"], "unreachable");
+        assert_eq!(unreachable_row["death_kind"], Value::Null);
+
+        let state = shared.lock().await;
+        assert_eq!(
+            state.sessions.get(&dead).expect("dead").state,
+            AgentState::Quarantined
+        );
+        assert_eq!(
+            state.sessions.get(&live).expect("live").state,
+            AgentState::Busy
+        );
+        assert_eq!(
+            state.sessions.get(&unreachable).expect("unreachable").state,
+            AgentState::Busy
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_prune_quarantined_removes_only_confirmed_dead_quarantined() {
+        let dead_quarantined = SessionTarget::session_id("local", "$1").expect("target");
+        let live_quarantined = SessionTarget::session_id("local", "$2").expect("target");
+        let dead_busy = SessionTarget::session_id("local", "$3").expect("target");
+        let unreachable_quarantined = SessionTarget::session_id("down", "$9").expect("target");
+        let local = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ live $2 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", local);
+        register_mock_host(&mut state, "down", no_tmux_server_mock());
+        open_test_workstream(&mut state, "issue-561");
+        for (target, agent_state) in [
+            (&dead_quarantined, AgentState::Quarantined),
+            (&live_quarantined, AgentState::Quarantined),
+            (&dead_busy, AgentState::Busy),
+            (&unreachable_quarantined, AgentState::Quarantined),
+        ] {
+            state
+                .add_session_to_workstream(
+                    "issue-561",
+                    target.clone(),
+                    "implementer".to_string(),
+                    Some("codex".to_string()),
+                    None,
+                    agent_state,
+                )
+                .expect("add session");
+        }
+        state
+            .sessions
+            .get_mut(&dead_quarantined)
+            .expect("dead quarantined")
+            .observe_tmux_session(&session_info("dead", "$1", 100, 120));
+        state
+            .sessions
+            .get_mut(&live_quarantined)
+            .expect("live quarantined")
+            .observe_tmux_session(&session_info("live", "$2", 100, 150));
+        state
+            .sessions
+            .get_mut(&dead_busy)
+            .expect("dead busy")
+            .observe_tmux_session(&session_info("dead-busy", "$3", 100, 125));
+        state
+            .sessions
+            .get_mut(&unreachable_quarantined)
+            .expect("unreachable quarantined")
+            .observe_tmux_session(&session_info("unreachable", "$9", 100, 130));
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::doctor_shared(
+            Arc::clone(&shared),
+            DoctorRequest {
+                cached: false,
+                quarantine_dead: false,
+                prune_quarantined: true,
+            },
+        )
+        .await
+        .expect("doctor");
+
+        assert_eq!(records[0]["cleanup"]["pruned_count"], 1);
+        let dead_quarantined_target = dead_quarantined.to_string();
+        assert_eq!(
+            records[0]["cleanup"]["pruned"][0]["target"],
+            dead_quarantined_target
+        );
+        assert!(records[0]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .all(|row| row["target"].as_str() != Some(dead_quarantined_target.as_str())));
+        assert_eq!(
+            doctor_session_row(&records[0], &live_quarantined)["liveness"],
+            "live"
+        );
+        assert_eq!(
+            doctor_session_row(&records[0], &dead_busy)["liveness"],
+            "dead"
+        );
+        assert_eq!(
+            doctor_session_row(&records[0], &unreachable_quarantined)["liveness"],
+            "unreachable"
+        );
+
+        let state = shared.lock().await;
+        assert!(!state.sessions.contains_key(&dead_quarantined));
+        assert!(state.sessions.contains_key(&live_quarantined));
+        assert!(state.sessions.contains_key(&dead_busy));
+        assert!(state.sessions.contains_key(&unreachable_quarantined));
+        let workstream = state.workstream("issue-561").expect("workstream");
+        assert!(!workstream.sessions.contains(&dead_quarantined));
+        assert!(workstream.sessions.contains(&live_quarantined));
+        assert!(workstream.sessions.contains(&dead_busy));
+        assert!(workstream.sessions.contains(&unreachable_quarantined));
     }
 
     #[tokio::test]

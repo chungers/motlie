@@ -533,12 +533,24 @@ pub struct DoctorArgs {
     pub cached: bool,
     #[arg(long = "no-reconcile")]
     pub no_reconcile: bool,
+    #[arg(
+        long,
+        help = "Move confirmed-dead sessions to the #401 quarantined lifecycle state; never acts on unreachable rows"
+    )]
+    pub quarantine_dead: bool,
+    #[arg(
+        long,
+        help = "Remove already-quarantined confirmed-dead session records; never acts on unreachable rows"
+    )]
+    pub prune_quarantined: bool,
 }
 
 impl DoctorArgs {
     fn into_request(self) -> DoctorRequest {
         DoctorRequest {
             cached: self.cached || self.no_reconcile,
+            quarantine_dead: self.quarantine_dead,
+            prune_quarantined: self.prune_quarantined,
         }
     }
 }
@@ -1230,6 +1242,25 @@ mod tests {
         assert_eq!(request.role.as_deref(), Some("implementer"));
         assert_eq!(request.workstream.as_deref(), Some("issue-360"));
         assert_eq!(request.mmux_label.as_deref(), Some("360 impl"));
+    }
+
+    #[test]
+    fn doctor_cleanup_flags_build_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "doctor",
+            "--quarantine-dead",
+            "--prune-quarantined",
+        ])
+        .expect("doctor command parses");
+
+        let request = cli.command.into_request().expect("doctor request");
+        let ClientRequest::Doctor(request) = request else {
+            panic!("expected doctor request");
+        };
+        assert!(!request.cached);
+        assert!(request.quarantine_dead);
+        assert!(request.prune_quarantined);
     }
 
     #[test]
