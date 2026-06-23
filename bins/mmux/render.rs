@@ -278,22 +278,23 @@ fn session_row_name_field(row: &SessionRow, width: usize) -> String {
 }
 
 fn session_identity_field(row: &SessionRow, width: usize) -> String {
-    const SESSION_ID_GAP: usize = 4;
-
     if width == 0 {
         return String::new();
     }
 
     let id = format!("[{}]", row.session.id.as_str());
     let id_width = char_width(&id);
-    if width <= id_width {
+    if width <= id_width + 1 {
         return truncate_chars(&id, width);
     }
 
-    let gap = SESSION_ID_GAP.min(width.saturating_sub(id_width + 1));
-    let name_width = width.saturating_sub(id_width).saturating_sub(gap);
+    let name_width = width.saturating_sub(id_width + 1);
     let name = truncate_chars(&row.session.name, name_width);
-    format!("{name}{}{id}", " ".repeat(gap))
+    if name.is_empty() {
+        truncate_chars(&id, width)
+    } else {
+        format!("{name} {id}")
+    }
 }
 
 fn session_row_metadata_gap(row: &SessionRow, metadata: &str, default_gap: usize) -> usize {
@@ -892,6 +893,10 @@ fn modal_content_padding(body: &ModalBody) -> (u16, u16) {
 fn modal_content_height(view: &ModalView, content_width: u16) -> u16 {
     match &view.body {
         ModalBody::Text(text) => max(1, text.lines().count()) as u16,
+        ModalBody::Help { header, keys, .. } => {
+            let header_height = header.lines().count().saturating_add(1);
+            max(1, header_height.saturating_add(keys.lines().count())) as u16
+        }
         ModalBody::NewSession { host_label, .. } => {
             let session_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
             let field_height = if host_label.is_some() {
@@ -922,6 +927,12 @@ fn modal_content_width(view: &ModalView) -> u16 {
     let body_width = match &view.body {
         ModalBody::Text(text) => text
             .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0),
+        ModalBody::Help { header, keys, .. } => header
+            .lines()
+            .chain(keys.lines())
             .map(|line| line.chars().count())
             .max()
             .unwrap_or(0),
@@ -1011,6 +1022,11 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
                 area,
             );
         }
+        ModalBody::Help {
+            header,
+            keys,
+            scroll,
+        } => draw_help_body(frame, area, header, keys, *scroll),
         ModalBody::NewSession {
             input,
             input_cursor,
@@ -1076,6 +1092,48 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
                 },
             );
         }
+    }
+}
+
+fn draw_help_body(frame: &mut Frame<'_>, area: Rect, header: &str, keys: &str, scroll: usize) {
+    let header_height = min(header.lines().count() as u16, area.height);
+    if header_height > 0 {
+        frame.render_widget(
+            Paragraph::new(header),
+            Rect::new(area.x, area.y, area.width, header_height),
+        );
+    }
+
+    let key_list_y = area.y.saturating_add(header_height.saturating_add(1));
+    if key_list_y >= area.bottom() {
+        return;
+    }
+
+    let key_area = Rect::new(
+        area.x,
+        key_list_y,
+        area.width,
+        area.bottom().saturating_sub(key_list_y),
+    );
+    let total_rows = max(1, keys.lines().count());
+    let visible_rows = max(1, key_area.height as usize);
+    let scroll = scroll.min(total_rows.saturating_sub(visible_rows));
+    frame.render_widget(
+        Paragraph::new(keys).scroll((saturating_u16(scroll), 0)),
+        key_area,
+    );
+
+    if total_rows > visible_rows {
+        let mut scrollbar_state = ScrollbarState::new(total_rows)
+            .position(scroll)
+            .viewport_content_length(visible_rows);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_style(Style::default().fg(Color::Green))
+                .track_style(Style::default().fg(Color::DarkGray)),
+            key_area,
+            &mut scrollbar_state,
+        );
     }
 }
 
@@ -2120,20 +2178,27 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                 active_button,
             }
         }
-        ModalState::Help => ModalView {
+        ModalState::Help { scroll } => ModalView {
             title: " Help ",
-            body: ModalBody::Text(format!(
-                "{}\n\nVersion: {}\nBuild date: {}\nGit SHA: {}\n\n{}",
-                MOTLIE_PLACEHOLDER,
-                env!("CARGO_PKG_VERSION"),
-                BUILD_DATE,
-                short_build_git_sha(),
-                HELP_KEY_FUNCTIONS
-            )),
+            body: ModalBody::Help {
+                header: help_header_text(),
+                keys: HELP_KEY_FUNCTIONS.to_string(),
+                scroll: *scroll,
+            },
             buttons: "[Ok]".to_string(),
             active_button: Some(Button::Ok),
         },
     }
+}
+
+fn help_header_text() -> String {
+    format!(
+        "{}\n\nVersion: {}\nBuild date: {}\nGit SHA: {}",
+        MOTLIE_PLACEHOLDER,
+        env!("CARGO_PKG_VERSION"),
+        BUILD_DATE,
+        short_build_git_sha()
+    )
 }
 
 pub(crate) fn short_build_git_sha() -> String {

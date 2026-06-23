@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-562-impl | Updated live-test follow-ups: session rows use single-space stable-id rendering, `s`/`g` toggle back to activity recency, and Help keeps its logo fixed while scrolling the key list. |
 | 2026-06-22 | @codex-562-impl | Added issue #562 design updates: session rows show stable tmux ids and list-focused `/` search uses case-insensitive substring matching in current sort order. |
 | 2026-05-28 | @gpt55-342-og | Updated multi-host identity for issue #342: SSH labels and aliases now use endpoint identity and positional `--alias` overrides are removed. |
 | 2026-05-20 | @codex | Added issue #317 host-label override design: `--alias` maps comma-separated display overrides to localhost plus SSH URI order, while empty entries preserve discovered labels. |
@@ -137,7 +138,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - The TUI body is split into a left pane `L` and right pane `R`.
 - `L` lists tmux sessions on the target host and has default focus.
 - `L` session rows show the display name and stable tmux session id, for
-  example `486-rv-llm    [$42]`, so users can distinguish renamed or similarly
+  example `486-rv-llm [$42]`, so users can distinguish renamed or similarly
   named sessions while mmux still dispatches by stable id internally.
 - When `L` has focus, `/` enters quick session search. Typed characters after
   `/` match session display names, and the highlight jumps to the first
@@ -232,7 +233,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `h` opens a centered help modal with the built-in motlie logo,
   build date, current build git SHA, key-function reference text, a horizontal
   separator, and an `Ok` button. Build metadata renders below the logo and
-  above the key-function reference.
+  above the key-function reference. The logo and build metadata stay fixed at
+  the top of the modal while the key-function reference scrolls below them
+  with Up/Down, PgUp/PgDn, or `j`/`k`.
 - In create/kill modal dialogs, Left and Right choose between `Cancel` and
   `Ok`; the kill modal also lets `Tab` / `Shift-Tab` cycle those buttons.
   Enter exits the modal and applies `Ok` when selected. `Esc` in a modal is
@@ -278,7 +281,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   each group sort by activity time, host order, and session name. Empty
   checked-tag values sort with rows that have no displayed tag. Pressing `g`
   selects the first row in the new order and pressing `g` again restores
-  activity sort. Sorting on the observer-side mark instead of raw host
+  activity sort. Pressing `s` while the session list is focused toggles name
+  sorting: the first press sorts by session name and selects the first row in
+  name order; the next press restores activity recency. Sorting on the
+  observer-side mark instead of raw host
   `SessionInfo.activity` keeps activity order stable across multi-host fleets
   even when host clocks drift. Stable `(host_id, session_id)` preservation
   keeps the current highlight on the same session after refresh even if the row
@@ -719,8 +725,9 @@ Main-selector keymap (focus-aware):
 | `$` then `0…9` | Send a single digit immediately to highlight | No-op |
 | `$` then `!` | Send `{Esc}` immediately to highlight | No-op |
 | `t` | Open tag list/add/update/delete modal for highlight | Same |
-| `g` | Toggle activity/tag grouping | No-op |
-| `h` | Open help modal with logo, key functions, and build git SHA | Same |
+| `g` | Toggle tag grouping / activity recency | No-op |
+| `s` | Toggle name sort / activity recency | No-op |
+| `h` | Open help modal with fixed logo, scrollable key functions, and build git SHA | Same |
 | `a` | Attach highlight | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 

@@ -105,32 +105,61 @@ pub(crate) const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 
 pub(crate) const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 pub(crate) const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
-pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:
-↑ (u) / ↓ (b) select session or scroll detail
-/ then chars: case-insensitive substring; sorted first; /,↑,↓ cancel
-Enter refresh highlighted session preview (list pane)
+pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Sessions/List:
+↑/↓ or u/b select session
+PgUp/PgDn page sessions
+Home/End first/last session
+/ then chars: search names; case-insensitive substring
+  jumps to first match in current sort order
+  another /, ↑, or ↓ cancels search
+Enter refresh highlighted session preview
+s toggle name sort <-> activity recency
+g toggle tag sort <-> activity recency
+p or @ prompt highlighted session
+$0..$9 send digit to highlighted session
+$! send Escape to highlighted session
+Ctrl-Enter send keys, wait, Enter
+$$ suffix sends same delayed Enter
+n create session
+k kill highlighted session
+r rename highlighted session
+t manage highlighted session tags
+a attach highlighted session
+
+Detail:
+↑/↓ or u/b scroll detail
+PgUp/PgDn page detail
+Home/End top/bottom detail
+
+New Session:
+↑/↓ or u/b move env row
+m modify env row
+x unset env row
+Enter apply focused action
+Esc cancel
+
+Session Tags:
+↑/↓ or u/b move focused tag
+m modify focused tag
+x unset focused tag
+c choose displayed tag
+Enter apply focused action
+Esc discard changes
+
+Text Fields:
+Tab/Shift-Tab cycle focus
+Left/Right move cursor or choose Cancel/Ok
+Home/End move cursor to start/end
+Backspace/Delete edit text
+
+Help:
+↑/↓ or j/k scroll key list
+PgUp/PgDn page key list
+Enter or Esc close help
+
+Global:
 tab cycle panes
 l toggle layout
-p | @ prompt highlighted session
-  $0..$9 send digit to highlight
-  $! send Escape to highlight
-  Ctrl-Enter send keys, wait, Enter
-  $$ suffix same delayed Enter
-n create session
-  ↑ (u) / ↓ (b) move env row
-  m modify env row
-  x unset env row
-k kill highlighted session
-r rename highlighted session (list pane)
-t manage highlighted session tags
-  ↑ (u) / ↓ (b) move focused tag
-  m modify focused tag
-  x unset focused tag
-  c toggle sort tag
-g group sessions by tag (list pane)
-s sort sessions by name (list pane)
-h help
-a attach highlighted session
 mod-←/→ resize L/R in landscape
 mod-↑/↓ resize T/B in portrait
 q/Ctrl-C quit"#;

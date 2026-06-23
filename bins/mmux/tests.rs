@@ -591,7 +591,8 @@ fn session_list_line_shows_stable_id() {
     let line = session_list_line(&row, true, None, 0, 36);
 
     assert!(line.starts_with(">  dev"), "{line:?}");
-    assert!(line.contains("[$42]"), "{line:?}");
+    assert!(line.contains("dev [$42]"), "{line:?}");
+    assert!(!line.contains("dev  [$42]"), "{line:?}");
 }
 
 #[test]
@@ -1069,7 +1070,7 @@ async fn g_toggles_tag_grouping_from_list_focus_and_selects_top_row() {
 }
 
 #[tokio::test]
-async fn s_sorts_sessions_by_name_from_list_focus_and_selects_top_row() {
+async fn s_toggles_name_sort_from_list_focus_and_selects_top_row() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.session_list.rows = vec![
@@ -1120,6 +1121,30 @@ async fn s_sorts_sessions_by_name_from_list_focus_and_selects_top_row() {
         app.selected_session()
             .map(|session| session.name().to_string()),
         Some("alpha".to_string())
+    );
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.status.text(), "sort: activity");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta", "beta", "alpha"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("zeta".to_string())
     );
 }
 
@@ -2023,32 +2048,51 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
-    assert!(matches!(app.modal.as_ref(), Some(ModalState::Help)));
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 0 })
+    ));
     let view = modal_content(app.modal.as_ref().unwrap());
     assert_eq!(view.title, " Help ");
     assert_eq!(view.active_button, Some(Button::Ok));
     assert_eq!(view.buttons, "[Ok]");
+    assert!(matches!(&view.body, ModalBody::Help { scroll: 0, .. }));
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
-    assert!(body.contains("↑ (u) / ↓ (b) select session or scroll detail"));
-    assert!(body.contains("/ then chars: case-insensitive substring; sorted first; /,↑,↓ cancel"));
-    assert!(body.contains("Enter refresh highlighted session preview (list pane)"));
+    assert!(body.contains("Sessions/List:"));
+    assert!(body.contains("↑/↓ or u/b select session"));
+    assert!(body.contains("/ then chars: search names; case-insensitive substring"));
+    assert!(body.contains("  jumps to first match in current sort order"));
+    assert!(body.contains("  another /, ↑, or ↓ cancels search"));
+    assert!(body.contains("Enter refresh highlighted session preview"));
     assert!(!body.contains("monitor highlighted session"));
-    assert!(body.contains("  $0..$9 send digit to highlight"));
-    assert!(body.contains("  $! send Escape to highlight"));
-    assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
-    assert!(body.contains("  $$ suffix same delayed Enter"));
-    assert!(body.contains("  ↑ (u) / ↓ (b) move env row"));
-    assert!(body.contains("  m modify env row"));
-    assert!(body.contains("  x unset env row"));
-    assert!(body.contains("  ↑ (u) / ↓ (b) move focused tag"));
-    assert!(body.contains("  m modify focused tag"));
-    assert!(body.contains("  x unset focused tag"));
-    assert!(body.contains("  c toggle sort tag"));
-    assert!(body.contains("s sort sessions by name (list pane)"));
-    assert!(!body.contains("PgUp/PgDn page current pane"));
-    assert!(!body.contains("Home/End jump current pane"));
+    assert!(body.contains("$0..$9 send digit to highlighted session"));
+    assert!(body.contains("$! send Escape to highlighted session"));
+    assert!(body.contains("Ctrl-Enter send keys, wait, Enter"));
+    assert!(body.contains("$$ suffix sends same delayed Enter"));
+    assert!(body.contains("New Session:"));
+    assert!(body.contains("↑/↓ or u/b move env row"));
+    assert!(body.contains("m modify env row"));
+    assert!(body.contains("x unset env row"));
+    assert!(body.contains("Session Tags:"));
+    assert!(body.contains("↑/↓ or u/b move focused tag"));
+    assert!(body.contains("m modify focused tag"));
+    assert!(body.contains("x unset focused tag"));
+    assert!(body.contains("c choose displayed tag"));
+    assert!(body.contains("s toggle name sort <-> activity recency"));
+    assert!(body.contains("g toggle tag sort <-> activity recency"));
+    assert!(body.contains("PgUp/PgDn page sessions"));
+    assert!(body.contains("Home/End first/last session"));
+    assert!(body.contains("PgUp/PgDn page detail"));
+    assert!(body.contains("Home/End top/bottom detail"));
+    assert!(body.contains("Text Fields:"));
+    assert!(body.contains("Tab/Shift-Tab cycle focus"));
+    assert!(body.contains("Left/Right move cursor or choose Cancel/Ok"));
+    assert!(body.contains("Backspace/Delete edit text"));
+    assert!(body.contains("Help:"));
+    assert!(body.contains("↑/↓ or j/k scroll key list"));
+    assert!(body.contains("PgUp/PgDn page key list"));
     assert!(body.contains(&format!("Version: {}", env!("CARGO_PKG_VERSION"))));
     assert!(body.contains(BUILD_DATE));
     assert!(body.contains(&format!("Git SHA: {}", short_build_git_sha())));
@@ -2065,6 +2109,73 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(version_pos < build_date_pos);
     assert!(build_date_pos < git_sha_pos);
     assert!(git_sha_pos < keys_pos);
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 1 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 2 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 1 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 0 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 10 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 0 })
+    ));
 
     let outcome = handle_key(
         &fleet,
@@ -2092,6 +2203,23 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     .unwrap();
     assert!(matches!(outcome, KeyOutcome::Continue));
     assert!(app.modal.is_none());
+}
+
+#[test]
+fn help_modal_scrolls_key_list_below_fixed_header() {
+    let mut app = app_with_session();
+    app.modal = Some(ModalState::Help { scroll: 0 });
+
+    let unscrolled = render_to_string(&mut app, 80, 24);
+    assert!(unscrolled.contains("Version:"), "{unscrolled}");
+    assert!(unscrolled.contains("Sessions/List:"), "{unscrolled}");
+    assert!(!unscrolled.contains("Session Tags:"), "{unscrolled}");
+
+    app.modal = Some(ModalState::Help { scroll: 30 });
+    let scrolled = render_to_string(&mut app, 80, 24);
+    assert!(scrolled.contains("Version:"), "{scrolled}");
+    assert!(scrolled.contains("Session Tags:"), "{scrolled}");
+    assert!(!scrolled.contains("Sessions/List:"), "{scrolled}");
 }
 
 #[tokio::test]

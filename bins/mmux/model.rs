@@ -135,7 +135,9 @@ pub(crate) enum ModalState {
         session: SelectedSession,
         ui: SessionKeyValueModalUi,
     },
-    Help,
+    Help {
+        scroll: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +195,7 @@ impl ModalView {
     pub(crate) fn body_text(&self) -> String {
         match &self.body {
             ModalBody::Text(text) => text.clone(),
+            ModalBody::Help { header, keys, .. } => format!("{header}\n\n{keys}"),
             ModalBody::NewSession {
                 input,
                 host_label,
@@ -252,6 +255,11 @@ impl ModalView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModalBody {
     Text(String),
+    Help {
+        header: String,
+        keys: String,
+        scroll: usize,
+    },
     NewSession {
         input: String,
         input_cursor: usize,
@@ -828,7 +836,7 @@ impl SessionListState {
         self.rows = rows;
     }
 
-    pub(crate) fn toggle_sort_mode(&mut self) -> SessionSortMode {
+    pub(crate) fn toggle_tag_group_sort(&mut self) -> SessionSortMode {
         self.sort_mode = match self.sort_mode {
             SessionSortMode::Activity => SessionSortMode::TagGroup,
             SessionSortMode::Name => SessionSortMode::TagGroup,
@@ -837,8 +845,12 @@ impl SessionListState {
         self.sort_mode
     }
 
-    pub(crate) fn sort_by_name(&mut self) -> SessionSortMode {
-        self.sort_mode = SessionSortMode::Name;
+    pub(crate) fn toggle_name_sort(&mut self) -> SessionSortMode {
+        self.sort_mode = match self.sort_mode {
+            SessionSortMode::Activity => SessionSortMode::Name,
+            SessionSortMode::Name => SessionSortMode::Activity,
+            SessionSortMode::TagGroup => SessionSortMode::Name,
+        };
         self.sort_mode
     }
 

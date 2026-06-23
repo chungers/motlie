@@ -10,8 +10,8 @@ use motlie_tmux::{
 };
 
 use crate::consts::{
-    DEFAULT_DETAIL_LINES, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    DEFAULT_DETAIL_LINES, HELP_KEY_FUNCTIONS, LANDSCAPE_MAX_LEFT_PERCENT,
+    LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
 use crate::detail::{fetch_older_lines, render_live_preview};
 use crate::model::{
@@ -28,6 +28,7 @@ const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
 const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "$$";
 const SEND_KEYS_ENTER_DELAY: Duration = Duration::from_millis(500);
+const HELP_MODAL_PAGE_SCROLL: usize = 10;
 
 pub(crate) struct HostRefreshResult {
     host_id: HostId,
@@ -506,7 +507,7 @@ pub(crate) async fn handle_key(
 
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => app.layout.focus = Focus::List,
-        (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help),
+        (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help { scroll: 0 }),
         (KeyCode::Char('g'), _) if app.layout.focus == Focus::List => {
             toggle_session_grouping(fleet, app).await?;
         }
@@ -834,7 +835,7 @@ fn is_resize_modifier(modifiers: KeyModifiers) -> bool {
 
 async fn toggle_session_grouping(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     let previous = current_selection_key(app);
-    let mode = app.session_list.toggle_sort_mode();
+    let mode = app.session_list.toggle_tag_group_sort();
     app.session_list.resort(fleet);
     app.session_list.select_first();
     if previous != current_selection_key(app) {
@@ -850,7 +851,7 @@ async fn toggle_session_grouping(fleet: &HostFleet, app: &mut AppState) -> Resul
 
 async fn sort_sessions_by_name(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     let previous = current_selection_key(app);
-    let mode = app.session_list.sort_by_name();
+    let mode = app.session_list.toggle_name_sort();
     app.session_list.resort(fleet);
     app.session_list.select_first();
     if previous != current_selection_key(app) {
@@ -1011,8 +1012,24 @@ async fn handle_modal_key(
         Some(ModalState::SessionKeyValues { session, ui }) => {
             handle_session_key_values_modal_key(key, session.clone(), ui)
         }
-        Some(ModalState::Help) => match key.code {
+        Some(ModalState::Help { scroll }) => match key.code {
             KeyCode::Esc | KeyCode::Enter => ModalAction::Close,
+            KeyCode::Up | KeyCode::Char('k') => {
+                scroll_help_keys(scroll, -1);
+                ModalAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                scroll_help_keys(scroll, 1);
+                ModalAction::None
+            }
+            KeyCode::PageUp => {
+                scroll_help_keys(scroll, -(HELP_MODAL_PAGE_SCROLL as isize));
+                ModalAction::None
+            }
+            KeyCode::PageDown => {
+                scroll_help_keys(scroll, HELP_MODAL_PAGE_SCROLL as isize);
+                ModalAction::None
+            }
             _ => ModalAction::None,
         },
         None => ModalAction::None,
@@ -1078,6 +1095,15 @@ async fn handle_modal_key(
         }
     }
     Ok(KeyOutcome::Continue)
+}
+
+fn scroll_help_keys(scroll: &mut usize, delta: isize) {
+    let max_scroll = HELP_KEY_FUNCTIONS.lines().count().saturating_sub(1);
+    if delta < 0 {
+        *scroll = scroll.saturating_sub(delta.unsigned_abs());
+    } else {
+        *scroll = scroll.saturating_add(delta as usize).min(max_scroll);
+    }
 }
 
 fn discarded_key_value_status(modal: Option<&ModalState>) -> Option<String> {

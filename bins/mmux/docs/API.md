@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-562-impl | Updated live-test follow-ups: single-space stable-id rows, `s`/`g` toggles back to activity recency, and Help key-list scrolling below the fixed logo. |
 | 2026-06-22 | @codex-562-impl | Documented issue #562 reality: session rows render stable tmux ids and list-focused `/` search uses case-insensitive substring matching in current sort order. |
 | 2026-06-11 | @mstream453-impl | Added `SessionSortMode::Name` for list-pane `s` sorting and Help shortcut coverage. |
 | 2026-05-20 | @codex | Added `Cli.alias` and host-label override behavior so mmux can display operator-provided labels without changing host routing identity. |
@@ -253,7 +254,7 @@ enum ModalState {
     RenameSession { session: SelectedSession, input: String, button: Button },
     SendKeys { session: SelectedSession, ui: SendKeysModalUi },
     SessionKeyValues { session: SelectedSession, ui: SessionKeyValueModalUi },
-    Help,
+    Help { scroll: usize },
 }
 
 struct SelectedSession {
@@ -325,7 +326,8 @@ The Sessions pane title is derived only from the live session list length:
 `Sessions [n]`. List rows show the display name, attached marker, optional
 multi-host color-square column, and right-aligned `<active> / <age>` recency
 text with a small right margin. Rows also show the stable tmux session id as
-`[$id]` next to the display name while retaining the same id for dispatch.
+`[$id]` next to the display name with exactly one space as `<name> [$id]`
+while retaining the same id for dispatch.
 The attached marker is `*` when `SessionInfo::is_attached()` is true.
 The list is sorted by
 `activity_observed_at_local` descending — operator-side wall clock at the
@@ -337,8 +339,9 @@ recent activity in each group, and rows within a group then sort by activity
 time, host order, and session name. Empty checked-tag values sort with rows that
 have no displayed tag. The `g` toggle selects the first row in the new order;
 pressing `g` again restores `SessionSortMode::Activity`. Pressing `s` with the
-list focused selects `SessionSortMode::Name`, sorts by session name, and selects
-the first row in name order. `preserve_selection()` re-finds the highlighted row
+list focused toggles `SessionSortMode::Name`: the first press sorts by session
+name and selects the first row in name order, and the next press restores
+`SessionSortMode::Activity`. `preserve_selection()` re-finds the highlighted row
 by stable session id after refreshes. A single quiet one-second
 `list_sessions()` refresh keeps the active ordering current and notices
 structural session changes. Recency text is observer-relative
@@ -452,8 +455,10 @@ with Rust filesystem APIs. It sets `MMUX_BUILD_DATE` from an explicit
 environment override or from `SystemTime` converted to a UTC `YYYY-MM-DD` date
 in Rust. The Help modal opened by `h` renders the build date and only the last
 8 characters of the git SHA below the built-in motlie logo and above the
-key-function reference. Modal content is padded inside the outer border, and
-the button bar is separated from the main content by a horizontal rule.
+key-function reference. The logo/build metadata are fixed at the top of the
+modal; the key-function reference below them scrolls with Up/Down, PgUp/PgDn,
+or `j`/`k`. Modal content is padded inside the outer border, and the button bar
+is separated from the main content by a horizontal rule.
 New Session renders its session-name input in a bordered field. In multi-host
 mode, it also renders a Host dropdown above the session-name field and carries
 the selected host id through `Ok` so create dispatches to that host.
