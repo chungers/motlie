@@ -6,9 +6,9 @@ use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
     validate_session_env_var_name, validate_session_env_var_value, validate_session_tag_value,
-    CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionEnvVar, SessionId, SessionTag,
-    SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, StatusLeft, StatusLeftLength,
-    StatusStyle, TmuxSocket, WindowInfo, WindowStyle,
+    CreateSessionOptions, CreateWindowOptions, PaneAddress, PaneProcessStatus, SessionEnvVar,
+    SessionId, SessionInfo, SessionTag, SessionTagPrefix, SplitDirection, SplitPaneOptions,
+    SplitSize, StatusLeft, StatusLeftLength, StatusStyle, TmuxSocket, WindowInfo, WindowStyle,
 };
 
 /// Shell-escape a string for safe interpolation into shell commands.
@@ -26,6 +26,35 @@ fn shell_escape_path(path: &Path) -> Result<String> {
         ))
     })?;
     Ok(shell_escape(s))
+}
+
+fn parse_created_session(output: &str) -> Result<SessionInfo> {
+    let line = output.trim();
+    let fields = crate::discovery::parse_escaped_fields(line);
+    if fields.len() < 7 {
+        return Err(Error::Command(format!(
+            "malformed new-session output (expected 7 fields): {}",
+            line
+        )));
+    }
+
+    Ok(SessionInfo {
+        id: SessionId::new(fields[0].clone())?,
+        name: fields[1].clone(),
+        created: fields[2]
+            .parse()
+            .map_err(|_| Error::Parse(format!("invalid session_created: {}", fields[2])))?,
+        attached_count: fields[3]
+            .parse()
+            .map_err(|_| Error::Parse(format!("invalid session_attached: {}", fields[3])))?,
+        window_count: fields[4]
+            .parse()
+            .map_err(|_| Error::Parse(format!("invalid session_windows: {}", fields[4])))?,
+        group: (!fields[5].is_empty()).then(|| fields[5].clone()),
+        activity: fields[6]
+            .parse()
+            .map_err(|_| Error::Parse(format!("invalid session_activity: {}", fields[6])))?,
+    })
 }
 
 fn parse_created_window(output: &str) -> Result<WindowInfo> {
@@ -77,13 +106,43 @@ fn parse_created_pane(output: &str) -> Result<PaneAddress> {
     })
 }
 
+fn parse_pane_process_status(output: &str) -> Result<PaneProcessStatus> {
+    let line = output.trim();
+    let fields = crate::discovery::parse_escaped_fields(line);
+    if fields.len() < 3 {
+        return Err(Error::Command(format!(
+            "malformed pane process status output (expected 3 fields): {}",
+            line
+        )));
+    }
+    let dead = match fields[0].as_str() {
+        "0" => false,
+        "1" => true,
+        value => return Err(Error::Parse(format!("invalid pane_dead value: {}", value))),
+    };
+    let exit_status = if fields[1].is_empty() {
+        None
+    } else {
+        Some(
+            fields[1]
+                .parse()
+                .map_err(|_| Error::Parse(format!("invalid pane_dead_status: {}", fields[1])))?,
+        )
+    };
+    Ok(PaneProcessStatus {
+        dead,
+        exit_status,
+        current_command: fields[2].clone(),
+    })
+}
+
 /// Create a new detached tmux session (using bare "tmux" prefix).
 pub async fn create_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     name: &str,
     opts: &CreateSessionOptions,
-) -> Result<()> {
+) -> Result<SessionInfo> {
     create_session_with_prefix(transport, &tmux_prefix(socket), name, opts).await
 }
 
@@ -93,8 +152,12 @@ pub async fn create_session_with_prefix(
     prefix: &str,
     name: &str,
     opts: &CreateSessionOptions,
-) -> Result<()> {
-    let mut cmd = format!("{} new-session -d -s {}", prefix, shell_escape(name));
+) -> Result<SessionInfo> {
+    let mut cmd = format!(
+        "{} new-session -d -P -F '#{{q:session_id}} #{{q:session_name}} #{{q:session_created}} #{{q:session_attached}} #{{q:session_windows}} #{{q:session_group}} #{{q:session_activity}}' -s {}",
+        prefix,
+        shell_escape(name)
+    );
 
     if let Some(wn) = &opts.window_name {
         cmd.push_str(&format!(" -n {}", shell_escape(wn)));
@@ -113,15 +176,16 @@ pub async fn create_session_with_prefix(
         cmd.push_str(&format!(" {}", shell_escape(c)));
     }
 
-    transport.exec(&cmd).await?;
+    let output = transport.exec(&cmd).await?;
+    let session = parse_created_session(&output)?;
 
-    // Set history-limit if requested (DC22, Option B).
     if let Some(limit) = opts.history_limit {
+        let session_id = session.id.as_str();
         let result = async {
             let session_cmd = format!(
                 "{} set-option -t {} history-limit {}",
                 prefix,
-                shell_escape(name),
+                shell_escape(session_id),
                 limit
             );
             transport.exec(&session_cmd).await?;
@@ -129,7 +193,7 @@ pub async fn create_session_with_prefix(
             let pane_cmd = format!(
                 "{} set-option -p -t {} history-limit {}",
                 prefix,
-                shell_escape(name),
+                shell_escape(session_id),
                 limit
             );
             transport.exec(&pane_cmd).await?;
@@ -138,13 +202,13 @@ pub async fn create_session_with_prefix(
         .await;
 
         if let Err(e) = result {
-            let kill_cmd = format!("{} kill-session -t {}", prefix, shell_escape(name));
+            let kill_cmd = format!("{} kill-session -t {}", prefix, shell_escape(session_id));
             let _ = transport.exec(&kill_cmd).await;
             return Err(e);
         }
     }
 
-    Ok(())
+    Ok(session)
 }
 
 /// Create a new tmux window (using bare "tmux" prefix).
@@ -365,6 +429,56 @@ pub async fn send_text_with_prefix(
     );
     transport.exec(&cmd).await?;
     Ok(())
+}
+
+/// Set pane-level remain-on-exit for a tmux target.
+pub async fn set_pane_remain_on_exit_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    enabled: bool,
+) -> Result<()> {
+    let value = if enabled { "on" } else { "off" };
+    let cmd = format!(
+        "{} set-option -p -t {} remain-on-exit {}",
+        prefix,
+        shell_escape(target),
+        value
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Respawn a tmux pane with a command.
+pub async fn respawn_pane_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    command: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} respawn-pane -k -t {} {}",
+        prefix,
+        shell_escape(target),
+        shell_escape(command)
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Query whether the target pane is held dead by remain-on-exit.
+pub async fn pane_process_status_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<PaneProcessStatus> {
+    let cmd = format!(
+        "{} display-message -p -t {} '#{{q:pane_dead}} #{{q:pane_dead_status}} #{{q:pane_current_command}}'",
+        prefix,
+        shell_escape(target)
+    );
+    let output = transport.exec(&cmd).await?;
+    parse_pane_process_status(&output)
 }
 
 /// Rename a tmux session (using bare "tmux" prefix).
@@ -1283,7 +1397,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_basic() {
-        let mock = MockTransport::new().with_default("");
+        let mock = MockTransport::new().with_default("$0 test 1700000000 0 1  1700000005");
         let transport = TransportKind::Mock(mock);
         create_session(&transport, None, "test", &Default::default())
             .await
@@ -1292,7 +1406,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_with_window_and_command() {
-        let mock = MockTransport::new().with_default("");
+        let mock = MockTransport::new().with_default("$0 test 1700000000 0 1  1700000005");
         let transport = TransportKind::Mock(mock);
         let opts = CreateSessionOptions {
             window_name: Some("main".to_string()),
@@ -1306,7 +1420,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_with_size() {
-        let mock = MockTransport::new().with_default("");
+        let mock = MockTransport::new().with_default("$0 test 1700000000 0 1  1700000005");
         let transport = TransportKind::Mock(mock);
         let opts = CreateSessionOptions {
             width: Some(200),
@@ -1321,7 +1435,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_with_history_limit() {
-        let mock = MockTransport::new().with_default("");
+        let mock = MockTransport::new().with_default("$0 test 1700000000 0 1  1700000005");
         let transport = TransportKind::Mock(mock);
         let opts = CreateSessionOptions {
             history_limit: Some(50000),
@@ -1335,8 +1449,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_with_initial_environment_builds_expected_command() {
-        let expected = "tmux new-session -d -s 'test' -e 'MOTLIE=enabled' -e 'BUILD_ID=42 42'";
-        let mock = MockTransport::new().with_response(expected, "");
+        let expected = "tmux new-session -d -P -F '#{q:session_id} #{q:session_name} #{q:session_created} #{q:session_attached} #{q:session_windows} #{q:session_group} #{q:session_activity}' -s 'test' -e 'MOTLIE=enabled' -e 'BUILD_ID=42 42'";
+        let mock =
+            MockTransport::new().with_response(expected, "$0 test 1700000000 0 1  1700000005");
         let transport = TransportKind::Mock(mock);
         let opts = CreateSessionOptions {
             initial_environment: vec![
@@ -1352,7 +1467,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_with_all_options() {
-        let mock = MockTransport::new().with_default("");
+        let mock = MockTransport::new().with_default("$0 test 1700000000 0 1  1700000005");
         let transport = TransportKind::Mock(mock);
         let opts = CreateSessionOptions {
             window_name: Some("editor".to_string()),
@@ -1365,6 +1480,17 @@ mod tests {
         create_session(&transport, None, "test", &opts)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_malformed_printed_output() {
+        let mock = MockTransport::new().with_response("new-session -d -P", "bad-output");
+        let transport = TransportKind::Mock(mock);
+
+        let err = create_session(&transport, None, "test", &Default::default())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("malformed new-session output"));
     }
 
     #[tokio::test]

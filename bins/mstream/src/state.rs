@@ -14,31 +14,33 @@ use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
 use motlie_agent as agent;
 use motlie_tmux::{
-    CreateSessionOptions, Error as TmuxError, Fleet, FleetTargetSpec, HostHandle, KeySequence,
-    ResolvedFleetTarget, SessionEnvVar, SessionInfo, SessionTag, SinkEvent, SshConfig, Target,
+    CreateSessionOptions, Fleet, FleetTargetSpec, HostHandle, KeySequence, ResolvedFleetTarget,
+    SessionEnvVar, SessionInfo, SessionInventory, SessionTag, SinkEvent, SshConfig, Target,
     TargetOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use unicode_width::UnicodeWidthStr;
 
 use crate::build_info;
 use crate::jsonl;
 use crate::protocol::{
-    AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
-    HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
-    NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
-    SessionMarkRequest, SessionRetagRequest, SnapshotRequest, SummaryInputRequest,
-    TimerStartRequest, WorkstreamSettings,
+    AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, DoctorRequest,
+    EventsRequest, HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest,
+    LeaveRequest, NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
+    SessionListRequest, SessionMarkRequest, SessionRetagRequest, SnapshotRequest,
+    SummaryInputRequest, TimerStartRequest, WorkstreamSettings,
 };
 use crate::tags;
 use crate::timeline::PublicCursor;
 
 type SessionTarget = FleetTargetSpec;
 type ResolvedTarget = ResolvedFleetTarget;
+type ReconcileHostTargets = Vec<(SessionTarget, Option<u64>)>;
+type ReconcileHostMap = BTreeMap<String, (HostHandle, ReconcileHostTargets)>;
 
 const MMUX_TAG_PREFIX: &str = "mmux";
 const MMUX_SELECTED_KEY: &str = "__selected-key";
@@ -56,6 +58,9 @@ const EVENT_STORE_BEST_EFFORT_QUEUE_CAPACITY: usize = 4_096;
 const EVENT_STORE_WARNING_WINDOW_SECS: u64 = 60;
 const EVENT_STORE_BEST_EFFORT_POLL_MS: u64 = 20;
 const OUTPUT_AUDIT_CHANNEL_CAPACITY: usize = 4_096;
+const SESSION_RECONCILE_TIMEOUT_MS: u64 = 1_500;
+const BOOT_EXIT_CHECK_DELAY_MS: u64 = 750;
+const BOOT_EXIT_CAPTURE_LINES: i32 = -120;
 
 pub struct DaemonState {
     fleet: Fleet,
@@ -402,6 +407,7 @@ struct SessionRecord {
     agent: Option<String>,
     agent_args: Vec<String>,
     identity: String,
+    live_name: Option<String>,
     state: AgentState,
     cwd: Option<PathBuf>,
     workstream: Option<String>,
@@ -747,7 +753,70 @@ struct StatusActivityOptions {
 enum LiveActivity {
     Present(SessionInfo),
     Missing,
+    Reused {
+        observed: SessionInfo,
+        reason: String,
+    },
     Error(String),
+}
+
+#[derive(Debug, Clone)]
+struct ConfirmedDeadSession {
+    target: SessionTarget,
+    death_kind: &'static str,
+    death_reason: String,
+    reused_by_agent: Option<String>,
+}
+
+impl ConfirmedDeadSession {
+    fn from_live(target: &SessionTarget, live: Option<&LiveActivity>) -> Option<Self> {
+        match live? {
+            LiveActivity::Missing => Some(Self {
+                target: target.clone(),
+                death_kind: "absent_session_id",
+                death_reason: "tracked tmux session id is absent".to_string(),
+                reused_by_agent: None,
+            }),
+            LiveActivity::Reused { observed, reason } => Some(Self {
+                target: target.clone(),
+                death_kind: "reused_session_id",
+                death_reason: reason.clone(),
+                reused_by_agent: Some(observed.name.clone()),
+            }),
+            LiveActivity::Present(_) | LiveActivity::Error(_) => None,
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "target": self.target.to_string(),
+            "death_kind": self.death_kind,
+            "death_reason": self.death_reason.clone(),
+            "reused_by": self.reused_by_agent.clone(),
+            "reused_by_agent": self.reused_by_agent.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct DoctorCleanupReport {
+    quarantine_dead: bool,
+    prune_quarantined: bool,
+    quarantined: Vec<Value>,
+    pruned: Vec<Value>,
+}
+
+impl DoctorCleanupReport {
+    fn to_json(&self) -> Value {
+        json!({
+            "quarantine_dead": self.quarantine_dead,
+            "prune_quarantined": self.prune_quarantined,
+            "quarantined_count": self.quarantined.len(),
+            "pruned_count": self.pruned.len(),
+            "quarantined": self.quarantined.clone(),
+            "pruned": self.pruned.clone(),
+        })
+    }
 }
 
 impl DaemonState {
@@ -801,7 +870,8 @@ impl DaemonState {
             ClientRequest::Show { workstream } => {
                 Ok(vec![shared.lock().await.show(&workstream)?])
             }
-            ClientRequest::SessionList => Ok(vec![shared.lock().await.session_list_json()]),
+            ClientRequest::SessionList(request) => Self::session_list_shared(shared, request).await,
+            ClientRequest::Doctor(request) => Self::doctor_shared(shared, request).await,
             ClientRequest::HandoffList { workstream } => {
                 Ok(vec![shared.lock().await.handoff_list(&workstream)?])
             }
@@ -819,7 +889,7 @@ impl DaemonState {
                 active_window_secs,
                 idle_after_secs,
             } => Self::status_shared(shared, workstream, active_window_secs, idle_after_secs).await,
-            ClientRequest::Events(request) => Ok(vec![shared.lock().await.events(request)?]),
+            ClientRequest::Events(request) => Self::events_shared(shared, request).await,
         }
     }
 
@@ -981,6 +1051,9 @@ impl DaemonState {
         let Some((target, workstream)) = state.target_for_output(&output) else {
             return Ok(());
         };
+        if let Some(record) = state.sessions.get_mut(&target) {
+            record.live_name = Some(output.session_name().to_string());
+        }
         let source_pane = output.pane_id().map(ToString::to_string);
         let mut event = EventDraft::new("agent_output")
             .direction_from_agent()
@@ -1057,7 +1130,21 @@ impl DaemonState {
             let state = shared.lock().await;
             state.host_handle(&alias)?
         };
-        let sessions = handle.list_sessions().await?;
+        let inventory = handle.session_inventory().await?;
+        let sessions = match inventory {
+            SessionInventory::Available(sessions) => sessions,
+            SessionInventory::NoTmuxServer { reason } => {
+                return Ok(vec![json!({
+                    "type": "ok",
+                    "op": "scan",
+                    "host": alias,
+                    "hydrated_sessions": 0,
+                    "liveness": "unreachable",
+                    "liveness_error": reason,
+                    "tmux_present": Value::Null,
+                })]);
+            }
+        };
         let tags_by_session = handle
             .list_tags_for_session_infos(tags::PREFIX, &sessions)
             .await?;
@@ -1089,6 +1176,10 @@ impl DaemonState {
                         SessionRecord::from_target(&target, state_value, parsed.updated_at)
                     });
                     record.observe_tmux_session(&session);
+                    record.identity = parsed
+                        .identity
+                        .clone()
+                        .unwrap_or_else(|| session.name.clone());
                     record.state = state_value;
                     record.role = parsed.role.clone();
                     record.agent = parsed.agent.clone();
@@ -1226,6 +1317,7 @@ impl DaemonState {
                 resolved.target.session_info(),
             ) {
                 record.observe_tmux_session(session);
+                record.identity = resolved.target.session_name().to_string();
             }
             let mut cursor = state.record_event(
                 &request.workstream,
@@ -1281,22 +1373,32 @@ impl DaemonState {
         let command = bootstrap_command(&request.cwd, &request.agent, &request.agent_args);
         let env = session_environment(&request.workstream, &request.role)?;
         let opts = CreateSessionOptions {
-            command: Some(command),
+            command: None,
             initial_environment: env,
             ..Default::default()
         };
-        let tmux_target = match handle.create_session(target.session_name(), &opts).await {
-            Ok(tmux_target) => tmux_target,
-            Err(error) if is_created_session_not_found(&error, target.session_name()) => {
-                bail!(
-                    "agent session {} on {} exited immediately during startup while running agent executable {}; tmux did not report it as live after creation",
-                    target.session_name(),
-                    target.host_alias(),
-                    request.agent
-                );
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let tmux_target = handle.create_session(target.session_name(), &opts).await?;
+        tmux_target.set_pane_remain_on_exit(true).await?;
+        tmux_target.respawn_pane(&command).await?;
+        sleep(Duration::from_millis(BOOT_EXIT_CHECK_DELAY_MS)).await;
+        let boot_status = tmux_target.pane_process_status().await?;
+        if boot_status.dead {
+            let pane_output = tmux_target
+                .capture_with_history(BOOT_EXIT_CAPTURE_LINES)
+                .await
+                .unwrap_or_else(|err| format!("<failed to capture pane output: {err}>"));
+            let _ = tmux_target.kill().await;
+            bail!(
+                "agent session {} on {} exited during startup while running agent executable {}; exit_status={:?}; current_command={}; pane_output:\n{}",
+                target.session_name(),
+                target.host_alias(),
+                request.agent,
+                boot_status.exit_status,
+                boot_status.current_command,
+                pane_output
+            );
+        }
+        tmux_target.set_pane_remain_on_exit(false).await?;
         let stable_target = SessionTarget::session_id(
             target.host_alias(),
             tmux_target
@@ -1354,6 +1456,7 @@ impl DaemonState {
                 if let Some(session) = resolved.target.session_info() {
                     record.observe_tmux_session(session);
                 }
+                record.identity = resolved.target.session_name().to_string();
             }
             let mut cursor = state.record_event(
                 &request.workstream,
@@ -2829,14 +2932,22 @@ impl DaemonState {
         shared: Arc<Mutex<Self>>,
         request: SnapshotRequest,
     ) -> anyhow::Result<Vec<Value>> {
+        let live =
+            Self::reconcile_workstream_live_names_shared(Arc::clone(&shared), &request.workstream)
+                .await?;
         if let Some(target) = request.target.as_deref() {
             let (stable_target, text) = Self::capture_target_shared(
                 Arc::clone(&shared),
                 &request.workstream,
                 target,
                 request.max_chars,
+                &live,
             )
             .await?;
+            let sessions = {
+                let state = shared.lock().await;
+                state.session_sidecars_for_targets(std::slice::from_ref(&stable_target), &live)
+            };
             return Ok(vec![json!({
                 "type": "snapshot",
                 "workstream": request.workstream,
@@ -2844,20 +2955,29 @@ impl DaemonState {
                 "after": request.after,
                 "text": text,
                 "ordering": "single-target",
+                "reconciled": true,
+                "sessions": sessions,
             })]);
         }
         let text = Self::capture_workstream_shared(
             Arc::clone(&shared),
             &request.workstream,
             request.max_chars,
+            &live,
         )
         .await?;
+        let sessions = {
+            let state = shared.lock().await;
+            state.workstream_session_sidecars(&request.workstream, &live)?
+        };
         Ok(vec![json!({
             "type": "snapshot",
             "workstream": request.workstream,
             "after": request.after,
             "text": text,
             "ordering": "arrival",
+            "reconciled": true,
+            "sessions": sessions,
         })])
     }
 
@@ -2865,10 +2985,14 @@ impl DaemonState {
         shared: Arc<Mutex<Self>>,
         request: SummaryInputRequest,
     ) -> anyhow::Result<Vec<Value>> {
+        let live =
+            Self::reconcile_workstream_live_names_shared(Arc::clone(&shared), &request.workstream)
+                .await?;
         let text = Self::capture_workstream_shared(
             Arc::clone(&shared),
             &request.workstream,
             request.max_chars,
+            &live,
         )
         .await?;
         Ok(vec![json!({
@@ -2878,6 +3002,290 @@ impl DaemonState {
             "text": compact_text(&text, request.max_chars),
             "ordering": "arrival",
         })])
+    }
+
+    async fn events_shared(
+        shared: Arc<Mutex<Self>>,
+        request: EventsRequest,
+    ) -> anyhow::Result<Vec<Value>> {
+        let live =
+            Self::reconcile_workstream_live_names_shared(Arc::clone(&shared), &request.workstream)
+                .await?;
+        Ok(vec![shared
+            .lock()
+            .await
+            .events_with_live(request, &live)?])
+    }
+
+    async fn session_list_shared(
+        shared: Arc<Mutex<Self>>,
+        request: SessionListRequest,
+    ) -> anyhow::Result<Vec<Value>> {
+        if request.cached {
+            return Ok(vec![shared.lock().await.session_list_json()]);
+        }
+        let targets = {
+            let state = shared.lock().await;
+            state.sessions.keys().cloned().collect::<Vec<_>>()
+        };
+        let live = Self::reconcile_targets_shared(Arc::clone(&shared), targets).await?;
+        let state = shared.lock().await;
+        Ok(vec![state.session_list_json_with_live(&live)])
+    }
+
+    async fn doctor_shared(
+        shared: Arc<Mutex<Self>>,
+        request: DoctorRequest,
+    ) -> anyhow::Result<Vec<Value>> {
+        let cleanup_requested = request.quarantine_dead || request.prune_quarantined;
+        if cleanup_requested && request.cached {
+            bail!("doctor cleanup requires live reconciliation; remove --cached/--no-reconcile");
+        }
+
+        let mut live = BTreeMap::new();
+        let cleanup = if request.cached {
+            DoctorCleanupReport {
+                quarantine_dead: request.quarantine_dead,
+                prune_quarantined: request.prune_quarantined,
+                ..Default::default()
+            }
+        } else {
+            let targets = {
+                let state = shared.lock().await;
+                state.sessions.keys().cloned().collect::<Vec<_>>()
+            };
+            live = Self::reconcile_targets_shared(Arc::clone(&shared), targets).await?;
+            let (cleanup, abort_tasks) = {
+                let mut state = shared.lock().await;
+                state.apply_doctor_cleanup(
+                    &live,
+                    request.quarantine_dead,
+                    request.prune_quarantined,
+                )
+            };
+            for task in abort_tasks {
+                task.abort();
+            }
+            cleanup
+        };
+
+        let sessions = {
+            let state = shared.lock().await;
+            if request.cached {
+                state.session_list_json()
+            } else {
+                state.session_list_json_with_live(&live)
+            }
+        };
+        Ok(vec![json!({
+            "type": "doctor",
+            "scope": "sessions",
+            "sessions": sessions["sessions"].clone(),
+            "reconciled": sessions["reconciled"].clone(),
+            "cleanup": cleanup.to_json(),
+        })])
+    }
+
+    fn apply_doctor_cleanup(
+        &mut self,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+        quarantine_dead: bool,
+        prune_quarantined: bool,
+    ) -> (DoctorCleanupReport, Vec<JoinHandle<()>>) {
+        let mut report = DoctorCleanupReport {
+            quarantine_dead,
+            prune_quarantined,
+            ..Default::default()
+        };
+        let mut abort_tasks = Vec::new();
+
+        if quarantine_dead {
+            let confirmed_dead = self
+                .sessions
+                .iter()
+                .filter(|(_, record)| record.state != AgentState::Quarantined)
+                .filter_map(|(target, _)| ConfirmedDeadSession::from_live(target, live.get(target)))
+                .collect::<Vec<_>>();
+            for dead in confirmed_dead {
+                let reason = format!(
+                    "confirmed-dead target {} quarantined by mstream doctor for #401 lifecycle cleanup ({})",
+                    dead.target, dead.death_kind
+                );
+                abort_tasks
+                    .extend(self.quarantine_confirmed_dead_session_target(&dead.target, &reason));
+                let mut row = dead.to_json();
+                if let Value::Object(fields) = &mut row {
+                    fields.insert("state".to_string(), json!(AgentState::Quarantined.as_str()));
+                }
+                report.quarantined.push(row);
+            }
+        }
+
+        if prune_quarantined {
+            let confirmed_dead = self
+                .sessions
+                .iter()
+                .filter(|(_, record)| record.state == AgentState::Quarantined)
+                .filter_map(|(target, _)| ConfirmedDeadSession::from_live(target, live.get(target)))
+                .collect::<Vec<_>>();
+            for dead in confirmed_dead {
+                let reason = format!(
+                    "confirmed-dead quarantined target {} pruned by mstream doctor for #401 lifecycle cleanup ({})",
+                    dead.target, dead.death_kind
+                );
+                abort_tasks.extend(self.deregister_session_target(&dead.target, &reason, None));
+                report.pruned.push(dead.to_json());
+            }
+        }
+
+        (report, abort_tasks)
+    }
+
+    fn quarantine_confirmed_dead_session_target(
+        &mut self,
+        target: &SessionTarget,
+        reason: &str,
+    ) -> Vec<JoinHandle<()>> {
+        // #401 lifecycle: doctor quarantine is the non-destructive retire state
+        // for sessions proven dead by a fresh tmux reconciliation. It must not
+        // run for unreachable rows, which are not confirmed dead.
+        self.remove_agent_channels_for_target(target);
+        if let Some(record) = self.sessions.get_mut(target) {
+            record.state = AgentState::Quarantined;
+            record.last_report_kind = Some("doctor_quarantine_dead".to_string());
+            record.last_report_summary = Some(reason.to_string());
+            record.updated_at = Utc::now();
+        }
+        self.cancel_target_dependents(target, reason, None)
+    }
+
+    async fn reconcile_workstream_live_names_shared(
+        shared: Arc<Mutex<Self>>,
+        workstream: &str,
+    ) -> anyhow::Result<BTreeMap<SessionTarget, LiveActivity>> {
+        let targets = {
+            let state = shared.lock().await;
+            state
+                .workstream(workstream)?
+                .sessions
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        Self::reconcile_targets_shared(shared, targets).await
+    }
+
+    async fn reconcile_targets_shared(
+        shared: Arc<Mutex<Self>>,
+        targets: Vec<SessionTarget>,
+    ) -> anyhow::Result<BTreeMap<SessionTarget, LiveActivity>> {
+        let hosts = {
+            let state = shared.lock().await;
+            let mut hosts: ReconcileHostMap = BTreeMap::new();
+            for target in targets {
+                let expected_created = state
+                    .sessions
+                    .get(&target)
+                    .and_then(|record| record.tmux_session_created);
+                if !hosts.contains_key(target.host_alias()) {
+                    let handle = state.host_handle(target.host_alias())?;
+                    hosts.insert(target.host_alias().to_string(), (handle, Vec::new()));
+                }
+                if let Some((_, host_targets)) = hosts.get_mut(target.host_alias()) {
+                    host_targets.push((target, expected_created));
+                }
+            }
+            hosts
+        };
+
+        let mut tasks = Vec::new();
+        for (alias, (handle, host_targets)) in hosts {
+            tasks.push(tokio::spawn(async move {
+                let result = timeout(
+                    Duration::from_millis(SESSION_RECONCILE_TIMEOUT_MS),
+                    handle.session_inventory(),
+                )
+                .await;
+                (alias, host_targets, result)
+            }));
+        }
+
+        let mut live = BTreeMap::new();
+        for task in tasks {
+            let (_alias, host_targets, result) =
+                task.await.context("session inventory task failed")?;
+            match result {
+                Ok(Ok(SessionInventory::Available(sessions))) => {
+                    let by_id = sessions
+                        .iter()
+                        .map(|session| (session.id.as_str().to_string(), session.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    let by_name = sessions
+                        .iter()
+                        .map(|session| (session.name.clone(), session.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    for (target, expected_created) in host_targets {
+                        let observed = target
+                            .session_id_selector()
+                            .and_then(|id| by_id.get(id.as_str()).cloned())
+                            .or_else(|| by_name.get(target.session_name()).cloned());
+                        match observed {
+                            Some(session) => {
+                                if let Some(reason) = expected_created.and_then(|created| {
+                                    session_reuse_reason(&target, created, session.created)
+                                }) {
+                                    live.insert(
+                                        target,
+                                        LiveActivity::Reused {
+                                            observed: session,
+                                            reason,
+                                        },
+                                    );
+                                } else {
+                                    live.insert(target, LiveActivity::Present(session));
+                                }
+                            }
+                            None => {
+                                live.insert(target, LiveActivity::Missing);
+                            }
+                        }
+                    }
+                }
+                Ok(Ok(SessionInventory::NoTmuxServer { reason })) => {
+                    for (target, _) in host_targets {
+                        live.insert(target, LiveActivity::Error(reason.clone()));
+                    }
+                }
+                Ok(Err(err)) => {
+                    let message = err.to_string();
+                    for (target, _) in host_targets {
+                        live.insert(target, LiveActivity::Error(message.clone()));
+                    }
+                }
+                Err(_) => {
+                    let message = format!(
+                        "session inventory timed out after {}ms",
+                        SESSION_RECONCILE_TIMEOUT_MS
+                    );
+                    for (target, _) in host_targets {
+                        live.insert(target, LiveActivity::Error(message.clone()));
+                    }
+                }
+            }
+        }
+
+        {
+            let mut state = shared.lock().await;
+            for (target, activity) in &live {
+                if let LiveActivity::Present(session) = activity {
+                    if let Some(record) = state.sessions.get_mut(target) {
+                        record.observe_tmux_session(session);
+                    }
+                }
+            }
+        }
+
+        Ok(live)
     }
 
     async fn status_shared(
@@ -2890,72 +3298,15 @@ impl DaemonState {
             active_window_secs,
             idle_after_secs,
         };
-        let (targets, hosts) = {
-            let state = shared.lock().await;
-            let workstream_record = state.workstream(&workstream)?;
-            let targets = workstream_record
-                .sessions
-                .iter()
-                .map(|target| {
-                    (
-                        target.clone(),
-                        state
-                            .sessions
-                            .get(target)
-                            .and_then(|record| record.tmux_session_created),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let mut hosts = BTreeMap::new();
-            for (target, _) in &targets {
-                if !hosts.contains_key(target.host_alias()) {
-                    hosts.insert(
-                        target.host_alias().to_string(),
-                        state.host_handle(target.host_alias())?,
-                    );
-                }
-            }
-            (targets, hosts)
-        };
-
-        let mut live = BTreeMap::new();
-        let mut stale_targets = Vec::new();
-        for (alias, handle) in hosts {
-            let host_targets = targets
-                .iter()
-                .filter(|(target, _)| target.host_alias() == alias)
-                .cloned()
-                .collect::<Vec<_>>();
-            match handle.list_sessions().await {
-                Ok(sessions) => {
-                    let mut by_id = sessions
-                        .into_iter()
-                        .map(|session| (session.id.as_str().to_string(), session))
-                        .collect::<BTreeMap<_, _>>();
-                    for (target, expected_created) in host_targets {
-                        let activity = target.session_id_selector().and_then(|id| {
-                            by_id.remove(id.as_str()).map(|session| {
-                                if let Some(reason) = expected_created.and_then(|created| {
-                                    session_reuse_reason(&target, created, session.created)
-                                }) {
-                                    stale_targets.push((target.clone(), reason));
-                                    LiveActivity::Missing
-                                } else {
-                                    LiveActivity::Present(session)
-                                }
-                            })
-                        });
-                        live.insert(target, activity.unwrap_or(LiveActivity::Missing));
-                    }
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    for (target, _) in host_targets {
-                        live.insert(target, LiveActivity::Error(message.clone()));
-                    }
-                }
-            }
-        }
+        let live =
+            Self::reconcile_workstream_live_names_shared(Arc::clone(&shared), &workstream).await?;
+        let stale_targets = live
+            .iter()
+            .filter_map(|(target, activity)| match activity {
+                LiveActivity::Reused { reason, .. } => Some((target.clone(), reason.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
 
         let now = Utc::now();
         let (status, abort_tasks) = {
@@ -3257,9 +3608,47 @@ impl DaemonState {
         let sessions: Vec<Value> = self
             .sessions
             .iter()
-            .map(|(target, session)| session.to_json(target))
+            .map(|(target, session)| session.to_json(target, None))
             .collect();
-        json!({ "type": "sessions", "sessions": sessions })
+        json!({ "type": "sessions", "reconciled": false, "sessions": sessions })
+    }
+
+    fn session_list_json_with_live(&self, live: &BTreeMap<SessionTarget, LiveActivity>) -> Value {
+        let sessions: Vec<Value> = self
+            .sessions
+            .iter()
+            .map(|(target, session)| session.to_json(target, live.get(target)))
+            .collect();
+        json!({ "type": "sessions", "reconciled": true, "sessions": sessions })
+    }
+
+    fn workstream_session_sidecars(
+        &self,
+        workstream: &str,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+    ) -> anyhow::Result<Vec<Value>> {
+        let targets = self
+            .workstream(workstream)?
+            .sessions
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(self.session_sidecars_for_targets(&targets, live))
+    }
+
+    fn session_sidecars_for_targets(
+        &self,
+        targets: &[SessionTarget],
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+    ) -> Vec<Value> {
+        targets
+            .iter()
+            .filter_map(|target| {
+                self.sessions
+                    .get(target)
+                    .map(|session| session.to_json(target, live.get(target)))
+            })
+            .collect()
     }
 
     fn handoff_list(&self, workstream: &str) -> anyhow::Result<Value> {
@@ -3382,8 +3771,19 @@ impl DaemonState {
         }))
     }
 
+    #[cfg(test)]
     fn events(&self, request: EventsRequest) -> anyhow::Result<Value> {
+        self.events_with_live(request, &BTreeMap::new())
+    }
+
+    fn events_with_live(
+        &self,
+        request: EventsRequest,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+    ) -> anyhow::Result<Value> {
         let workstream = self.workstream(&request.workstream)?;
+        let targets = workstream.sessions.iter().cloned().collect::<Vec<_>>();
+        let agents = self.session_sidecars_for_targets(&targets, live);
         let from = match request.after.as_deref() {
             Some(cursor) => match PublicCursor::decode(cursor) {
                 Ok(cursor) => {
@@ -3424,7 +3824,7 @@ impl DaemonState {
         if request.readable {
             let text = events
                 .iter()
-                .map(|event| render_readable_event(event))
+                .map(|event| render_readable_event(event, self.event_agent(event, live).as_deref()))
                 .collect::<Vec<_>>()
                 .join("\n");
             return Ok(json!({
@@ -3433,23 +3833,66 @@ impl DaemonState {
                 "text": text,
                 "cursor": cursor,
                 "ordering": "arrival",
+                "agents": agents,
                 "audit": self.audit_status_json(),
             }));
         }
+        let events = events
+            .iter()
+            .map(|event| self.event_json(event, live))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(json!({
             "type": "events",
             "workstream": request.workstream,
             "events": events,
             "cursor": cursor,
             "ordering": "arrival",
+            "agents": agents,
             "audit": self.audit_status_json(),
         }))
+    }
+
+    fn event_json(
+        &self,
+        event: &EventRecord,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+    ) -> anyhow::Result<Value> {
+        let mut value = serde_json::to_value(event)?;
+        if let Value::Object(fields) = &mut value {
+            fields.insert(
+                "agent".to_string(),
+                self.event_agent(event, live)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+        }
+        Ok(value)
+    }
+
+    fn event_agent(
+        &self,
+        event: &EventRecord,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+    ) -> Option<String> {
+        let target = event.target.as_deref()?.parse::<SessionTarget>().ok()?;
+        self.snapshot_header_agent(&target, live)
+    }
+
+    fn snapshot_header_agent(
+        &self,
+        target: &SessionTarget,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+    ) -> Option<String> {
+        self.sessions
+            .get(target)
+            .and_then(|session| session.canonical_agent(live.get(target)))
     }
 
     async fn capture_workstream_shared(
         shared: Arc<Mutex<Self>>,
         workstream: &str,
         max_chars: usize,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
     ) -> anyhow::Result<String> {
         let targets = {
             let state = shared.lock().await;
@@ -3458,15 +3901,15 @@ impl DaemonState {
                 .sessions
                 .iter()
                 .filter_map(|target| {
-                    state
-                        .host_handle(target.host_alias())
-                        .ok()
-                        .map(|handle| (target.clone(), handle))
+                    state.host_handle(target.host_alias()).ok().map(|handle| {
+                        let agent = state.snapshot_header_agent(target, live);
+                        (target.clone(), handle, agent)
+                    })
                 })
                 .collect::<Vec<_>>()
         };
         let mut text = String::new();
-        for (logical, handle) in targets {
+        for (logical, handle, agent) in targets {
             let capture = match Self::resolve_target(handle, logical.clone()).await {
                 Ok(target_handle) => match Self::ensure_resolved_target_fresh_shared(
                     Arc::clone(&shared),
@@ -3481,7 +3924,7 @@ impl DaemonState {
                 },
                 Err(_) => String::new(),
             };
-            text.push_str(&format!("=== {} ===\n", logical));
+            text.push_str(&snapshot_header(&logical, agent.as_deref()));
             text.push_str(&capture);
             if !capture.ends_with('\n') {
                 text.push('\n');
@@ -3498,6 +3941,7 @@ impl DaemonState {
         workstream: &str,
         target: &str,
         max_chars: usize,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
     ) -> anyhow::Result<(SessionTarget, String)> {
         let logical: SessionTarget = target.parse()?;
         let handle = {
@@ -3507,12 +3951,13 @@ impl DaemonState {
         let resolved = Self::resolve_target(handle, logical).await?;
         Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
             .await?;
-        {
+        let agent = {
             let state = shared.lock().await;
             state.ensure_target_in_workstream(workstream, &resolved.spec)?;
-        }
+            state.snapshot_header_agent(&resolved.spec, live)
+        };
         let capture = resolved.target.capture().await.unwrap_or_default();
-        let mut text = format!("=== {} ===\n", resolved.spec);
+        let mut text = snapshot_header(&resolved.spec, agent.as_deref());
         text.push_str(&capture);
         if !capture.ends_with('\n') {
             text.push('\n');
@@ -4318,6 +4763,7 @@ impl DaemonState {
             record.observe_tmux_session(session);
         }
         record.role = plan.role.clone();
+        record.identity = plan.new_name.clone();
         record.agent = plan.agent.clone();
         record.agent_args = plan.agent_args.clone();
         record.cwd = plan.cwd.clone();
@@ -4398,7 +4844,8 @@ impl DaemonState {
 
         self.sessions.iter().find_map(|(target, record)| {
             if target.host_alias() == output.host.as_str()
-                && record.identity == output.session_name()
+                && (record.live_name.as_deref() == Some(output.session_name())
+                    || record.identity == output.session_name())
             {
                 record
                     .workstream
@@ -4416,7 +4863,7 @@ impl DaemonState {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(err) => {
                 return Err(err)
-                    .with_context(|| format!("failed to open event audit log {}", path.display()))
+                    .with_context(|| format!("failed to open event audit log {}", path.display()));
             }
         };
 
@@ -4836,6 +5283,17 @@ impl DaemonState {
         self.sessions.remove(target);
         for workstream in self.workstreams.values_mut() {
             workstream.sessions.remove(target);
+        }
+        self.cancel_target_dependents(target, reason, active_timer)
+    }
+
+    fn cancel_target_dependents(
+        &mut self,
+        target: &SessionTarget,
+        reason: &str,
+        active_timer: Option<(&str, ActiveTimer)>,
+    ) -> Vec<JoinHandle<()>> {
+        for workstream in self.workstreams.values_mut() {
             for handoff in workstream.handoffs.values_mut() {
                 if handoff.canceled_reason.is_none()
                     && (handoff.from == *target || handoff.to == *target)
@@ -5096,6 +5554,7 @@ impl SessionRecord {
             agent: None,
             agent_args: Vec::new(),
             identity: session_identity_seed(target),
+            live_name: None,
             state,
             cwd: None,
             workstream: None,
@@ -5116,7 +5575,7 @@ impl SessionRecord {
     }
 
     fn observe_tmux_session(&mut self, session: &SessionInfo) {
-        self.identity = session.name.clone();
+        self.live_name = Some(session.name.clone());
         self.tmux_session_created = Some(session.created);
     }
 
@@ -5131,6 +5590,77 @@ impl SessionRecord {
             .unwrap_or(0)
     }
 
+    fn assigned_handle(&self) -> Option<String> {
+        (!self.identity.is_empty()).then(|| self.identity.clone())
+    }
+
+    fn canonical_agent(&self, live: Option<&LiveActivity>) -> Option<String> {
+        match live {
+            Some(LiveActivity::Present(session)) => Some(session.name.clone()),
+            Some(LiveActivity::Missing)
+            | Some(LiveActivity::Reused { .. })
+            | Some(LiveActivity::Error(_)) => None,
+            None => self.live_name.clone(),
+        }
+    }
+
+    fn liveness(&self, live: Option<&LiveActivity>) -> &'static str {
+        match live {
+            Some(LiveActivity::Present(_)) => "live",
+            Some(LiveActivity::Missing) | Some(LiveActivity::Reused { .. }) => "dead",
+            Some(LiveActivity::Error(_)) => "unreachable",
+            None => "cached",
+        }
+    }
+
+    fn tmux_present(&self, live: Option<&LiveActivity>) -> Value {
+        match live {
+            Some(LiveActivity::Present(_)) => json!(true),
+            Some(LiveActivity::Missing) | Some(LiveActivity::Reused { .. }) => json!(false),
+            Some(LiveActivity::Error(_)) | None => Value::Null,
+        }
+    }
+
+    fn liveness_error(&self, live: Option<&LiveActivity>) -> Value {
+        match live {
+            Some(LiveActivity::Error(err)) => json!(err),
+            _ => Value::Null,
+        }
+    }
+
+    fn name_drift(&self, live: Option<&LiveActivity>) -> Value {
+        let Some(agent) = self.canonical_agent(live) else {
+            return Value::Null;
+        };
+        let Some(handle) = self.assigned_handle() else {
+            return Value::Null;
+        };
+        json!(agent != handle)
+    }
+
+    fn death_kind(&self, live: Option<&LiveActivity>) -> Value {
+        match live {
+            Some(LiveActivity::Missing) => json!("absent_session_id"),
+            Some(LiveActivity::Reused { .. }) => json!("reused_session_id"),
+            _ => Value::Null,
+        }
+    }
+
+    fn death_reason(&self, live: Option<&LiveActivity>) -> Value {
+        match live {
+            Some(LiveActivity::Reused { reason, .. }) => json!(reason),
+            Some(LiveActivity::Missing) => json!("tracked tmux session id is absent"),
+            _ => Value::Null,
+        }
+    }
+
+    fn reused_by_agent(&self, live: Option<&LiveActivity>) -> Value {
+        match live {
+            Some(LiveActivity::Reused { observed, .. }) => json!(observed.name.clone()),
+            _ => Value::Null,
+        }
+    }
+
     fn status_json(
         &mut self,
         target: &SessionTarget,
@@ -5139,11 +5669,26 @@ impl SessionRecord {
         now: DateTime<Utc>,
     ) -> Value {
         let activity = self.activity_json(live, activity_options, now);
+        let canonical_agent = self.canonical_agent(live);
+        let assigned_handle = self.assigned_handle();
         json!({
             "target": target.to_string(),
             "role": self.role,
-            "agent": self.agent,
+            "agent": canonical_agent,
+            "agent_executable": self.agent,
+            "agent_command": self.agent,
             "agent_args": self.agent_args,
+            "self_reported_handle": assigned_handle.clone(),
+            "assigned_handle": assigned_handle.clone(),
+            "identity": assigned_handle,
+            "last_observed_agent": self.live_name,
+            "name_drift": self.name_drift(live),
+            "liveness": self.liveness(live),
+            "liveness_error": self.liveness_error(live),
+            "death_kind": self.death_kind(live),
+            "death_reason": self.death_reason(live),
+            "reused_by": self.reused_by_agent(live),
+            "reused_by_agent": self.reused_by_agent(live),
             "state": self.state.as_str(),
             "last_report_kind": self.last_report_kind,
             "last_report_summary": self.last_report_summary,
@@ -5185,26 +5730,28 @@ impl SessionRecord {
                     activity_error: Value::Null,
                 }
             }
-            Some(LiveActivity::Missing) | None => SessionActivityJson {
-                tmux_present: json!(false),
-                tmux_session_id: Value::Null,
-                tmux_activity: option_u64_json(self.last_tmux_activity),
-                tmux_activity_at: self
-                    .last_tmux_activity
-                    .map(epoch_seconds_json)
-                    .unwrap_or(Value::Null),
-                last_output_secs: option_u64_json(
-                    self.last_tmux_activity
-                        .and_then(|activity| seconds_since_epoch(now, activity)),
-                ),
-                observed_activity_idle_secs: option_u64_json(
-                    self.activity_observed_at
-                        .and_then(|observed_at| seconds_between(observed_at, now)),
-                ),
-                observed_activity_at: datetime_option_json(self.activity_observed_at),
-                activity_hint: json!("missing"),
-                activity_error: Value::Null,
-            },
+            Some(LiveActivity::Missing) | Some(LiveActivity::Reused { .. }) | None => {
+                SessionActivityJson {
+                    tmux_present: json!(false),
+                    tmux_session_id: Value::Null,
+                    tmux_activity: option_u64_json(self.last_tmux_activity),
+                    tmux_activity_at: self
+                        .last_tmux_activity
+                        .map(epoch_seconds_json)
+                        .unwrap_or(Value::Null),
+                    last_output_secs: option_u64_json(
+                        self.last_tmux_activity
+                            .and_then(|activity| seconds_since_epoch(now, activity)),
+                    ),
+                    observed_activity_idle_secs: option_u64_json(
+                        self.activity_observed_at
+                            .and_then(|observed_at| seconds_between(observed_at, now)),
+                    ),
+                    observed_activity_at: datetime_option_json(self.activity_observed_at),
+                    activity_hint: json!("missing"),
+                    activity_error: Value::Null,
+                }
+            }
             Some(LiveActivity::Error(err)) => SessionActivityJson {
                 tmux_present: Value::Null,
                 tmux_session_id: Value::Null,
@@ -5228,13 +5775,28 @@ impl SessionRecord {
         }
     }
 
-    fn to_json(&self, target: &SessionTarget) -> Value {
+    fn to_json(&self, target: &SessionTarget, live: Option<&LiveActivity>) -> Value {
+        let canonical_agent = self.canonical_agent(live);
+        let assigned_handle = self.assigned_handle();
         json!({
             "target": target.to_string(),
             "role": self.role,
-            "agent": self.agent,
+            "agent": canonical_agent,
+            "agent_executable": self.agent,
+            "agent_command": self.agent,
             "agent_args": self.agent_args,
-            "identity": self.identity,
+            "self_reported_handle": assigned_handle.clone(),
+            "assigned_handle": assigned_handle.clone(),
+            "identity": assigned_handle,
+            "last_observed_agent": self.live_name,
+            "name_drift": self.name_drift(live),
+            "liveness": self.liveness(live),
+            "liveness_error": self.liveness_error(live),
+            "tmux_present": self.tmux_present(live),
+            "death_kind": self.death_kind(live),
+            "death_reason": self.death_reason(live),
+            "reused_by": self.reused_by_agent(live),
+            "reused_by_agent": self.reused_by_agent(live),
             "state": self.state.as_str(),
             "cwd": self.cwd,
             "workstream": self.workstream,
@@ -5422,6 +5984,7 @@ struct ParsedTags {
     workstream: Option<String>,
     workstream_title: Option<String>,
     role: Option<String>,
+    identity: Option<String>,
     agent: Option<String>,
     agent_args: Vec<String>,
     cwd: Option<PathBuf>,
@@ -5447,6 +6010,7 @@ impl ParsedTags {
                 "workstream" => parsed.workstream = Some(tag.value().to_string()),
                 "workstream-title" => parsed.workstream_title = Some(tag.value().to_string()),
                 "role" => parsed.role = Some(tag.value().to_string()),
+                "identity" => parsed.identity = Some(tag.value().to_string()),
                 "agent" => parsed.agent = Some(tag.value().to_string()),
                 "agent-args" => parsed.agent_args = parse_agent_args_tag(tag.value()),
                 "cwd" => parsed.cwd = Some(PathBuf::from(tag.value())),
@@ -5624,14 +6188,6 @@ async fn validate_agent_executable(handle: &HostHandle, agent: &str) -> anyhow::
         );
     }
     Ok(())
-}
-
-fn is_created_session_not_found(error: &TmuxError, session_name: &str) -> bool {
-    if let TmuxError::State(message) = error {
-        message == &format!("session '{session_name}' created but not found in list")
-    } else {
-        false
-    }
 }
 
 fn bootstrap_command(cwd: &Path, agent: &str, agent_args: &[String]) -> String {
@@ -5877,7 +6433,7 @@ fn is_phone_digit(ch: char) -> bool {
     ch.is_ascii_digit() || (ch.is_numeric() && !ch.is_ascii_alphabetic())
 }
 
-fn render_readable_event(event: &EventRecord) -> String {
+fn render_readable_event(event: &EventRecord, agent: Option<&str>) -> String {
     let mut first_line = format!(
         "{}  {}/{}  {}",
         event.timestamp,
@@ -5887,6 +6443,9 @@ fn render_readable_event(event: &EventRecord) -> String {
     );
     if let Some(target) = &event.target {
         first_line.push_str(&format!("  {target}"));
+    }
+    if let Some(agent) = agent {
+        first_line.push_str(&format!("  agent={agent}"));
     }
     if let Some(source_pane) = &event.source_pane {
         first_line.push_str(&format!("  pane={source_pane}"));
@@ -5914,6 +6473,11 @@ fn render_readable_event(event: &EventRecord) -> String {
         }
     }
     rendered
+}
+
+fn snapshot_header(target: &SessionTarget, agent: Option<&str>) -> String {
+    let agent = agent.unwrap_or("null");
+    format!("=== {target} agent={agent} ===\n")
 }
 
 fn render_readable_block(rendered: &mut String, label: &str, text: &str) {
@@ -6102,6 +6666,45 @@ mod tests {
             group: None,
             activity,
         }
+    }
+
+    fn no_tmux_server_error() -> String {
+        let quote = char::from(39);
+        let cmd = format!(
+            "tmux list-sessions -F {quote}__MOTLIE_S__ #{{q:session_name}} #{{q:session_id}} #{{q:session_created}} #{{q:session_attached}} #{{q:session_windows}} #{{q:session_group}} #{{q:session_activity}}{quote} \\; list-windows -a -F {quote}__MOTLIE_WIN__ #{{q:session_id}} #{{q:window_activity}}{quote}"
+        );
+        format!(
+            "command failed (exit 1): {cmd}\nstderr: no server running on /tmp/tmux-1000/default"
+        )
+    }
+
+    fn no_tmux_server_mock() -> motlie_tmux::transport::MockTransport {
+        let error = no_tmux_server_error();
+        motlie_tmux::transport::MockTransport::new()
+            .with_error("list-sessions", &error)
+            .with_default("")
+    }
+
+    fn fast_channel_manager_state() -> DaemonState {
+        DaemonState {
+            channel_manager: agent::ChannelManager::new(agent::ChannelConfig {
+                coalesce_window: Duration::ZERO,
+                coalesce_max_wait: Duration::ZERO,
+                preserve_composer: false,
+                ..agent::ChannelConfig::default()
+            }),
+            ..DaemonState::default()
+        }
+    }
+
+    fn doctor_session_row<'a>(record: &'a Value, target: &SessionTarget) -> &'a Value {
+        let target = target.to_string();
+        record["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .find(|row| row["target"].as_str() == Some(target.as_str()))
+            .expect("session row")
     }
 
     fn open_test_workstream(state: &mut DaemonState, workstream: &str) {
@@ -6393,7 +6996,8 @@ mod tests {
 
         assert_eq!(state.sessions.len(), 1);
         let record = state.sessions.get(&target).expect("stable keyed record");
-        assert_eq!(record.identity, "new-name");
+        assert_eq!(record.identity, "");
+        assert_eq!(record.live_name.as_deref(), Some("new-name"));
         assert_eq!(record.role.as_deref(), Some("reviewer"));
         assert!(state
             .workstream("issue-355")
@@ -6805,6 +7409,7 @@ mod tests {
             .get_mut(&target)
             .expect("session")
             .observe_tmux_session(&session_info("old", "$1", 100, 150));
+        state.sessions.get_mut(&target).expect("session").identity = "old".to_string();
 
         let shared = Arc::new(Mutex::new(state));
         let err = DaemonState::session_retag_shared(
@@ -7218,6 +7823,251 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_tmux_server_inventory_is_unreachable_not_dead() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", no_tmux_server_mock());
+        open_test_workstream(&mut state, "issue-561");
+        state
+            .add_session_to_workstream(
+                "issue-561",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("worker", "$1", 100, 150));
+        let shared = Arc::new(Mutex::new(state));
+
+        let session_list = DaemonState::session_list_shared(
+            Arc::clone(&shared),
+            SessionListRequest { cached: false },
+        )
+        .await
+        .expect("session list");
+        let session = &session_list[0]["sessions"][0];
+        assert_eq!(session["liveness"], "unreachable");
+        assert_eq!(session["tmux_present"], Value::Null);
+        assert_eq!(session["death_kind"], Value::Null);
+        assert!(session["liveness_error"]
+            .as_str()
+            .expect("liveness error")
+            .contains("no server running"));
+
+        let scan = DaemonState::scan_shared(Arc::clone(&shared), "local".to_string())
+            .await
+            .expect("scan");
+        assert_eq!(scan[0]["liveness"], "unreachable");
+        assert_eq!(scan[0]["tmux_present"], Value::Null);
+        assert!(!scan[0]
+            .as_object()
+            .expect("scan object")
+            .contains_key("death_kind"));
+
+        let state = shared.lock().await;
+        let record = state.sessions.get(&target).expect("session retained");
+        assert_eq!(record.state, AgentState::Busy);
+        assert!(state
+            .workstream("issue-561")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
+    }
+
+    #[tokio::test]
+    async fn doctor_quarantine_dead_only_confirmed_dead_sessions() {
+        let dead = SessionTarget::session_id("local", "$1").expect("target");
+        let live = SessionTarget::session_id("local", "$2").expect("target");
+        let unreachable = SessionTarget::session_id("down", "$9").expect("target");
+        let local = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ live $2 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", local);
+        register_mock_host(&mut state, "down", no_tmux_server_mock());
+        open_test_workstream(&mut state, "issue-561");
+        for target in [&dead, &live, &unreachable] {
+            state
+                .add_session_to_workstream(
+                    "issue-561",
+                    target.clone(),
+                    "implementer".to_string(),
+                    Some("codex".to_string()),
+                    None,
+                    AgentState::Busy,
+                )
+                .expect("add session");
+        }
+        state
+            .sessions
+            .get_mut(&dead)
+            .expect("dead session")
+            .observe_tmux_session(&session_info("dead", "$1", 100, 120));
+        state
+            .sessions
+            .get_mut(&live)
+            .expect("live session")
+            .observe_tmux_session(&session_info("live", "$2", 100, 150));
+        state
+            .sessions
+            .get_mut(&unreachable)
+            .expect("unreachable session")
+            .observe_tmux_session(&session_info("unreachable", "$9", 100, 130));
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::doctor_shared(
+            Arc::clone(&shared),
+            DoctorRequest {
+                cached: false,
+                quarantine_dead: true,
+                prune_quarantined: false,
+            },
+        )
+        .await
+        .expect("doctor");
+
+        assert_eq!(records[0]["cleanup"]["quarantined_count"], 1);
+        assert_eq!(
+            records[0]["cleanup"]["quarantined"][0]["target"],
+            dead.to_string()
+        );
+        assert_eq!(
+            records[0]["cleanup"]["quarantined"][0]["death_kind"],
+            "absent_session_id"
+        );
+        let dead_row = doctor_session_row(&records[0], &dead);
+        assert_eq!(dead_row["state"], "quarantined");
+        assert_eq!(dead_row["liveness"], "dead");
+        assert_eq!(dead_row["death_kind"], "absent_session_id");
+        let live_row = doctor_session_row(&records[0], &live);
+        assert_eq!(live_row["state"], "busy");
+        assert_eq!(live_row["liveness"], "live");
+        let unreachable_row = doctor_session_row(&records[0], &unreachable);
+        assert_eq!(unreachable_row["state"], "busy");
+        assert_eq!(unreachable_row["liveness"], "unreachable");
+        assert_eq!(unreachable_row["death_kind"], Value::Null);
+
+        let state = shared.lock().await;
+        assert_eq!(
+            state.sessions.get(&dead).expect("dead").state,
+            AgentState::Quarantined
+        );
+        assert_eq!(
+            state.sessions.get(&live).expect("live").state,
+            AgentState::Busy
+        );
+        assert_eq!(
+            state.sessions.get(&unreachable).expect("unreachable").state,
+            AgentState::Busy
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_prune_quarantined_removes_only_confirmed_dead_quarantined() {
+        let dead_quarantined = SessionTarget::session_id("local", "$1").expect("target");
+        let live_quarantined = SessionTarget::session_id("local", "$2").expect("target");
+        let dead_busy = SessionTarget::session_id("local", "$3").expect("target");
+        let unreachable_quarantined = SessionTarget::session_id("down", "$9").expect("target");
+        let local = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ live $2 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", local);
+        register_mock_host(&mut state, "down", no_tmux_server_mock());
+        open_test_workstream(&mut state, "issue-561");
+        for (target, agent_state) in [
+            (&dead_quarantined, AgentState::Quarantined),
+            (&live_quarantined, AgentState::Quarantined),
+            (&dead_busy, AgentState::Busy),
+            (&unreachable_quarantined, AgentState::Quarantined),
+        ] {
+            state
+                .add_session_to_workstream(
+                    "issue-561",
+                    target.clone(),
+                    "implementer".to_string(),
+                    Some("codex".to_string()),
+                    None,
+                    agent_state,
+                )
+                .expect("add session");
+        }
+        state
+            .sessions
+            .get_mut(&dead_quarantined)
+            .expect("dead quarantined")
+            .observe_tmux_session(&session_info("dead", "$1", 100, 120));
+        state
+            .sessions
+            .get_mut(&live_quarantined)
+            .expect("live quarantined")
+            .observe_tmux_session(&session_info("live", "$2", 100, 150));
+        state
+            .sessions
+            .get_mut(&dead_busy)
+            .expect("dead busy")
+            .observe_tmux_session(&session_info("dead-busy", "$3", 100, 125));
+        state
+            .sessions
+            .get_mut(&unreachable_quarantined)
+            .expect("unreachable quarantined")
+            .observe_tmux_session(&session_info("unreachable", "$9", 100, 130));
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::doctor_shared(
+            Arc::clone(&shared),
+            DoctorRequest {
+                cached: false,
+                quarantine_dead: false,
+                prune_quarantined: true,
+            },
+        )
+        .await
+        .expect("doctor");
+
+        assert_eq!(records[0]["cleanup"]["pruned_count"], 1);
+        let dead_quarantined_target = dead_quarantined.to_string();
+        assert_eq!(
+            records[0]["cleanup"]["pruned"][0]["target"],
+            dead_quarantined_target
+        );
+        assert!(records[0]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .all(|row| row["target"].as_str() != Some(dead_quarantined_target.as_str())));
+        assert_eq!(
+            doctor_session_row(&records[0], &live_quarantined)["liveness"],
+            "live"
+        );
+        assert_eq!(
+            doctor_session_row(&records[0], &dead_busy)["liveness"],
+            "dead"
+        );
+        assert_eq!(
+            doctor_session_row(&records[0], &unreachable_quarantined)["liveness"],
+            "unreachable"
+        );
+
+        let state = shared.lock().await;
+        assert!(!state.sessions.contains_key(&dead_quarantined));
+        assert!(state.sessions.contains_key(&live_quarantined));
+        assert!(state.sessions.contains_key(&dead_busy));
+        assert!(state.sessions.contains_key(&unreachable_quarantined));
+        let workstream = state.workstream("issue-561").expect("workstream");
+        assert!(!workstream.sessions.contains(&dead_quarantined));
+        assert!(workstream.sessions.contains(&live_quarantined));
+        assert!(workstream.sessions.contains(&dead_busy));
+        assert!(workstream.sessions.contains(&unreachable_quarantined));
+    }
+
+    #[tokio::test]
     async fn session_mark_updates_known_missing_session_without_tmux_tags() {
         let target = SessionTarget::session_id("local", "$1").expect("target");
         let mock = motlie_tmux::transport::MockTransport::new()
@@ -7605,6 +8455,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_shared_reports_live_agent_header_and_sessions_sidecar() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ live-name $1 100 0 1  150\n")
+            .with_response("capture-pane", "pane output\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-561");
+        state
+            .add_session_to_workstream(
+                "issue-561",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add target");
+        state.sessions.get_mut(&target).expect("session").identity = "assigned-name".to_string();
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::snapshot_shared(
+            shared,
+            SnapshotRequest {
+                workstream: "issue-561".to_string(),
+                target: None,
+                after: None,
+                max_chars: 12_000,
+            },
+        )
+        .await
+        .expect("snapshot");
+
+        let text = records[0]["text"].as_str().expect("text");
+        assert!(text.contains("=== local::$1 agent=live-name ==="));
+        assert!(text.contains("pane output"));
+        assert_eq!(records[0]["sessions"][0]["agent"], "live-name");
+        assert_eq!(
+            records[0]["sessions"][0]["self_reported_handle"],
+            "assigned-name"
+        );
+        assert_eq!(records[0]["sessions"][0]["name_drift"], true);
+        assert_eq!(records[0]["sessions"][0]["liveness"], "live");
+    }
+
+    #[tokio::test]
     async fn snapshot_target_captures_only_requested_member() {
         let target = SessionTarget::session_id("local", "$1").expect("target");
         let other = SessionTarget::session_id("local", "$2").expect("target");
@@ -7722,6 +8619,8 @@ mod tests {
     async fn new_session_forwards_agent_args_to_spawned_command() {
         let mock = motlie_tmux::transport::MockTransport::new()
             .with_response("command -v 'claude'", "found")
+            .with_response("new-session -d -P", "$1 claude-reviewer 200 0 1  250")
+            .with_response("display-message -p", "0  claude")
             .with_response(
                 "list-sessions",
                 "__MOTLIE_S__ claude-reviewer $1 200 0 1  250\n",
@@ -7749,13 +8648,19 @@ mod tests {
         .await
         .expect("new session with agent args");
 
-        let commands = commands.lock().expect("command log");
-        let create_command = commands
-            .iter()
-            .find(|command| command.contains("new-session"))
-            .expect("new-session command");
-        assert!(create_command.contains("--permission-mode"));
-        assert!(create_command.contains("auto"));
+        let (contains_permission_mode, contains_auto) = {
+            let commands = commands.lock().expect("command log");
+            let respawn_command = commands
+                .iter()
+                .find(|command| command.contains("respawn-pane"))
+                .expect("respawn-pane command");
+            (
+                respawn_command.contains("--permission-mode"),
+                respawn_command.contains("auto"),
+            )
+        };
+        assert!(contains_permission_mode);
+        assert!(contains_auto);
 
         let state = shared.lock().await;
         let target = SessionTarget::session_id("local", "$1").expect("target");
@@ -7868,6 +8773,9 @@ mod tests {
     async fn new_session_reports_immediate_agent_exit_after_creation() {
         let mock = motlie_tmux::transport::MockTransport::new()
             .with_response("command -v 'agent-new'", "found")
+            .with_response("new-session -d -P", "$1 worker 100 0 1  100")
+            .with_response("display-message -p", "1 127 agent-new")
+            .with_response("capture-pane", "boot failed")
             .with_response("list-sessions", "")
             .with_default("");
         let mut state = DaemonState::default();
@@ -7891,8 +8799,10 @@ mod tests {
         .expect_err("immediate session death should be reported clearly");
 
         let message = error.to_string();
-        assert!(message.contains("exited immediately during startup"));
+        assert!(message.contains("exited during startup"));
         assert!(message.contains("agent-new"));
+        assert!(message.contains("exit_status=Some(127)"));
+        assert!(message.contains("boot failed"));
         assert!(
             !message.contains("not found in list"),
             "misleading lower-level error leaked: {message}"
@@ -7904,6 +8814,8 @@ mod tests {
         let target = SessionTarget::session_id("local", "$1").expect("target");
         let mock = motlie_tmux::transport::MockTransport::new()
             .with_response("command -v 'agent-new'", "found")
+            .with_response("new-session -d -P", "$1 fresh 200 0 1  250")
+            .with_response("display-message -p", "0  agent-new")
             .with_response("list-sessions", "__MOTLIE_S__ fresh $1 200 0 1  250\n")
             .with_shell_data(vec![b"%output %5 ready\n".to_vec()])
             .with_default("");
@@ -8453,6 +9365,59 @@ mod tests {
         rendered
     }
 
+    #[tokio::test]
+    async fn events_shared_reports_live_agent_and_agents_sidecar() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ live-name $1 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-561");
+        state
+            .add_session_to_workstream(
+                "issue-561",
+                target.clone(),
+                "implementer".to_string(),
+                Some("codex".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state.sessions.get_mut(&target).expect("session").identity = "assigned-name".to_string();
+        state
+            .record_event(
+                "issue-561",
+                EventDraft::new("message_sent")
+                    .direction_to_agent()
+                    .target(&target)
+                    .text("check status"),
+            )
+            .expect("record event");
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::events_shared(
+            shared,
+            EventsRequest {
+                workstream: "issue-561".to_string(),
+                after: None,
+                limit: 10,
+                readable: false,
+            },
+        )
+        .await
+        .expect("events");
+
+        assert_eq!(records[0]["events"][0]["agent"], "live-name");
+        assert_eq!(records[0]["agents"][0]["agent"], "live-name");
+        assert_eq!(
+            records[0]["agents"][0]["self_reported_handle"],
+            "assigned-name"
+        );
+        assert_eq!(records[0]["agents"][0]["name_drift"], true);
+        assert_eq!(records[0]["agents"][0]["liveness"], "live");
+    }
+
     #[test]
     fn events_readable_renders_compact_timeline() {
         let mut state = DaemonState::default();
@@ -8695,13 +9660,7 @@ mod tests {
             .with_response("send-keys", "")
             .with_response("capture-pane", "hello\n")
             .with_default("");
-        let mut state = DaemonState::default();
-        state.channel_manager = agent::ChannelManager::new(agent::ChannelConfig {
-            coalesce_window: Duration::ZERO,
-            coalesce_max_wait: Duration::ZERO,
-            preserve_composer: false,
-            ..agent::ChannelConfig::default()
-        });
+        let mut state = fast_channel_manager_state();
         register_mock_host(&mut state, "local", mock);
         open_test_workstream(&mut state, "issue-453");
         state
@@ -8749,13 +9708,7 @@ mod tests {
             .with_response("send-keys", "")
             .with_default("");
         let commands = mock.command_log();
-        let mut state = DaemonState::default();
-        state.channel_manager = agent::ChannelManager::new(agent::ChannelConfig {
-            coalesce_window: Duration::ZERO,
-            coalesce_max_wait: Duration::ZERO,
-            preserve_composer: false,
-            ..agent::ChannelConfig::default()
-        });
+        let mut state = fast_channel_manager_state();
         register_mock_host(&mut state, "local", mock);
         let mut timer = timer_record("poll", target, Some(100));
         timer.prompt = "Line one\nLine two".to_string();
@@ -8798,13 +9751,7 @@ mod tests {
             .with_response("capture-pane", "Wake up.\n")
             .with_default("");
         let commands = mock.command_log();
-        let mut state = DaemonState::default();
-        state.channel_manager = agent::ChannelManager::new(agent::ChannelConfig {
-            coalesce_window: Duration::ZERO,
-            coalesce_max_wait: Duration::ZERO,
-            preserve_composer: false,
-            ..agent::ChannelConfig::default()
-        });
+        let mut state = fast_channel_manager_state();
         register_mock_host(&mut state, "local", mock);
         open_test_workstream(&mut state, "issue-355");
         state

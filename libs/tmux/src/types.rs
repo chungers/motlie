@@ -66,6 +66,13 @@ impl fmt::Display for PaneAddress {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PaneProcessStatus {
+    pub dead: bool,
+    pub exit_status: Option<i32>,
+    pub current_command: String,
+}
+
 /// Stable tmux session identifier using tmux's `#{session_id}` (`$<id>`).
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -132,6 +139,12 @@ impl SessionInfo {
     pub fn is_attached(&self) -> bool {
         self.attached_count > 0
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum SessionInventory {
+    Available(Vec<SessionInfo>),
+    NoTmuxServer { reason: String },
 }
 
 /// Maximum supported value size for a session metadata tag.

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-23 | @codex-561-design | Implemented B3 cleanup contract: `doctor --quarantine-dead` and `--prune-quarantined` operate only on confirmed-dead rows and preserve unreachable rows per #401 lifecycle hygiene. |
 | 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, timer start upsert behavior, timer paste-mode selection, and delivery primitive parity controls. |
 | 2026-06-07 | @codex-401-impl | Clarified issue #409 audit durability: non-`agent_output` events are lossless-enqueued, high-volume `agent_output` is best-effort with observable degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
 | 2026-06-06 | @codex-401-impl | Added issue #409 durable audit call-log events: redacted `to_agent`/`from_agent` text, OutputBus agent output capture, socket-adjacent JSONL replay, and readable transcripts that survive daemon restart. |
@@ -209,6 +210,13 @@ and records the transition so cleanup directives remain audit-logged. `reclaim`
 then kills and deregisters only a managed target whose live tmux tags are
 `quarantined`.
 
+`doctor --quarantine-dead` is the #561/#401 cleanup bridge for stale daemon
+records that are confirmed dead by fresh tmux reconciliation. It moves only
+`death_kind=absent_session_id|reused_session_id` rows to the quarantined
+lifecycle state and never acts on `unreachable` rows. `doctor --prune-quarantined`
+removes only records already `quarantined` and still confirmed dead; live
+quarantined sessions still require `reclaim`.
+
 ## Communication And Handoff
 
 ```sh
@@ -385,6 +393,11 @@ mstream events pr-324 --limit 50 --readable
 mstream snapshot pr-324 --max-chars 12000
 mstream snapshot pr-324 --target local::$7 --max-chars 12000
 mstream summary-input pr-324 --max-chars 12000
+mstream session list
+mstream session list --cached
+mstream doctor
+mstream doctor --quarantine-dead
+mstream doctor --prune-quarantined
 ```
 
 `status` refreshes live tmux session activity through each connected
@@ -393,10 +406,29 @@ the tmux library's session-level maximum of `session_activity` and
 `window_activity`, so it reflects either attached-client input or program
 output. Use this command for liveness instead of direct SSH/tmux probing.
 Timer input guards do not apply to observation commands; `status`, `events`,
-`snapshot`, `summary-input`, `timer list`, `hosts`, `scan`, `list`, and `show`
-remain read-only polling operations.
+`snapshot`, `summary-input`, `timer list`, `hosts`, `scan`, `list`, `show`,
+`session list`, and default `doctor` remain read-only polling operations.
+`doctor --quarantine-dead` and `doctor --prune-quarantined` are explicit
+cleanup side effects and require live reconciliation; they cannot be combined
+with `--cached` or `--no-reconcile`.
 `snapshot --target <host>::<session-or-id>` captures one joined target and is
 useful when aggregate workstream snapshots would truncate later panes.
+
+`session list` and `doctor` reconcile daemon records with live tmux inventory by
+stable session id unless `--cached` or `--no-reconcile` is supplied. Rows expose
+canonical `agent`, `self_reported_handle`, `name_drift`, `liveness`,
+`liveness_error`, `tmux_present`, and confirmed-dead `death_kind` fields. A
+`death_kind` is emitted only for confirmed dead rows: `absent_session_id` when
+the tracked `$N` is missing, or `reused_session_id` when the tracked `$N` now
+belongs to another tmux session. `unreachable` rows have `tmux_present=null`
+and no confirmed-dead `death_kind`.
+
+`doctor` also returns a `cleanup` object with requested flags, counts, and
+`quarantined`/`pruned` row summaries. `--quarantine-dead` moves only
+confirmed-dead rows into the #401 quarantined lifecycle state, cancels dependent
+handoffs/timers, and leaves live or unreachable rows untouched.
+`--prune-quarantined` removes only records already quarantined and still
+confirmed dead after live reconciliation.
 
 Each status agent includes:
 
