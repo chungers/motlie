@@ -51,10 +51,11 @@ pub use transport::{
 pub use types::{
     CaptureNormalizeMode, CaptureOptions, CaptureResult, ClientInfo, CreateSessionOptions,
     CreateWindowOptions, ExecId, ExecOutput, ExecState, FidelityIssue, GeometrySnapshot,
-    HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, ScrollbackQuery,
-    SessionClientActivity, SessionEnvVar, SessionId, SessionInfo, SessionTag, SplitDirection,
-    SplitPaneOptions, SplitSize, StatusLeft, StatusLeftLength, StatusStyle, TargetAddress,
-    TargetLevel, TargetSpec, TmuxSocket, TmuxStyle, TransferOptions, WindowInfo, WindowStyle,
-    SESSION_ENV_VAR_VALUE_MAX_BYTES, SESSION_TAG_VALUE_MAX_BYTES, STATUS_LEFT_LENGTH_MAX,
-    STATUS_LEFT_MAX_BYTES, STATUS_STYLE_MAX_BYTES, TMUX_STYLE_MAX_BYTES,
+    HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, PaneProcessStatus,
+    ScrollbackQuery, SessionClientActivity, SessionEnvVar, SessionId, SessionInfo,
+    SessionInventory, SessionTag, SplitDirection, SplitPaneOptions, SplitSize, StatusLeft,
+    StatusLeftLength, StatusStyle, TargetAddress, TargetLevel, TargetSpec, TmuxSocket, TmuxStyle,
+    TransferOptions, WindowInfo, WindowStyle, SESSION_ENV_VAR_VALUE_MAX_BYTES,
+    SESSION_TAG_VALUE_MAX_BYTES, STATUS_LEFT_LENGTH_MAX, STATUS_LEFT_MAX_BYTES,
+    STATUS_STYLE_MAX_BYTES, TMUX_STYLE_MAX_BYTES,
 };

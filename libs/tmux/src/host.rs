@@ -483,6 +483,12 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// Return tmux session inventory, preserving no-server as a named state.
+    pub async fn session_inventory(&self) -> Result<SessionInventory> {
+        let prefix = self.inner.tmux_prefix().await;
+        discovery::session_inventory_with_prefix(&self.inner.transport, &prefix).await
+    }
+
     /// Return the hostname reported by the host's tmux server.
     ///
     /// This uses `start-server ; display-message -p '#{host}'` through the
@@ -680,16 +686,8 @@ impl HostHandle {
     /// `CreateSessionOptions::default()` preserves pre-DC22 behavior.
     pub async fn create_session(&self, name: &str, opts: &CreateSessionOptions) -> Result<Target> {
         let prefix = self.inner.tmux_prefix().await;
-        control::create_session_with_prefix(&self.inner.transport, &prefix, name, opts).await?;
-
-        // Query the created session to get full info
-        let sessions = self.list_sessions().await?;
-        let info = sessions
-            .into_iter()
-            .find(|s| s.name == name)
-            .ok_or_else(|| {
-                Error::State(format!("session '{}' created but not found in list", name))
-            })?;
+        let info =
+            control::create_session_with_prefix(&self.inner.transport, &prefix, name, opts).await?;
 
         Ok(Target {
             inner: self.inner.clone(),
@@ -751,9 +749,9 @@ impl HostHandle {
 
         match (spec.window_selector(), spec.pane_index()) {
             (None, Some(_)) => Err(Error::Parse(format!(
-                    "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
-                    spec.session_name()
-                ))),
+                "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
+                spec.session_name()
+            ))),
             (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(session_info),
@@ -2479,6 +2477,41 @@ impl Target {
             .await
     }
 
+    /// Set pane-level remain-on-exit for the active pane resolved by this target.
+    pub async fn set_pane_remain_on_exit(&self, enabled: bool) -> Result<()> {
+        let prefix = self.inner.tmux_prefix().await;
+        control::set_pane_remain_on_exit_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &self.target_string(),
+            enabled,
+        )
+        .await
+    }
+
+    /// Respawn the active pane resolved by this target with a command.
+    pub async fn respawn_pane(&self, command: &str) -> Result<()> {
+        let prefix = self.inner.tmux_prefix().await;
+        control::respawn_pane_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &self.target_string(),
+            command,
+        )
+        .await
+    }
+
+    /// Query process/death status for the active pane resolved by this target.
+    pub async fn pane_process_status(&self) -> Result<PaneProcessStatus> {
+        let prefix = self.inner.tmux_prefix().await;
+        control::pane_process_status_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &self.target_string(),
+        )
+        .await
+    }
+
     /// Capture visible pane content.
     ///
     /// At **session or window level**, this captures the **active pane only**
@@ -3396,10 +3429,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_returns_target() {
-        let mock = MockTransport::new().with_default("").with_response(
-            "list-sessions",
-            "__MOTLIE_S__ test $0 1700000000 0 1  1700000005\n",
-        );
+        let mock = MockTransport::new().with_default("$0 test 1700000000 0 1  1700000005");
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())

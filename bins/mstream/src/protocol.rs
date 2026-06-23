@@ -114,7 +114,8 @@ pub enum ClientRequest {
     Interrupt(InterruptRequest),
     Broadcast(BroadcastRequest),
     SessionRetag(SessionRetagRequest),
-    SessionList,
+    SessionList(SessionListRequest),
+    Doctor(DoctorRequest),
     SessionMark(SessionMarkRequest),
     HandoffArm(HandoffArmRequest),
     HandoffList {
@@ -278,6 +279,18 @@ pub struct BroadcastRequest {
     pub input_quiet_for_secs: Option<u64>,
     pub role: Option<String>,
     pub state: Option<AgentState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionListRequest {
+    #[serde(default)]
+    pub cached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DoctorRequest {
+    #[serde(default)]
+    pub cached: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
