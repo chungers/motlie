@@ -135,7 +135,9 @@ pub(crate) enum ModalState {
         session: SelectedSession,
         ui: SessionKeyValueModalUi,
     },
-    Help,
+    Help {
+        scroll: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +195,7 @@ impl ModalView {
     pub(crate) fn body_text(&self) -> String {
         match &self.body {
             ModalBody::Text(text) => text.clone(),
+            ModalBody::Help { header, keys, .. } => format!("{header}\n\n{keys}"),
             ModalBody::NewSession {
                 input,
                 host_label,
@@ -252,6 +255,11 @@ impl ModalView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModalBody {
     Text(String),
+    Help {
+        header: String,
+        keys: String,
+        scroll: usize,
+    },
     NewSession {
         input: String,
         input_cursor: usize,
@@ -828,7 +836,7 @@ impl SessionListState {
         self.rows = rows;
     }
 
-    pub(crate) fn toggle_sort_mode(&mut self) -> SessionSortMode {
+    pub(crate) fn toggle_tag_group_sort(&mut self) -> SessionSortMode {
         self.sort_mode = match self.sort_mode {
             SessionSortMode::Activity => SessionSortMode::TagGroup,
             SessionSortMode::Name => SessionSortMode::TagGroup,
@@ -837,8 +845,12 @@ impl SessionListState {
         self.sort_mode
     }
 
-    pub(crate) fn sort_by_name(&mut self) -> SessionSortMode {
-        self.sort_mode = SessionSortMode::Name;
+    pub(crate) fn toggle_name_sort(&mut self) -> SessionSortMode {
+        self.sort_mode = match self.sort_mode {
+            SessionSortMode::Activity => SessionSortMode::Name,
+            SessionSortMode::Name => SessionSortMode::Activity,
+            SessionSortMode::TagGroup => SessionSortMode::Name,
+        };
         self.sort_mode
     }
 
@@ -891,6 +903,20 @@ impl SessionListState {
         let next = (self.selected as isize + delta).clamp(0, max_index) as usize;
         self.selected = next;
         old != next
+    }
+
+    pub(crate) fn select_first_name_match(&mut self, query: &str) -> Option<bool> {
+        if query.is_empty() {
+            return None;
+        }
+        let query = query.to_lowercase();
+        let index = self
+            .rows
+            .iter()
+            .position(|row| row.session.name.to_lowercase().contains(&query))?;
+        let changed = self.selected != index;
+        self.selected = index;
+        Some(changed)
     }
 }
 
@@ -1081,6 +1107,7 @@ pub(crate) struct AppState {
     pub(crate) modal: Option<ModalState>,
     pub(crate) activity_tracker: ActivityTracker,
     pub(crate) pending_list_shortcut: Option<PendingListShortcut>,
+    pub(crate) session_search: Option<String>,
 }
 
 impl AppState {
@@ -1104,6 +1131,7 @@ impl AppState {
             modal: None,
             activity_tracker: ActivityTracker::default(),
             pending_list_shortcut: None,
+            session_search: None,
         }
     }
 

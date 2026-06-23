@@ -8,6 +8,8 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-562-impl | Updated live-test follow-ups: single-space stable-id rows, list-pane `s`/`g` toggles back to activity recency, and Help key-list scrolling below the fixed logo. |
+| 2026-06-22 | @codex-562-impl | Documented issue #562 TUI updates: visible stable session ids in rows and list-focused `/` quick search with case-insensitive substring matching. |
 | 2026-06-11 | @mstream453-impl | Added list-pane `s` name sorting and documented the Help shortcut. |
 | 2026-05-30 | @codex | Added the local macOS release-build install sequence, including re-signing `/usr/local/bin/mmux` before ForceCommand use. |
 | 2026-05-28 | @gpt55-342-og | Removed positional `--alias` overrides; SSH targets now use endpoint identity labels including user, host, non-default port, and non-default tmux socket. |
@@ -232,10 +234,10 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
   attached marker and the session name:
 
   ```
-  > * ■ dev          1m / 12d
-    * ■ jarvis       4h / 19d
-      ■ build        2d / 5d
-      ■ logs         3d / 7d
+  > * ■ dev    [$1]       1m / 12d
+    * ■ jarvis [$2]       4h / 19d
+      ■ build  [$3]       2d / 5d
+      ■ logs   [$4]       3d / 7d
   ```
 
   Host colors are assigned from configured host order using a five-color
@@ -244,7 +246,7 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
 - All command keys (`Up`/`Down`, `u`/`b`, `PgUp`/`PgDn`, `Home`/`End`,
-  `a`, `p`, `n`, `k`, `r`, `t`, `g`, `$` then `0`…`9`, `$` then `!`, `Ctrl-C`/`q`, `l`,
+  `/`, `a`, `p`, `n`, `k`, `r`, `t`, `g`, `$` then `0`…`9`, `$` then `!`, `Ctrl-C`/`q`, `l`,
   `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
@@ -290,6 +292,7 @@ Main-view keys:
 | PgUp / PgDn | Page session list | Page detail buffer |
 | Home / End | First / last session | Top / bottom detail; End resumes live tail |
 | Enter | Refresh live preview now | No-op |
+| `/` then chars | Search session names by case-insensitive substring and jump to the first matching row in current sort order; `/`, Up, or Down cancels search | No-op |
 | Tab | Focus detail pane | Focus session list |
 | Left / Right | No-op | No-op |
 | `Esc` | Focus session list | Focus session list |
@@ -303,8 +306,8 @@ Main-view keys:
 | `k` | Open Kill Session modal | Open Kill Session modal |
 | `r` | Open Rename Session modal | No-op |
 | `t` | Open Session Tags modal | Open Session Tags modal |
-| `g` | Toggle activity/tag grouping | No-op |
-| `s` | Sort sessions by name | No-op |
+| `g` | Toggle tag grouping / activity recency | No-op |
+| `s` | Toggle name sort / activity recency | No-op |
 | `h` | Open Help modal | Open Help modal |
 | `a` | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach |
@@ -326,9 +329,11 @@ state in the same snapshot. The selector no longer starts a
 separate `watch_host_events()` poller for its TUI list. Direct tmux
 control-mode host notifications remain future work.
 
-Each session row includes the display name, an attached-client marker, and a
-right-aligned recency column. The attached marker is `*` when tmux reports one
-or more clients attached to the session. Rows are sorted by
+Each session row includes the display name and stable tmux session id as
+`<name> [$id]` with exactly one space between them, plus an attached-client
+marker and a right-aligned recency column. The
+attached marker is `*` when tmux reports one or more clients attached to the
+session. Rows are sorted by
 `activity_observed_at_local` (operator-side wall clock at last observed
 `session.activity` advance) descending so the most recently active session
 appears first by default. Pressing `g` while the list pane is focused toggles
@@ -338,7 +343,17 @@ inside each group are ordered by activity time, host order, and session name.
 Empty checked-tag values are treated like no displayed tag. The toggle selects
 the first row in the new order so the grouped top is visible immediately.
 Pressing `g` again restores activity sort. Pressing `s` while the list pane is
-focused sorts sessions by session name and selects the first row in name order.
+focused toggles name sorting: the first press sorts sessions by session name
+and selects the first row in name order, and the next press restores activity
+sort.
+Pressing `/` while the list pane is focused starts quick search; typed
+characters match session names case-insensitively and move the highlight to the
+first matching row in the current sort order. Another `/`, Up, or Down cancels
+search mode without moving the highlighted row.
+Matching is substring (`contains`), not prefix, following the vi/vim/less `/`
+convention: search is unanchored/match-anywhere, while prefix matching is a
+typeahead/completion idiom. Iterating matches with `n`/`N` is a possible future
+follow-up and is out of scope for #562.
 The recency column is formatted as
 `  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`
@@ -383,7 +398,9 @@ Modal keys:
 |-----|----------|
 | Left / Right | In focused text fields, move the insertion point left/right within New Session, Rename Session, Send Keys, and Session Tags inputs. Otherwise choose Cancel or Ok in action modals. No-op in Help. |
 | Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Send Keys, cycle text field, Ok, and Cancel. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
-| Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row. |
+| Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row; in Help, scroll the key list. |
+| PgUp / PgDn | In Help, page the key list. |
+| `j` / `k` | In Help, scroll the key list down/up. |
 | `u` / `b` | In New Session env rows and Session Tags, move focus up/down through rows. |
 | `m` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
 | `c` | In Session Tags, stage the focused row as the checked key with `✓`; Ok persists it as `@mmux/__selected-key`. |
@@ -415,7 +432,9 @@ internal `@mmux/__selected-key` option is filtered from this list, and
 non-empty values. Checked tag values render after session names as a
 right-aligned column in the Sessions list. Help
 renders the built-in motlie logo, build date, last 8 characters of the build git
-SHA, key functions, and a single Ok button. All modal content areas are
+SHA, key functions, and a single Ok button. The logo/build metadata stay fixed
+at the top; the key-function list below them scrolls with Up/Down, PgUp/PgDn,
+or `j`/`k`. All modal content areas are
 separated from the button bar by a horizontal line.
 
 ## Local Build And macOS Install

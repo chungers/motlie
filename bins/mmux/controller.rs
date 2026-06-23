@@ -10,8 +10,8 @@ use motlie_tmux::{
 };
 
 use crate::consts::{
-    DEFAULT_DETAIL_LINES, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    DEFAULT_DETAIL_LINES, HELP_KEY_FUNCTIONS, LANDSCAPE_MAX_LEFT_PERCENT,
+    LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
 use crate::detail::{fetch_older_lines, render_live_preview};
 use crate::model::{
@@ -28,6 +28,7 @@ const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
 const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "$$";
 const SEND_KEYS_ENTER_DELAY: Duration = Duration::from_millis(500);
+const HELP_MODAL_PAGE_SCROLL: usize = 10;
 
 pub(crate) struct HostRefreshResult {
     host_id: HostId,
@@ -487,13 +488,18 @@ pub(crate) async fn handle_key(
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             app.pending_list_shortcut = None;
+            app.session_search = None;
             return Ok(KeyOutcome::Cancel);
         }
-        (KeyCode::Char('q'), _) => {
+        (KeyCode::Char('q'), _) if app.session_search.is_none() => {
             app.pending_list_shortcut = None;
+            app.session_search = None;
             return Ok(KeyOutcome::Cancel);
         }
         _ => {}
+    }
+    if let Some(outcome) = handle_session_search_key(fleet, app, key).await? {
+        return Ok(outcome);
     }
     if let Some(shortcut) = app.pending_list_shortcut.take() {
         return handle_pending_list_shortcut(fleet, app, key, shortcut).await;
@@ -501,7 +507,7 @@ pub(crate) async fn handle_key(
 
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => app.layout.focus = Focus::List,
-        (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help),
+        (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help { scroll: 0 }),
         (KeyCode::Char('g'), _) if app.layout.focus == Focus::List => {
             toggle_session_grouping(fleet, app).await?;
         }
@@ -544,6 +550,7 @@ pub(crate) async fn handle_key(
         }
         (KeyCode::Char('$'), _) if app.layout.focus == Focus::List => {
             if app.selected_session().is_some() {
+                app.session_search = None;
                 app.pending_list_shortcut = Some(PendingListShortcut::SendKeysImmediate);
             } else {
                 app.status = StatusBanner::info("no session selected");
@@ -681,6 +688,94 @@ pub(crate) async fn handle_key(
     Ok(KeyOutcome::Continue)
 }
 
+async fn handle_session_search_key(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    key: KeyEvent,
+) -> Result<Option<KeyOutcome>> {
+    if app.layout.focus == Focus::List
+        && app.session_search.is_none()
+        && key.code == KeyCode::Char('/')
+        && text_key_modifiers(key.modifiers)
+    {
+        app.session_search = Some(String::new());
+        app.status = StatusBanner::info("search: /");
+        return Ok(Some(KeyOutcome::Continue));
+    }
+
+    if app.session_search.is_none() {
+        return Ok(None);
+    }
+    if app.layout.focus != Focus::List {
+        app.session_search = None;
+        return Ok(None);
+    }
+
+    match key.code {
+        KeyCode::Char('/') if text_key_modifiers(key.modifiers) => {
+            cancel_session_search(app);
+            Ok(Some(KeyOutcome::Continue))
+        }
+        KeyCode::Up | KeyCode::Down => {
+            cancel_session_search(app);
+            Ok(Some(KeyOutcome::Continue))
+        }
+        KeyCode::Esc => {
+            cancel_session_search(app);
+            Ok(Some(KeyOutcome::Continue))
+        }
+        KeyCode::Backspace => {
+            if let Some(query) = &mut app.session_search {
+                query.pop();
+            }
+            apply_session_search(fleet, app).await?;
+            Ok(Some(KeyOutcome::Continue))
+        }
+        KeyCode::Char(ch) if text_key_modifiers(key.modifiers) => {
+            if let Some(query) = &mut app.session_search {
+                query.push(ch);
+            }
+            apply_session_search(fleet, app).await?;
+            Ok(Some(KeyOutcome::Continue))
+        }
+        _ => {
+            app.session_search = None;
+            Ok(None)
+        }
+    }
+}
+
+fn text_key_modifiers(modifiers: KeyModifiers) -> bool {
+    !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+fn cancel_session_search(app: &mut AppState) {
+    app.session_search = None;
+    app.status = StatusBanner::info("search canceled");
+}
+
+async fn apply_session_search(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
+    let query = app.session_search.clone().unwrap_or_default();
+    if query.is_empty() {
+        app.status = StatusBanner::info("search: /");
+        return Ok(());
+    }
+
+    match app.session_list.select_first_name_match(&query) {
+        Some(true) => {
+            refresh_selected_detail(fleet, app).await?;
+            app.status = StatusBanner::info(format!("search: /{query}"));
+        }
+        Some(false) => {
+            app.status = StatusBanner::info(format!("search: /{query}"));
+        }
+        None => {
+            app.status = StatusBanner::info(format!("search: /{query} (no match)"));
+        }
+    }
+    Ok(())
+}
+
 async fn handle_pending_list_shortcut(
     fleet: &HostFleet,
     app: &mut AppState,
@@ -740,7 +835,7 @@ fn is_resize_modifier(modifiers: KeyModifiers) -> bool {
 
 async fn toggle_session_grouping(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     let previous = current_selection_key(app);
-    let mode = app.session_list.toggle_sort_mode();
+    let mode = app.session_list.toggle_tag_group_sort();
     app.session_list.resort(fleet);
     app.session_list.select_first();
     if previous != current_selection_key(app) {
@@ -756,7 +851,7 @@ async fn toggle_session_grouping(fleet: &HostFleet, app: &mut AppState) -> Resul
 
 async fn sort_sessions_by_name(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     let previous = current_selection_key(app);
-    let mode = app.session_list.sort_by_name();
+    let mode = app.session_list.toggle_name_sort();
     app.session_list.resort(fleet);
     app.session_list.select_first();
     if previous != current_selection_key(app) {
@@ -917,8 +1012,24 @@ async fn handle_modal_key(
         Some(ModalState::SessionKeyValues { session, ui }) => {
             handle_session_key_values_modal_key(key, session.clone(), ui)
         }
-        Some(ModalState::Help) => match key.code {
+        Some(ModalState::Help { scroll }) => match key.code {
             KeyCode::Esc | KeyCode::Enter => ModalAction::Close,
+            KeyCode::Up | KeyCode::Char('k') => {
+                scroll_help_keys(scroll, -1);
+                ModalAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                scroll_help_keys(scroll, 1);
+                ModalAction::None
+            }
+            KeyCode::PageUp => {
+                scroll_help_keys(scroll, -(HELP_MODAL_PAGE_SCROLL as isize));
+                ModalAction::None
+            }
+            KeyCode::PageDown => {
+                scroll_help_keys(scroll, HELP_MODAL_PAGE_SCROLL as isize);
+                ModalAction::None
+            }
             _ => ModalAction::None,
         },
         None => ModalAction::None,
@@ -984,6 +1095,15 @@ async fn handle_modal_key(
         }
     }
     Ok(KeyOutcome::Continue)
+}
+
+fn scroll_help_keys(scroll: &mut usize, delta: isize) {
+    let max_scroll = HELP_KEY_FUNCTIONS.lines().count().saturating_sub(1);
+    if delta < 0 {
+        *scroll = scroll.saturating_sub(delta.unsigned_abs());
+    } else {
+        *scroll = scroll.saturating_add(delta as usize).min(max_scroll);
+    }
 }
 
 fn discarded_key_value_status(modal: Option<&ModalState>) -> Option<String> {

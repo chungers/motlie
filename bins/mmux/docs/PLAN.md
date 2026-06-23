@@ -12,6 +12,8 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-22 | @codex-562-impl | Updated help-modal plan note after live test: fixed logo/build header with scrollable key list. |
+| 2026-06-22 | @codex-562-impl | Added and completed Phase 16 for issue #562: stable id row display, list-focused quick search, docs, and focused verification. |
 | 2026-05-28 | @gpt55-342-og | Added Phase 15 for issue #342 endpoint identity labels, removal of positional `--alias`, and focused validation. |
 | 2026-05-20 | @codex | Added Phase 14 for issue #317 host alias overrides, covering CLI parsing, host setup threading, docs, and focused tests. |
 | 2026-05-16 | @codex-tmux-tl | Tracked issue #282 and fixed modal text inputs so focused Left/Right move the insertion point inside New Session, Rename Session, Send Keys, and Session Tags fields instead of jumping to modal buttons. |
@@ -127,6 +129,22 @@ require an SSH daemon:
 export MOTLIE_MMUX_SSH_URI='ssh://user@host?identity-file=/path/to/key'
 cargo test -p motlie-mmux --test ssh_integration -- --ignored
 ```
+
+## Phase 16: mmux usability improvements (issue #562)
+
+References: [Functional Requirements](./DESIGN.md#functional),
+[Layout](./DESIGN.md#layout), [Selector Internal Types](./API.md#selector-internal-types).
+
+- [x] 16.1 Render each session-list row with the stable tmux session id in
+  `[$id]` form while preserving existing attachment, host-marker, tag, and
+  recency columns.
+- [x] 16.2 Add list-focused `/` quick search state. Printable characters extend
+  the query, matching is by session display name, and selection jumps to the
+  first matching row in the current list order.
+- [x] 16.3 Cancel search mode on another `/`, Up, or Down without moving the
+  highlighted row.
+- [x] 16.4 Update Help/API/CLI/DESIGN docs and focused tests for row id display,
+  search matching, current-order behavior, and cancellation.
 
 ## Phase 15: Endpoint Identity Labels (issue #342)
 
@@ -373,7 +391,8 @@ References: [Functional Requirements](./DESIGN.md#functional),
   button bar, Tab-reachable Ok/Cancel buttons, and id captured at modal-open.
 - [x] 5.7 Implement Help modal opened by `h`, showing the built-in motlie
   logo, build date, last 8 characters of the build git SHA, key functions,
-  and a separated single Ok button; Enter or Esc closes it.
+  and a separated single Ok button; Enter or Esc closes it. The logo/build
+  header remains fixed while the key-function list scrolls below it.
 - [ ] 5.8 Add unit tests for every key transition, modal button selection,
   modal Esc behavior, Tab pane focus behavior, and `l` layout toggle behavior.
 
