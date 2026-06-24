@@ -968,6 +968,53 @@ fn session_list_tag_group_orders_groups_by_recent_activity() {
 }
 
 #[test]
+fn session_list_host_group_sorts_by_host_then_activity() {
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
+        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
+    ]);
+    let mut app = AppState::new(LayoutMode::Normal);
+
+    app.session_list.set_rows_grouped_by_host(
+        vec![
+            make_row_for_host_at(
+                session_with_times("b-fresh", "$1", 10, 950),
+                ssh_host_id("ssh://b"),
+                "beta",
+                1_000,
+            ),
+            make_row_for_host_at(
+                session_with_times("a-old", "$2", 10, 100),
+                ssh_host_id("ssh://a"),
+                "alpha",
+                1_000,
+            ),
+            make_row_for_host_at(
+                session_with_times("b-old", "$3", 10, 200),
+                ssh_host_id("ssh://b"),
+                "beta",
+                1_000,
+            ),
+            make_row_for_host_at(
+                session_with_times("a-fresh", "$4", 10, 900),
+                ssh_host_id("ssh://a"),
+                "alpha",
+                1_000,
+            ),
+        ],
+        &fleet,
+    );
+
+    let names = app
+        .session_list
+        .rows
+        .iter()
+        .map(|row| row.session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["a-fresh", "a-old", "b-fresh", "b-old"]);
+}
+
+#[test]
 fn activity_sort_preserves_selection_by_stable_id() {
     let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
@@ -1149,6 +1196,109 @@ async fn s_toggles_name_sort_from_list_focus_and_selects_top_row() {
 }
 
 #[tokio::test]
+async fn m_toggles_host_sort_from_list_focus_and_selects_top_row() {
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
+        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
+    ]);
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = vec![
+        make_row_for_host_at(
+            session_with_times("b-fresh", "$1", 10, 950),
+            ssh_host_id("ssh://b"),
+            "beta",
+            1_000,
+        ),
+        make_row_for_host_at(
+            session_with_times("a-old", "$2", 10, 100),
+            ssh_host_id("ssh://a"),
+            "alpha",
+            1_000,
+        ),
+        make_row_for_host_at(
+            session_with_times("b-old", "$3", 10, 200),
+            ssh_host_id("ssh://b"),
+            "beta",
+            1_000,
+        ),
+        make_row_for_host_at(
+            session_with_times("a-fresh", "$4", 10, 900),
+            ssh_host_id("ssh://a"),
+            "alpha",
+            1_000,
+        ),
+    ];
+    app.session_list.selected = 0;
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b-fresh", "a-old", "b-old", "a-fresh"]
+    );
+
+    app.layout.focus = Focus::List;
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::HostGroup);
+    assert_eq!(app.status.text(), "sort: host");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-fresh", "a-old", "b-fresh", "b-old"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("a-fresh".to_string())
+    );
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.status.text(), "sort: activity");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b-fresh", "a-fresh", "b-old", "a-old"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("b-fresh".to_string())
+    );
+}
+
+#[tokio::test]
 async fn slash_search_selects_first_name_match_in_current_order() {
     let listing = "__MOTLIE_S__ bar $1 10 0 1  100\n\
                    __MOTLIE_S__ foo $2 10 0 1  100\n\
@@ -1191,6 +1341,34 @@ async fn slash_search_selects_first_name_match_in_current_order() {
     assert_eq!(app.selected_session().unwrap().name(), "foo");
     assert_eq!(app.status.text(), "search: /fo");
     assert_eq!(app.detail.lines, vec!["foo screen".to_string()]);
+}
+
+#[tokio::test]
+async fn slash_search_treats_m_as_query_character() {
+    let fleet = local_fleet();
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![session("alpha", "$1"), session("machine", "$2")]);
+    app.layout.focus = Focus::List;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.session_search.as_deref(), Some("m"));
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.selected_session().unwrap().name(), "machine");
+    assert_eq!(app.status.text(), "search: /m");
 }
 
 #[tokio::test]
@@ -2082,6 +2260,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains("c choose displayed tag"));
     assert!(body.contains("s toggle name sort <-> activity recency"));
     assert!(body.contains("g toggle tag sort <-> activity recency"));
+    assert!(body.contains("m toggle host sort; recency within host <-> activity recency"));
     assert!(body.contains("PgUp/PgDn page sessions"));
     assert!(body.contains("Home/End first/last session"));
     assert!(body.contains("PgUp/PgDn page detail"));
@@ -2215,7 +2394,7 @@ fn help_modal_scrolls_key_list_below_fixed_header() {
     assert!(unscrolled.contains("Sessions/List:"), "{unscrolled}");
     assert!(!unscrolled.contains("Session Tags:"), "{unscrolled}");
 
-    app.modal = Some(ModalState::Help { scroll: 30 });
+    app.modal = Some(ModalState::Help { scroll: 34 });
     let scrolled = render_to_string(&mut app, 80, 24);
     assert!(scrolled.contains("Version:"), "{scrolled}");
     assert!(scrolled.contains("Session Tags:"), "{scrolled}");
@@ -2226,6 +2405,7 @@ fn help_modal_scrolls_key_list_below_fixed_header() {
 async fn m_no_longer_starts_monitoring() {
     let fleet = local_fleet();
     let mut app = app_with_session();
+    app.layout.focus = Focus::Detail;
 
     let outcome = handle_key(
         &fleet,
@@ -2236,6 +2416,7 @@ async fn m_no_longer_starts_monitoring() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
     assert!(app.modal.is_none());
     assert!(app.detail.lines.is_empty());
     assert_eq!(app.status.text(), "loading sessions");
@@ -2846,7 +3027,7 @@ async fn new_session_modal_creates_on_selected_multi_host() {
     let beta = HostHandle::new(
         TransportKind::Mock(
             MockTransport::new()
-                .with_response("new-session -d -s 'build'", "")
+                .with_response("new-session -d -P", "$9 build 10 0 1  100")
                 .with_response("list-sessions", "__MOTLIE_S__ build $9 10 0 1  100\n")
                 .with_response(
                     "display-message -p '__MOTLIE_TAGS__ $9'",
@@ -3804,10 +3985,7 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
 #[tokio::test]
 async fn new_session_modal_applies_staged_initial_environment() {
     let mock = MockTransport::new()
-        .with_response(
-            "new-session -d -s 'build' -e 'BUILD_ID=42' -e 'MOTLIE=enabled'",
-            "",
-        )
+        .with_response("new-session -d -P", "$9 build 10 0 1  100")
         .with_response("list-sessions", "__MOTLIE_S__ build $9 10 0 1  100\n")
         .with_response(
             "display-message -p '__MOTLIE_TAGS__ $9'",

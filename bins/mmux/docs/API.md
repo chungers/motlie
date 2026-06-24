@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-24 | @codex-562-impl | Documented issue #567: `SessionSortMode::HostGroup` and list-pane `m` toggle host/machine grouped recency sorting. |
 | 2026-06-22 | @codex-562-impl | Updated live-test follow-ups: single-space stable-id rows, `s`/`g` toggles back to activity recency, and Help key-list scrolling below the fixed logo. |
 | 2026-06-22 | @codex-562-impl | Documented issue #562 reality: session rows render stable tmux ids and list-focused `/` search uses case-insensitive substring matching in current sort order. |
 | 2026-06-11 | @mstream453-impl | Added `SessionSortMode::Name` for list-pane `s` sorting and Help shortcut coverage. |
@@ -341,8 +342,12 @@ have no displayed tag. The `g` toggle selects the first row in the new order;
 pressing `g` again restores `SessionSortMode::Activity`. Pressing `s` with the
 list focused toggles `SessionSortMode::Name`: the first press sorts by session
 name and selects the first row in name order, and the next press restores
-`SessionSortMode::Activity`. `preserve_selection()` re-finds the highlighted row
-by stable session id after refreshes. A single quiet one-second
+`SessionSortMode::Activity`. Pressing `m` with the list focused toggles
+`SessionSortMode::HostGroup`: the first press groups rows by host/machine using
+configured host order and sorts rows within each host by activity recency; the
+next press restores `SessionSortMode::Activity`. `preserve_selection()`
+re-finds the highlighted row by stable session id after refreshes. A single
+quiet one-second
 `list_sessions()` refresh keeps the active ordering current and notices
 structural session changes. Recency text is observer-relative
 for the activity column (`local_now − activity_observed_at_local`) and

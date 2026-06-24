@@ -802,6 +802,7 @@ pub(crate) enum SessionSortMode {
     Activity,
     Name,
     TagGroup,
+    HostGroup,
 }
 
 impl SessionListState {
@@ -823,6 +824,7 @@ impl SessionListState {
             SessionSortMode::Activity => self.set_rows_sorted_by_activity(rows),
             SessionSortMode::Name => self.set_rows_sorted_by_name(rows),
             SessionSortMode::TagGroup => self.set_rows_grouped_by_tag(rows, fleet),
+            SessionSortMode::HostGroup => self.set_rows_grouped_by_host(rows, fleet),
         }
     }
 
@@ -836,11 +838,21 @@ impl SessionListState {
         self.rows = rows;
     }
 
+    pub(crate) fn set_rows_grouped_by_host(
+        &mut self,
+        mut rows: Vec<SessionRow>,
+        fleet: &HostFleet,
+    ) {
+        sort_rows_by_host_group(&mut rows, fleet);
+        self.rows = rows;
+    }
+
     pub(crate) fn toggle_tag_group_sort(&mut self) -> SessionSortMode {
         self.sort_mode = match self.sort_mode {
             SessionSortMode::Activity => SessionSortMode::TagGroup,
             SessionSortMode::Name => SessionSortMode::TagGroup,
             SessionSortMode::TagGroup => SessionSortMode::Activity,
+            SessionSortMode::HostGroup => SessionSortMode::TagGroup,
         };
         self.sort_mode
     }
@@ -850,6 +862,17 @@ impl SessionListState {
             SessionSortMode::Activity => SessionSortMode::Name,
             SessionSortMode::Name => SessionSortMode::Activity,
             SessionSortMode::TagGroup => SessionSortMode::Name,
+            SessionSortMode::HostGroup => SessionSortMode::Name,
+        };
+        self.sort_mode
+    }
+
+    pub(crate) fn toggle_host_group_sort(&mut self) -> SessionSortMode {
+        self.sort_mode = match self.sort_mode {
+            SessionSortMode::Activity => SessionSortMode::HostGroup,
+            SessionSortMode::Name => SessionSortMode::HostGroup,
+            SessionSortMode::TagGroup => SessionSortMode::HostGroup,
+            SessionSortMode::HostGroup => SessionSortMode::Activity,
         };
         self.sort_mode
     }
@@ -958,6 +981,17 @@ fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
             .then_with(|| left.session.name.cmp(&right.session.name))
             .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
             .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
+    });
+}
+
+fn sort_rows_by_host_group(rows: &mut [SessionRow], fleet: &HostFleet) {
+    rows.sort_by(|left, right| {
+        fleet
+            .host_sort_index(&left.host_id)
+            .cmp(&fleet.host_sort_index(&right.host_id))
+            .then_with(|| left.host_label.cmp(&right.host_label))
+            .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
+            .then_with(|| activity_sort_order(left, right))
     });
 }
 

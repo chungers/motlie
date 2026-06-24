@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-24 | @codex-562-impl | Added and completed Phase 17 for issue #567: list-focused host sort toggle, help/docs, and focused validation. |
 | 2026-06-22 | @codex-562-impl | Updated help-modal plan note after live test: fixed logo/build header with scrollable key list. |
 | 2026-06-22 | @codex-562-impl | Added and completed Phase 16 for issue #562: stable id row display, list-focused quick search, docs, and focused verification. |
 | 2026-05-28 | @gpt55-342-og | Added Phase 15 for issue #342 endpoint identity labels, removal of positional `--alias`, and focused validation. |
@@ -129,6 +130,20 @@ require an SSH daemon:
 export MOTLIE_MMUX_SSH_URI='ssh://user@host?identity-file=/path/to/key'
 cargo test -p motlie-mmux --test ssh_integration -- --ignored
 ```
+
+## Phase 17: Host sort toggle (issue #567)
+
+References: [Functional Requirements](./DESIGN.md#functional),
+[Layout](./DESIGN.md#layout), [Selector Internal Types](./API.md#selector-internal-types).
+
+- [x] 17.1 Add `SessionSortMode::HostGroup` for host/machine grouping with
+  activity recency order within each host.
+- [x] 17.2 Bind list-focused `m` as a two-state host sort/activity recency
+  toggle, with status banners matching existing sort toggles.
+- [x] 17.3 Preserve `/` search behavior so printable `m` extends the active
+  search query instead of toggling sort.
+- [x] 17.4 Update Help/API/CLI/DESIGN docs and focused tests for host sort,
+  focus scoping, search interaction, and help content.
 
 ## Phase 16: mmux usability improvements (issue #562)
 
