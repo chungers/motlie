@@ -3,6 +3,7 @@ use motlie_voice::app::{ConversationCommand, TranscriptEvent};
 
 use crate::early_response::{EarlyResponseEvent, EarlyResponseIntent};
 
+pub(crate) mod external_text;
 mod identity;
 
 /// Events that may drive a conversation processor.
@@ -39,12 +40,20 @@ pub enum ConversationProcessorKind {
     /// Repeat accepted caller text exactly for both committed and provisional paths.
     #[default]
     Identity,
+    /// External app/telnyx-agent text stream attached through the text-call protocol.
+    ///
+    /// This is adapter-backed: inbound caller turns are delivered by the text-call
+    /// websocket registry, and agent frames are handled by `processors::external_text`.
+    /// Local `process_input` intentionally returns no output so the media/ASR
+    /// processor dispatcher does not synthesize a competing response.
+    ExternalTextStream,
 }
 
 impl ConversationProcessorKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Identity => "identity",
+            Self::ExternalTextStream => "external_text_stream",
         }
     }
 
@@ -54,6 +63,9 @@ impl ConversationProcessorKind {
     ) -> Option<ConversationProcessorOutput> {
         match self {
             Self::Identity => identity::IdentityRepeatConversationProcessor.process_input(input),
+            // Adapter-backed processor: websocket-owned external text streams
+            // handle agent frames and queue speech in `processors::external_text`.
+            Self::ExternalTextStream => None,
         }
     }
 
@@ -65,5 +77,29 @@ impl ConversationProcessorKind {
         S: Stream<Item = ConversationProcessorInput> + Send,
     {
         inputs.filter_map(move |input| async move { self.process_input(input) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use motlie_voice::app::TranscriptEvent;
+
+    use super::*;
+
+    #[test]
+    fn external_text_stream_processor_is_local_noop() {
+        let input = ConversationProcessorInput::CommittedTurn(ConversationCommittedTurn {
+            call_id: "call-external".to_string(),
+            turn_id: Some("turn-external".to_string()),
+            text: "hello".to_string(),
+            event: TranscriptEvent::Final {
+                text: "hello".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+        });
+
+        assert!(ConversationProcessorKind::ExternalTextStream
+            .process_input(input)
+            .is_none());
     }
 }

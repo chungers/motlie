@@ -1413,7 +1413,7 @@ impl VoiceQualityConfig {
         self.outcome(
             "text_call.media_ready_timeout_ms",
             clamped.value,
-            ApplyBoundary::NewPlaybackRequest,
+            ApplyBoundary::NewTextCallSession,
             clamped.clamped,
         )
     }
@@ -1424,7 +1424,7 @@ impl VoiceQualityConfig {
         self.outcome(
             "text_call.playback_wait_timeout_ms",
             clamped.value,
-            ApplyBoundary::NewPlaybackRequest,
+            ApplyBoundary::NewTextCallSession,
             clamped.clamped,
         )
     }
@@ -1434,7 +1434,7 @@ impl VoiceQualityConfig {
         self.outcome(
             "text_call.latest_response_wins",
             value,
-            ApplyBoundary::NewTurn,
+            ApplyBoundary::NewTextCallSession,
             false,
         )
     }

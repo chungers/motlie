@@ -1060,13 +1060,25 @@ async fn queue_conversation_speech(
     conflict_policy: SpeechConflictPolicy,
     turn_context: ConversationTurnContext,
 ) {
-    let tts_backend = state.read().await.conversation_tts_backend;
+    let speech_output = {
+        let guard = state.read().await;
+        guard
+            .calls
+            .get(gateway_call_id)
+            .map(|call| call.speech_output)
+            .unwrap_or_else(|| {
+                crate::operator::state::SpeechOutputConfig::from_quality(
+                    guard.conversation_tts_backend,
+                    &guard.quality.config.tts,
+                )
+            })
+    };
     let queued = speech::queue_speech_with_request(
         state,
         media_registry,
         &runtime.tts,
         SpeechQueueRequest {
-            tts_backend,
+            tts_backend: speech_output.tts_backend,
             gateway_call_id: gateway_call_id.to_string(),
             text: response_text.clone(),
             source_label: "conversation say".to_string(),
@@ -1078,6 +1090,8 @@ async fn queue_conversation_speech(
             source_asr_session_ids: Vec::new(),
             source_utterance_ids: Vec::new(),
             prebuffer_chunks_override: None,
+            speech_output: Some(speech_output),
+            metadata: crate::operator::state::QualityPlaybackMetadata::default(),
         },
     )
     .await
@@ -1099,7 +1113,7 @@ async fn queue_conversation_speech(
                 gateway_call_id,
                 playback_id = queued.playback_id,
                 replaced_playback_id = queued.replaced_playback_id.as_deref(),
-                tts_backend = tts_backend.label(),
+                tts_backend = speech_output.tts_backend.label(),
                 "conversation.say.queued"
             );
         }

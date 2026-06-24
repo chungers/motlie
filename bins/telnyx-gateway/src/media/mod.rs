@@ -1961,14 +1961,19 @@ async fn ensure_early_response_pipeline(
     let Some(runtime) = media_state.conversation.as_ref() else {
         return;
     };
-    let (tts_backend, processor) = {
+    let (speech_output, processor) = {
         let guard = state.read().await;
-        let processor = guard
-            .calls
-            .get(gateway_call_id)
+        let call = guard.calls.get(gateway_call_id);
+        let processor = call
             .map(|call| call.conversation.processor)
             .unwrap_or_default();
-        (guard.conversation_tts_backend, processor)
+        let speech_output = call.map(|call| call.speech_output).unwrap_or_else(|| {
+            crate::operator::state::SpeechOutputConfig::from_quality(
+                guard.conversation_tts_backend,
+                &guard.quality.config.tts,
+            )
+        });
+        (speech_output, processor)
     };
     let text_calls = media_state.text_calls.clone().unwrap_or_default();
     let handle = spawn_early_response_pipeline(
@@ -1979,7 +1984,7 @@ async fn ensure_early_response_pipeline(
             media_registry: media_state.media_registry.clone(),
             tts: runtime.tts_registry(),
             text_calls,
-            tts_backend,
+            speech_output,
             processor,
         },
     );
@@ -5694,6 +5699,7 @@ mod tests {
                     source_asr_session_ids: vec![quality_session.asr_session_id.clone()],
                     source_utterance_ids: vec![quality_session.utterance_id.clone()],
                     source_label: "early response".to_string(),
+                    metadata: crate::operator::state::QualityPlaybackMetadata::default(),
                 },
                 None,
             );

@@ -18,7 +18,7 @@ use crate::operator::persistence::write_state_dump;
 use crate::operator::session::OperatorSession;
 use crate::operator::state::{
     asr_warm_key, tts_warm_key, CallStatus, ConversationMode, ConversationStatus, GatewayState,
-    InboundMode, LogLevel, SharedState,
+    InboundMode, LogLevel, QualityPlaybackMetadata, SharedState, SpeechOutputConfig,
 };
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
@@ -32,6 +32,21 @@ use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperatorSourceChannel {
+    Tui,
+    Socket,
+}
+
+impl OperatorSourceChannel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tui => "tui",
+            Self::Socket => "socket",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GatewayContext {
     pub state: SharedState,
@@ -42,6 +57,7 @@ pub struct GatewayContext {
     pub conversation: ConversationRuntime,
     pub text_calls: SharedTextCallRegistry,
     pub session: OperatorSession,
+    pub source_channel: OperatorSourceChannel,
 }
 
 impl GatewayContext {
@@ -80,6 +96,7 @@ impl GatewayContext {
             conversation,
             text_calls: SharedTextCallRegistry::default(),
             session: OperatorSession::new(next_asr_backend),
+            source_channel: OperatorSourceChannel::Tui,
         }
     }
 
@@ -110,6 +127,7 @@ impl GatewayContext {
         )
         .with_text_calls(self.text_calls.clone());
         context.session.next_tts_backend = self.session.next_tts_backend;
+        context.source_channel = OperatorSourceChannel::Socket;
         context
     }
 
@@ -381,12 +399,14 @@ pub enum ConversationModeArg {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ConversationProcessorArg {
     Identity,
+    ExternalTextStream,
 }
 
 impl From<ConversationProcessorArg> for ConversationProcessorKind {
     fn from(processor: ConversationProcessorArg) -> Self {
         match processor {
             ConversationProcessorArg::Identity => Self::Identity,
+            ConversationProcessorArg::ExternalTextStream => Self::ExternalTextStream,
         }
     }
 }
@@ -1701,8 +1721,8 @@ async fn dial(context: &mut GatewayContext, args: DialArgs) -> DriverResult<Comm
             format!("selected call: {gateway_call_id}"),
             "conversation attached in auto mode; smoke-test identity/repeat replies require:".to_string(),
             "  conversation smoke-test on".to_string(),
-            format!("manual TTS smoke test: speak {gateway_call_id} <text to say>"),
-            "use `status` or `call show` to inspect TTS playback; use `speak cancel` to clear active speech".to_string(),
+            format!("manual speech injection: speak {gateway_call_id} <text to say>"),
+            "use `status` or `call show` to inspect injected TTS playback; use `speak cancel` to clear active speech".to_string(),
         ],
         effects: Vec::new(),
     })
@@ -1729,22 +1749,39 @@ async fn start_speech(
 ) -> DriverResult<CommandOutput> {
     if context.text_calls.contains(&gateway_call_id).await {
         return Err(DriverError::message(format!(
-            "manual speak is disabled while a text-call stream is attached for {gateway_call_id}; send agent.turn over the stream or detach it first"
+            "manual speech injection is disabled while a text-call stream is attached for {gateway_call_id}; send agent.turn over the stream or detach it first"
         )));
     }
-    let queued = speech::queue_speech(
+    let backend = context.session.next_tts_backend;
+    let speech_output = {
+        let guard = context.state.read().await;
+        SpeechOutputConfig::from_quality(backend, &guard.quality.config.tts)
+    };
+    let queued = speech::queue_speech_with_request(
         &context.state,
         &context.media,
         &context.tts,
-        context.session.next_tts_backend,
-        gateway_call_id.clone(),
-        text,
-        "speak",
+        speech::SpeechQueueRequest {
+            tts_backend: speech_output.tts_backend,
+            gateway_call_id: gateway_call_id.clone(),
+            text,
+            source_label: "manual speech injection".to_string(),
+            conflict_policy: speech::SpeechConflictPolicy::Reject,
+            turn_finalized_at: None,
+            latest_turn_finalized_at: None,
+            turn_id: None,
+            coalesced_turn_ids: Vec::new(),
+            source_asr_session_ids: Vec::new(),
+            source_utterance_ids: Vec::new(),
+            prebuffer_chunks_override: None,
+            speech_output: Some(speech_output),
+            metadata: QualityPlaybackMetadata::operator_speak(context.source_channel.label()),
+        },
     )
     .await
     .map_err(driver_anyhow)?;
     Ok(CommandOutput::line(format!(
-        "speak queued for {gateway_call_id} playback={}",
+        "manual speech injection queued for {gateway_call_id} playback={}",
         queued.playback_id
     )))
 }
@@ -2275,7 +2312,7 @@ async fn approve_conversation_proposal(
     context: &mut GatewayContext,
     call: Option<String>,
 ) -> DriverResult<CommandOutput> {
-    let (id, text) = {
+    let (id, text, speech_output) = {
         let guard = context.state.read().await;
         let id = resolve_call_id(
             &guard,
@@ -2303,17 +2340,29 @@ async fn approve_conversation_proposal(
             .ok_or_else(|| {
                 DriverError::message(format!("no pending conversation proposal for {id}"))
             })?;
-        (id, text)
+        (id, text, call.speech_output)
     };
 
-    let queued = speech::queue_speech(
+    let queued = speech::queue_speech_with_request(
         &context.state,
         &context.media,
         &context.tts,
-        context.session.next_tts_backend,
-        id.clone(),
-        text,
-        "conversation approve",
+        speech::SpeechQueueRequest {
+            tts_backend: speech_output.tts_backend,
+            gateway_call_id: id.clone(),
+            text,
+            source_label: "conversation approve".to_string(),
+            conflict_policy: speech::SpeechConflictPolicy::Reject,
+            turn_finalized_at: None,
+            latest_turn_finalized_at: None,
+            turn_id: None,
+            coalesced_turn_ids: Vec::new(),
+            source_asr_session_ids: Vec::new(),
+            source_utterance_ids: Vec::new(),
+            prebuffer_chunks_override: None,
+            speech_output: Some(speech_output),
+            metadata: QualityPlaybackMetadata::default(),
+        },
     )
     .await;
     match queued {
@@ -3540,12 +3589,12 @@ fn gateway_root_help() -> String {
         "  status [call-id]               Show gateway status or selected call status",
         "  answer [call-id]               Answer one waiting inbound call; auto-attach conversation",
         "  dial <+e164> [--from +e164]    Place an outbound call; auto-attach conversation",
-        "  speak [call-id] <text...>      Queue debug TTS; disabled while a text-call stream is attached",
+        "  speak [call-id] <text...>      Inject manual speech; disabled while a text-call stream is attached",
         "  speak cancel [call-id]         Clear active TTS; allowed as an emergency control",
         "  conversation status [call-id]  Show attachment, mode, processor, and latest turns",
         "  conversation smoke-test on|off Enable or disable test-only identity/repeat replies",
         "  conversation barge-in on|off|status Enable or disable transcript-triggered TTS clear",
-        "  conversation processor identity [call-id] Set per-call conversation processor",
+        "  conversation processor identity|external-text-stream [call-id] Set per-call conversation processor",
         "  conversation disapprove [call-id] Stop TTS and detach conversation",
         "  reject [call-id]",
         "  hangup [call-id]",
@@ -3920,7 +3969,7 @@ fn conversation_help() -> String {
         "  conversation status [call-id]",
         "  conversation smoke-test <on|off>",
         "  conversation barge-in [on|off|status]",
-        "  conversation processor identity [call-id]",
+        "  conversation processor identity|external-text-stream [call-id]",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
         "  conversation disapprove [call-id]",
@@ -4010,7 +4059,7 @@ fn outbound_help() -> String {
         "Place an outbound call over the existing bidirectional Telnyx media WebSocket.",
         "`dial` selects the new call and auto-attaches conversation in auto mode. The",
         "built-in conversation processor remains disabled by default, so normal live calls",
-        "transcribe without automatic replies. `speak` is manual, non-blocking, and cancellable;",
+        "transcribe without automatic replies. `speak` is manual speech injection, non-blocking, and cancellable;",
         "`speak cancel` sends Telnyx clear and drops local queued outbound audio.",
         "",
         "Conversation smoke test:",
@@ -4136,20 +4185,20 @@ fn socket_help() -> String {
         "    Detail pane scroll    transcript follow / call show polling",
         "  Outbound and M3 conversation commands are also shared:",
         "    dial <+e164> [--from +e164]",
-        "    speak [call-id] <text...>     blocked while stream attach/app-agent owns the call",
+        "    speak [call-id] <text...>     manual speech injection; blocked while stream attach/app-agent owns the call",
         "    speak cancel [call-id]        emergency clear remains available",
         "    conversation status [call-id]",
         "    conversation attach|detach [call-id]",
         "    conversation smoke-test on|off",
         "    conversation barge-in [on|off|status]",
-        "    conversation processor identity [call-id]",
+        "    conversation processor identity|external-text-stream [call-id]",
         "    conversation approve [call-id]",
         "    conversation disapprove [call-id]",
         "    hangup [call-id]",
         "",
         "Source-local state:",
         "  Each socket connection has its own selected call and next ASR backend.",
-        "  `tts use` changes the source's next manual speak backend and the gateway-wide",
+        "  `tts use` changes the source's next manual speech-injection backend and the gateway-wide",
         "  conversation reply backend, because media-triggered turns are not associated",
         "  with one TUI/socket command source.",
         "  The smoke-test processor mode and barge-in mode are also gateway-wide.",
@@ -4440,19 +4489,19 @@ mod tests {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
         let media = SharedMediaRegistry::default();
-        let (tx, mut rx) = mpsc::channel(16);
-        let call_id = {
-            let mut guard = state.write().await;
-            add_streaming_call(&mut guard, "call-1", "stream-1")
-        };
-        media.register_call(call_id.clone(), tx).await;
         let context = context_with_static_tts(state.clone(), telnyx, media.clone());
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
         engine
             .run_line("tts use piper")
             .await
-            .expect("select piper for conversation replies");
+            .expect("select piper for future conversation replies");
+        let (tx, mut rx) = mpsc::channel(16);
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        media.register_call(call_id.clone(), tx).await;
         engine
             .run_line("quality endpoint merge-window-ms 0")
             .await
@@ -4493,6 +4542,66 @@ mod tests {
             .expect("conversation TTS should be queued");
         assert_eq!(tts.playback_id, playback_id);
         assert_eq!(tts.backend, LiveTtsBackend::Piper);
+    }
+
+    #[tokio::test]
+    async fn conversation_smoke_reply_keeps_call_scoped_tts_backend_after_default_changes() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let media = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        media.register_call(call_id.clone(), tx).await;
+        let context = context_with_static_tts(state.clone(), telnyx, media.clone());
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line("tts use piper")
+            .await
+            .expect("change default for later calls only");
+        engine
+            .run_line("quality endpoint merge-window-ms 0")
+            .await
+            .expect("disable coalescing for deterministic smoke test");
+        engine
+            .run_line("conversation smoke-test on")
+            .await
+            .expect("enable smoke processor");
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        engine
+            .run_line("conversation attach")
+            .await
+            .expect("attach conversation");
+
+        handle_transcript_event(
+            &state,
+            &media,
+            &engine.context().conversation,
+            &call_id,
+            TranscriptEvent::Final {
+                text: "backend check".to_string(),
+                update: TranscriptionUpdate::default(),
+            },
+            None,
+        )
+        .await
+        .expect("final transcript should queue smoke reply");
+
+        let playback_id = receive_frame_playback(&mut rx).await;
+        let guard = state.read().await;
+        let call = guard.calls.get(&call_id).expect("call exists");
+        let tts = call
+            .tts
+            .as_ref()
+            .expect("conversation TTS should be queued");
+        assert_eq!(tts.playback_id, playback_id);
+        assert_eq!(tts.backend, LiveTtsBackend::Kokoro82m);
     }
 
     #[tokio::test]
@@ -4824,8 +4933,10 @@ mod tests {
     #[tokio::test]
     async fn speak_queues_tts_frames_over_media_registry() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let (quality_tx, mut quality_rx) = mpsc::channel(16);
         let call_id = {
             let mut guard = state.write().await;
+            guard.set_quality_event_sink(QualityEventSink::with_sender(quality_tx), None);
             add_streaming_call(&mut guard, "call-1", "stream-1")
         };
         let media = SharedMediaRegistry::default();
@@ -4844,7 +4955,22 @@ mod tests {
             .await
             .expect("speak should queue TTS");
 
-        assert!(output.lines[0].contains("speak queued"));
+        assert!(output.lines[0].contains("manual speech injection queued"));
+        let playback_link = loop {
+            let event = quality_rx
+                .try_recv()
+                .expect("manual speech injection should emit playback linkage");
+            if event.event == "quality.turn.playback_linked"
+                && event.payload["link_stage"] == "queued"
+            {
+                break event;
+            }
+        };
+        assert_eq!(playback_link.payload["source"], "operator_speak");
+        assert_eq!(playback_link.payload["source_channel"], "tui");
+        assert_eq!(playback_link.payload["manual_injection"], true);
+        assert!(playback_link.payload["related_turn_id"].is_null());
+        assert!(playback_link.payload["turn_id"].is_null());
         let mut frames = 0usize;
         let mut mark_playback = None;
         for _ in 0..8 {
@@ -4900,9 +5026,11 @@ mod tests {
         let error = engine
             .run_line("speak this should not interrupt the agent stream")
             .await
-            .expect_err("manual speak should be rejected during text-call stream");
+            .expect_err("manual speech injection should be rejected during text-call stream");
 
-        assert!(error.to_string().contains("manual speak is disabled"));
+        assert!(error
+            .to_string()
+            .contains("manual speech injection is disabled"));
         assert!(error.to_string().contains("text-call stream"));
     }
 
@@ -5582,18 +5710,27 @@ mod tests {
         let context = GatewayContext::new(state.clone(), telnyx);
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
 
-        engine
+        let media_ready = engine
             .run_line("quality text-call media-ready-timeout-ms 2345")
             .await
             .expect("set media-ready timeout");
-        engine
+        assert!(media_ready.lines[0].contains("key=text_call.media_ready_timeout_ms"));
+        assert!(media_ready.lines[0].contains("applies=new_text_call_session"));
+
+        let playback_wait = engine
             .run_line("quality text-call playback-wait-timeout-ms 3456")
             .await
             .expect("set playback-wait timeout");
-        engine
+        assert!(playback_wait.lines[0].contains("key=text_call.playback_wait_timeout_ms"));
+        assert!(playback_wait.lines[0].contains("applies=new_text_call_session"));
+
+        let latest = engine
             .run_line("quality text-call latest-response-wins off")
             .await
             .expect("set latest policy");
+        assert!(latest.lines[0].contains("key=text_call.latest_response_wins"));
+        assert!(latest.lines[0].contains("applies=new_text_call_session"));
+
         engine
             .run_line("quality text-call callback-timeout-ms 4567")
             .await

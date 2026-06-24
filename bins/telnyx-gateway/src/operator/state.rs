@@ -15,7 +15,7 @@ use crate::call_control::TelnyxMediaConfig;
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
     ActiveAsrQualitySession, CallerTurnEventMetadata, QualityEvent, QualityEventContext,
-    QualityEventSink, RedactionMode, VoiceQualityConfig,
+    QualityEventSink, RedactionMode, TtsGenerationMode, TtsQualityConfig, VoiceQualityConfig,
 };
 use crate::tts::LiveTtsBackend;
 
@@ -234,12 +234,32 @@ pub struct TtsPlaybackState {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct QualityPlaybackMetadata {
+    pub source: Option<String>,
+    pub source_channel: Option<String>,
+    pub manual_injection: bool,
+    pub related_turn_id: Option<String>,
+}
+
+impl QualityPlaybackMetadata {
+    pub fn operator_speak(source_channel: impl Into<String>) -> Self {
+        Self {
+            source: Some("operator_speak".to_string()),
+            source_channel: Some(source_channel.into()),
+            manual_injection: true,
+            related_turn_id: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct QualityPlaybackLinkage {
     pub turn_id: Option<String>,
     pub coalesced_turn_ids: Vec<String>,
     pub source_asr_session_ids: Vec<String>,
     pub source_utterance_ids: Vec<String>,
     pub source_label: String,
+    pub metadata: QualityPlaybackMetadata,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -251,6 +271,7 @@ struct QualityPlaybackRecord {
     source_utterance_ids: Vec<String>,
     tts_backend: LiveTtsBackend,
     source_label: String,
+    metadata: QualityPlaybackMetadata,
     first_audio_sent: bool,
     terminal_status: Option<String>,
     terminal_reason: Option<String>,
@@ -309,6 +330,7 @@ impl QualityTurnReportState {
             source_utterance_ids: linkage.source_utterance_ids,
             tts_backend,
             source_label: linkage.source_label,
+            metadata: linkage.metadata,
             first_audio_sent: false,
             terminal_status: None,
             terminal_reason: None,
@@ -490,6 +512,35 @@ impl Default for ConversationState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpeechOutputConfig {
+    pub tts_backend: LiveTtsBackend,
+    pub tts_generation_mode: TtsGenerationMode,
+    pub tts_chunking_enabled: bool,
+    pub tts_max_text_chunk_chars: usize,
+    pub tts_first_chunk_max_chars: usize,
+    pub tts_prebuffer_chunks: usize,
+}
+
+impl SpeechOutputConfig {
+    pub fn from_quality(tts_backend: LiveTtsBackend, tts: &TtsQualityConfig) -> Self {
+        Self {
+            tts_backend,
+            tts_generation_mode: tts.generation_mode,
+            tts_chunking_enabled: tts.chunking_enabled,
+            tts_max_text_chunk_chars: tts.max_text_chunk_chars,
+            tts_first_chunk_max_chars: tts.first_chunk_max_chars,
+            tts_prebuffer_chunks: tts.prebuffer_chunks,
+        }
+    }
+}
+
+impl Default for SpeechOutputConfig {
+    fn default() -> Self {
+        Self::from_quality(LiveTtsBackend::default(), &TtsQualityConfig::default())
+    }
+}
+
 impl ConversationState {
     pub fn status_label(&self) -> &'static str {
         if self.attached {
@@ -562,6 +613,7 @@ pub struct CallSession {
     pub echo_suppressed_transcripts: usize,
     pub last_echo_suppressed_preview: Option<String>,
     pub conversation: ConversationState,
+    pub speech_output: SpeechOutputConfig,
     pub quality_turns: QualityTurnReportState,
 }
 
@@ -593,6 +645,7 @@ impl CallSession {
             echo_suppressed_transcripts: 0,
             last_echo_suppressed_preview: None,
             conversation: ConversationState::default(),
+            speech_output: SpeechOutputConfig::default(),
             quality_turns: QualityTurnReportState::default(),
         };
         call.push_timeline("call created");
@@ -1164,6 +1217,10 @@ impl GatewayState {
 
         let mut call = CallSession::pending_inbound(ids.clone(), from, to, status);
         call.conversation.processor = self.config.conversation_processor;
+        call.speech_output = SpeechOutputConfig::from_quality(
+            self.conversation_tts_backend,
+            &self.quality.config.tts,
+        );
         let gateway_call_id = call.gateway_call_id.clone();
         self.call_control_index
             .insert(ids.call_control_id, gateway_call_id.clone());
@@ -1196,6 +1253,10 @@ impl GatewayState {
 
         let mut call = CallSession::outbound(ids.clone(), from, to, status);
         call.conversation.processor = self.config.conversation_processor;
+        call.speech_output = SpeechOutputConfig::from_quality(
+            self.conversation_tts_backend,
+            &self.quality.config.tts,
+        );
         let gateway_call_id = call.gateway_call_id.clone();
         self.call_control_index
             .insert(ids.call_control_id, gateway_call_id.clone());
@@ -1822,6 +1883,10 @@ fn playback_link_payload(
         "source_utterance_ids": record.source_utterance_ids,
         "tts_backend": record.tts_backend.label(),
         "source_label": record.source_label,
+        "source": record.metadata.source,
+        "source_channel": record.metadata.source_channel,
+        "manual_injection": record.metadata.manual_injection,
+        "related_turn_id": record.metadata.related_turn_id,
         "first_audio_sent": record.first_audio_sent,
         "terminal_status": terminal_status,
         "terminal_reason": terminal_reason,
@@ -1959,6 +2024,7 @@ mod tests {
                 source_asr_session_ids: Vec::new(),
                 source_utterance_ids: Vec::new(),
                 source_label: "test".to_string(),
+                metadata: QualityPlaybackMetadata::default(),
             },
             Some("tts_replaced"),
         );
