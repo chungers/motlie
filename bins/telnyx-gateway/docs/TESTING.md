@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | 2026-06-21 | @codex-535 | Added run-by-run live tuning ladder for identity/repeat endpoint and playback-hold knobs after PR #558 live test. |
 | 2026-06-24 PDT | @codex-541 | Linked the live-test playbook to the comprehensive global TOML config guide. |
+| 2026-06-24 PDT | @codex-541 | Recorded latest inbound no-barge-in Identity tuning profile and live-run findings: bounded FIFO policy improved repeat reliability, with remaining ASR fragment and latency work. |
 | 2026-06-20 | @ops48-orchestrator | Protocol B: lead with the global run-config TOML as the single source of all batcher knobs (test protocol fully specified in one place); reframe the `conversation smoke-test --…` form as an OPTIONAL runtime operator TUI/agent socket-command override, explicitly NOT process CLI/argv flags. Per David. |
 | 2026-06-20 | @codex-541-refactor | Reconciled the gateway-alone turn-batching protocols with approved DESIGN-557 §4.3 event names, deadline/status fields, and batcher-owned config knobs. Timestamp: 2026-06-21 00:46:41 UTC. |
 | 2026-06-20 | @codex-541-refactor | Added gateway-alone partials-batching and turns-batching smoke-test protocols plus turn-batch lifecycle observability checks. Timestamp: 2026-06-20 23:27:26 UTC. |
@@ -139,7 +140,8 @@ cargo run -p motlie-telnyx-gateway --features "sherpa piper kokoro" -- \
   --config "$HOME/telnyx-test/runs/<run-id>/<run-id>.toml"
 ```
 
-The current default live identity/repeat tuning profile is:
+The current default live identity/repeat tuning profile is the 2026-06-24
+no-barge-in bounded-pending profile:
 
 - `conversation.final_coalescing_enabled = true`
 - `conversation.processor = "identity"`
@@ -148,11 +150,18 @@ The current default live identity/repeat tuning profile is:
 - `startup.warm_models = true`
 - `voice_quality.tts.generation_mode = "streaming"`
 - `voice_quality.tts.chunking_enabled = true`
+- `voice_quality.tts.max_text_chunk_chars = 70`
 - `voice_quality.tts.first_chunk_max_chars = 40`
 - `voice_quality.tts.prebuffer_chunks = 1`
-- `voice_quality.endpoint.conversation_playback_max_hold_ms = 0` for baseline compatibility, or a positive cap only when intentionally reproducing the legacy dropped-repeat cap behavior.
-- `voice_quality.conversation_policy.mode = "current_compat"` for baseline runs; use `"no_barge_in_bounded_pending"` with bounded FIFO pending output for repeat-reliability runs.
-- `voice_quality.conversation_policy.max_pending_outputs = 3` and `pending_output_order = "fifo"` for identity/repeat reliability validation with barge-in off.
+- `voice_quality.endpoint.trailing_silence_ms = 850`
+- `voice_quality.endpoint.merge_window_ms = 120`
+- `voice_quality.endpoint.final_settle_ms = 500`
+- `voice_quality.endpoint.conversation_incomplete_tail_hold_ms = 250`
+- `voice_quality.endpoint.conversation_playback_hold_poll_ms = 10`
+- `voice_quality.endpoint.conversation_playback_max_hold_ms = 0`
+- `voice_quality.conversation_policy.mode = "no_barge_in_bounded_pending"`
+- `voice_quality.conversation_policy.max_pending_outputs = 3`
+- `voice_quality.conversation_policy.pending_output_order = "fifo"`
 - `voice_quality.early_response.enabled = true`
 - `voice_quality.early_response.boundary = "clause"`
 - `voice_quality.early_response.start_timing = "while_speaking"`
@@ -162,9 +171,18 @@ The current default live identity/repeat tuning profile is:
 - `voice_quality.echo_suppression.enabled = true`
 - `voice_quality.logging.enabled = true`
 
-Recent live-run finding: the clause/coalescing profile reduced repeated
-identity fragments. Do not assume early-response is active just because the
-config enables it; verify accepted/rejected provisional-response quality events.
+Use `conversation_policy.mode = "current_compat"` only for baseline/regression
+runs that intentionally reproduce the legacy latest-only drop behavior.
+
+Recent live-run finding: on 2026-06-24, this profile produced a solid audible
+improvement on inbound Identity/repeat with good audio quality. The completed
+run recorded 12 attempted playbacks, 12 completed playbacks, 0 canceled/failed
+playbacks, 13 raw ASR finals, 1 excluded turn without playback, and 0 dropped
+quality events. Remaining issues were ASR/domain fragments such as `Motlie ->
+Martley`, `barge in -> bar J`, and a perceived `hang`/`hang up` tail miss, plus
+long tail latency during serial Identity playback. Do not assume early-response
+is active just because the config enables it; verify accepted/rejected
+provisional-response quality events.
 
 ## Run-By-Run Tuning Ladder
 
@@ -231,6 +249,28 @@ whether missed repeats were caused by the legacy max-hold drop policy rather
 than ASR loss.
 
 ```toml
+[conversation]
+enabled = true
+final_coalescing_enabled = true
+barge_in_enabled = false
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[voice_quality.tts]
+generation_mode = "streaming"
+chunking_enabled = true
+max_text_chunk_chars = 70
+first_chunk_max_chars = 40
+prebuffer_chunks = 1
+
+[voice_quality.early_response]
+enabled = true
+audio_mode = "speak_provisionally"
+boundary = "clause"
+start_timing = "while_speaking"
+debounce_ms = 180
+max_updates_per_utterance = 1
+
 [voice_quality.endpoint]
 trailing_silence_ms = 850
 merge_window_ms = 120
@@ -238,6 +278,12 @@ final_settle_ms = 500
 conversation_incomplete_tail_hold_ms = 250
 conversation_playback_hold_poll_ms = 10
 conversation_playback_max_hold_ms = 0
+
+[voice_quality.barge_in]
+enabled = false
+speech_onset_cancel_enabled = false
+partial_asr_cancel_enabled = false
+final_asr_cancel_enabled = false
 
 [voice_quality.conversation_policy]
 mode = "no_barge_in_bounded_pending"
@@ -256,6 +302,18 @@ Success criteria:
   `max_hold_reached` drops for the policy-managed path.
 - Queue growth remains bounded by `max_pending_outputs`; overflow should be
   recorded as dropped pending output rather than unbounded serial playback.
+
+Latest 2026-06-24 result:
+
+- Human feedback: solid improvement, good audio quality, with some remaining
+  fragment misses such as `hang` vs `hang up`.
+- Structured result: 12/12 attempted playbacks completed, 0 canceled/failed
+  playbacks, 13 raw ASR finals, 1 excluded turn without playback, and 0 dropped
+  quality events.
+- Scoped scripted-span WER was 13.33%, but coordination speech happened after
+  answer, so treat the WER as diagnostic rather than a clean benchmark.
+- Latency tail remains the next bottleneck: `turn.finalize_to_first_audio` p95
+  was 10.748 s and max was 19.431 s during serial Identity playback.
 
 ### Barge-In Policy Profiles
 
@@ -313,33 +371,44 @@ Success criteria:
 - Echo-guard still defers likely assistant echo to partial/final ASR before
   cancellation.
 
-### Next Endpoint-Completeness A/B
+### Next No-Barge-In Follow-Up
 
-For the next no-barge-in identity run, keep the playback cap fixed and vary only
-the endpoint tail:
+For the next no-barge-in Identity run, keep the bounded FIFO policy fixed and do
+not re-enable turn batching. The 2026-06-24 run suggests repeat reliability is
+mostly improved, while the remaining work is fragment accuracy and latency tail.
+
+Hold this baseline unless testing one explicit hypothesis:
 
 ```toml
 [voice_quality.endpoint]
-trailing_silence_ms = 850  # run A; use 900 for run B if tails are still cut
+trailing_silence_ms = 850
 merge_window_ms = 120
 final_settle_ms = 500
 conversation_incomplete_tail_hold_ms = 250
 conversation_playback_hold_poll_ms = 10
-conversation_playback_max_hold_ms = 500
+conversation_playback_max_hold_ms = 0
+
+[voice_quality.conversation_policy]
+mode = "no_barge_in_bounded_pending"
+active_playback_hold_ms = 1000
+max_pending_outputs = 3
+pending_output_order = "fifo"
+post_barge_in_silence_ms = 1200
 ```
 
-Success criteria:
+Next hypotheses, one per run:
 
-- Fewer truncated ASR finals at phrase tails.
-- No return of long serial identity-repeat backlog.
-- Median `turn.finalize_to_first_audio` remains close to the previous tuned run.
-- `conversation.final_debounce` still reports playback holds explicitly when
-  they happen.
-
-After endpoint completeness is acceptable, tune TTS first-audio latency
-separately. Do not change `first_chunk_max_chars`, `prebuffer_chunks`, or TTS
-backend in the same run as endpoint-tail changes unless the goal is explicitly a
-multi-factor stress test.
+- ASR/domain accuracy: add or test hotword/domain handling for `Motlie`,
+  `barge-in`, `turn batching`, and `hang up`; success is lower scripted-span WER
+  without changing repeat policy.
+- Tail-fragment recovery: test `conversation_incomplete_tail_hold_ms = 300..500`
+  only if final words continue to be cut; success is fewer final-word
+  substitutions/deletions without overmerging adjacent turns.
+- TTS first-audio/serial latency: inspect Kokoro streaming first-chunk latency
+  before changing TTS knobs; success is lower `tts.request_to_first_audio` p95
+  while preserving audio quality.
+- Protocol cleanliness: provide/read the script before answer or immediately
+  from the run config so coordination speech does not contaminate WER.
 
 ## Readiness Check
 

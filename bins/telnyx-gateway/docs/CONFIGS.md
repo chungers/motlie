@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 | --- | --- | --- |
 | 2026-06-24 PDT | @codex-541 | Added a user-facing guide for the strict global TOML config surface, live-run config records, and conversation policy tuning knobs. |
+| 2026-06-24 PDT | @codex-541 | Updated the no-barge-in Identity recommended profile with the latest live-run tuning values and follow-up priorities. |
 
 ## Purpose
 
@@ -128,7 +129,7 @@ Use explicit overrides in live-run configs so each run is self-describing.
 
 | Key | Live identity starting point | Purpose |
 | --- | --- | --- |
-| `trailing_silence_ms` | `750` to `850` | Silence before local endpoint. |
+| `trailing_silence_ms` | `850` | Silence before local endpoint for the current no-barge-in Identity baseline. |
 | `min_turn_words` | `2` | Minimum words for committed turn dispatch. |
 | `min_turn_chars` | `6` | Minimum characters for committed turn dispatch. |
 | `merge_window_ms` | `120` | Merge adjacent ASR finals from one thought. |
@@ -163,7 +164,7 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | --- | --- | --- |
 | `generation_mode` | `"streaming"` | Selects buffered vs incremental TTS. |
 | `chunking_enabled` | `true` | Splits long replies before synthesis. |
-| `max_text_chunk_chars` | `70` to `90` | Later chunk packing budget. |
+| `max_text_chunk_chars` | `70` | Later chunk packing budget for the current no-barge-in Identity baseline. |
 | `first_chunk_max_chars` | `40` | Smaller first chunk for lower first-audio latency. |
 | `prebuffer_chunks` | `1` | Prepared chunks required before playback starts. |
 
@@ -238,6 +239,29 @@ barge_in_enabled = false
 processor = "identity"
 tts_backend = "kokoro-82m"
 
+[voice_quality.tts]
+generation_mode = "streaming"
+chunking_enabled = true
+max_text_chunk_chars = 70
+first_chunk_max_chars = 40
+prebuffer_chunks = 1
+
+[voice_quality.early_response]
+enabled = true
+audio_mode = "speak_provisionally"
+boundary = "clause"
+start_timing = "while_speaking"
+debounce_ms = 180
+max_updates_per_utterance = 1
+
+[voice_quality.endpoint]
+trailing_silence_ms = 850
+merge_window_ms = 120
+final_settle_ms = 500
+conversation_incomplete_tail_hold_ms = 250
+conversation_playback_hold_poll_ms = 10
+conversation_playback_max_hold_ms = 0
+
 [voice_quality.barge_in]
 enabled = false
 speech_onset_cancel_enabled = false
@@ -251,6 +275,11 @@ max_pending_outputs = 3
 pending_output_order = "fifo"
 post_barge_in_silence_ms = 1200
 ```
+
+The 2026-06-24 inbound Identity run with this profile completed 12/12 attempted
+playbacks with 0 canceled/failed playbacks and good reported audio quality. Keep
+this as the repeat-reliability baseline. Next tune ASR fragment/domain accuracy
+and TTS/serial playback latency separately.
 
 ### Echo Suppression
 
@@ -297,7 +326,8 @@ cargo test -p motlie-telnyx-gateway docs_live_run_example_configs_parse_strictly
 Then start the gateway from the exact local run config:
 
 ```sh
-cargo run -p motlie-telnyx-gateway --features "sherpa piper kokoro" --   --config "$HOME/telnyx-test/runs/<run-id>/<run-id>.toml"
+cargo run -p motlie-telnyx-gateway --features "sherpa piper kokoro" -- \
+  --config "$HOME/telnyx-test/runs/<run-id>/<run-id>.toml"
 ```
 
 For the full live-call procedure, use [`TESTING.md`](TESTING.md).

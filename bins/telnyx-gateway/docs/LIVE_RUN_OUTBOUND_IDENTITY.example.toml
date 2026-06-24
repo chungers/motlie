@@ -91,16 +91,16 @@ peak_threshold = 1100
 onset_min_silence_ms = 180
 
 [voice_quality.endpoint]
-# Final endpoint trailing silence window.
-trailing_silence_ms = 750
+# Final endpoint trailing silence window. Latest no-barge-in Identity baseline uses 850 ms.
+trailing_silence_ms = 850
 # Minimum final-turn word count before committed dispatch.
 min_turn_words = 2
 # Minimum final-turn character count before committed dispatch.
 min_turn_chars = 6
 # Merge window for adjacent ASR finals from one spoken thought.
-merge_window_ms = 450
+merge_window_ms = 120
 # Hold window for structurally incomplete final fragments.
-final_settle_ms = 900
+final_settle_ms = 500
 # Punctuation suffixes that indicate a fragment should continue.
 final_settle_trailing_punctuation = [",", ":", ";"]
 # Leading words that commonly start a dependent fragment.
@@ -112,12 +112,12 @@ final_settle_dangling_suffixes = ["'", "-"]
 # Tail words that may hold conversation dispatch while prior playback is active.
 conversation_tail_words = ["a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "did", "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might", "must", "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were", "where", "will", "with", "would"]
 # Max hold for incomplete conversation tails.
-conversation_incomplete_tail_hold_ms = 1800
+conversation_incomplete_tail_hold_ms = 250
 # Native ASR confidence threshold below which incomplete tails may hold.
 conversation_low_confidence_threshold_percent = 45
 # Poll cadence while waiting for active playback before dispatch.
-conversation_playback_hold_poll_ms = 50
-# Max active-playback hold before dispatch/deferred Say gives up; 0 preserves unbounded wait.
+conversation_playback_hold_poll_ms = 10
+# Max active-playback hold before dispatch/deferred Say gives up; 0 lets the conversation policy own bounded pending output.
 conversation_playback_max_hold_ms = 0
 # Hard cap for committed turn words.
 max_turn_words = 80
