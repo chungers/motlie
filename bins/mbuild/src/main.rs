@@ -53,6 +53,9 @@ const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.
 const OCI_IMAGE_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 const OCI_IMAGE_LAYER_TAR_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 const OCI_MANIFEST_ARTIFACT_KIND: &str = "motlie.vm-image-artifact";
+const PAYLOAD_SOURCE_RUST_TARGET_PLACEHOLDER: &str = "{rust_target}";
+const ELF_MACHINE_X86_64: u16 = 0x3e;
+const ELF_MACHINE_AARCH64: u16 = 0xb7;
 
 fn main() {
     init_tracing();
@@ -938,6 +941,7 @@ fn run_ch_external_oci_build(
         None
     };
     let guest_binaries = build_guest_binaries(repo_root, &guest, &log_path)?;
+    validate_immutable_payload_sources(repo_root, config, &guest)?;
     run_package_stage(
         &rootfs_dir,
         config,
@@ -947,7 +951,7 @@ fn run_ch_external_oci_build(
     )?;
 
     let assembly_manifest =
-        assemble_immutable_rootfs(&rootfs_dir, config, &source, &guest_binaries)?;
+        assemble_immutable_rootfs(&rootfs_dir, repo_root, config, &source, &guest)?;
     fs::write(
         options.out.join("mbuild-rootfs-assembly.json"),
         serde_json::to_vec_pretty(&assembly_manifest)?,
@@ -1321,6 +1325,20 @@ impl ChGuestTarget {
             GuestArchitecture::Arm64 => "arm64",
         }
     }
+
+    fn elf_machine(&self) -> u16 {
+        match self.platform.architecture {
+            GuestArchitecture::Amd64 => ELF_MACHINE_X86_64,
+            GuestArchitecture::Arm64 => ELF_MACHINE_AARCH64,
+        }
+    }
+
+    fn elf_machine_name(&self) -> &'static str {
+        match self.platform.architecture {
+            GuestArchitecture::Amd64 => "x86-64",
+            GuestArchitecture::Arm64 => "AArch64",
+        }
+    }
 }
 
 fn parse_source_platform(value: &str) -> Result<OciPlatform> {
@@ -1456,7 +1474,6 @@ fn subordinate_id_range(path: &str) -> Result<(u32, u32)> {
 #[derive(Debug, Clone)]
 struct GuestBinaries {
     vfs: PathBuf,
-    ssh_bridge: PathBuf,
 }
 
 fn build_guest_binaries(
@@ -1501,7 +1518,7 @@ fn build_guest_binaries(
             ssh_bridge.display()
         );
     }
-    Ok(GuestBinaries { vfs, ssh_bridge })
+    Ok(GuestBinaries { vfs })
 }
 
 fn rust_lld_path() -> Result<PathBuf> {
@@ -2575,9 +2592,10 @@ restore_apk_recorded_modes
 
 fn assemble_immutable_rootfs(
     rootfs_dir: &Path,
+    repo_root: &Path,
     config: &ImageBuildConfig,
     source: &ExternalOciSource,
-    guest_binaries: &GuestBinaries,
+    guest: &ChGuestTarget,
 ) -> Result<motlie_vmm::image::RootfsCompatibilityAssemblyManifest> {
     let mut profile = guest_image_profile_from_config(config, source.clone())?;
     profile.required_packages = config.package_stage.install.clone();
@@ -2587,13 +2605,7 @@ fn assemble_immutable_rootfs(
     spec.enable_ch_egress_service = true;
     for payload in &config.immutable_payloads {
         let mode = parse_octal_mode(&payload.mode)?;
-        let source = if payload.guest_path == v1_5::MOTLIE_V15_GUEST_BIN_OPT {
-            guest_binaries.vfs.clone()
-        } else if payload.guest_path == "/opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge" {
-            guest_binaries.ssh_bridge.clone()
-        } else {
-            payload.source.clone()
-        };
+        let source = resolve_immutable_payload_source(repo_root, payload, guest, mode)?;
         let mut file = RootfsPayloadFile::new(source, PathBuf::from(&payload.guest_path), mode);
         for link in &payload.links {
             file = file.with_link(PathBuf::from(link));
@@ -2617,6 +2629,117 @@ fn guest_image_profile_from_config(
 fn parse_octal_mode(value: &str) -> Result<u32> {
     u32::from_str_radix(value.trim_start_matches('0'), 8)
         .with_context(|| format!("invalid octal mode {value:?}"))
+}
+
+fn validate_immutable_payload_sources(
+    repo_root: &Path,
+    config: &ImageBuildConfig,
+    guest: &ChGuestTarget,
+) -> Result<()> {
+    for payload in &config.immutable_payloads {
+        let mode = parse_octal_mode(&payload.mode)?;
+        resolve_immutable_payload_source(repo_root, payload, guest, mode)?;
+    }
+    Ok(())
+}
+
+fn resolve_immutable_payload_source(
+    repo_root: &Path,
+    payload: &PayloadSpec,
+    guest: &ChGuestTarget,
+    mode: u32,
+) -> Result<PathBuf> {
+    let rendered = render_payload_source_template(&payload.source, guest)?;
+    let source = if rendered.is_absolute() {
+        rendered
+    } else {
+        repo_root.join(rendered)
+    };
+    if !source.is_file() {
+        bail!(
+            "immutable_payloads[{}].source resolved for {} to missing file: {}",
+            payload.label,
+            guest.rust_target,
+            source.display()
+        );
+    }
+    if mode & 0o111 != 0 {
+        validate_executable_payload_elf(&source, guest).with_context(|| {
+            format!(
+                "validate immutable_payloads[{}].source {}",
+                payload.label,
+                source.display()
+            )
+        })?;
+    }
+    Ok(source)
+}
+
+fn render_payload_source_template(source: &Path, guest: &ChGuestTarget) -> Result<PathBuf> {
+    let value = source.to_str().with_context(|| {
+        format!(
+            "immutable_payloads.source must be UTF-8: {}",
+            source.display()
+        )
+    })?;
+    let rendered = value.replace(PAYLOAD_SOURCE_RUST_TARGET_PLACEHOLDER, guest.rust_target);
+    if rendered.contains('{') || rendered.contains('}') {
+        bail!(
+            "immutable_payloads.source contains unsupported template placeholder: {}",
+            value
+        );
+    }
+    Ok(PathBuf::from(rendered))
+}
+
+fn validate_executable_payload_elf(path: &Path, guest: &ChGuestTarget) -> Result<()> {
+    let mut file = File::open(path)
+        .with_context(|| format!("open executable immutable payload {}", path.display()))?;
+    let mut header = [0_u8; 20];
+    file.read_exact(&mut header)
+        .with_context(|| format!("read ELF header from {}", path.display()))?;
+    if &header[0..4] != b"\x7fELF" {
+        bail!(
+            "executable immutable payload is not an ELF file: {}",
+            path.display()
+        );
+    }
+    if header[4] != 2 {
+        bail!(
+            "executable immutable payload must be ELF64 for {}: {}",
+            guest.rust_target,
+            path.display()
+        );
+    }
+    if header[5] != 1 {
+        bail!(
+            "executable immutable payload must be little-endian ELF for {}: {}",
+            guest.rust_target,
+            path.display()
+        );
+    }
+    let machine = u16::from_le_bytes([header[18], header[19]]);
+    let expected = guest.elf_machine();
+    if machine != expected {
+        bail!(
+            "executable immutable payload ELF machine {} ({:#x}) does not match guest target {} expected {} ({:#x}): {}",
+            elf_machine_name(machine),
+            machine,
+            guest.rust_target,
+            guest.elf_machine_name(),
+            expected,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn elf_machine_name(machine: u16) -> &'static str {
+    match machine {
+        ELF_MACHINE_X86_64 => "x86-64",
+        ELF_MACHINE_AARCH64 => "AArch64",
+        _ => "unknown",
+    }
 }
 
 fn install_ch_boot_adaptations(
@@ -4414,10 +4537,7 @@ struct PayloadSpec {
 impl PayloadSpec {
     fn validate(&self) -> Result<()> {
         require_token("immutable_payloads.label", &self.label)?;
-        require_non_empty(
-            "immutable_payloads.source",
-            &self.source.display().to_string(),
-        )?;
+        require_payload_source_template("immutable_payloads.source", &self.source)?;
         require_abs_path("immutable_payloads.guest_path", &self.guest_path)?;
         if self.mode.is_empty() {
             bail!("immutable_payloads.mode must not be empty");
@@ -5681,6 +5801,37 @@ fn require_env_name(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_payload_source_template(field: &str, source: &Path) -> Result<()> {
+    let value = source
+        .to_str()
+        .with_context(|| format!("{field} must be UTF-8: {}", source.display()))?;
+    require_non_empty(field, value)?;
+    let mut rest = value;
+    loop {
+        let open = rest.find('{');
+        let close = rest.find('}');
+        match (open, close) {
+            (Some(open), Some(close)) if close < open => {
+                bail!("{field} contains an unopened template placeholder");
+            }
+            (Some(open), _) => {
+                let after_start = &rest[open + 1..];
+                let Some(end) = after_start.find('}') else {
+                    bail!("{field} contains an unclosed template placeholder");
+                };
+                let name = &after_start[..end];
+                if name != "rust_target" {
+                    bail!("{field} contains unsupported template placeholder {{{name}}}");
+                }
+                rest = &after_start[end + 1..];
+            }
+            (None, Some(_)) => bail!("{field} contains an unopened template placeholder"),
+            (None, None) => break,
+        }
+    }
+    Ok(())
+}
+
 fn require_seed_template(field: &str, value: &str) -> Result<()> {
     require_non_empty(field, value)?;
     let mut rest = value;
@@ -5738,7 +5889,7 @@ mod tests {
             },
             immutable_payloads: vec![PayloadSpec {
                 label: "motlie-vfs-guest".to_string(),
-                source: PathBuf::from("target/release/motlie-vfs-guest-v1_5"),
+                source: PathBuf::from("target/{rust_target}/release/motlie-vfs-guest-v1_5"),
                 guest_path: v1_5::MOTLIE_V15_GUEST_BIN_OPT.to_string(),
                 mode: "0755".to_string(),
                 links: vec![v1_5::MOTLIE_V15_GUEST_BIN_COMPAT.to_string()],
@@ -5817,7 +5968,7 @@ source:
   clean: true
 immutable_payloads:
   - label: motlie-vfs-guest
-    source: target/release/motlie-vfs-guest-v1_5
+    source: target/{{rust_target}}/release/motlie-vfs-guest-v1_5
     guest_path: /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
     mode: "0755"
     links:
@@ -5886,7 +6037,7 @@ package_stage:
   clean: true
 immutable_payloads:
   - label: motlie-vfs-guest
-    source: target/release/motlie-vfs-guest-v1_5
+    source: target/{{rust_target}}/release/motlie-vfs-guest-v1_5
     guest_path: /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
     mode: "0755"
     links:
@@ -5942,6 +6093,80 @@ validation:
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn write_test_elf(path: &Path, machine: u16) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut bytes = vec![0_u8; 64];
+        bytes[0..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2; // ELFCLASS64
+        bytes[5] = 1; // ELFDATA2LSB
+        bytes[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn immutable_payload_source_renders_rust_target_and_validates_elf() {
+        let root = temp_test_dir("payload-source-renders");
+        let guest = ChGuestTarget::from_platform(OciPlatform::linux_arm64()).unwrap();
+        let binary = root
+            .join("target")
+            .join(guest.rust_target)
+            .join("release")
+            .join("motlie-vfs-guest-v1_5");
+        write_test_elf(&binary, ELF_MACHINE_AARCH64);
+        let payload = PayloadSpec {
+            label: "motlie-vfs-guest".to_string(),
+            source: PathBuf::from("target/{rust_target}/release/motlie-vfs-guest-v1_5"),
+            guest_path: v1_5::MOTLIE_V15_GUEST_BIN_OPT.to_string(),
+            mode: "0755".to_string(),
+            links: vec![v1_5::MOTLIE_V15_GUEST_BIN_COMPAT.to_string()],
+        };
+
+        let resolved = resolve_immutable_payload_source(&root, &payload, &guest, 0o755).unwrap();
+
+        assert_eq!(resolved, binary);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn immutable_payload_source_rejects_wrong_arch_elf() {
+        let root = temp_test_dir("payload-source-wrong-arch");
+        let guest = ChGuestTarget::from_platform(OciPlatform::linux_arm64()).unwrap();
+        let binary = root
+            .join("target")
+            .join(guest.rust_target)
+            .join("release")
+            .join("motlie-vfs-guest-v1_5");
+        write_test_elf(&binary, ELF_MACHINE_X86_64);
+        let payload = PayloadSpec {
+            label: "motlie-vfs-guest".to_string(),
+            source: PathBuf::from("target/{rust_target}/release/motlie-vfs-guest-v1_5"),
+            guest_path: v1_5::MOTLIE_V15_GUEST_BIN_OPT.to_string(),
+            mode: "0755".to_string(),
+            links: vec![v1_5::MOTLIE_V15_GUEST_BIN_COMPAT.to_string()],
+        };
+
+        let error = resolve_immutable_payload_source(&root, &payload, &guest, 0o755)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("validate immutable_payloads[motlie-vfs-guest].source"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn payload_source_template_rejects_unknown_placeholder() {
+        let mut config = image_config_fixture();
+        config.immutable_payloads[0].source =
+            PathBuf::from("target/{target}/release/motlie-vfs-guest-v1_5");
+
+        let error = config.validate().unwrap_err().to_string();
+
+        assert!(error.contains("unsupported template placeholder {target}"));
     }
 
     fn repo_root_fixture() -> PathBuf {
@@ -6786,9 +7011,11 @@ validation:
         assert!(!artifacts
             .iter()
             .any(|artifact| artifact.path.ends_with("motlie-v1-5-base-iter.vm/disk.img")));
-        assert!(artifacts.iter().any(|artifact| artifact
-            .path
-            .ends_with("motlie-v1-5-base-iter.vm/nvram.bin")));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact
+                .path
+                .ends_with("motlie-v1-5-base-iter.vm/nvram.bin")
+        }));
     }
 
     #[test]
