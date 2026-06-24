@@ -7,6 +7,7 @@
 | 2026-06-21 | @codex-535 | Added run-by-run live tuning ladder for identity/repeat endpoint and playback-hold knobs after PR #558 live test. |
 | 2026-06-24 PDT | @codex-541 | Linked the live-test playbook to the comprehensive global TOML config guide. |
 | 2026-06-24 PDT | @codex-541 | Recorded latest inbound no-barge-in Identity tuning profile and live-run findings: bounded FIFO policy improved repeat reliability, with remaining ASR fragment and latency work. |
+| 2026-06-24 PDT | @codex-541 | Recorded the follow-up decision to defer domain biasing, verify the shared TTS first-chunk latency fix, and treat coalesced source-turn accounting as a gateway metric correctness fix. |
 | 2026-06-20 | @ops48-orchestrator | Protocol B: lead with the global run-config TOML as the single source of all batcher knobs (test protocol fully specified in one place); reframe the `conversation smoke-test --…` form as an OPTIONAL runtime operator TUI/agent socket-command override, explicitly NOT process CLI/argv flags. Per David. |
 | 2026-06-20 | @codex-541-refactor | Reconciled the gateway-alone turn-batching protocols with approved DESIGN-557 §4.3 event names, deadline/status fields, and batcher-owned config knobs. Timestamp: 2026-06-21 00:46:41 UTC. |
 | 2026-06-20 | @codex-541-refactor | Added gateway-alone partials-batching and turns-batching smoke-test protocols plus turn-batch lifecycle observability checks. Timestamp: 2026-06-20 23:27:26 UTC. |
@@ -177,12 +178,15 @@ runs that intentionally reproduce the legacy latest-only drop behavior.
 Recent live-run finding: on 2026-06-24, this profile produced a solid audible
 improvement on inbound Identity/repeat with good audio quality. The completed
 run recorded 12 attempted playbacks, 12 completed playbacks, 0 canceled/failed
-playbacks, 13 raw ASR finals, 1 excluded turn without playback, and 0 dropped
-quality events. Remaining issues were ASR/domain fragments such as `Motlie ->
-Martley`, `barge in -> bar J`, and a perceived `hang`/`hang up` tail miss, plus
-long tail latency during serial Identity playback. Do not assume early-response
-is active just because the config enables it; verify accepted/rejected
-provisional-response quality events.
+playbacks, 13 raw ASR finals, 1 pre-fix excluded turn without playback, and 0
+dropped quality events. Follow-up code classified that excluded turn as a
+coalesced source-turn accounting artifact rather than a dropped repeat: quality
+summary attempted/played/canceled turn counts now include every linked source
+turn, not only the selected response turn. Remaining issues were ASR fragments
+such as `Motlie -> Martley`, `barge in -> bar J`, and a perceived `hang`/`hang
+up` tail miss, plus long first-audio/tail latency during serial playback. Do not
+assume early-response is active just because the config enables it; verify
+accepted/rejected provisional-response quality events.
 
 ## Run-By-Run Tuning Ladder
 
@@ -308,12 +312,17 @@ Latest 2026-06-24 result:
 - Human feedback: solid improvement, good audio quality, with some remaining
   fragment misses such as `hang` vs `hang up`.
 - Structured result: 12/12 attempted playbacks completed, 0 canceled/failed
-  playbacks, 13 raw ASR finals, 1 excluded turn without playback, and 0 dropped
-  quality events.
+  playbacks, 13 raw ASR finals, 1 pre-fix excluded turn without playback, and 0
+  dropped quality events. The excluded turn was later traced to coalesced
+  source-turn accounting; it should report as covered after the shared metrics
+  fix.
 - Scoped scripted-span WER was 13.33%, but coordination speech happened after
   answer, so treat the WER as diagnostic rather than a clean benchmark.
 - Latency tail remains the next bottleneck: `turn.finalize_to_first_audio` p95
-  was 10.748 s and max was 19.431 s during serial Identity playback.
+  was 10.748 s and max was 19.431 s during serial Identity playback. The next
+  run should verify the shared streaming TTS fix that enforces
+  `first_chunk_max_chars` even when the first sentence or unsentenced segment is
+  longer than the cap.
 
 ### Barge-In Policy Profiles
 
@@ -398,17 +407,19 @@ post_barge_in_silence_ms = 1200
 
 Next hypotheses, one per run:
 
-- ASR/domain accuracy: add or test hotword/domain handling for `Motlie`,
-  `barge-in`, `turn batching`, and `hang up`; success is lower scripted-span WER
-  without changing repeat policy.
+- TTS first-audio/serial latency: verify the shared first-chunk cap fix before
+  changing TTS knobs; success is lower `tts.request_to_first_audio` p95 while
+  preserving audio quality.
 - Tail-fragment recovery: test `conversation_incomplete_tail_hold_ms = 300..500`
   only if final words continue to be cut; success is fewer final-word
   substitutions/deletions without overmerging adjacent turns.
-- TTS first-audio/serial latency: inspect Kokoro streaming first-chunk latency
-  before changing TTS knobs; success is lower `tts.request_to_first_audio` p95
-  while preserving audio quality.
+- Coalesced source-turn accounting: verify `excluded_turns_without_playback = 0`
+  when one playback intentionally covers multiple source turns.
 - Protocol cleanliness: provide/read the script before answer or immediately
   from the run config so coordination speech does not contaminate WER.
+
+Domain/hotword biasing is intentionally deferred; do not tune domain vocabulary
+until endpointing, repeat reliability, and latency are stable.
 
 ## Readiness Check
 
@@ -452,8 +463,9 @@ Expected checks:
 
 ## Caller Script
 
-Give the caller the relevant script before dialing. For ASR WER runs, use the
-WER passage. For identity/repeat quality runs, use this script:
+Give the caller the relevant script before dialing or before answering an
+inbound manual call. For ASR WER runs, use the WER passage. For identity/repeat
+quality runs, use this script:
 
 ```text
 This is David testing Motlie live streaming voice.

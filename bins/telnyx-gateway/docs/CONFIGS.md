@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | 2026-06-24 PDT | @codex-541 | Added a user-facing guide for the strict global TOML config surface, live-run config records, and conversation policy tuning knobs. |
 | 2026-06-24 PDT | @codex-541 | Updated the no-barge-in Identity recommended profile with the latest live-run tuning values and follow-up priorities. |
+| 2026-06-24 PDT | @codex-541 | Clarified that `first_chunk_max_chars` is enforced by shared streaming TTS chunking and that quality turn counts are source-turn aware for coalesced outputs. |
 
 ## Purpose
 
@@ -165,7 +166,7 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | `generation_mode` | `"streaming"` | Selects buffered vs incremental TTS. |
 | `chunking_enabled` | `true` | Splits long replies before synthesis. |
 | `max_text_chunk_chars` | `70` | Later chunk packing budget for the current no-barge-in Identity baseline. |
-| `first_chunk_max_chars` | `40` | Smaller first chunk for lower first-audio latency. |
+| `first_chunk_max_chars` | `40` | Hard cap for the first incremental TTS request; if the first sentence or unsentenced segment is longer, the remainder goes through normal `max_text_chunk_chars` packing. |
 | `prebuffer_chunks` | `1` | Prepared chunks required before playback starts. |
 
 ### Early Response
@@ -209,7 +210,9 @@ Set both `[conversation] barge_in_enabled = false` and
 ### Conversation Policy
 
 `[voice_quality.conversation_policy]` arbitrates assistant output overlap and
-valid barge-in actions:
+valid barge-in actions. Quality summary turn counts are source-turn aware: when
+one policy-managed playback covers multiple coalesced caller turns, all linked
+source turns count as attempted/played rather than being reported as excluded.
 
 | Key | Values | Purpose |
 | --- | --- | --- |

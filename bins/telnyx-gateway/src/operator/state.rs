@@ -334,7 +334,11 @@ impl QualityTurnReportState {
     }
 
     fn record_caller_turn(&mut self, turn_id: &str, source_turn_ids: &[String]) {
-        self.caller_turn_ids.insert(turn_id.to_string());
+        if source_turn_ids.is_empty() {
+            self.caller_turn_ids.insert(turn_id.to_string());
+        } else {
+            self.caller_turn_ids.extend(source_turn_ids.iter().cloned());
+        }
         if source_turn_ids.len() > 1 {
             self.coalesced_selected_turn_ids.insert(turn_id.to_string());
             self.coalesced_source_turn_ids
@@ -350,9 +354,8 @@ impl QualityTurnReportState {
     ) -> QualityPlaybackRecord {
         let source_turn_ids =
             normalized_source_turn_ids(linkage.turn_id.as_deref(), linkage.coalesced_turn_ids);
-        if let Some(turn_id) = linkage.turn_id.as_ref() {
-            self.response_attempted_turn_ids.insert(turn_id.clone());
-        }
+        self.response_attempted_turn_ids
+            .extend(source_turn_ids.iter().cloned());
         self.response_attempted_playback_ids
             .insert(playback_id.clone());
         let record = QualityPlaybackRecord {
@@ -378,9 +381,8 @@ impl QualityTurnReportState {
             return None;
         }
         record.first_audio_sent = true;
-        if let Some(turn_id) = record.turn_id.as_ref() {
-            self.played_turn_ids.insert(turn_id.clone());
-        }
+        self.played_turn_ids
+            .extend(record.source_turn_ids.iter().cloned());
         self.played_playback_ids.insert(playback_id.to_string());
         Some(record.clone())
     }
@@ -415,10 +417,8 @@ impl QualityTurnReportState {
         if reason == Some("canceled_after_call_end") {
             self.canceled_after_call_end_playback_ids
                 .insert(playback_id.to_string());
-            if let Some(turn_id) = record.turn_id.as_ref() {
-                self.canceled_after_call_end_turn_ids
-                    .insert(turn_id.clone());
-            }
+            self.canceled_after_call_end_turn_ids
+                .extend(record.source_turn_ids.iter().cloned());
         }
         Some(record.clone())
     }
@@ -2363,15 +2363,15 @@ mod tests {
             .find(|event| event.event == "quality.report.summary")
             .expect("summary event");
         assert_eq!(summary.payload["raw_asr_final_events"], 1);
-        assert_eq!(summary.payload["caller_turns"], 1);
-        assert_eq!(summary.payload["attempted_turns"], 1);
+        assert_eq!(summary.payload["caller_turns"], 2);
+        assert_eq!(summary.payload["attempted_turns"], 2);
         assert_eq!(summary.payload["attempted_playbacks"], 1);
         assert_eq!(summary.payload["coalesced_turns"], 2);
         assert_eq!(summary.payload["coalesced_response_turns"], 1);
-        assert_eq!(summary.payload["played_turns"], 1);
+        assert_eq!(summary.payload["played_turns"], 2);
         assert_eq!(summary.payload["played_playbacks"], 1);
         assert_eq!(summary.payload["canceled_playbacks"], 1);
-        assert_eq!(summary.payload["canceled_after_call_end_turns"], 1);
+        assert_eq!(summary.payload["canceled_after_call_end_turns"], 2);
         assert_eq!(summary.payload["canceled_after_call_end_playbacks"], 1);
         assert_eq!(summary.payload["excluded_turns_without_playback"], 0);
         assert_eq!(summary.payload["turn_batch_batches_formed"], 1);
