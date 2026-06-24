@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | 2026-06-22 PDT | @codex-535 | Started issue #545 design for a unified conversation policy that covers barge-in and no-barge-in playback overlap, with an initial PR #558 implementation slice for bounded pending repeats. |
 | 2026-06-22 PDT | @codex-535 | Expanded the design to shipped behavior: enum-backed policy decisions now cover no-barge-in pending output, cancel-only barge-in, and post-barge-in silence coalescing through global TOML config. |
+| 2026-06-24 PDT | @codex-541 | Cross-linked the conversation policy design to the user-facing global TOML config guide. |
 
 ## Problem
 
@@ -105,6 +106,10 @@ max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
 ```
+
+The broader user-facing config reference, including conversation, endpoint,
+TTS, early-response, barge-in, policy, and logging knobs, lives in
+[`CONFIGS.md`](CONFIGS.md).
 
 Live no-barge-in identity smoke tests should use:
 

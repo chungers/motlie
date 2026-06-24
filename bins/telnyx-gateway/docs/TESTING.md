@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 | --- | --- | --- |
 | 2026-06-21 | @codex-535 | Added run-by-run live tuning ladder for identity/repeat endpoint and playback-hold knobs after PR #558 live test. |
+| 2026-06-24 PDT | @codex-541 | Linked the live-test playbook to the comprehensive global TOML config guide. |
 | 2026-06-20 | @ops48-orchestrator | Protocol B: lead with the global run-config TOML as the single source of all batcher knobs (test protocol fully specified in one place); reframe the `conversation smoke-test --…` form as an OPTIONAL runtime operator TUI/agent socket-command override, explicitly NOT process CLI/argv flags. Per David. |
 | 2026-06-20 | @codex-541-refactor | Reconciled the gateway-alone turn-batching protocols with approved DESIGN-557 §4.3 event names, deadline/status fields, and batcher-owned config knobs. Timestamp: 2026-06-21 00:46:41 UTC. |
 | 2026-06-20 | @codex-541-refactor | Added gateway-alone partials-batching and turns-batching smoke-test protocols plus turn-batch lifecycle observability checks. Timestamp: 2026-06-20 23:27:26 UTC. |
@@ -61,6 +62,11 @@ Create the run config from a committed redacted example. Use the generic templat
 - `bins/telnyx-gateway/docs/LIVE_RUN_CONFIG.example.toml`
 - `bins/telnyx-gateway/docs/LIVE_RUN_INBOUND_IDENTITY.example.toml`
 - `bins/telnyx-gateway/docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml`
+
+The global TOML surface and tuning knobs are documented in
+[`CONFIGS.md`](CONFIGS.md). Use that guide as the canonical user-facing
+reference for conversation, endpoint, TTS, early response, barge-in,
+conversation policy, and quality logging knobs.
 
 ```sh
 RUN_ID="$(date +%Y%m%d-%H%M%S)-clause-coalesce-v1"
