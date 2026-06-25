@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-25 PDT | @codex-541 | Added the current barge-in coalesce-after-silence Identity profile and live-run findings. |
 | 2026-06-24 PDT | @codex-541 | Added a user-facing guide for the strict global TOML config surface, live-run config records, and conversation policy tuning knobs. |
 | 2026-06-24 PDT | @codex-541 | Updated the no-barge-in Identity recommended profile with the latest live-run tuning values and follow-up priorities. |
 | 2026-06-24 PDT | @codex-541 | Clarified that `first_chunk_max_chars` is enforced by shared streaming TTS chunking and that quality turn counts are source-turn aware for coalesced outputs. |
@@ -283,6 +284,63 @@ The 2026-06-24 inbound Identity run with this profile completed 12/12 attempted
 playbacks with 0 canceled/failed playbacks and good reported audio quality. Keep
 this as the repeat-reliability baseline. Next tune ASR fragment/domain accuracy
 and TTS/serial playback latency separately.
+
+Recommended barge-in Identity smoke-test profile:
+
+```toml
+[conversation]
+enabled = true
+final_coalescing_enabled = true
+barge_in_enabled = true
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[voice_quality.tts]
+generation_mode = "streaming"
+chunking_enabled = true
+max_text_chunk_chars = 70
+first_chunk_max_chars = 40
+prebuffer_chunks = 1
+
+[voice_quality.early_response]
+enabled = true
+audio_mode = "speak_provisionally"
+boundary = "clause"
+start_timing = "while_speaking"
+debounce_ms = 180
+max_updates_per_utterance = 1
+
+[voice_quality.endpoint]
+trailing_silence_ms = 850
+merge_window_ms = 120
+final_settle_ms = 500
+conversation_incomplete_tail_hold_ms = 250
+conversation_playback_hold_poll_ms = 10
+conversation_playback_max_hold_ms = 0
+
+[voice_quality.barge_in]
+enabled = true
+speech_onset_cancel_enabled = true
+onset_during_playback = "defer_to_partial"
+partial_asr_cancel_enabled = true
+final_asr_cancel_enabled = true
+clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+mode = "barge_in_coalesce_after_silence"
+active_playback_hold_ms = 1000
+max_pending_outputs = 1
+pending_output_order = "latest_only"
+post_barge_in_silence_ms = 1200
+```
+
+The 2026-06-25 barge-in Identity run with this profile canceled active playback
+within 12 ms, had 0 outbound underruns, and produced clear reported audio. Keep
+this as the current interruption profile. For the next run, avoid the spoken
+phrase `barge in` because ASR rendered it poorly; use a clearer trigger such as
+`Stop now. Please repeat this replacement sentence.` Collect qualitative
+feedback only after hangup or after `conversation smoke-test off`, otherwise
+Identity/repeat will capture and repeat the feedback as more caller turns.
 
 ### Echo Suppression
 

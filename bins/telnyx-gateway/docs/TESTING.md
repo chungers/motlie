@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-25 PDT | @codex-541 | Recorded the current barge-in coalesce-after-silence tuning profile and latest live-run result; tightened the next-run protocol to keep qualitative feedback out of Identity repeat capture. |
 | 2026-06-21 | @codex-535 | Added run-by-run live tuning ladder for identity/repeat endpoint and playback-hold knobs after PR #558 live test. |
 | 2026-06-24 PDT | @codex-541 | Linked the live-test playbook to the comprehensive global TOML config guide. |
 | 2026-06-24 PDT | @codex-541 | Recorded latest inbound no-barge-in Identity tuning profile and live-run findings: bounded FIFO policy improved repeat reliability, with remaining ASR fragment and latency work. |
@@ -354,6 +355,36 @@ preserves caller ASR, and holds post-barge-in finals until the configured
 silence window closes before processor dispatch.
 
 ```toml
+[conversation]
+enabled = true
+final_coalescing_enabled = true
+barge_in_enabled = true
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[voice_quality.tts]
+generation_mode = "streaming"
+chunking_enabled = true
+max_text_chunk_chars = 70
+first_chunk_max_chars = 40
+prebuffer_chunks = 1
+
+[voice_quality.early_response]
+enabled = true
+audio_mode = "speak_provisionally"
+boundary = "clause"
+start_timing = "while_speaking"
+debounce_ms = 180
+max_updates_per_utterance = 1
+
+[voice_quality.endpoint]
+trailing_silence_ms = 850
+merge_window_ms = 120
+final_settle_ms = 500
+conversation_incomplete_tail_hold_ms = 250
+conversation_playback_hold_poll_ms = 10
+conversation_playback_max_hold_ms = 0
+
 [voice_quality.barge_in]
 enabled = true
 speech_onset_cancel_enabled = true
@@ -379,6 +410,33 @@ Success criteria:
   window when multiple finals arrive during the post-barge-in window.
 - Echo-guard still defers likely assistant echo to partial/final ASR before
   cancellation.
+
+Latest 2026-06-25 result:
+
+- Use `barge_in_coalesce_after_silence` as the current barge-in Identity
+  profile. The completed run recorded 6 caller turns, 6 attempted playbacks, 4
+  barge-in cancels, 2 completed playbacks, 0 failed playbacks, 0 dropped quality
+  events, and 0 excluded turns without playback.
+- Barge-in cancel latency was fast: p50 11 ms and max 12 ms from cancel request
+  to terminal playback status.
+- Transport was clean: no outbound underruns, outbound skipped packets 0, and
+  carrier MOS 4.50.
+- Scripted baseline WER was 6.67% (`rolled -> rolls`). The interruption line
+  WER was 41.67%, mostly because `barge in` was recognized as `Harja`.
+- Human feedback was positive: audio was clear, playback stopped in time, and
+  the replacement sentence appeared to play back without missing fragments.
+- The run was not a clean WER/control sample because qualitative feedback after
+  the replacement entered Identity repeat and produced additional turns.
+
+Next barge-in Identity run:
+
+- Keep the profile above unchanged.
+- Avoid the phrase `barge in` in the caller-spoken replacement line; use a
+  phonetically cleaner trigger such as `Stop now. Please repeat this replacement
+  sentence.` Domain/hotword biasing remains deferred.
+- After the replacement playback completes, hang up or run
+  `conversation smoke-test off` before collecting qualitative feedback. Feedback
+  spoken while Identity is attached is part of the call and will be repeated.
 
 ### Next No-Barge-In Follow-Up
 
