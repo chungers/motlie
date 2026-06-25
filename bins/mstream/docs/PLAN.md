@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 | @codex-570-impl | Updated attach phase notes after live dogfood: explicit multi-client switching and visit-pane-exit cleanup. |
 | 2026-06-25 | @codex-570-impl | Added issue #570 attach implementation tasks and validation gates for daemon resolution, PTY handoff, caller-tmux window injection, and reaping. |
 | 2026-06-06 | @codex-401-impl | Added issue #401 implementation notes for `quarantined`, `retire`, gated `reclaim`, and scan registry self-heal. |
 | 2026-05-30 | @codex-360-og | Added and completed issue #360 tasks for id-stable live session rename/retag, mmux refresh, stale-id safety, and test coverage. |
@@ -596,11 +597,12 @@ Tasks:
 - [x] 12.3 Add `mstream attach <target> [--here] [--sweep] [--print]` with
   `--print` command emission and default foreground PTY handoff.
 - [x] 12.4 Implement caller-tmux `--here` behavior, auto-selected when `$TMUX`
-  is set: create a tagged detached window, switch the current client, wait for
-  return, and kill only when the visit window is no longer active.
+  is set: create a tagged detached window, switch every attached client of the
+  caller session with `switch-client -c <tty>`, and wait for the visit pane to
+  exit or disappear.
 - [x] 12.5 Implement window ownership cleanup: `@mstream/attach` tags,
-  target/spawn metadata, self-kill after nested attach exit, guarded
-  force-reap-on-return, and inactive tagged-window `--sweep`.
+  target/spawn metadata, self-kill after nested attach exit, visit-pane-exit
+  cleanup, already-gone kill tolerance, and inactive tagged-window `--sweep`.
 - [x] 12.6 Cover attach command rendering, client command reconstruction,
   self-kill shell construction, and inactive sweep selection with focused unit
   tests.
@@ -628,9 +630,10 @@ mstream attach local::<session> --here
 mstream attach local::<session> --sweep
 ```
 
-`--here` should leave no inactive `@mstream/attach` windows after the user
-returns to the orchestrator window. `--sweep` should kill inactive tagged visit
-windows and preserve the active visit window.
+`--here` should switch every attached client of the caller session to the visit
+window, then leave no inactive `@mstream/attach` windows after the injected pane
+exits. `--sweep` should kill inactive tagged visit windows and preserve the
+active visit window.
 
 ## End-To-End Validation Plan
 

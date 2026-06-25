@@ -4,7 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-25 | @codex-570-impl | Clarified standalone `attach --sweep` cleanup and that `attach --here` blocks until the caller returns. |
+| 2026-06-25 | @codex-570-impl | Updated `attach --here` docs for multi-client `switch-client -c` forwarding and visit-pane-exit cleanup. |
+| 2026-06-25 | @codex-570-impl | Clarified standalone `attach --sweep` cleanup and that `attach --here` blocks for the visit lifecycle. |
 | 2026-06-25 | @codex-570-impl | Documented `mstream attach <target> [--here] [--sweep] [--print]` for daemon-resolved attach commands, PTY handoff, and tagged caller-tmux visits. |
 | 2026-06-23 | @codex-561-design | Implemented B3 cleanup contract: `doctor --quarantine-dead` and `--prune-quarantined` operate only on confirmed-dead rows and preserve unreachable rows per #401 lifecycle hygiene. |
 | 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, timer start upsert behavior, timer paste-mode selection, and delivery primitive parity controls. |
@@ -150,13 +151,13 @@ handoff: `mstream` runs the daemon-resolved command with the current terminal as
 stdin/stdout/stderr and returns the attach child shell status. When `$TMUX` is
 set, `--here` is selected automatically. `--here` creates a detached local
 caller-tmux window named `mstream-attach`, tags it with `@mstream/attach=true`
-and target/spawn metadata, switches the current client to that window, and waits
-until that window is no longer active. The `--here` invocation blocks until the
-caller returns, so orchestrators that need their prompt back while the user is
-visiting must run it in the background. On return, mstream kills the visit
-window only after the active-window guard says the active window is not the
-visit window. The shell running inside the injected window also self-kills
-its window after the nested attach command exits.
+and target/spawn metadata, switches each attached client of the caller session
+to that window with `switch-client -c <tty>`, and waits until the injected visit
+pane exits or disappears. The `--here` invocation blocks until that pane exits,
+so orchestrators that need their prompt back while the user is visiting must run
+it in the background. The shell running inside the injected window self-kills
+its window after the nested attach command exits; the waiting caller also treats
+an already-gone visit window as successful cleanup.
 
 `--sweep` is caller-tmux cleanup. Before resolving or attaching, it scans
 local tmux windows for inactive `@mstream/attach` windows and kills them while

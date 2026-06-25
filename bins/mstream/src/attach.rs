@@ -21,6 +21,12 @@ const ATTACH_CREATED_AT_TAG: &str = "@mstream/attach-created-at";
 const ATTACH_WINDOW_NAME: &str = "mstream-attach";
 const RETURN_POLL_MS: u64 = 500;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttachWindow {
+    window_id: String,
+    pane_id: String,
+}
+
 pub async fn run(socket: &Path, args: AttachArgs) -> anyhow::Result<i32> {
     let in_tmux = env::var_os("TMUX").is_some();
     let here = args.here || in_tmux;
@@ -92,37 +98,127 @@ fn attach_command_from_record(record: AttachCommandRecord) -> AttachCommand {
 }
 
 async fn attach_here(resolved: &AttachResolveRecord) -> anyhow::Result<()> {
-    let window_id = create_attach_window(resolved)?;
-    if let Err(err) = tmux_status(["switch-client", "-t", window_id.as_str()]) {
-        let _ = kill_window(&window_id);
+    let caller_session_id = caller_session_id()?;
+    let client_ttys = attached_client_ttys(&caller_session_id)?;
+    if client_ttys.is_empty() {
+        bail!("no attached tmux clients found for caller session {caller_session_id}");
+    }
+
+    let visit = create_attach_window(resolved, &caller_session_id)?;
+    if let Err(err) = switch_clients_to_window(&client_ttys, &visit.window_id) {
+        let _ = kill_window(&visit.window_id);
         return Err(err);
     }
-    wait_for_return_and_reap(&window_id).await
+    wait_for_visit_pane_exit_and_reap(&visit).await
 }
 
-fn create_attach_window(resolved: &AttachResolveRecord) -> anyhow::Result<String> {
+fn caller_session_id() -> anyhow::Result<String> {
+    let output = match env::var("TMUX_PANE") {
+        Ok(pane_id) if !pane_id.is_empty() => tmux_output([
+            "display-message",
+            "-p",
+            "-t",
+            pane_id.as_str(),
+            "#{session_id}",
+        ])?,
+        _ => tmux_output(["display-message", "-p", "#{session_id}"])?,
+    };
+    let session_id = output.trim();
+    if session_id.is_empty() {
+        bail!("tmux did not return a caller session id");
+    }
+    Ok(session_id.to_string())
+}
+
+fn attached_client_ttys(session_id: &str) -> anyhow::Result<Vec<String>> {
+    let output = match tmux_output(["list-clients", "-F", "#{client_tty}\t#{session_id}"]) {
+        Ok(output) => output,
+        Err(err) if tmux_error_contains(&err, "no clients") => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    Ok(attached_client_ttys_for_session(&output, session_id))
+}
+
+fn attached_client_ttys_for_session(output: &str, session_id: &str) -> Vec<String> {
+    let mut ttys = Vec::new();
+    for line in output.lines() {
+        let Some((tty, client_session_id)) = line.split_once('\t') else {
+            continue;
+        };
+        let tty = tty.trim();
+        if client_session_id.trim() == session_id
+            && !tty.is_empty()
+            && !ttys.iter().any(|existing| existing == tty)
+        {
+            ttys.push(tty.to_string());
+        }
+    }
+    ttys
+}
+
+fn switch_clients_to_window(client_ttys: &[String], window_id: &str) -> anyhow::Result<()> {
+    let mut switched = 0usize;
+    let mut errors = Vec::new();
+    for client_tty in client_ttys {
+        match tmux_status(["switch-client", "-c", client_tty.as_str(), "-t", window_id]) {
+            Ok(()) => switched += 1,
+            Err(err) if tmux_error_contains(&err, "can't find client") => {}
+            Err(err) => errors.push(err.to_string()),
+        }
+    }
+
+    if switched > 0 {
+        Ok(())
+    } else if errors.is_empty() {
+        bail!("no attached tmux clients found for caller session")
+    } else {
+        bail!(
+            "failed to switch attached tmux clients: {}",
+            errors.join("; ")
+        )
+    }
+}
+
+fn create_attach_window(
+    resolved: &AttachResolveRecord,
+    caller_session_id: &str,
+) -> anyhow::Result<AttachWindow> {
     let shell = attach_window_shell(&resolved.command.shell);
-    let window_id = tmux_output([
+    let output = tmux_output([
         "new-window",
         "-d",
         "-P",
         "-F",
-        "#{window_id}",
+        "#{window_id}\t#{pane_id}",
+        "-t",
+        caller_session_id,
         "-n",
         ATTACH_WINDOW_NAME,
         shell.as_str(),
-    ])?
-    .trim()
-    .to_string();
-    if window_id.is_empty() {
-        bail!("tmux new-window did not return a window id");
-    }
+    ])?;
+    let visit = parse_attach_window(&output)?;
 
-    if let Err(err) = tag_attach_window(&window_id, resolved) {
-        let _ = kill_window(&window_id);
+    if let Err(err) = tag_attach_window(&visit.window_id, resolved) {
+        let _ = kill_window(&visit.window_id);
         return Err(err);
     }
-    Ok(window_id)
+    Ok(visit)
+}
+
+fn parse_attach_window(output: &str) -> anyhow::Result<AttachWindow> {
+    let line = output.trim();
+    let Some((window_id, pane_id)) = line.split_once('\t') else {
+        bail!("tmux new-window did not return window and pane ids");
+    };
+    let window_id = window_id.trim();
+    let pane_id = pane_id.trim();
+    if window_id.is_empty() || pane_id.is_empty() {
+        bail!("tmux new-window returned an empty window or pane id");
+    }
+    Ok(AttachWindow {
+        window_id: window_id.to_string(),
+        pane_id: pane_id.to_string(),
+    })
 }
 
 fn tag_attach_window(window_id: &str, resolved: &AttachResolveRecord) -> anyhow::Result<()> {
@@ -146,33 +242,31 @@ fn attach_window_shell(attach_shell: &str) -> String {
     )
 }
 
-async fn wait_for_return_and_reap(window_id: &str) -> anyhow::Result<()> {
-    let mut armed = false;
+async fn wait_for_visit_pane_exit_and_reap(visit: &AttachWindow) -> anyhow::Result<()> {
     loop {
         sleep(Duration::from_millis(RETURN_POLL_MS)).await;
-        match window_is_active(window_id) {
-            Ok(active) if reap_should_kill(&mut armed, active) => {
-                kill_window(window_id)?;
+        match visit_pane_is_running(&visit.pane_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                kill_window(&visit.window_id)?;
                 return Ok(());
             }
-            Ok(_) => {}
             Err(_) => return Ok(()),
         }
     }
 }
 
-fn reap_should_kill(armed: &mut bool, active: bool) -> bool {
-    if active {
-        *armed = true;
-        false
-    } else {
-        *armed
+fn visit_pane_is_running(pane_id: &str) -> anyhow::Result<bool> {
+    match tmux_output(["display-message", "-p", "-t", pane_id, "#{pane_dead}"]) {
+        Ok(output) => match output.trim() {
+            "0" => Ok(true),
+            "1" => Ok(false),
+            value => bail!("tmux pane_dead returned unexpected value: {value}"),
+        },
+        Err(err) if tmux_error_contains(&err, "can't find pane") => Ok(false),
+        Err(err) if tmux_error_contains(&err, "can't find window") => Ok(false),
+        Err(err) => Err(err),
     }
-}
-
-fn window_is_active(window_id: &str) -> anyhow::Result<bool> {
-    let active = tmux_output(["display-message", "-p", "-t", window_id, "#{window_active}"])?;
-    Ok(active.trim() == "1")
 }
 
 fn sweep_attach_windows() -> anyhow::Result<usize> {
@@ -208,7 +302,11 @@ fn inactive_attach_windows(output: &str) -> Vec<String> {
 }
 
 fn kill_window(window_id: &str) -> anyhow::Result<()> {
-    tmux_status(["kill-window", "-t", window_id])
+    match tmux_status(["kill-window", "-t", window_id]) {
+        Ok(()) => Ok(()),
+        Err(err) if tmux_error_contains(&err, "can't find window") => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 fn tmux_status<I, S>(args: I) -> anyhow::Result<()>
@@ -254,6 +352,10 @@ fn tmux_error(args: &[OsString], output: &std::process::Output) -> anyhow::Error
     anyhow!("tmux {} failed: {}", display_args(args), stderr.trim())
 }
 
+fn tmux_error_contains(err: &anyhow::Error, needle: &str) -> bool {
+    err.to_string().contains(needle)
+}
+
 fn display_args(args: &[OsString]) -> String {
     args.iter()
         .map(|arg| arg.to_string_lossy())
@@ -282,14 +384,35 @@ mod tests {
     }
 
     #[test]
-    fn reap_waits_until_visit_window_was_observed_active() {
-        let mut armed = false;
+    fn attached_client_ttys_selects_real_clients_in_caller_session() {
+        let clients = attached_client_ttys_for_session(
+            "/dev/pts/4\t$2\n\t$2\n/dev/pts/38\t$2\n/dev/pts/9\t$3\n/dev/pts/4\t$2\n",
+            "$2",
+        );
 
-        assert!(!reap_should_kill(&mut armed, false));
-        assert!(!armed);
-        assert!(!reap_should_kill(&mut armed, true));
-        assert!(armed);
-        assert!(reap_should_kill(&mut armed, false));
+        assert_eq!(clients, vec!["/dev/pts/4", "/dev/pts/38"]);
+    }
+
+    #[test]
+    fn parse_attach_window_requires_window_and_pane_ids() {
+        let visit = parse_attach_window("@7\t%13\n").expect("attach window ids parse");
+
+        assert_eq!(
+            visit,
+            AttachWindow {
+                window_id: "@7".to_string(),
+                pane_id: "%13".to_string(),
+            }
+        );
+        assert!(parse_attach_window("@7\n").is_err());
+        assert!(parse_attach_window("@7\t\n").is_err());
+    }
+
+    #[test]
+    fn tmux_error_contains_matches_missing_window_race() {
+        let err = anyhow!("tmux kill-window -t @262 failed: can't find window: @262");
+
+        assert!(tmux_error_contains(&err, "can't find window"));
     }
 
     #[test]
