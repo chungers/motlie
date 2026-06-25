@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 | --- | --- | --- |
 | 2026-06-25 PDT | @codex-541 | Added the current barge-in coalesce-after-silence Identity profile and live-run findings. |
+| 2026-06-25 PDT | @codex-541 | Documented final-ASR active-playback confidence/stability gates for barge-in policy tuning. |
 | 2026-06-24 PDT | @codex-541 | Added a user-facing guide for the strict global TOML config surface, live-run config records, and conversation policy tuning knobs. |
 | 2026-06-24 PDT | @codex-541 | Updated the no-barge-in Identity recommended profile with the latest live-run tuning values and follow-up priorities. |
 | 2026-06-24 PDT | @codex-541 | Clarified that `first_chunk_max_chars` is enforced by shared streaming TTS chunking and that quality turn counts are source-turn aware for coalesced outputs. |
@@ -207,6 +208,8 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | `transcript_min_words` | `2` | `2` | Minimum transcript words before partial/final ASR may cancel active playback. |
 | `partial_min_confidence` | `0.50` | `0.50` | Minimum partial-ASR confidence during active playback; omit in ad-hoc configs to disable this gate. |
 | `partial_min_stability` | `0.50` | `0.50` | Minimum partial-ASR stability during active playback; omit in ad-hoc configs to disable this gate. |
+| `final_min_confidence` | `0.70` (ignored when disabled) | `0.70` | Minimum final-ASR confidence during active playback; suppresses low-confidence short finals that can self-cancel playback. |
+| `final_min_stability` | unset | unset | Optional final-ASR stability floor; leave unset until the backend reports stability on finals. |
 | `clear_timeout_ms` | `1000` | `1000` | Media clear/terminal wait budget. |
 
 Set both `[conversation] barge_in_enabled = false` and
@@ -332,6 +335,8 @@ transcript_min_chars = 6
 transcript_min_words = 2
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
+final_min_confidence = 0.70
+# final_min_stability intentionally unset until final ASR reports stability.
 clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]

@@ -281,11 +281,16 @@ fn transcript_evidence_allows_barge_in(
     {
         return false;
     }
-    if trigger == BargeInTrigger::Partial {
-        score_meets_threshold(evidence.confidence, barge_in.partial_min_confidence)
-            && score_meets_threshold(evidence.stability, barge_in.partial_min_stability)
-    } else {
-        true
+    match trigger {
+        BargeInTrigger::Partial => {
+            score_meets_threshold(evidence.confidence, barge_in.partial_min_confidence)
+                && score_meets_threshold(evidence.stability, barge_in.partial_min_stability)
+        }
+        BargeInTrigger::Final => {
+            score_meets_threshold(evidence.confidence, barge_in.final_min_confidence)
+                && score_meets_threshold(evidence.stability, barge_in.final_min_stability)
+        }
+        BargeInTrigger::SpeechOnset => true,
     }
 }
 
@@ -507,6 +512,50 @@ mod tests {
 
         assert!(!decision.cancels_playback());
         assert!(!decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn low_confidence_final_during_active_playback_is_ignored_when_configured() {
+        let policy = ConversationPolicyConfig::default();
+        let barge_in = BargeInQualityConfig {
+            final_min_confidence: Some(0.70),
+            ..BargeInQualityConfig::default()
+        };
+        let decision = policy.decide_transcript_barge_in(
+            &barge_in,
+            BargeInTrigger::Final,
+            BargeInTranscriptEvidence {
+                text: "at now please",
+                active_playback: true,
+                confidence: Some(0.62),
+                stability: None,
+            },
+        );
+
+        assert!(!decision.cancels_playback());
+        assert!(!decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn high_confidence_final_during_active_playback_can_cancel_when_configured() {
+        let policy = ConversationPolicyConfig::default();
+        let barge_in = BargeInQualityConfig {
+            final_min_confidence: Some(0.70),
+            ..BargeInQualityConfig::default()
+        };
+        let decision = policy.decide_transcript_barge_in(
+            &barge_in,
+            BargeInTrigger::Final,
+            BargeInTranscriptEvidence {
+                text: "stop now please",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: None,
+            },
+        );
+
+        assert!(decision.cancels_playback());
+        assert!(decision.forwards_caller_transcript());
     }
 
     #[test]

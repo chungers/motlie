@@ -455,6 +455,8 @@ pub struct BargeInQualityConfig {
     pub transcript_min_words: usize,
     pub partial_min_confidence: Option<f32>,
     pub partial_min_stability: Option<f32>,
+    pub final_min_confidence: Option<f32>,
+    pub final_min_stability: Option<f32>,
     pub clear_timeout_ms: u64,
 }
 
@@ -470,6 +472,8 @@ impl Default for BargeInQualityConfig {
             transcript_min_words: 2,
             partial_min_confidence: None,
             partial_min_stability: None,
+            final_min_confidence: None,
+            final_min_stability: None,
             clear_timeout_ms: 1_000,
         }
     }
@@ -939,6 +943,12 @@ impl VoiceQualityConfig {
         if let Some(value) = self.barge_in.partial_min_stability {
             ensure_f32("barge_in.partial_min_stability", value, 0.0, 1.0)?;
         }
+        if let Some(value) = self.barge_in.final_min_confidence {
+            ensure_f32("barge_in.final_min_confidence", value, 0.0, 1.0)?;
+        }
+        if let Some(value) = self.barge_in.final_min_stability {
+            ensure_f32("barge_in.final_min_stability", value, 0.0, 1.0)?;
+        }
         ensure_u64(
             "barge_in.clear_timeout_ms",
             self.barge_in.clear_timeout_ms,
@@ -1233,6 +1243,12 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = barge_in.partial_min_stability {
                 self.set_barge_in_partial_min_stability(value)?;
+            }
+            if let Some(value) = barge_in.final_min_confidence {
+                self.set_barge_in_final_min_confidence(value)?;
+            }
+            if let Some(value) = barge_in.final_min_stability {
+                self.set_barge_in_final_min_stability(value)?;
             }
             if let Some(value) = barge_in.clear_timeout_ms {
                 self.set_barge_in_clear_timeout_ms(value);
@@ -1829,6 +1845,34 @@ impl VoiceQualityConfig {
         ))
     }
 
+    pub fn set_barge_in_final_min_confidence(
+        &mut self,
+        value: f32,
+    ) -> Result<QualityMutationOutcome> {
+        ensure_f32("barge_in.final_min_confidence", value, 0.0, 1.0)?;
+        self.barge_in.final_min_confidence = Some(value);
+        Ok(self.outcome(
+            "barge_in.final_min_confidence",
+            format!("{value:.2}"),
+            ApplyBoundary::NewTurn,
+            false,
+        ))
+    }
+
+    pub fn set_barge_in_final_min_stability(
+        &mut self,
+        value: f32,
+    ) -> Result<QualityMutationOutcome> {
+        ensure_f32("barge_in.final_min_stability", value, 0.0, 1.0)?;
+        self.barge_in.final_min_stability = Some(value);
+        Ok(self.outcome(
+            "barge_in.final_min_stability",
+            format!("{value:.2}"),
+            ApplyBoundary::NewTurn,
+            false,
+        ))
+    }
+
     pub fn set_barge_in_clear_timeout_ms(&mut self, value: u64) -> QualityMutationOutcome {
         let clamped = clamp_u64(value, 100, 10_000);
         self.barge_in.clear_timeout_ms = clamped.value;
@@ -2357,6 +2401,8 @@ pub struct BargeInQualityConfigPatch {
     pub transcript_min_words: Option<usize>,
     pub partial_min_confidence: Option<f32>,
     pub partial_min_stability: Option<f32>,
+    pub final_min_confidence: Option<f32>,
+    pub final_min_stability: Option<f32>,
     pub clear_timeout_ms: Option<u64>,
 }
 
@@ -2568,6 +2614,8 @@ mod tests {
             transcript_min_words = 2
             partial_min_confidence = 0.50
             partial_min_stability = 0.55
+            final_min_confidence = 0.70
+            final_min_stability = 0.75
             "#,
         )
         .expect("quality config parses");
@@ -2576,6 +2624,8 @@ mod tests {
         assert_eq!(config.barge_in.transcript_min_words, 2);
         assert_eq!(config.barge_in.partial_min_confidence, Some(0.50));
         assert_eq!(config.barge_in.partial_min_stability, Some(0.55));
+        assert_eq!(config.barge_in.final_min_confidence, Some(0.70));
+        assert_eq!(config.barge_in.final_min_stability, Some(0.75));
     }
 
     #[test]
@@ -2592,6 +2642,11 @@ mod tests {
         assert!(error
             .to_string()
             .contains("barge_in.partial_min_confidence"));
+
+        let error = config
+            .set_barge_in_final_min_confidence(-0.1)
+            .expect_err("confidence below zero should be rejected");
+        assert!(error.to_string().contains("barge_in.final_min_confidence"));
     }
 
     #[test]

@@ -199,6 +199,10 @@ transcript_min_words = 2
 partial_min_confidence = 0.50
 # Minimum partial-ASR stability for active-playback cancellation.
 partial_min_stability = 0.50
+# Minimum final-ASR confidence for active-playback cancellation.
+final_min_confidence = 0.70
+# Optional final-ASR stability floor; leave unset until final ASR reports stability.
+# final_min_stability = 0.50
 # Time allowed for media clear/mark handling.
 clear_timeout_ms = 1000
 

@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 | --- | --- | --- |
 | 2026-06-25 PDT | @codex-541 | Recorded the current barge-in coalesce-after-silence tuning profile and latest live-run result; tightened the next-run protocol to keep qualitative feedback out of Identity repeat capture. |
+| 2026-06-25 PDT | @codex-541 | Added final-ASR active-playback confidence gating after a failed barge-in run showed short finals could still cancel replacement playback. |
 | 2026-06-21 | @codex-535 | Added run-by-run live tuning ladder for identity/repeat endpoint and playback-hold knobs after PR #558 live test. |
 | 2026-06-24 PDT | @codex-541 | Linked the live-test playbook to the comprehensive global TOML config guide. |
 | 2026-06-24 PDT | @codex-541 | Recorded latest inbound no-barge-in Identity tuning profile and live-run findings: bounded FIFO policy improved repeat reliability, with remaining ASR fragment and latency work. |
@@ -343,6 +344,8 @@ transcript_min_chars = 6
 transcript_min_words = 2
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
+final_min_confidence = 0.70
+# final_min_stability intentionally unset until final ASR reports stability.
 clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]
@@ -399,6 +402,8 @@ transcript_min_chars = 6
 transcript_min_words = 2
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
+final_min_confidence = 0.70
+# final_min_stability intentionally unset until final ASR reports stability.
 clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]
@@ -442,6 +447,10 @@ Next barge-in Identity run:
 - Avoid the phrase `barge in` in the caller-spoken replacement line; use a
   phonetically cleaner trigger such as `Stop now. Please repeat this replacement
   sentence.` Domain/hotword biasing remains deferred.
+- Keep `voice_quality.barge_in.final_min_confidence = 0.70` and leave
+  `final_min_stability` unset until final ASR emits stability. This preserves
+  high-confidence final interruption while suppressing low-confidence short
+  finals captured from assistant echo or coordination speech.
 - After the replacement playback completes, hang up or run
   `conversation smoke-test off` before collecting qualitative feedback. Feedback
   spoken while Identity is attached is part of the call and will be repeated.
