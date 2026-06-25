@@ -153,8 +153,12 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 # Maximum characters in the first TTS chunk; `0` disables the special first limit.
 first_chunk_max_chars = 40
-# Buffered-mode prebuffer chunks before playback starts.
+# Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
+# Normal streaming TTS frames to hold before first playback frame; 0 disables.
+streaming_start_buffer_ms = 300
+# Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 # Provisional early-response stage; committed finals still flow when false.

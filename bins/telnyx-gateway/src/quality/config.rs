@@ -412,6 +412,8 @@ pub struct TtsQualityConfig {
     pub max_text_chunk_chars: usize,
     pub first_chunk_max_chars: usize,
     pub prebuffer_chunks: usize,
+    pub streaming_start_buffer_ms: u64,
+    pub tail_pad_ms: u64,
 }
 
 impl Default for TtsQualityConfig {
@@ -422,6 +424,8 @@ impl Default for TtsQualityConfig {
             max_text_chunk_chars: 90,
             first_chunk_max_chars: 40,
             prebuffer_chunks: 1,
+            streaming_start_buffer_ms: 300,
+            tail_pad_ms: 200,
         }
     }
 }
@@ -889,6 +893,13 @@ impl VoiceQualityConfig {
             )?;
         }
         ensure_usize("tts.prebuffer_chunks", self.tts.prebuffer_chunks, 1, 64)?;
+        ensure_u64(
+            "tts.streaming_start_buffer_ms",
+            self.tts.streaming_start_buffer_ms,
+            0,
+            2_000,
+        )?;
+        ensure_u64("tts.tail_pad_ms", self.tts.tail_pad_ms, 0, 2_000)?;
         ensure_usize(
             "early_response.min_text_chars",
             self.early_response.min_text_chars,
@@ -1211,6 +1222,12 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = tts.prebuffer_chunks {
                 self.set_tts_prebuffer_chunks(value);
+            }
+            if let Some(value) = tts.streaming_start_buffer_ms {
+                self.set_tts_streaming_start_buffer_ms(value);
+            }
+            if let Some(value) = tts.tail_pad_ms {
+                self.set_tts_tail_pad_ms(value);
             }
         }
         if let Some(early_response) = patch.early_response {
@@ -1687,6 +1704,28 @@ impl VoiceQualityConfig {
         self.tts.prebuffer_chunks = clamped.value;
         self.outcome(
             "tts.prebuffer_chunks",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_tts_streaming_start_buffer_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 2_000);
+        self.tts.streaming_start_buffer_ms = clamped.value;
+        self.outcome(
+            "tts.streaming_start_buffer_ms",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_tts_tail_pad_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 2_000);
+        self.tts.tail_pad_ms = clamped.value;
+        self.outcome(
+            "tts.tail_pad_ms",
             clamped.value,
             ApplyBoundary::NewPlaybackRequest,
             clamped.clamped,
@@ -2387,6 +2426,8 @@ pub struct TtsQualityConfigPatch {
     pub max_text_chunk_chars: Option<usize>,
     pub first_chunk_max_chars: Option<usize>,
     pub prebuffer_chunks: Option<usize>,
+    pub streaming_start_buffer_ms: Option<u64>,
+    pub tail_pad_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2488,6 +2529,8 @@ mod tests {
         assert_eq!(config.tts.max_text_chunk_chars, 90);
         assert_eq!(config.tts.first_chunk_max_chars, 40);
         assert_eq!(config.tts.prebuffer_chunks, 1);
+        assert_eq!(config.tts.streaming_start_buffer_ms, 300);
+        assert_eq!(config.tts.tail_pad_ms, 200);
     }
 
     #[test]
@@ -2693,11 +2736,15 @@ mod tests {
 
             [voice_quality.tts]
             generation_mode = "streaming"
+            streaming_start_buffer_ms = 420
+            tail_pad_ms = 240
             "#,
         )
         .expect("quality parser should accept full gateway TOML metadata");
 
         assert_eq!(config.tts.generation_mode, TtsGenerationMode::Streaming);
+        assert_eq!(config.tts.streaming_start_buffer_ms, 420);
+        assert_eq!(config.tts.tail_pad_ms, 240);
     }
 
     #[test]

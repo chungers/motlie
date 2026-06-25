@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad tuning knobs for outbound pacing reliability. |
 | 2026-06-25 PDT | @codex-541 | Added the current barge-in coalesce-after-silence Identity profile and live-run findings. |
 | 2026-06-25 PDT | @codex-541 | Documented final-ASR active-playback confidence/stability gates for barge-in policy tuning. |
 | 2026-06-24 PDT | @codex-541 | Added a user-facing guide for the strict global TOML config surface, live-run config records, and conversation policy tuning knobs. |
@@ -169,7 +170,9 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | `chunking_enabled` | `true` | Splits long replies before synthesis. |
 | `max_text_chunk_chars` | `70` | Later chunk packing budget for the current no-barge-in Identity baseline. |
 | `first_chunk_max_chars` | `40` | Hard cap for the first incremental TTS request; if the first sentence or unsentenced segment is longer, the remainder goes through normal `max_text_chunk_chars` packing. |
-| `prebuffer_chunks` | `1` | Prepared chunks required before playback starts. |
+| `prebuffer_chunks` | `1` | Buffered-mode prepared chunks required before playback starts. |
+| `streaming_start_buffer_ms` | `300` | Normal streaming TTS frame prebuffer before first playback frame; raise to smooth pacing, lower for first-audio latency. |
+| `tail_pad_ms` | `200` | Silence frames appended before the final Telnyx mark for normal committed TTS, protecting final syllables from mark/tail clipping. |
 
 ### Early Response
 
@@ -256,6 +259,8 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 enabled = true
@@ -308,6 +313,8 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 enabled = true

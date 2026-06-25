@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad tuning knobs for outbound pacing reliability. |
 | 2026-06-25 PDT | @codex-541 | Recorded the current barge-in coalesce-after-silence tuning profile and latest live-run result; tightened the next-run protocol to keep qualitative feedback out of Identity repeat capture. |
 | 2026-06-25 PDT | @codex-541 | Added final-ASR active-playback confidence gating after a failed barge-in run showed short finals could still cancel replacement playback. |
 | 2026-06-21 | @codex-535 | Added run-by-run live tuning ladder for identity/repeat endpoint and playback-hold knobs after PR #558 live test. |
@@ -106,6 +107,8 @@ warm_models = true
 generation_mode = "streaming"
 chunking_enabled = true
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 enabled = true
@@ -156,6 +159,8 @@ no-barge-in bounded-pending profile:
 - `voice_quality.tts.max_text_chunk_chars = 70`
 - `voice_quality.tts.first_chunk_max_chars = 40`
 - `voice_quality.tts.prebuffer_chunks = 1`
+- `voice_quality.tts.streaming_start_buffer_ms = 300`
+- `voice_quality.tts.tail_pad_ms = 200`
 - `voice_quality.endpoint.trailing_silence_ms = 850`
 - `voice_quality.endpoint.merge_window_ms = 120`
 - `voice_quality.endpoint.final_settle_ms = 500`
@@ -214,6 +219,8 @@ generation_mode = "streaming"
 chunking_enabled = true
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 enabled = true
@@ -268,6 +275,8 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 enabled = true
@@ -375,6 +384,8 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 enabled = true

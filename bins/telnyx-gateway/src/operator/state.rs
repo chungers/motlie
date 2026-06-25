@@ -686,6 +686,8 @@ pub struct SpeechOutputConfig {
     pub tts_max_text_chunk_chars: usize,
     pub tts_first_chunk_max_chars: usize,
     pub tts_prebuffer_chunks: usize,
+    pub tts_streaming_start_buffer_ms: u64,
+    pub tts_tail_pad_ms: u64,
 }
 
 impl SpeechOutputConfig {
@@ -697,6 +699,8 @@ impl SpeechOutputConfig {
             tts_max_text_chunk_chars: tts.max_text_chunk_chars,
             tts_first_chunk_max_chars: tts.first_chunk_max_chars,
             tts_prebuffer_chunks: tts.prebuffer_chunks,
+            tts_streaming_start_buffer_ms: tts.streaming_start_buffer_ms,
+            tts_tail_pad_ms: tts.tail_pad_ms,
         }
     }
 }

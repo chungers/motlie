@@ -852,6 +852,8 @@ pub enum QualityTtsCommand {
     MaxTextChunkChars { n: usize },
     FirstChunkMaxChars { n: usize },
     PrebufferChunks { n: usize },
+    StreamingStartBufferMs { ms: u64 },
+    TailPadMs { ms: u64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2849,6 +2851,11 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             quality.config.tts.prebuffer_chunks
         ),
         format!(
+            "tts.streaming_start_buffer_ms={}",
+            quality.config.tts.streaming_start_buffer_ms
+        ),
+        format!("tts.tail_pad_ms={}", quality.config.tts.tail_pad_ms),
+        format!(
             "early_response.enabled={}",
             quality.config.early_response.enabled
         ),
@@ -3090,6 +3097,8 @@ chunking_enabled={}
 max_text_chunk_chars={}
 first_chunk_max_chars={}
 prebuffer_chunks={}
+streaming_start_buffer_ms={}
+tail_pad_ms={}
 conversation_backend={}
 conversation_incremental={}
 streaming_compatible={}",
@@ -3098,6 +3107,8 @@ streaming_compatible={}",
                 tts.max_text_chunk_chars,
                 tts.first_chunk_max_chars,
                 tts.prebuffer_chunks,
+                tts.streaming_start_buffer_ms,
+                tts.tail_pad_ms,
                 backend.label(),
                 if factory.supports_incremental() {
                     "yes"
@@ -3153,6 +3164,15 @@ streaming_compatible={}",
         }
         QualityTtsCommand::PrebufferChunks { n } => {
             mutate_quality_config(context, |config| Ok(config.set_tts_prebuffer_chunks(n))).await
+        }
+        QualityTtsCommand::StreamingStartBufferMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_tts_streaming_start_buffer_ms(ms))
+            })
+            .await
+        }
+        QualityTtsCommand::TailPadMs { ms } => {
+            mutate_quality_config(context, |config| Ok(config.set_tts_tail_pad_ms(ms))).await
         }
     }
 }
@@ -3850,6 +3870,8 @@ fn quality_help() -> String {
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
+        "quality tts streaming-start-buffer-ms <ms>     range=0..2000 default=300ms applies=new_playback_request",
+        "quality tts tail-pad-ms <ms>                   range=0..2000 default=200ms applies=new_playback_request",
         "quality early-response status|on|off",
         "quality early-response boundary <none|clause|sentence> default=clause applies=new_call",
         "quality early-response start-timing <endpoint-candidate-only|while-speaking>",
@@ -5144,6 +5166,9 @@ mod tests {
         let call_id = {
             let mut guard = state.write().await;
             guard.set_quality_event_sink(QualityEventSink::with_sender(quality_tx), None);
+            guard.quality.config.set_tts_tail_pad_ms(0);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
             add_streaming_call(&mut guard, "call-1", "stream-1")
         };
         let media = SharedMediaRegistry::default();
@@ -6088,6 +6113,18 @@ mod tests {
             .expect("set prebuffer chunks");
         assert!(prebuffer_output.lines[0].contains("key=tts.prebuffer_chunks"));
         assert!(prebuffer_output.lines[0].contains("applies=new_playback_request"));
+        let start_buffer_output = engine
+            .run_line("quality tts streaming-start-buffer-ms 450")
+            .await
+            .expect("set streaming start buffer");
+        assert!(start_buffer_output.lines[0].contains("key=tts.streaming_start_buffer_ms"));
+        assert!(start_buffer_output.lines[0].contains("applies=new_playback_request"));
+        let tail_pad_output = engine
+            .run_line("quality tts tail-pad-ms 250")
+            .await
+            .expect("set tail pad");
+        assert!(tail_pad_output.lines[0].contains("key=tts.tail_pad_ms"));
+        assert!(tail_pad_output.lines[0].contains("applies=new_playback_request"));
 
         let status = engine
             .run_line("quality tts status")
@@ -6109,6 +6146,11 @@ mod tests {
         assert!(status
             .lines
             .iter()
+            .any(|line| line == "streaming_start_buffer_ms=450"));
+        assert!(status.lines.iter().any(|line| line == "tail_pad_ms=250"));
+        assert!(status
+            .lines
+            .iter()
             .any(|line| line == "conversation_incremental=yes"));
         assert!(status
             .lines
@@ -6123,6 +6165,8 @@ mod tests {
         assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
         assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
         assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
+        assert_eq!(guard.quality.config.tts.streaming_start_buffer_ms, 450);
+        assert_eq!(guard.quality.config.tts.tail_pad_ms, 250);
     }
 
     #[tokio::test]

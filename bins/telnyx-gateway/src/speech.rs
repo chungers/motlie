@@ -59,6 +59,8 @@ struct SpeechJobConfigSnapshot {
     tts_max_text_chunk_chars: usize,
     tts_first_chunk_max_chars: usize,
     tts_prebuffer_chunks: usize,
+    tts_streaming_start_buffer_ms: u64,
+    tts_tail_pad_ms: u64,
 }
 
 impl SpeechJobConfigSnapshot {
@@ -91,6 +93,8 @@ impl SpeechJobConfigSnapshot {
             tts_max_text_chunk_chars: output.tts_max_text_chunk_chars,
             tts_first_chunk_max_chars: output.tts_first_chunk_max_chars,
             tts_prebuffer_chunks: prebuffer_chunks_override.unwrap_or(output.tts_prebuffer_chunks),
+            tts_streaming_start_buffer_ms: output.tts_streaming_start_buffer_ms,
+            tts_tail_pad_ms: output.tts_tail_pad_ms,
         })
     }
 }
@@ -133,6 +137,8 @@ impl SpeechJob {
             tts_max_text_chunk_chars: build.snapshot.tts_max_text_chunk_chars,
             tts_first_chunk_max_chars: build.snapshot.tts_first_chunk_max_chars,
             tts_prebuffer_chunks: build.snapshot.tts_prebuffer_chunks,
+            tts_streaming_start_buffer_ms: build.snapshot.tts_streaming_start_buffer_ms,
+            tts_tail_pad_ms: build.snapshot.tts_tail_pad_ms,
             request_started_at: build.request_started_at,
             turn_finalized_at: build.turn_finalized_at,
             latest_turn_finalized_at: build.latest_turn_finalized_at,
@@ -534,6 +540,8 @@ struct SpeechJob {
     tts_max_text_chunk_chars: usize,
     tts_first_chunk_max_chars: usize,
     tts_prebuffer_chunks: usize,
+    tts_streaming_start_buffer_ms: u64,
+    tts_tail_pad_ms: u64,
     request_started_at: Instant,
     turn_finalized_at: Option<Instant>,
     latest_turn_finalized_at: Option<Instant>,
@@ -1335,6 +1343,13 @@ async fn run_buffered_speech_job_inner(
     }
 
     if !job.cancel.is_canceled() {
+        enqueue_duration += enqueue_tail_padding(
+            job,
+            text_chunks.len().saturating_sub(1),
+            &mut queued_frames,
+            &mut first_packet_for_playback,
+        )
+        .await?;
         emit_speech_span(
             job,
             "tts.frames_enqueue",
@@ -1368,7 +1383,35 @@ async fn run_buffered_speech_job_inner(
     Ok(SpeechJobOutcome::NoAudioOrCanceled)
 }
 
+const MEDIA_FRAME_MS: u64 = 20;
 const INCREMENTAL_TTS_MAX_BUFFERED_AUDIO_MS: u32 = 80;
+
+fn frame_count_for_duration_ms(duration_ms: u64) -> usize {
+    if duration_ms == 0 {
+        0
+    } else {
+        duration_ms.div_ceil(MEDIA_FRAME_MS) as usize
+    }
+}
+
+fn silence_frames_for_duration_ms(
+    media: TelnyxMediaConfig,
+    duration_ms: u64,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let frame_count = frame_count_for_duration_ms(duration_ms);
+    if frame_count == 0 {
+        return Ok(Vec::new());
+    }
+    if media.sample_rate_hz == 0 || !media.sample_rate_hz.is_multiple_of(50) {
+        bail!(
+            "cannot create TTS tail padding for {}Hz media; expected a 20ms frame rate",
+            media.sample_rate_hz
+        );
+    }
+    let samples_per_frame = (media.sample_rate_hz / 50) as usize;
+    let samples = vec![0i16; samples_per_frame.saturating_mul(frame_count)];
+    packetize_tts_samples(samples, media.sample_rate_hz, media)
+}
 
 struct StreamingJobState {
     text_chunk_count: usize,
@@ -1384,6 +1427,8 @@ struct StreamingJobState {
     emitted_first_synthesis: bool,
     emitted_first_packetize: bool,
     emitted_prebuffer_ready: bool,
+    start_buffer_frames: usize,
+    start_buffer: Vec<PreparedSpeechChunk>,
 }
 
 impl StreamingJobState {
@@ -1409,6 +1454,12 @@ impl StreamingJobState {
             emitted_first_synthesis: false,
             emitted_first_packetize: false,
             emitted_prebuffer_ready: false,
+            start_buffer_frames: if append_stream {
+                0
+            } else {
+                frame_count_for_duration_ms(job.tts_streaming_start_buffer_ms)
+            },
+            start_buffer: Vec::new(),
         })
     }
 
@@ -1467,6 +1518,29 @@ impl StreamingJobState {
         if prepared.is_empty() {
             return Ok(());
         }
+        if self.first_packet_for_playback && self.start_buffer_frames > 0 {
+            self.start_buffer.append(&mut prepared);
+            if prepared_frame_count(&self.start_buffer) < self.start_buffer_frames {
+                return Ok(());
+            }
+            prepared = std::mem::take(&mut self.start_buffer);
+        }
+        self.enqueue_ready_prepared_chunks(job, prepared).await
+    }
+
+    async fn flush_start_buffer(&mut self, job: &SpeechJob) -> Result<(), SpeechJobFailure> {
+        let prepared = std::mem::take(&mut self.start_buffer);
+        self.enqueue_ready_prepared_chunks(job, prepared).await
+    }
+
+    async fn enqueue_ready_prepared_chunks(
+        &mut self,
+        job: &SpeechJob,
+        mut prepared: Vec<PreparedSpeechChunk>,
+    ) -> Result<(), SpeechJobFailure> {
+        if prepared.is_empty() {
+            return Ok(());
+        }
         if !self.emitted_prebuffer_ready {
             self.emitted_prebuffer_ready = true;
             let buffered_frames = prepared_frame_count(&prepared);
@@ -1495,6 +1569,8 @@ impl StreamingJobState {
                     "max_text_chunk_chars": job.tts_max_text_chunk_chars,
                     "first_chunk_max_chars": job.tts_first_chunk_max_chars,
                     "max_buffered_audio_ms": INCREMENTAL_TTS_MAX_BUFFERED_AUDIO_MS,
+                    "streaming_start_buffer_ms": job.tts_streaming_start_buffer_ms,
+                    "streaming_start_buffer_frames": self.start_buffer_frames,
                 }),
             )
             .await;
@@ -1502,6 +1578,21 @@ impl StreamingJobState {
         self.enqueue_duration += enqueue_prepared_chunks(
             job,
             &mut prepared,
+            &mut self.queued_frames,
+            &mut self.first_packet_for_playback,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn enqueue_tail_padding(
+        &mut self,
+        job: &SpeechJob,
+        text_chunk_index: usize,
+    ) -> Result<(), SpeechJobFailure> {
+        self.enqueue_duration += enqueue_tail_padding(
+            job,
+            text_chunk_index,
             &mut self.queued_frames,
             &mut self.first_packet_for_playback,
         )
@@ -1571,6 +1662,12 @@ async fn run_streaming_speech_job_inner(
     streaming
         .finish_packetizer(job, text_chunk_count.saturating_sub(1))
         .await?;
+    streaming.flush_start_buffer(job).await?;
+    if streaming.queued_frames > 0 && !job.cancel.is_canceled() {
+        streaming
+            .enqueue_tail_padding(job, text_chunk_count.saturating_sub(1))
+            .await?;
+    }
 
     if streaming.queued_frames == 0 || job.cancel.is_canceled() {
         return Ok(SpeechJobOutcome::NoAudioOrCanceled);
@@ -1857,6 +1954,57 @@ async fn enqueue_prepared_chunks(
         }
     }
     Ok(enqueue_started_at.elapsed())
+}
+
+async fn enqueue_tail_padding(
+    job: &SpeechJob,
+    text_chunk_index: usize,
+    queued_frames: &mut usize,
+    first_packet_for_playback: &mut bool,
+) -> Result<Duration, SpeechJobFailure> {
+    let frames = silence_frames_for_duration_ms(job.media, job.tts_tail_pad_ms)
+        .map_err(|error| SpeechJobFailure::new(error, *queued_frames))?;
+    if frames.is_empty() {
+        return Ok(Duration::ZERO);
+    }
+    let tail_frames = frames.len();
+    let mut prepared = vec![PreparedSpeechChunk {
+        text_chunk_index,
+        audio_chunk_count: 0,
+        sample_rate_hz: job.media.sample_rate_hz,
+        frames,
+    }];
+    let before = *queued_frames;
+    let duration =
+        enqueue_prepared_chunks(job, &mut prepared, queued_frames, first_packet_for_playback)
+            .await?;
+    let queued_tail_frames = queued_frames.saturating_sub(before);
+    if queued_tail_frames > 0 {
+        emit_speech_span(
+            job,
+            "tts.tail_pad_queued",
+            "media_packetization",
+            duration,
+            false,
+            false,
+            serde_json::json!({
+                "playback_id": job.playback_id.as_str(),
+                "tts_backend": job.tts_backend.label(),
+                "tail_pad_ms": job.tts_tail_pad_ms,
+                "tail_frames": queued_tail_frames,
+            }),
+        )
+        .await;
+        tracing::info!(
+            gateway_call_id = job.gateway_call_id.as_str(),
+            playback_id = job.playback_id.as_str(),
+            configured_tail_frames = tail_frames,
+            tail_frames = queued_tail_frames,
+            tail_pad_ms = job.tts_tail_pad_ms,
+            "tts.tail_pad.queued"
+        );
+    }
+    Ok(duration)
 }
 
 struct PreparedSpeechChunk {
@@ -2639,6 +2787,8 @@ mod tests {
                 .set_tts_generation_mode(TtsGenerationMode::Streaming);
             guard.quality.config.set_tts_first_chunk_max_chars(40);
             guard.quality.config.set_tts_max_text_chunk_chars(90);
+            guard.quality.config.set_tts_streaming_start_buffer_ms(0);
+            guard.quality.config.set_tts_tail_pad_ms(0);
             let config_id = guard.quality.config.config_id();
             guard.quality.config_id = config_id;
         }
@@ -2710,6 +2860,8 @@ mod tests {
                 .set_tts_generation_mode(TtsGenerationMode::Streaming);
             guard.quality.config.set_tts_first_chunk_max_chars(40);
             guard.quality.config.set_tts_max_text_chunk_chars(90);
+            guard.quality.config.set_tts_streaming_start_buffer_ms(0);
+            guard.quality.config.set_tts_tail_pad_ms(0);
             let config_id = guard.quality.config.config_id();
             guard.quality.config_id = config_id;
         }
@@ -2775,6 +2927,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_generation_buffers_short_first_chunk_until_later_chunk_finishes() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_outbound_call(
+                TelnyxIds {
+                    call_control_id: "call-control-1".to_string(),
+                    call_session_id: Some("session-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                None,
+                None,
+                CallStatus::MediaStarted,
+            )
+        };
+        {
+            let mut guard = state.write().await;
+            guard
+                .quality
+                .config
+                .set_tts_generation_mode(TtsGenerationMode::Streaming);
+            guard.quality.config.set_tts_first_chunk_max_chars(40);
+            guard.quality.config.set_tts_max_text_chunk_chars(90);
+            guard.quality.config.set_tts_tail_pad_ms(0);
+            assert_eq!(guard.quality.config.tts.streaming_start_buffer_ms, 300);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
+        }
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let factory = Arc::new(BlockingSecondIncrementalTtsFactory::new(24_000, 2_400));
+        let tts = Arc::new(TtsRegistry::new(factory.clone(), factory.clone()));
+
+        let queued = queue_speech(
+            &state,
+            &media_registry,
+            &tts,
+            LiveTtsBackend::Kokoro82m,
+            gateway_call_id,
+            "Alpha beta gamma. This second sentence releases the buffered first chunk.".to_string(),
+            "test streaming start buffer",
+        )
+        .await
+        .expect("speech should be queued");
+
+        timeout(Duration::from_secs(1), factory.wait_for_second_call())
+            .await
+            .expect("second incremental request should start");
+        assert!(
+            timeout(Duration::from_millis(200), rx.recv()).await.is_err(),
+            "short first chunk should stay buffered until streaming start buffer is satisfied or flushed"
+        );
+
+        factory.release_second_call();
+        let command = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("buffered frames should queue after second chunk finishes")
+            .expect("media command should be present");
+        match command {
+            OutboundMediaCommand::Frame(frame) => {
+                assert_eq!(frame.playback_id, queued.playback_id);
+            }
+            other => panic!("expected buffered frame after release, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_generation_queues_tail_padding_before_mark() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_outbound_call(
+                TelnyxIds {
+                    call_control_id: "call-control-1".to_string(),
+                    call_session_id: Some("session-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                None,
+                None,
+                CallStatus::MediaStarted,
+            )
+        };
+        {
+            let mut guard = state.write().await;
+            guard
+                .quality
+                .config
+                .set_tts_generation_mode(TtsGenerationMode::Streaming);
+            guard.quality.config.set_tts_streaming_start_buffer_ms(0);
+            guard.quality.config.set_tts_tail_pad_ms(200);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
+        }
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let factory = Arc::new(ModeTrackingTtsFactory::new(24_000, 480));
+        let tts = Arc::new(TtsRegistry::new(factory.clone(), factory.clone()));
+
+        let queued = queue_speech(
+            &state,
+            &media_registry,
+            &tts,
+            LiveTtsBackend::Kokoro82m,
+            gateway_call_id,
+            "tail guard".to_string(),
+            "test streaming tail pad",
+        )
+        .await
+        .expect("speech should be queued");
+
+        let mut frames = 0usize;
+        let mut saw_mark = false;
+        for _ in 0..16 {
+            let command = timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .expect("speech job should finish")
+                .expect("media command should be present");
+            match command {
+                OutboundMediaCommand::Frame(frame) => {
+                    assert_eq!(frame.playback_id, queued.playback_id);
+                    frames += 1;
+                }
+                OutboundMediaCommand::Mark { playback_id } => {
+                    assert_eq!(playback_id, queued.playback_id);
+                    saw_mark = true;
+                    break;
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+
+        assert_eq!(frames, 11);
+        assert!(saw_mark, "mark should follow audio plus tail padding");
+    }
+
+    #[tokio::test]
     async fn queue_speech_waits_for_all_chunks_before_enqueuing_frames() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = {
@@ -2795,6 +3091,7 @@ mod tests {
             let mut guard = state.write().await;
             guard.quality.config.set_tts_max_text_chunk_chars(40);
             guard.quality.config.set_tts_prebuffer_chunks(2);
+            guard.quality.config.set_tts_tail_pad_ms(0);
             let config_id = guard.quality.config.config_id();
             guard.quality.config_id = config_id;
         }
@@ -2885,6 +3182,7 @@ mod tests {
         {
             let mut guard = state.write().await;
             guard.quality.config.set_tts_max_text_chunk_chars(40);
+            guard.quality.config.set_tts_tail_pad_ms(0);
             assert_eq!(guard.quality.config.tts.prebuffer_chunks, 1);
             let config_id = guard.quality.config.config_id();
             guard.quality.config_id = config_id;

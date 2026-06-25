@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad controls for outbound pacing and tail reliability. |
 | 2026-06-18 PDT | @codex-367-design | Clarified that text-call playback and latest-response knobs apply to new text-call sessions, matching live config snapshot behavior. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Simplified gateway startup around one durable `--config <gateway.toml>` file; `state dump` now emits readable TOML with full `[voice_quality.*]`, while `.repl` scripts are limited to interactive `source <path>` command replay. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Removed the smoke-command committed-final debounce side effect and exposed `early_response.boundary` as a live-safe knob so identity tests can accept stable unpunctuated partials without changing stricter real-agent modes. |
@@ -1034,7 +1035,9 @@ Prompt requirements:
 | `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. Applies to buffered synthesis and to streaming mode, where the gateway opens incremental TTS requests per prepared text chunk. For committed streaming turns, the gateway holds the first tiny text chunk until the next prepared text chunk has audio to avoid outbound underruns; provisional append playback stays one-frame JIT. |
 | `tts.max_text_chunk_chars` | `Count` | `40..500` | `90` | clamp to range | new playback request | Packs complete sentence segments up to this size before falling back to word splits for oversized segments. |
 | `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `40` | `0` disables, otherwise clamp to range | new playback request | Sentence-boundary first-chunk ramp for lower first-audio latency; `0` restores full-size first-chunk synthesis. |
-| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Prepared text chunks required before playback starts; the telephony default starts playback as soon as the first prepared chunk is available. Raise this only when a deployment explicitly prefers extra smoothing over first-audio latency. |
+| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Buffered-mode prepared text chunks required before playback starts. |
+| `tts.streaming_start_buffer_ms` | `DurationMs` | `0..2000` | `300` | clamp to range | new playback request | Normal streaming TTS frames held before the first playback frame; `0` disables. This is the primary underrun-smoothing knob for committed streaming playback. |
+| `tts.tail_pad_ms` | `DurationMs` | `0..2000` | `200` | clamp to range | new playback request | Silence frames appended before the final Telnyx mark for normal committed TTS; protects final syllables from mark/tail clipping. |
 | `early_response.enabled` | `bool` | `true,false` | `false` | reject non-bool | new call | Enables the opt-in provisional ASR-input stage for new calls. It feeds the selected per-call `ConversationProcessorKind`; it does not choose a separate response processor. Use `quality early-response on` before dialing for live identity tests. |
 | `early_response.boundary` | enum | `none,clause,sentence` | `clause` | reject unknown | new call | Minimum text boundary before a partial can start provisional processor work. `none` is useful for identity latency smoke tests with stable unpunctuated ASR partials; `clause` and `sentence` preserve semantic-boundary gating for real agents. |
 | `early_response.start_timing` | enum | `while_speaking,endpoint_candidate_only` | `while_speaking` | reject unknown | new call | Selects whether stable partials may start provisional work while the caller is still speaking or only after the low-energy endpoint-candidate window. `while_speaking` is the live-test default for snappier identity/agent response; `endpoint_candidate_only` preserves the older conservative delay. |
@@ -1132,6 +1135,8 @@ chunking_enabled = true
 max_text_chunk_chars = 90
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.text_call]
 max_active_turns = 32
@@ -1376,6 +1381,8 @@ quality tts chunking on|off
 quality tts max-text-chunk-chars <n>
 quality tts first-chunk-max-chars <n>
 quality tts prebuffer-chunks <n>
+quality tts streaming-start-buffer-ms <ms>
+quality tts tail-pad-ms <ms>
 quality early-response status
 quality early-response on|off
 quality early-response boundary none|clause|sentence

@@ -791,6 +791,8 @@ This markdown is intentionally not valid TOML.
             crate::quality::TtsGenerationMode::Streaming
         );
         assert_eq!(config.voice_quality.tts.prebuffer_chunks, 1);
+        assert_eq!(config.voice_quality.tts.streaming_start_buffer_ms, 300);
+        assert_eq!(config.voice_quality.tts.tail_pad_ms, 200);
         assert!(config.voice_quality.early_response.enabled);
 
         let _ = std::fs::remove_file(path);
@@ -863,6 +865,8 @@ Mentioning generation_mod here is fine because this is not config.
             config.voice_quality.tts.generation_mode,
             crate::quality::TtsGenerationMode::Streaming
         );
+        assert_eq!(config.voice_quality.tts.streaming_start_buffer_ms, 300);
+        assert_eq!(config.voice_quality.tts.tail_pad_ms, 200);
         assert!(config.quality_logging.path.is_some());
         assert!(config.voice_quality.logging.enabled);
     }
@@ -928,6 +932,8 @@ Mentioning generation_mod here is fine because this is not config.
             assert_eq!(config.voice_quality.tts.max_text_chunk_chars, 70);
             assert_eq!(config.voice_quality.tts.first_chunk_max_chars, 40);
             assert_eq!(config.voice_quality.tts.prebuffer_chunks, 1);
+            assert_eq!(config.voice_quality.tts.streaming_start_buffer_ms, 300);
+            assert_eq!(config.voice_quality.tts.tail_pad_ms, 200);
             assert!(config.voice_quality.early_response.enabled);
             assert_eq!(config.voice_quality.early_response.debounce_ms, 180);
             assert_eq!(
