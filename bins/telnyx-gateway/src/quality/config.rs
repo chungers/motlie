@@ -443,7 +443,7 @@ impl OnsetDuringPlaybackPolicy {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BargeInQualityConfig {
     pub enabled: bool,
     pub speech_onset_cancel_enabled: bool,
@@ -451,6 +451,10 @@ pub struct BargeInQualityConfig {
     pub onset_during_playback: OnsetDuringPlaybackPolicy,
     pub partial_asr_cancel_enabled: bool,
     pub final_asr_cancel_enabled: bool,
+    pub transcript_min_chars: usize,
+    pub transcript_min_words: usize,
+    pub partial_min_confidence: Option<f32>,
+    pub partial_min_stability: Option<f32>,
     pub clear_timeout_ms: u64,
 }
 
@@ -462,6 +466,10 @@ impl Default for BargeInQualityConfig {
             onset_during_playback: OnsetDuringPlaybackPolicy::DeferToPartial,
             partial_asr_cancel_enabled: true,
             final_asr_cancel_enabled: true,
+            transcript_min_chars: 6,
+            transcript_min_words: 2,
+            partial_min_confidence: None,
+            partial_min_stability: None,
             clear_timeout_ms: 1_000,
         }
     }
@@ -913,6 +921,24 @@ impl VoiceQualityConfig {
             1,
             1,
         )?;
+        ensure_usize(
+            "barge_in.transcript_min_chars",
+            self.barge_in.transcript_min_chars,
+            0,
+            200,
+        )?;
+        ensure_usize(
+            "barge_in.transcript_min_words",
+            self.barge_in.transcript_min_words,
+            0,
+            50,
+        )?;
+        if let Some(value) = self.barge_in.partial_min_confidence {
+            ensure_f32("barge_in.partial_min_confidence", value, 0.0, 1.0)?;
+        }
+        if let Some(value) = self.barge_in.partial_min_stability {
+            ensure_f32("barge_in.partial_min_stability", value, 0.0, 1.0)?;
+        }
         ensure_u64(
             "barge_in.clear_timeout_ms",
             self.barge_in.clear_timeout_ms,
@@ -1195,6 +1221,18 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = barge_in.final_asr_cancel_enabled {
                 self.set_barge_in_final_asr_cancel_enabled(value);
+            }
+            if let Some(value) = barge_in.transcript_min_chars {
+                self.set_barge_in_transcript_min_chars(value);
+            }
+            if let Some(value) = barge_in.transcript_min_words {
+                self.set_barge_in_transcript_min_words(value);
+            }
+            if let Some(value) = barge_in.partial_min_confidence {
+                self.set_barge_in_partial_min_confidence(value)?;
+            }
+            if let Some(value) = barge_in.partial_min_stability {
+                self.set_barge_in_partial_min_stability(value)?;
             }
             if let Some(value) = barge_in.clear_timeout_ms {
                 self.set_barge_in_clear_timeout_ms(value);
@@ -1741,6 +1779,56 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_barge_in_transcript_min_chars(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 200);
+        self.barge_in.transcript_min_chars = clamped.value;
+        self.outcome(
+            "barge_in.transcript_min_chars",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_barge_in_transcript_min_words(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 50);
+        self.barge_in.transcript_min_words = clamped.value;
+        self.outcome(
+            "barge_in.transcript_min_words",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_barge_in_partial_min_confidence(
+        &mut self,
+        value: f32,
+    ) -> Result<QualityMutationOutcome> {
+        ensure_f32("barge_in.partial_min_confidence", value, 0.0, 1.0)?;
+        self.barge_in.partial_min_confidence = Some(value);
+        Ok(self.outcome(
+            "barge_in.partial_min_confidence",
+            format!("{value:.2}"),
+            ApplyBoundary::NewTurn,
+            false,
+        ))
+    }
+
+    pub fn set_barge_in_partial_min_stability(
+        &mut self,
+        value: f32,
+    ) -> Result<QualityMutationOutcome> {
+        ensure_f32("barge_in.partial_min_stability", value, 0.0, 1.0)?;
+        self.barge_in.partial_min_stability = Some(value);
+        Ok(self.outcome(
+            "barge_in.partial_min_stability",
+            format!("{value:.2}"),
+            ApplyBoundary::NewTurn,
+            false,
+        ))
+    }
+
     pub fn set_barge_in_clear_timeout_ms(&mut self, value: u64) -> QualityMutationOutcome {
         let clamped = clamp_u64(value, 100, 10_000);
         self.barge_in.clear_timeout_ms = clamped.value;
@@ -2265,6 +2353,10 @@ pub struct BargeInQualityConfigPatch {
     pub onset_during_playback: Option<OnsetDuringPlaybackPolicy>,
     pub partial_asr_cancel_enabled: Option<bool>,
     pub final_asr_cancel_enabled: Option<bool>,
+    pub transcript_min_chars: Option<usize>,
+    pub transcript_min_words: Option<usize>,
+    pub partial_min_confidence: Option<f32>,
+    pub partial_min_stability: Option<f32>,
     pub clear_timeout_ms: Option<u64>,
 }
 
@@ -2465,6 +2557,41 @@ mod tests {
         assert_eq!(config.speech.rms_threshold, 260.0);
         assert_eq!(config.endpoint.trailing_silence_ms, 100);
         assert!(!config.logging.include_transcript_text);
+    }
+
+    #[test]
+    fn toml_accepts_barge_in_transcript_thresholds() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.barge_in]
+            transcript_min_chars = 8
+            transcript_min_words = 2
+            partial_min_confidence = 0.50
+            partial_min_stability = 0.55
+            "#,
+        )
+        .expect("quality config parses");
+
+        assert_eq!(config.barge_in.transcript_min_chars, 8);
+        assert_eq!(config.barge_in.transcript_min_words, 2);
+        assert_eq!(config.barge_in.partial_min_confidence, Some(0.50));
+        assert_eq!(config.barge_in.partial_min_stability, Some(0.55));
+    }
+
+    #[test]
+    fn barge_in_threshold_numeric_knobs_validate() {
+        let mut config = VoiceQualityConfig::default();
+        config.set_barge_in_transcript_min_chars(999);
+        config.set_barge_in_transcript_min_words(999);
+        assert_eq!(config.barge_in.transcript_min_chars, 200);
+        assert_eq!(config.barge_in.transcript_min_words, 50);
+
+        let error = config
+            .set_barge_in_partial_min_confidence(1.1)
+            .expect_err("confidence above one should be rejected");
+        assert!(error
+            .to_string()
+            .contains("barge_in.partial_min_confidence"));
     }
 
     #[test]

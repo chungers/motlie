@@ -15,8 +15,8 @@ use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
 use crate::conversation_policy::{
-    AssistantOutputPolicyAction, BargeInPolicyDecision, BargeInTrigger, ConversationPolicyQueue,
-    PendingPolicyOutput,
+    AssistantOutputPolicyAction, BargeInPolicyDecision, BargeInTranscriptEvidence, BargeInTrigger,
+    ConversationPolicyQueue, PendingPolicyOutput,
 };
 use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
@@ -36,8 +36,6 @@ use crate::quality::{
 use crate::speech;
 use crate::speech::{SpeechConflictPolicy, SpeechQueueRequest};
 use crate::tts::SharedTtsRegistry;
-
-const PARTIAL_BARGE_IN_MIN_CHARS: usize = 3;
 
 #[derive(Clone)]
 pub struct ConversationRuntime {
@@ -444,6 +442,13 @@ struct PendingConversationSay {
     turn_context: ConversationTurnContext,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConversationTranscriptMetadata<'a> {
+    pub turn_id: Option<&'a str>,
+    pub confidence: Option<f32>,
+    pub stability: Option<f32>,
+}
+
 pub async fn handle_transcript_event(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
@@ -473,6 +478,30 @@ pub async fn handle_transcript_event_with_turn(
     quality_config: Option<&VoiceQualityConfig>,
     turn_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    handle_transcript_event_with_metadata(
+        state,
+        media_registry,
+        runtime,
+        gateway_call_id,
+        event,
+        quality_config,
+        ConversationTranscriptMetadata {
+            turn_id,
+            ..ConversationTranscriptMetadata::default()
+        },
+    )
+    .await
+}
+
+pub async fn handle_transcript_event_with_metadata(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    event: TranscriptEvent,
+    quality_config: Option<&VoiceQualityConfig>,
+    metadata: ConversationTranscriptMetadata<'_>,
+) -> anyhow::Result<()> {
     let transcript_text = event.text().trim().to_string();
     if transcript_text.is_empty() {
         return Ok(());
@@ -485,12 +514,26 @@ pub async fn handle_transcript_event_with_turn(
         return Ok(());
     }
 
+    let active_playback = media_registry
+        .active_speech_playback_id(gateway_call_id)
+        .await
+        .is_some();
+    let transcript_confidence = metadata
+        .confidence
+        .or_else(|| latest_transcript_confidence(&event));
+
     if !event.is_final() {
+        let evidence = BargeInTranscriptEvidence {
+            text: &transcript_text,
+            active_playback,
+            confidence: transcript_confidence,
+            stability: metadata.stability,
+        };
         let decision = snapshot
             .quality_config
             .conversation_policy
-            .decide_barge_in(&snapshot.barge_in, BargeInTrigger::Partial);
-        if decision.cancels_playback() && is_meaningful_partial_barge_in(&transcript_text) {
+            .decide_transcript_barge_in(&snapshot.barge_in, BargeInTrigger::Partial, evidence);
+        if decision.cancels_playback() {
             cancel_active_speech_for_barge_in(
                 state,
                 media_registry,
@@ -501,16 +544,24 @@ pub async fn handle_transcript_event_with_turn(
                 snapshot.redaction_mode,
             )
             .await?;
+        } else if !decision.forwards_caller_transcript() {
+            log_barge_in_transcript_ignored(gateway_call_id, decision, evidence);
         }
         return Ok(());
     }
 
     let final_transcript_at = Instant::now();
 
+    let evidence = BargeInTranscriptEvidence {
+        text: &transcript_text,
+        active_playback,
+        confidence: transcript_confidence,
+        stability: metadata.stability,
+    };
     let final_barge_in_decision = snapshot
         .quality_config
         .conversation_policy
-        .decide_barge_in(&snapshot.barge_in, BargeInTrigger::Final);
+        .decide_transcript_barge_in(&snapshot.barge_in, BargeInTrigger::Final, evidence);
     if final_barge_in_decision.cancels_playback() {
         cancel_active_speech_for_barge_in(
             state,
@@ -522,6 +573,9 @@ pub async fn handle_transcript_event_with_turn(
             snapshot.redaction_mode,
         )
         .await?;
+    } else if !final_barge_in_decision.forwards_caller_transcript() {
+        log_barge_in_transcript_ignored(gateway_call_id, final_barge_in_decision, evidence);
+        return Ok(());
     }
 
     if !runtime.processor_enabled() {
@@ -559,7 +613,7 @@ pub async fn handle_transcript_event_with_turn(
                 quality_config,
                 final_transcript_at,
                 debounce,
-                turn_id: turn_id.map(str::to_string),
+                turn_id: metadata.turn_id.map(str::to_string),
             },
         )
         .await;
@@ -576,8 +630,11 @@ pub async fn handle_transcript_event_with_turn(
             ConversationTurnContext {
                 finalized_at: Some(final_transcript_at),
                 latest_finalized_at: Some(final_transcript_at),
-                turn_id: turn_id.map(str::to_string),
-                coalesced_turn_ids: turn_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
+                turn_id: metadata.turn_id.map(str::to_string),
+                coalesced_turn_ids: metadata
+                    .turn_id
+                    .map(|id| vec![id.to_string()])
+                    .unwrap_or_default(),
                 metadata: QualityPlaybackMetadata::default(),
             },
         )
@@ -594,7 +651,7 @@ pub async fn handle_transcript_event_with_turn(
             quality_config,
             final_transcript_at,
             debounce: conversation_final_debounce(snapshot.endpoint_merge_window_ms),
-            turn_id: turn_id.map(str::to_string),
+            turn_id: metadata.turn_id.map(str::to_string),
         },
     )
     .await;
@@ -1388,12 +1445,22 @@ pub async fn handle_speech_onset(
     .await
 }
 
-fn is_meaningful_partial_barge_in(text: &str) -> bool {
-    text.chars()
-        .filter(|character| !character.is_whitespace())
-        .take(PARTIAL_BARGE_IN_MIN_CHARS)
-        .count()
-        >= PARTIAL_BARGE_IN_MIN_CHARS
+fn log_barge_in_transcript_ignored(
+    gateway_call_id: &str,
+    decision: BargeInPolicyDecision,
+    evidence: BargeInTranscriptEvidence<'_>,
+) {
+    tracing::info!(
+        gateway_call_id,
+        trigger = decision.trigger.as_str(),
+        policy_mode = decision.mode.label(),
+        caller_transcript_action = decision.caller_transcript.label(),
+        transcript_chars = evidence.char_count(),
+        transcript_words = evidence.word_count(),
+        transcript_confidence = evidence.confidence,
+        transcript_stability = evidence.stability,
+        "conversation.barge_in.transcript_ignored"
+    );
 }
 
 async fn cancel_active_speech_for_barge_in(
@@ -1437,6 +1504,7 @@ async fn cancel_active_speech_for_barge_in(
             "playback_action": decision.playback.label(),
             "generation_action": decision.generation.label(),
             "caller_turn_action": decision.caller_turn.label(),
+            "caller_transcript_action": decision.caller_transcript.label(),
             "post_barge_in_silence_ms": decision.caller_turn.silence_ms(),
             "reset_turn_batch": decision.reset_turn_batch,
         });
@@ -1474,6 +1542,7 @@ async fn cancel_active_speech_for_barge_in(
         playback_action = decision.playback.label(),
         generation_action = decision.generation.label(),
         caller_turn_action = decision.caller_turn.label(),
+        caller_transcript_action = decision.caller_transcript.label(),
         post_barge_in_silence_ms = decision.caller_turn.silence_ms(),
         partial_triggered = matches!(trigger, BargeInTrigger::Partial),
         speech_onset_triggered = matches!(trigger, BargeInTrigger::SpeechOnset),
@@ -3169,7 +3238,7 @@ second"
             &runtime,
             &gateway_call_id,
             TranscriptEvent::Partial {
-                text: "hello".to_string(),
+                text: "hello there".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
             None,
@@ -3185,6 +3254,64 @@ second"
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
         assert_eq!(call.conversation.status, ConversationStatus::Interrupted);
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("assistant is speaking")
+        );
+    }
+
+    #[tokio::test]
+    async fn short_final_during_active_playback_does_not_self_cancel_or_dispatch() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
+        state.write().await.record_conversation_speaking(
+            &gateway_call_id,
+            "assistant is speaking".to_string(),
+            "tts_test".to_string(),
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(&gateway_call_id, "tts_test".to_string(), cancel.clone())
+            .await
+            .expect("register active speech");
+        let runtime = test_runtime_with_tts();
+
+        handle_transcript_event_with_metadata(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "Blue".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            },
+            None,
+            ConversationTranscriptMetadata {
+                turn_id: Some("turn-blue"),
+                confidence: Some(0.91),
+                stability: None,
+            },
+        )
+        .await
+        .expect("short echo-like final should be ignored during active playback");
+
+        assert!(!cancel.is_canceled());
+        assert_eq!(
+            media_registry
+                .active_speech_playback_id(&gateway_call_id)
+                .await
+                .as_deref(),
+            Some("tts_test")
+        );
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Speaking);
+        assert!(call.conversation.last_user_text.is_none());
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
             Some("assistant is speaking")
@@ -3264,7 +3391,7 @@ second"
             &runtime,
             &gateway_call_id,
             TranscriptEvent::Partial {
-                text: "interrupt".to_string(),
+                text: "interrupt now".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
             None,
@@ -4037,7 +4164,7 @@ second"
             &runtime,
             &gateway_call_id,
             TranscriptEvent::Partial {
-                text: "hello".to_string(),
+                text: "hello there".to_string(),
                 update: motlie_model::TranscriptionUpdate::default(),
             },
             None,

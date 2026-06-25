@@ -203,6 +203,10 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | `onset_during_playback` | `"defer_to_partial"` | `"defer_to_partial"` or `"trust"` | Echo-guard behavior during active playback. |
 | `partial_asr_cancel_enabled` | `false` | `true` | Allows meaningful partial ASR cancel. |
 | `final_asr_cancel_enabled` | `false` | `true` | Allows final ASR cancel. |
+| `transcript_min_chars` | `6` | `6` | Minimum non-whitespace transcript characters before partial/final ASR may cancel active playback. |
+| `transcript_min_words` | `2` | `2` | Minimum transcript words before partial/final ASR may cancel active playback. |
+| `partial_min_confidence` | `0.50` | `0.50` | Minimum partial-ASR confidence during active playback; omit in ad-hoc configs to disable this gate. |
+| `partial_min_stability` | `0.50` | `0.50` | Minimum partial-ASR stability during active playback; omit in ad-hoc configs to disable this gate. |
 | `clear_timeout_ms` | `1000` | `1000` | Media clear/terminal wait budget. |
 
 Set both `[conversation] barge_in_enabled = false` and
@@ -324,6 +328,10 @@ speech_onset_cancel_enabled = true
 onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
+transcript_min_chars = 6
+transcript_min_words = 2
+partial_min_confidence = 0.50
+partial_min_stability = 0.50
 clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]

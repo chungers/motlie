@@ -7,6 +7,7 @@
 | 2026-06-22 PDT | @codex-535 | Started issue #545 design for a unified conversation policy that covers barge-in and no-barge-in playback overlap, with an initial PR #558 implementation slice for bounded pending repeats. |
 | 2026-06-22 PDT | @codex-535 | Expanded the design to shipped behavior: enum-backed policy decisions now cover no-barge-in pending output, cancel-only barge-in, and post-barge-in silence coalescing through global TOML config. |
 | 2026-06-24 PDT | @codex-541 | Cross-linked the conversation policy design to the user-facing global TOML config guide. |
+| 2026-06-24 PDT | @codex-541 | Added active-playback transcript eligibility gates after live barge-in testing showed a one-word echo fragment could cancel and replace the intended response. |
 
 ## Problem
 
@@ -18,7 +19,7 @@ The same decision point will grow more complex when barge-in is enabled. A calle
 
 - Preserve current behavior by default for existing configs.
 - Add an opt-in no-barge-in policy that keeps bounded pending assistant outputs instead of dropping them when active playback persists.
-- Keep barge-in cancellation behavior unchanged in this PR, but shape the code so barge-in policy decisions can move into the same module later.
+- Keep barge-in cancellation under the same policy boundary, including transcript eligibility gates that prevent short/low-quality active-playback fragments from self-canceling assistant output.
 - Represent policy with typed config under `voice_quality`, strict TOML parsing, and validation ranges.
 - Emit quality spans when pending output waits, is superseded, reaches the active-playback hold budget, drains, or is dropped.
 - Avoid coupling the policy to the identity processor. The first proving case is identity/repeat, but the abstraction must apply to any processor that emits `ConversationCommand::Say`.
@@ -26,7 +27,7 @@ The same decision point will grow more complex when barge-in is enabled. A calle
 ## Non-Goals
 
 - Do not redesign Telnyx media playback or outbound media pacing in this slice.
-- Do not change the existing barge-in clear/cancel path yet.
+- Do not redesign the existing Telnyx clear/cancel transport path; policy may decide when that path is eligible.
 - Do not change turn batching semantics.
 - Do not add model-specific behavior.
 
@@ -61,6 +62,12 @@ Initial modes:
 Config sketch:
 
 ```toml
+[voice_quality.barge_in]
+transcript_min_chars = 6
+transcript_min_words = 2
+partial_min_confidence = 0.50
+partial_min_stability = 0.50
+
 [voice_quality.conversation_policy]
 mode = "current_compat"
 active_playback_hold_ms = 1000
@@ -87,12 +94,13 @@ Implemented decisions:
 
 1. `decide_say_overlap`: chooses `queue_now`, `legacy_defer_latest`, or `retain_bounded_pending` when a processor emits `ConversationCommand::Say` while playback may be active.
 2. `decide_barge_in`: chooses playback cancellation, generation cancellation, caller-turn handling, and turn-batch reset behavior for speech-onset, partial-ASR, and final-ASR barge-in triggers.
-3. `current_compat`: preserves existing latest-only no-barge-in deferral and existing barge-in cancel semantics.
-4. `no_barge_in_bounded_pending`: retains a bounded pending output queue and drains one assistant output at a time after playback clears.
-5. `barge_in_cancel_only`: makes today's cancel behavior explicit through the policy boundary: cancel active playback, preserve ASR, reset turn batching, and do not replay stale assistant output automatically.
-6. `barge_in_coalesce_after_silence`: cancels active playback, preserves ASR, and coalesces post-barge-in finals until `post_barge_in_silence_ms` before processor dispatch.
+3. `decide_transcript_barge_in`: applies active-playback transcript eligibility before partial/final ASR can cancel or dispatch a caller turn; short fragments such as one-word assistant echo are ignored instead of replacing the current response.
+4. `current_compat`: preserves existing latest-only no-barge-in deferral and existing barge-in cancel semantics.
+5. `no_barge_in_bounded_pending`: retains a bounded pending output queue and drains one assistant output at a time after playback clears.
+6. `barge_in_cancel_only`: makes today's cancel behavior explicit through the policy boundary: cancel active playback, preserve ASR, reset turn batching, and do not replay stale assistant output automatically.
+7. `barge_in_coalesce_after_silence`: cancels active playback, preserves ASR, and coalesces post-barge-in finals until `post_barge_in_silence_ms` before processor dispatch.
 
-Media still owns frame-level speech onset and echo-guard classification. When echo guard classifies onset as likely assistant echo, media defers cancellation to partial/final ASR as before. Once a trigger is valid, the policy decides whether cancellation/coalescing proceeds.
+Media still owns frame-level speech onset and echo-guard classification. When echo guard classifies onset as likely assistant echo, media defers cancellation to partial/final ASR as before. Once a trigger is valid, the policy decides whether cancellation/coalescing proceeds. For transcript-triggered barge-in during active playback, the policy also checks `barge_in.transcript_min_chars`, `barge_in.transcript_min_words`, `barge_in.partial_min_confidence`, and `barge_in.partial_min_stability`; ineligible transcript evidence is ignored during active playback so it cannot cancel or queue a replacement assistant output.
 
 ## Global TOML Surface
 

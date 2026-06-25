@@ -1043,6 +1043,10 @@ Prompt requirements:
 | `barge_in.onset_during_playback` | `OnsetDuringPlaybackPolicy` enum | `defer_to_partial`, `trust` | `defer_to_partial` | reject unknown | next ASR session | Distinguishes audible assistant echo from real caller interruption. The default keeps the live-tuned echo guard but still allows onset cancellation when active playback is not yet audible or has no echo signature. |
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
 | `barge_in.final_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Final ASR cancel path. |
+| `barge_in.transcript_min_chars` | `Count` | `0..200` | `6` | clamp to range | new turn | Minimum non-whitespace transcript characters before partial/final ASR may cancel active playback. |
+| `barge_in.transcript_min_words` | `Count` | `0..50` | `2` | clamp to range | new turn | Minimum transcript words before partial/final ASR may cancel active playback. |
+| `barge_in.partial_min_confidence` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Optional partial-ASR confidence floor before active-playback cancellation. |
+| `barge_in.partial_min_stability` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Optional partial-ASR stability floor before active-playback cancellation. |
 | `barge_in.clear_timeout_ms` | `DurationMs` | `100..10000` | `1000` | clamp to range | new cancel request | Clear/terminal wait. |
 | `conversation_policy.mode` | enum | `current_compat,no_barge_in_bounded_pending,barge_in_cancel_only,barge_in_coalesce_after_silence` | `current_compat` | reject unknown | new policy decision | Selects the conversation arbitration policy for no-barge-in output overlap and valid barge-in cancellation/coalescing triggers. |
 | `conversation_policy.active_playback_hold_ms` | `DurationMs` | `0..180000` | `1000` | clamp to range | new policy decision | Diagnostic hold budget for policy-managed pending assistant output behind active playback; bounded-pending mode records retained max-hold telemetry instead of dropping. |
@@ -1140,6 +1144,10 @@ speech_onset_cancel_enabled = true
 onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
+transcript_min_chars = 6
+transcript_min_words = 2
+partial_min_confidence = 0.50
+partial_min_stability = 0.50
 clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]

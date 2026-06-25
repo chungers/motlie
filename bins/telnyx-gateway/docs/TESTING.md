@@ -339,6 +339,10 @@ speech_onset_cancel_enabled = true
 onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
+transcript_min_chars = 6
+transcript_min_words = 2
+partial_min_confidence = 0.50
+partial_min_stability = 0.50
 clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]
@@ -391,6 +395,10 @@ speech_onset_cancel_enabled = true
 onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
+transcript_min_chars = 6
+transcript_min_words = 2
+partial_min_confidence = 0.50
+partial_min_stability = 0.50
 clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]

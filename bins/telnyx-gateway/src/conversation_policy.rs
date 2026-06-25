@@ -100,6 +100,21 @@ impl CallerTurnPolicyAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallerTranscriptPolicyAction {
+    Forward,
+    IgnoreDuringPlayback,
+}
+
+impl CallerTranscriptPolicyAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::IgnoreDuringPlayback => "ignore_during_playback",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AssistantOutputPolicyAction {
     QueueNow,
     LegacyDeferLatest,
@@ -124,6 +139,7 @@ pub struct BargeInPolicyDecision {
     pub playback: PlaybackPolicyAction,
     pub generation: GenerationPolicyAction,
     pub caller_turn: CallerTurnPolicyAction,
+    pub caller_transcript: CallerTranscriptPolicyAction,
     pub reset_turn_batch: bool,
 }
 
@@ -136,12 +152,42 @@ impl BargeInPolicyDecision {
             playback: PlaybackPolicyAction::Continue,
             generation: GenerationPolicyAction::Continue,
             caller_turn: CallerTurnPolicyAction::Preserve,
+            caller_transcript: CallerTranscriptPolicyAction::Forward,
             reset_turn_batch: false,
+        }
+    }
+
+    pub fn ignored_transcript(trigger: BargeInTrigger, mode: ConversationPolicyMode) -> Self {
+        Self {
+            caller_transcript: CallerTranscriptPolicyAction::IgnoreDuringPlayback,
+            ..Self::inactive(trigger, mode)
         }
     }
 
     pub fn cancels_playback(self) -> bool {
         self.allowed && self.playback == PlaybackPolicyAction::CancelActive
+    }
+
+    pub fn forwards_caller_transcript(self) -> bool {
+        self.caller_transcript == CallerTranscriptPolicyAction::Forward
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BargeInTranscriptEvidence<'a> {
+    pub text: &'a str,
+    pub active_playback: bool,
+    pub confidence: Option<f32>,
+    pub stability: Option<f32>,
+}
+
+impl BargeInTranscriptEvidence<'_> {
+    pub fn char_count(self) -> usize {
+        self.text.chars().filter(|ch| !ch.is_whitespace()).count()
+    }
+
+    pub fn word_count(self) -> usize {
+        self.text.split_whitespace().count()
     }
 }
 
@@ -161,6 +207,28 @@ impl ConversationPolicyConfig {
             return BargeInPolicyDecision::inactive(trigger, self.mode);
         }
 
+        self.allowed_barge_in_decision(trigger)
+    }
+
+    pub fn decide_transcript_barge_in(
+        &self,
+        barge_in: &BargeInQualityConfig,
+        trigger: BargeInTrigger,
+        evidence: BargeInTranscriptEvidence<'_>,
+    ) -> BargeInPolicyDecision {
+        if !trigger.enabled_by(barge_in) {
+            return BargeInPolicyDecision::inactive(trigger, self.mode);
+        }
+        if evidence.active_playback
+            && !transcript_evidence_allows_barge_in(barge_in, trigger, evidence)
+        {
+            return BargeInPolicyDecision::ignored_transcript(trigger, self.mode);
+        }
+
+        self.allowed_barge_in_decision(trigger)
+    }
+
+    fn allowed_barge_in_decision(&self, trigger: BargeInTrigger) -> BargeInPolicyDecision {
         let caller_turn = match self.mode {
             ConversationPolicyMode::BargeInCoalesceAfterSilence => {
                 CallerTurnPolicyAction::CoalesceAfterSilence {
@@ -179,6 +247,7 @@ impl ConversationPolicyConfig {
             playback: PlaybackPolicyAction::CancelActive,
             generation: GenerationPolicyAction::CancelActive,
             caller_turn,
+            caller_transcript: CallerTranscriptPolicyAction::Forward,
             reset_turn_batch: true,
         }
     }
@@ -199,6 +268,31 @@ impl ConversationPolicyConfig {
             mode: self.mode,
             assistant_output,
         }
+    }
+}
+
+fn transcript_evidence_allows_barge_in(
+    barge_in: &BargeInQualityConfig,
+    trigger: BargeInTrigger,
+    evidence: BargeInTranscriptEvidence<'_>,
+) -> bool {
+    if evidence.char_count() < barge_in.transcript_min_chars
+        || evidence.word_count() < barge_in.transcript_min_words
+    {
+        return false;
+    }
+    if trigger == BargeInTrigger::Partial {
+        score_meets_threshold(evidence.confidence, barge_in.partial_min_confidence)
+            && score_meets_threshold(evidence.stability, barge_in.partial_min_stability)
+    } else {
+        true
+    }
+}
+
+fn score_meets_threshold(score: Option<f32>, threshold: Option<f32>) -> bool {
+    match threshold {
+        Some(threshold) => score.is_some_and(|score| score >= threshold),
+        None => true,
     }
 }
 
@@ -355,6 +449,64 @@ mod tests {
         assert_eq!(decision.generation, GenerationPolicyAction::CancelActive);
         assert_eq!(decision.caller_turn, CallerTurnPolicyAction::Preserve);
         assert!(decision.reset_turn_batch);
+    }
+
+    #[test]
+    fn short_partial_during_active_playback_is_ignored() {
+        let policy = ConversationPolicyConfig::default();
+        let decision = policy.decide_transcript_barge_in(
+            &BargeInQualityConfig::default(),
+            BargeInTrigger::Partial,
+            BargeInTranscriptEvidence {
+                text: "Blue",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: Some(0.91),
+            },
+        );
+
+        assert!(!decision.cancels_playback());
+        assert!(!decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn meaningful_partial_during_active_playback_can_cancel() {
+        let policy = ConversationPolicyConfig::default();
+        let decision = policy.decide_transcript_barge_in(
+            &BargeInQualityConfig::default(),
+            BargeInTrigger::Partial,
+            BargeInTranscriptEvidence {
+                text: "please stop",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: None,
+            },
+        );
+
+        assert!(decision.cancels_playback());
+        assert!(decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn low_confidence_partial_during_active_playback_is_ignored_when_configured() {
+        let policy = ConversationPolicyConfig::default();
+        let barge_in = BargeInQualityConfig {
+            partial_min_confidence: Some(0.50),
+            ..BargeInQualityConfig::default()
+        };
+        let decision = policy.decide_transcript_barge_in(
+            &barge_in,
+            BargeInTrigger::Partial,
+            BargeInTranscriptEvidence {
+                text: "please stop",
+                active_playback: true,
+                confidence: Some(0.34),
+                stability: Some(0.91),
+            },
+        );
+
+        assert!(!decision.cancels_playback());
+        assert!(!decision.forwards_caller_transcript());
     }
 
     #[test]

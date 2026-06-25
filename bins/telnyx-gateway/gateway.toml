@@ -191,6 +191,14 @@ onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 # Cancel on final ASR overlap.
 final_asr_cancel_enabled = true
+# Minimum non-whitespace transcript characters before partial/final ASR may cancel active playback.
+transcript_min_chars = 6
+# Minimum transcript words before partial/final ASR may cancel active playback.
+transcript_min_words = 2
+# Minimum partial-ASR confidence for active-playback cancellation.
+partial_min_confidence = 0.50
+# Minimum partial-ASR stability for active-playback cancellation.
+partial_min_stability = 0.50
 # Time allowed for media clear/mark handling.
 clear_timeout_ms = 1000
 

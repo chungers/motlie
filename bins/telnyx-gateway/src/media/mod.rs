@@ -3282,6 +3282,8 @@ async fn emit_asr_final_reconciliation(
 struct ConversationTranscriptEvent {
     event: TranscriptEvent,
     turn_id: Option<String>,
+    confidence: Option<f32>,
+    stability: Option<f32>,
 }
 
 async fn forward_conversation_events(
@@ -3296,14 +3298,18 @@ async fn forward_conversation_events(
         return;
     };
     for event in events {
-        if let Err(error) = conversation::handle_transcript_event_with_turn(
+        if let Err(error) = conversation::handle_transcript_event_with_metadata(
             state,
             media_registry,
             conversation,
             gateway_call_id,
             event.event,
             quality_config,
-            event.turn_id.as_deref(),
+            conversation::ConversationTranscriptMetadata {
+                turn_id: event.turn_id.as_deref(),
+                confidence: event.confidence,
+                stability: event.stability,
+            },
         )
         .await
         {
@@ -3798,6 +3804,8 @@ async fn record_transcript_events(
         conversation_events.push(ConversationTranscriptEvent {
             event: event.event.clone(),
             turn_id,
+            confidence: transcript_confidence,
+            stability: transcript_stability,
         });
         let transcript_text =
             transcript_plaintext_included(redaction_mode, include_transcript_text)
