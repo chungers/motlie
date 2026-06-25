@@ -68,6 +68,7 @@ pub enum Command {
     Reclaim {
         target: String,
     },
+    Attach(AttachArgs),
     Send(SendArgs),
     Interrupt(InterruptArgs),
     Broadcast(BroadcastArgs),
@@ -148,6 +149,7 @@ impl Command {
                 target: args.target,
             })),
             Command::Reclaim { target } => Ok(ClientRequest::Reclaim { target }),
+            Command::Attach(_) => bail!("attach is handled before client request conversion"),
             Command::Send(args) => Ok(ClientRequest::Send(args.into_request()?)),
             Command::Interrupt(args) => Ok(ClientRequest::Interrupt(InterruptRequest {
                 target: args.target,
@@ -340,6 +342,26 @@ pub struct LeaveArgs {
 pub struct RetireArgs {
     pub workstream: String,
     pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AttachArgs {
+    pub target: String,
+    #[arg(
+        long,
+        help = "Inject a tagged attach window into the caller tmux session; also selected automatically when $TMUX is set."
+    )]
+    pub here: bool,
+    #[arg(
+        long,
+        help = "Reap inactive @mstream/attach windows in the caller tmux session before attaching."
+    )]
+    pub sweep: bool,
+    #[arg(
+        long,
+        help = "Print the daemon-resolved attach command instead of running it."
+    )]
+    pub print: bool,
 }
 
 #[derive(Debug, Args)]

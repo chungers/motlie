@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 | @codex-570-impl | Documented `mstream attach <target> [--here] [--sweep] [--print]` for daemon-resolved attach commands, PTY handoff, and tagged caller-tmux visits. |
 | 2026-06-23 | @codex-561-design | Implemented B3 cleanup contract: `doctor --quarantine-dead` and `--prune-quarantined` operate only on confirmed-dead rows and preserve unreachable rows per #401 lifecycle hygiene. |
 | 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, timer start upsert behavior, timer paste-mode selection, and delivery primitive parity controls. |
 | 2026-06-07 | @codex-401-impl | Clarified issue #409 audit durability: non-`agent_output` events are lossless-enqueued, high-volume `agent_output` is best-effort with observable degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
@@ -126,6 +127,36 @@ Daemon records are keyed by `(host, tmux session_id)`, for example
 use the resolved stable target when the session exists. `scan` reconciles by
 session id, updates display names after rename, and drops a stale in-memory
 record if tmux reuses an id with a different session creation timestamp.
+
+## Attach
+
+```sh
+mstream attach local::codex-worker --print
+mstream attach local::codex-worker
+mstream attach local::codex-worker --here
+mstream attach local::codex-worker --sweep
+```
+
+`attach` asks the daemon to resolve `<host>::<session-or-id>` to the same tmux
+attach argv used by `motlie-tmux`. The daemon does not take over a PTY; it only
+validates the connected host/target and returns the command. `--print` writes
+that shell-safe command line to stdout and does not attach or sweep, so shell
+wrappers and agent TUIs can ask for the exact command without side effects.
+
+When the caller is not inside tmux, the default behavior is foreground PTY
+handoff: `mstream` runs the daemon-resolved command with the current terminal as
+stdin/stdout/stderr and returns the attach child shell status. When `$TMUX` is
+set, `--here` is selected automatically. `--here` creates a detached local
+caller-tmux window named `mstream-attach`, tags it with `@mstream/attach=true`
+and target/spawn metadata, switches the current client to that window, and waits
+until that window is no longer active. On return, mstream kills the visit window
+only after the active-window guard says the active window is not the visit
+window. The shell running inside the injected window also self-kills its window
+after the nested attach command exits.
+
+`--sweep` is caller-tmux cleanup. Before attaching, it scans local tmux windows
+for inactive `@mstream/attach` windows and kills them while leaving the active
+visit window untouched. It requires `$TMUX` and is ignored by `--print`.
 
 ## Session Assignment
 

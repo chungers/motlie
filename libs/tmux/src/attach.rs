@@ -2,7 +2,7 @@ use crate::control::shell_escape;
 use crate::error::{Error, Result};
 use crate::transport::{SshConfig, SSH_DEFAULT_PORT};
 use crate::types::{HostKeyPolicy, TmuxSocket};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::process::{ExitStatus, Stdio};
 
@@ -38,20 +38,34 @@ pub struct AttachOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AttachCommand {
+pub struct AttachCommand {
     program: OsString,
     args: Vec<OsString>,
 }
 
 impl AttachCommand {
-    fn new(program: impl Into<OsString>, args: Vec<OsString>) -> Self {
+    pub fn new(program: impl Into<OsString>, args: Vec<OsString>) -> Self {
         Self {
             program: program.into(),
             args,
         }
     }
 
-    fn display(&self) -> String {
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+
+    pub fn shell_command(&self) -> String {
+        let mut parts = vec![shell_escape_os(&self.program)];
+        parts.extend(self.args.iter().map(|arg| shell_escape_os(arg.as_os_str())));
+        parts.join(" ")
+    }
+
+    pub(crate) fn display(&self) -> String {
         let mut parts = vec![self.program.to_string_lossy().into_owned()];
         parts.extend(
             self.args
@@ -60,6 +74,10 @@ impl AttachCommand {
         );
         parts.join(" ")
     }
+}
+
+fn shell_escape_os(value: &OsStr) -> String {
+    shell_escape(&value.to_string_lossy())
 }
 
 pub(crate) fn local_attach_command(
@@ -128,7 +146,7 @@ pub(crate) fn ssh_attach_command_with_options(
     AttachCommand::new("ssh", args)
 }
 
-pub(crate) fn run_attach_command_with_options(
+pub fn run_attach_command_with_options(
     command: AttachCommand,
     options: AttachOptions,
 ) -> Result<AttachExit> {
@@ -518,6 +536,23 @@ mod tests {
         let command = remote_tmux_attach_command("tmux", None, "it'is");
 
         assert_eq!(command, "'tmux' attach-session -t 'it'\\''is'");
+    }
+
+    #[test]
+    fn shell_command_escapes_program_and_args() {
+        let command = AttachCommand::new(
+            "/opt/tmux bin/tmux",
+            vec![
+                OsString::from("attach-session"),
+                OsString::from("-t"),
+                OsString::from("it's here"),
+            ],
+        );
+
+        assert_eq!(
+            command.shell_command(),
+            "'/opt/tmux bin/tmux' 'attach-session' '-t' 'it'\\''s here'"
+        );
     }
 
     #[test]

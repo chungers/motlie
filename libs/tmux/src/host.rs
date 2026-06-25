@@ -2704,38 +2704,29 @@ impl Target {
         }
     }
 
-    /// Attach the current process PTY to this tmux session.
-    pub async fn attach_current_pty(&self) -> Result<crate::AttachExit> {
-        self.attach_current_pty_with_options(&AttachOptions::default())
+    /// Build the command that would attach the current process PTY to this tmux session.
+    pub async fn attach_command(&self) -> Result<AttachCommand> {
+        self.attach_command_with_options(&AttachOptions::default())
             .await
     }
 
-    /// Attach the current process PTY to this tmux session with explicit
-    /// attach options.
-    pub async fn attach_current_pty_with_options(
+    /// Build the command that would attach the current process PTY to this
+    /// tmux session with explicit attach options.
+    pub async fn attach_command_with_options(
         &self,
         options: &AttachOptions,
-    ) -> Result<crate::AttachExit> {
-        let command = self.attach_command_with_options(options).await?;
-        let options = *options;
-        tokio::task::spawn_blocking(move || {
-            attach::run_attach_command_with_options(command, options)
-        })
-        .await?
-    }
-
-    async fn attach_command_with_options(&self, options: &AttachOptions) -> Result<AttachCommand> {
+    ) -> Result<AttachCommand> {
         let session = match &self.address {
             TargetAddress::Session(session) => session,
             TargetAddress::Window(_) => {
                 return Err(Error::UnsupportedTarget {
-                    operation: "attach_current_pty",
+                    operation: "attach_command",
                     level: TargetLevel::Window,
                 });
             }
             TargetAddress::Pane(_) => {
                 return Err(Error::UnsupportedTarget {
-                    operation: "attach_current_pty",
+                    operation: "attach_command",
                     level: TargetLevel::Pane,
                 });
             }
@@ -2757,9 +2748,29 @@ impl Target {
                 options,
             )),
             TransportKind::Mock(_) => Err(Error::State(
-                "attach_current_pty is not supported for mock transports".to_string(),
+                "attach_command is not supported for mock transports".to_string(),
             )),
         }
+    }
+
+    /// Attach the current process PTY to this tmux session.
+    pub async fn attach_current_pty(&self) -> Result<crate::AttachExit> {
+        self.attach_current_pty_with_options(&AttachOptions::default())
+            .await
+    }
+
+    /// Attach the current process PTY to this tmux session with explicit
+    /// attach options.
+    pub async fn attach_current_pty_with_options(
+        &self,
+        options: &AttachOptions,
+    ) -> Result<crate::AttachExit> {
+        let command = self.attach_command_with_options(options).await?;
+        let options = *options;
+        tokio::task::spawn_blocking(move || {
+            attach::run_attach_command_with_options(command, options)
+        })
+        .await?
     }
 
     /// Rename this entity and return a new `Target` with the updated address.

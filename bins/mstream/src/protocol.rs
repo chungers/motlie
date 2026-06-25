@@ -88,6 +88,7 @@ impl InterruptKey {
 pub enum ClientRequest {
     DaemonStatus,
     DaemonStop,
+    ResolveAttach(AttachResolveRequest),
     Connect(ConnectRequest),
     Hosts,
     Scan {
@@ -146,6 +147,28 @@ pub enum ClientRequest {
     Snapshot(SnapshotRequest),
     SummaryInput(SummaryInputRequest),
     Recruit(RecruitRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachResolveRequest {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachCommandRecord {
+    pub program: String,
+    pub args: Vec<String>,
+    pub shell: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachResolveRecord {
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub op: String,
+    pub target: String,
+    pub requested_target: String,
+    pub command: AttachCommandRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

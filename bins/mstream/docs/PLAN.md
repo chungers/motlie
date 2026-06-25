@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 | @codex-570-impl | Added issue #570 attach implementation tasks and validation gates for daemon resolution, PTY handoff, caller-tmux window injection, and reaping. |
 | 2026-06-06 | @codex-401-impl | Added issue #401 implementation notes for `quarantined`, `retire`, gated `reclaim`, and scan registry self-heal. |
 | 2026-05-30 | @codex-360-og | Added and completed issue #360 tasks for id-stable live session rename/retag, mmux refresh, stale-id safety, and test coverage. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 implementation slice for mmux-visible workstream labels, selected-key preservation, hydration, cleanup, and docs/tests. |
@@ -577,6 +578,59 @@ Validation:
 ```sh
 rg -n "mstream connect|daemon restart|summary-input" bins/mstream/docs
 ```
+
+## Phase 12. Issue #570 Attach / Forward Terminal
+
+Design references:
+
+- [Attach / Forward Terminal](./DESIGN.md#attach--forward-terminal)
+- [Binary And Layering](./DESIGN.md#binary-and-layering)
+- [Requirements](./DESIGN.md#requirements)
+
+Tasks:
+
+- [x] 12.1 Expose the existing `motlie-tmux` attach command/runner transport
+  APIs without moving CLI or window lifecycle policy into `libs/tmux`.
+- [x] 12.2 Add a daemon RPC that resolves `<host>::<session-or-id>` to a fresh
+  session target and returns the daemon-resolved attach argv.
+- [x] 12.3 Add `mstream attach <target> [--here] [--sweep] [--print]` with
+  `--print` command emission and default foreground PTY handoff.
+- [x] 12.4 Implement caller-tmux `--here` behavior, auto-selected when `$TMUX`
+  is set: create a tagged detached window, switch the current client, wait for
+  return, and kill only when the visit window is no longer active.
+- [x] 12.5 Implement window ownership cleanup: `@mstream/attach` tags,
+  target/spawn metadata, self-kill after nested attach exit, guarded
+  force-reap-on-return, and inactive tagged-window `--sweep`.
+- [x] 12.6 Cover attach command rendering, client command reconstruction,
+  self-kill shell construction, and inactive sweep selection with focused unit
+  tests.
+
+Validation:
+
+```sh
+cargo fmt -p motlie-tmux -p motlie-mstream
+cargo check -p motlie-tmux
+cargo check -p motlie-mstream
+cargo test -p motlie-tmux attach
+cargo test -p motlie-mstream attach
+cargo build -p motlie-tmux -p motlie-mstream
+cargo test -p motlie-tmux
+cargo test -p motlie-mstream
+cargo clippy -p motlie-tmux --all-targets -- -D warnings
+cargo clippy -p motlie-mstream --all-targets -- -D warnings
+```
+
+Manual caller-tmux smoke:
+
+```sh
+mstream attach local::<session> --print
+mstream attach local::<session> --here
+mstream attach local::<session> --sweep
+```
+
+`--here` should leave no inactive `@mstream/attach` windows after the user
+returns to the orchestrator window. `--sweep` should kill inactive tagged visit
+windows and preserve the active visit window.
 
 ## End-To-End Validation Plan
 

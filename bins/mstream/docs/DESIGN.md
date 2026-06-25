@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 | @codex-570-impl | Added issue #570 attach/forward-terminal design: daemon attach-command resolution plus client-owned PTY handoff or tagged caller-tmux window injection and reap. |
 | 2026-06-07 | @codex-401-impl | Defined issue #409 audit durability contract: non-`agent_output` events are lossless, `agent_output` is best-effort with degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
 | 2026-06-07 | @codex-401-impl | Reconciled issue #409 durable audit log semantics with the state/recovery requirements: redacted socket-adjacent event JSONL is replayed on startup, but host/session/timer/workflow state remains non-durable. |
 | 2026-06-06 | @codex-401-impl | Added issue #401 lifecycle semantics: `quarantined` state, workstream-retained `retire`, gated `reclaim`, and scan-time registry reconciliation. |
@@ -127,6 +128,9 @@ unstick collaborators.
   display active sessions by the workstream assigned through mstream.
 - FR22: Rename and retag live sessions without recreating them, while keeping
   daemon tracking keyed by stable tmux session id.
+- FR23: Support `mstream attach <target> [--here] [--sweep] [--print]`: the
+  daemon resolves the connected tmux target to attach argv, while the client
+  owns PTY handoff or caller-tmux window injection and reaping.
 
 ### State And Recovery Requirements
 
@@ -385,6 +389,32 @@ After connecting hosts, the daemon hydrates by scanning tmux:
 If a workstream has no tagged sessions, it cannot be reconstructed after
 restart. This is acceptable for the first design because the no-local-state
 requirement is stronger than durable empty-workstream metadata.
+
+### Attach / Forward Terminal
+
+`mstream attach <target> [--here] [--sweep] [--print]` is a thin CLI and
+lifecycle layer over existing `motlie-tmux` attach transport. The daemon owns
+only target resolution: it resolves the connected `FleetTargetSpec` to a fresh
+session `Target`, verifies the session has not been reused, and returns the
+`AttachCommand` argv. The daemon never attempts to attach because it has no
+foreground PTY.
+
+The client chooses the realization:
+
+- `--print` writes the shell-safe attach command and performs no attach or
+  cleanup side effect.
+- Outside tmux, the default is PTY handoff: the client runs the resolved argv
+  with the caller terminal inherited and returns the attach child shell status.
+- Inside tmux (`$TMUX` set, or explicit `--here`), the client creates a detached
+  caller-tmux window running the resolved attach command, tags it with
+  `@mstream/attach` plus target/spawn metadata, switches the current client to
+  that window, then waits for the window to stop being active before killing it.
+
+Injected windows are ephemeral mstream-owned visit windows. Cleanup does not
+rely on the user exiting the nested attach: the injected shell self-kills after
+the attach command exits, the caller process force-reaps the tagged window when
+`window_active` is no longer the visit window, and `--sweep` removes inactive
+orphaned `@mstream/attach` windows while preserving any active visit window.
 
 ### Workstream Commands
 
