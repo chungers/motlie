@@ -346,7 +346,7 @@ pub struct RetireArgs {
 
 #[derive(Debug, Args)]
 pub struct AttachArgs {
-    pub target: String,
+    pub target: Option<String>,
     #[arg(
         long,
         help = "Inject a tagged attach window into the caller tmux session; also selected automatically when $TMUX is set."
@@ -354,7 +354,7 @@ pub struct AttachArgs {
     pub here: bool,
     #[arg(
         long,
-        help = "Reap inactive @mstream/attach windows in the caller tmux session before attaching."
+        help = "Reap inactive @mstream/attach windows in the caller tmux session before resolving or attaching."
     )]
     pub sweep: bool,
     #[arg(
@@ -1308,6 +1308,18 @@ mod tests {
             panic!("expected reclaim request");
         };
         assert_eq!(target, "local::$1");
+    }
+
+    #[test]
+    fn attach_sweep_can_parse_without_target() {
+        let cli = Cli::try_parse_from(["mstream", "attach", "--sweep"])
+            .expect("attach sweep command parses");
+
+        let Command::Attach(args) = cli.command else {
+            panic!("expected attach command");
+        };
+        assert_eq!(args.target, None);
+        assert!(args.sweep);
     }
 
     #[test]

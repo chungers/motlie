@@ -167,7 +167,6 @@ pub struct AttachResolveRecord {
     pub record_type: String,
     pub op: String,
     pub target: String,
-    pub requested_target: String,
     pub command: AttachCommandRecord,
 }
 

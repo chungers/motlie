@@ -24,18 +24,24 @@ const RETURN_POLL_MS: u64 = 500;
 pub async fn run(socket: &Path, args: AttachArgs) -> anyhow::Result<i32> {
     let in_tmux = env::var_os("TMUX").is_some();
     let here = args.here || in_tmux;
-    let resolved = resolve_attach_command(socket, args.target).await?;
-
-    if args.print {
-        println!("{}", resolved.command.shell);
-        return Ok(0);
-    }
 
     if args.sweep {
         if !in_tmux {
             bail!("--sweep requires the caller to be inside tmux ($TMUX is not set)");
         }
         let _ = sweep_attach_windows()?;
+    }
+
+    let target = match args.target {
+        Some(target) => target,
+        None if args.sweep => return Ok(0),
+        None => bail!("<target> is required unless --sweep is used"),
+    };
+    let resolved = resolve_attach_command(socket, target).await?;
+
+    if args.print {
+        println!("{}", resolved.command.shell);
+        return Ok(0);
     }
 
     if here {
@@ -141,16 +147,26 @@ fn attach_window_shell(attach_shell: &str) -> String {
 }
 
 async fn wait_for_return_and_reap(window_id: &str) -> anyhow::Result<()> {
+    let mut armed = false;
     loop {
         sleep(Duration::from_millis(RETURN_POLL_MS)).await;
         match window_is_active(window_id) {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok(active) if reap_should_kill(&mut armed, active) => {
                 kill_window(window_id)?;
                 return Ok(());
             }
+            Ok(_) => {}
             Err(_) => return Ok(()),
         }
+    }
+}
+
+fn reap_should_kill(armed: &mut bool, active: bool) -> bool {
+    if active {
+        *armed = true;
+        false
+    } else {
+        *armed
     }
 }
 
@@ -263,6 +279,17 @@ mod tests {
         let windows = inactive_attach_windows("@1\t1\ttrue\n@2\t0\ttrue\n@3\t0\t\n@4\t0\t0\n");
 
         assert_eq!(windows, vec!["@2"]);
+    }
+
+    #[test]
+    fn reap_waits_until_visit_window_was_observed_active() {
+        let mut armed = false;
+
+        assert!(!reap_should_kill(&mut armed, false));
+        assert!(!armed);
+        assert!(!reap_should_kill(&mut armed, true));
+        assert!(armed);
+        assert!(reap_should_kill(&mut armed, false));
     }
 
     #[test]

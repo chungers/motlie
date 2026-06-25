@@ -1108,7 +1108,6 @@ impl DaemonState {
             record_type: "ok".to_string(),
             op: "attach_resolve".to_string(),
             target: resolved.spec.to_string(),
-            requested_target: request.target,
             command: attach_command_record(&command),
         };
         Ok(vec![serde_json::to_value(record)?])
