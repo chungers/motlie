@@ -98,18 +98,35 @@ fn attach_command_from_record(record: AttachCommandRecord) -> AttachCommand {
 }
 
 async fn attach_here(resolved: &AttachResolveRecord) -> anyhow::Result<()> {
-    let caller_session_id = caller_session_id()?;
-    let client_ttys = attached_client_ttys(&caller_session_id)?;
-    if client_ttys.is_empty() {
-        bail!("no attached tmux clients found for caller session {caller_session_id}");
-    }
-
-    let visit = create_attach_window(resolved, &caller_session_id)?;
+    let (visit, client_ttys) = prepare_attach_here_visit(
+        resolved,
+        sweep_attach_windows,
+        caller_session_id,
+        attached_client_ttys,
+        create_attach_window,
+    )?;
     if let Err(err) = switch_clients_to_window(&client_ttys, &visit.window_id) {
         let _ = kill_window(&visit.window_id);
         return Err(err);
     }
     wait_for_visit_pane_exit_and_reap(&visit).await
+}
+
+fn prepare_attach_here_visit(
+    resolved: &AttachResolveRecord,
+    sweep: impl FnOnce() -> anyhow::Result<usize>,
+    caller_session_id: impl FnOnce() -> anyhow::Result<String>,
+    attached_client_ttys: impl FnOnce(&str) -> anyhow::Result<Vec<String>>,
+    create_attach_window: impl FnOnce(&AttachResolveRecord, &str) -> anyhow::Result<AttachWindow>,
+) -> anyhow::Result<(AttachWindow, Vec<String>)> {
+    sweep()?;
+    let caller_session_id = caller_session_id()?;
+    let client_ttys = attached_client_ttys(&caller_session_id)?;
+    if client_ttys.is_empty() {
+        bail!("no attached tmux clients found for caller session {caller_session_id}");
+    }
+    let visit = create_attach_window(resolved, &caller_session_id)?;
+    Ok((visit, client_ttys))
 }
 
 fn caller_session_id() -> anyhow::Result<String> {
@@ -381,6 +398,59 @@ mod tests {
         let windows = inactive_attach_windows("@1\t1\ttrue\n@2\t0\ttrue\n@3\t0\t\n@4\t0\t0\n");
 
         assert_eq!(windows, vec!["@2"]);
+    }
+
+    #[test]
+    fn attach_here_sweeps_stale_windows_before_creating_new_visit() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let resolved = AttachResolveRecord {
+            record_type: "ok".to_string(),
+            op: "attach_resolve".to_string(),
+            target: "local::$1".to_string(),
+            command: AttachCommandRecord {
+                program: "tmux".to_string(),
+                args: vec![
+                    "attach-session".to_string(),
+                    "-t".to_string(),
+                    "$1".to_string(),
+                ],
+                shell: "tmux attach-session -t '$1'".to_string(),
+            },
+        };
+
+        let (visit, client_ttys) = prepare_attach_here_visit(
+            &resolved,
+            || {
+                events.borrow_mut().push("sweep");
+                Ok(1)
+            },
+            || {
+                events.borrow_mut().push("session");
+                Ok("$2".to_string())
+            },
+            |session_id| {
+                events.borrow_mut().push("clients");
+                assert_eq!(session_id, "$2");
+                Ok(vec!["/dev/pts/4".to_string()])
+            },
+            |record, session_id| {
+                events.borrow_mut().push("create");
+                assert_eq!(record.target, "local::$1");
+                assert_eq!(session_id, "$2");
+                Ok(AttachWindow {
+                    window_id: "@7".to_string(),
+                    pane_id: "%13".to_string(),
+                })
+            },
+        )
+        .expect("attach here setup succeeds");
+
+        assert_eq!(
+            events.into_inner(),
+            vec!["sweep", "session", "clients", "create"]
+        );
+        assert_eq!(visit.window_id, "@7");
+        assert_eq!(client_ttys, vec!["/dev/pts/4"]);
     }
 
     #[test]

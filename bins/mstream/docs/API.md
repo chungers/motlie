@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 | @codex-570-impl | Documented auto-sweep on `attach --here` and the at-most-one stale attach window invariant. |
 | 2026-06-25 | @codex-570-impl | Updated `attach --here` docs for multi-client `switch-client -c` forwarding and visit-pane-exit cleanup. |
 | 2026-06-25 | @codex-570-impl | Clarified standalone `attach --sweep` cleanup and that `attach --here` blocks for the visit lifecycle. |
 | 2026-06-25 | @codex-570-impl | Documented `mstream attach <target> [--here] [--sweep] [--print]` for daemon-resolved attach commands, PTY handoff, and tagged caller-tmux visits. |
@@ -153,16 +154,23 @@ set, `--here` is selected automatically. `--here` creates a detached local
 caller-tmux window named `mstream-attach`, tags it with `@mstream/attach=true`
 and target/spawn metadata, switches each attached client of the caller session
 to that window with `switch-client -c <tty>`, and waits until the injected visit
-pane exits or disappears. The `--here` invocation blocks until that pane exits,
-so orchestrators that need their prompt back while the user is visiting must run
-it in the background. The shell running inside the injected window self-kills
-its window after the nested attach command exits; the waiting caller also treats
-an already-gone visit window as successful cleanup.
+pane exits or disappears. Before creating each visit window, `--here` also
+auto-sweeps inactive `@mstream/attach` windows in the caller tmux server. The
+`--here` invocation blocks until the visit pane exits, so orchestrators that
+need their prompt back while the user is visiting must run it in the background.
+The shell running inside the injected window self-kills its window after the
+nested attach command exits; the waiting caller also treats an already-gone
+visit window as successful cleanup. If the user walks away from a visit while
+the nested attach keeps running, the next `attach --here` reaps that inactive
+stale window before creating a new one, so at most one stale attach window can
+exist at a time.
 
 `--sweep` is caller-tmux cleanup. Before resolving or attaching, it scans
 local tmux windows for inactive `@mstream/attach` windows and kills them while
-leaving the active visit window untouched. It requires `$TMUX` and can run
-standalone as `mstream attach --sweep`, even when the prior target is gone.
+leaving the active visit window untouched. The same sweep runs automatically
+before every `--here` visit window is created. The explicit flag still provides
+standalone cleanup as `mstream attach --sweep`, even when the prior target is
+gone; standalone cleanup requires `$TMUX`.
 
 ## Session Assignment
 

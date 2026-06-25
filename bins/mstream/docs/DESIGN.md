@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 | @codex-570-impl | Added auto-sweep-on-attach to bound abandoned `--here` visits to at most one stale window. |
 | 2026-06-25 | @codex-570-impl | Updated attach design after live dogfood: switch all caller-session clients explicitly and reap on visit-pane exit rather than session active-window polling. |
 | 2026-06-25 | @codex-570-impl | Added issue #570 attach/forward-terminal design: daemon attach-command resolution plus client-owned PTY handoff or tagged caller-tmux window injection and reap. |
 | 2026-06-07 | @codex-401-impl | Defined issue #409 audit durability contract: non-`agent_output` events are lossless, `agent_output` is best-effort with degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
@@ -406,17 +407,20 @@ The client chooses the realization:
   effect; cleanup only runs when `--sweep` is also present.
 - Outside tmux, the default is PTY handoff: the client runs the resolved argv
   with the caller terminal inherited and returns the attach child shell status.
-- Inside tmux (`$TMUX` set, or explicit `--here`), the client creates a detached
-  caller-tmux window running the resolved attach command, tags it with
+- Inside tmux (`$TMUX` set, or explicit `--here`), the client auto-sweeps
+  inactive `@mstream/attach` windows in the caller tmux server, creates a
+  detached caller-tmux window running the resolved attach command, tags it with
   `@mstream/attach` plus target/spawn metadata, switches every attached client
   of the caller session to that window with `switch-client -c <tty>`, then waits
   for the injected visit pane to exit or disappear before best-effort cleanup.
 
 Injected windows are ephemeral mstream-owned visit windows. Cleanup is keyed to
-the visit pane lifecycle: the injected shell self-kills after the attach command
-exits, the waiting caller treats an already-gone visit window as success, and
-`--sweep` removes inactive orphaned `@mstream/attach` windows while preserving
-any active visit window.
+two triggers: inner detach exits the visit pane and reaps the current window
+immediately; if a user walks away while the nested attach stays alive, the next
+`attach --here` auto-sweep removes that inactive stale window before creating
+another one. Because every `--here` attach sweeps before create, at most one
+stale attach window can exist at a time. Standalone `--sweep` remains the
+explicit cleanup-now command and preserves any active visit window.
 
 ### Workstream Commands
 
