@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-24 | @codex-562-impl | Documented issue #567: list-pane `m` toggles host/machine grouped recency sorting back to global activity recency. |
 | 2026-06-22 | @codex-562-impl | Updated live-test follow-ups: single-space stable-id rows, list-pane `s`/`g` toggles back to activity recency, and Help key-list scrolling below the fixed logo. |
 | 2026-06-22 | @codex-562-impl | Documented issue #562 TUI updates: visible stable session ids in rows and list-focused `/` quick search with case-insensitive substring matching. |
 | 2026-06-11 | @mstream453-impl | Added list-pane `s` name sorting and documented the Help shortcut. |
@@ -308,6 +309,7 @@ Main-view keys:
 | `t` | Open Session Tags modal | Open Session Tags modal |
 | `g` | Toggle tag grouping / activity recency | No-op |
 | `s` | Toggle name sort / activity recency | No-op |
+| `m` | Toggle host sort / activity recency | No-op |
 | `h` | Open Help modal | Open Help modal |
 | `a` | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach |
@@ -345,6 +347,9 @@ the first row in the new order so the grouped top is visible immediately.
 Pressing `g` again restores activity sort. Pressing `s` while the list pane is
 focused toggles name sorting: the first press sorts sessions by session name
 and selects the first row in name order, and the next press restores activity
+sort. Pressing `m` while the list pane is focused toggles host sorting: the
+first press groups sessions by host/machine in configured host order with
+recency order within each host, and the next press restores global activity
 sort.
 Pressing `/` while the list pane is focused starts quick search; typed
 characters match session names case-insensitively and move the highlight to the

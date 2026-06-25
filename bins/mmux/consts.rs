@@ -115,6 +115,7 @@ Home/End first/last session
 Enter refresh highlighted session preview
 s toggle name sort <-> activity recency
 g toggle tag sort <-> activity recency
+m toggle host sort; recency within host <-> activity recency
 p or @ prompt highlighted session
 $0..$9 send digit to highlighted session
 $! send Escape to highlighted session

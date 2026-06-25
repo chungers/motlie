@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-24 | @codex-562-impl | Added issue #567 design update: list-focused `m` toggles host/machine grouped recency sorting back to global activity recency. |
 | 2026-06-22 | @codex-562-impl | Updated live-test follow-ups: session rows use single-space stable-id rendering, `s`/`g` toggle back to activity recency, and Help keeps its logo fixed while scrolling the key list. |
 | 2026-06-22 | @codex-562-impl | Added issue #562 design updates: session rows show stable tmux ids and list-focused `/` search uses case-insensitive substring matching in current sort order. |
 | 2026-05-28 | @gpt55-342-og | Updated multi-host identity for issue #342: SSH labels and aliases now use endpoint identity and positional `--alias` overrides are removed. |
@@ -283,7 +284,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   selects the first row in the new order and pressing `g` again restores
   activity sort. Pressing `s` while the session list is focused toggles name
   sorting: the first press sorts by session name and selects the first row in
-  name order; the next press restores activity recency. Sorting on the
+  name order; the next press restores activity recency. Pressing `m` while the
+  session list is focused toggles host sorting: the first press groups rows by
+  host/machine in configured host order with recency order within each host;
+  the next press restores global activity recency. Sorting on the
   observer-side mark instead of raw host
   `SessionInfo.activity` keeps activity order stable across multi-host fleets
   even when host clocks drift. Stable `(host_id, session_id)` preservation
@@ -727,6 +731,7 @@ Main-selector keymap (focus-aware):
 | `t` | Open tag list/add/update/delete modal for highlight | Same |
 | `g` | Toggle tag grouping / activity recency | No-op |
 | `s` | Toggle name sort / activity recency | No-op |
+| `m` | Toggle host sort / activity recency | No-op |
 | `h` | Open help modal with fixed logo, scrollable key functions, and build git SHA | Same |
 | `a` | Attach highlight | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
@@ -1311,10 +1316,12 @@ Single-poll reconcile loop driven by the main TUI loop:
    - feed each `SessionInfo.activity` through `ActivityTracker::observe`
      to compute the row's `activity_observed_at_local`
    - sort rows using `SessionSortMode`: activity mode sorts by
-     `activity_observed_at_local` descending; tag-group mode puts rows with
-     visible non-empty checked-tag values before rows without displayed tags,
-     orders tag groups by the most recent activity in each group, then sorts
-     rows within each group by activity time, host order, and session name
+     `activity_observed_at_local` descending; name mode sorts by session name;
+     tag-group mode puts rows with visible non-empty checked-tag values before
+     rows without displayed tags, orders tag groups by the most recent activity
+     in each group, then sorts rows within each group by activity time, host
+     order, and session name; host-group mode groups rows by configured host
+     order and sorts rows within each host by activity recency
    - preserve highlight by `(host_id, session_id)`, falling back to the
      clamped index if the session disappeared
    - call `refresh_detail` **only** when the caller forced it, the

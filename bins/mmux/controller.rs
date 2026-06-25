@@ -514,6 +514,9 @@ pub(crate) async fn handle_key(
         (KeyCode::Char('s'), _) if app.layout.focus == Focus::List => {
             sort_sessions_by_name(fleet, app).await?;
         }
+        (KeyCode::Char('m'), _) if app.layout.focus == Focus::List => {
+            sort_sessions_by_host(fleet, app).await?;
+        }
         (KeyCode::Char('n'), _) => {
             app.modal = Some(new_session_modal_state(fleet, app));
         }
@@ -845,6 +848,7 @@ async fn toggle_session_grouping(fleet: &HostFleet, app: &mut AppState) -> Resul
         SessionSortMode::Activity => "sort: activity",
         SessionSortMode::Name => "sort: name",
         SessionSortMode::TagGroup => "group: tag",
+        SessionSortMode::HostGroup => "sort: host",
     });
     Ok(())
 }
@@ -861,6 +865,24 @@ async fn sort_sessions_by_name(fleet: &HostFleet, app: &mut AppState) -> Result<
         SessionSortMode::Activity => "sort: activity",
         SessionSortMode::Name => "sort: name",
         SessionSortMode::TagGroup => "group: tag",
+        SessionSortMode::HostGroup => "sort: host",
+    });
+    Ok(())
+}
+
+async fn sort_sessions_by_host(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
+    let previous = current_selection_key(app);
+    let mode = app.session_list.toggle_host_group_sort();
+    app.session_list.resort(fleet);
+    app.session_list.select_first();
+    if previous != current_selection_key(app) {
+        refresh_selected_detail(fleet, app).await?;
+    }
+    app.status = StatusBanner::info(match mode {
+        SessionSortMode::Activity => "sort: activity",
+        SessionSortMode::Name => "sort: name",
+        SessionSortMode::TagGroup => "group: tag",
+        SessionSortMode::HostGroup => "sort: host",
     });
     Ok(())
 }
