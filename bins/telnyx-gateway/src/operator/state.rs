@@ -782,6 +782,8 @@ pub struct CallSession {
     pub tts: Option<TtsPlaybackState>,
     pub echo_suppressed_transcripts: usize,
     pub last_echo_suppressed_preview: Option<String>,
+    pub last_echo_suppressed_text: Option<String>,
+    pub last_echo_suppressed_at: Option<DateTime<Utc>>,
     pub conversation: ConversationState,
     pub speech_output: SpeechOutputConfig,
     pub quality_turns: QualityTurnReportState,
@@ -814,6 +816,8 @@ impl CallSession {
             tts: None,
             echo_suppressed_transcripts: 0,
             last_echo_suppressed_preview: None,
+            last_echo_suppressed_text: None,
+            last_echo_suppressed_at: None,
             conversation: ConversationState::default(),
             speech_output: SpeechOutputConfig::default(),
             quality_turns: QualityTurnReportState::default(),
@@ -2044,6 +2048,8 @@ impl GatewayState {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.echo_suppressed_transcripts = call.echo_suppressed_transcripts.saturating_add(1);
             call.last_echo_suppressed_preview = Some(preview_text(text));
+            call.last_echo_suppressed_text = Some(text.trim().to_string());
+            call.last_echo_suppressed_at = Some(Utc::now());
             call.push_timeline("transcript suppressed assistant echo");
         }
     }

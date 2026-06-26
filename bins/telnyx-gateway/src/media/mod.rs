@@ -33,8 +33,9 @@ use crate::early_response::{
     EarlyResponsePipelineHandle, EarlyResponsePipelineServices,
 };
 use crate::operator::state::{
-    speech_echo_signature, CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission,
-    SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
+    speech_echo_signature, CallSession, CallStatus, GatewayState, LogLevel, MediaMetadata,
+    QualitySpanEmission, SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState,
+    TtsPlaybackStatus,
 };
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
@@ -3570,6 +3571,192 @@ fn assistant_echo_match(
     })
 }
 
+fn trim_quarantined_echo_prefix(text: &str, prefix: &str) -> Option<String> {
+    let end = token_prefix_end(text, prefix)?;
+    let trimmed = text[end..]
+        .trim_start_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '.' | ',' | ':' | ';' | '!' | '?' | '-')
+        })
+        .trim();
+    Some(trimmed.to_string())
+}
+
+fn token_prefix_end(text: &str, prefix: &str) -> Option<usize> {
+    let prefix_tokens = normalized_tokens(prefix);
+    if prefix_tokens.is_empty() {
+        return None;
+    }
+    let text_tokens = normalized_tokens_with_ends(text);
+    if text_tokens.len() < prefix_tokens.len() {
+        return None;
+    }
+    for (index, prefix_token) in prefix_tokens.iter().enumerate() {
+        if text_tokens[index].0 != *prefix_token {
+            return None;
+        }
+    }
+    text_tokens
+        .get(prefix_tokens.len().saturating_sub(1))
+        .map(|(_, end)| *end)
+}
+
+fn normalized_tokens(text: &str) -> Vec<String> {
+    normalized_tokens_with_ends(text)
+        .into_iter()
+        .map(|(token, _)| token)
+        .collect()
+}
+
+fn normalized_tokens_with_ends(text: &str) -> Vec<(String, usize)> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut token_end = 0usize;
+    for (index, ch) in text.char_indices() {
+        if ch.is_alphanumeric() || ch == '\'' {
+            token.extend(ch.to_lowercase());
+            token_end = index + ch.len_utf8();
+        } else if !token.is_empty() {
+            tokens.push((std::mem::take(&mut token), token_end));
+        }
+    }
+    if !token.is_empty() {
+        tokens.push((token, token_end));
+    }
+    tokens
+}
+
+fn sanitize_committed_echo_prefix(
+    guard: &mut GatewayState,
+    gateway_call_id: &str,
+    echo_config: &EchoSuppressionQualityConfig,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    redaction_mode: RedactionMode,
+    text: &mut String,
+) -> bool {
+    let Some((prefix, age_ms)) = take_echo_prefix_candidate(guard, gateway_call_id) else {
+        return false;
+    };
+    if age_ms < 0 || age_ms as u64 > echo_config.tail_window_ms {
+        return false;
+    }
+    let Some(sanitized) = trim_quarantined_echo_prefix(text, &prefix) else {
+        emit_committed_echo_prefix_span(
+            guard,
+            gateway_call_id,
+            quality_session,
+            redaction_mode,
+            CommittedEchoPrefixSpan {
+                action: "preserved",
+                removed_chars: prefix.chars().count(),
+                removed_words: prefix.split_whitespace().count(),
+                remaining_chars: text.chars().count(),
+                remaining_words: text.split_whitespace().count(),
+                prefix_age_ms: age_ms as u64,
+            },
+        );
+        return false;
+    };
+
+    let removed_chars = text
+        .chars()
+        .count()
+        .saturating_sub(sanitized.chars().count());
+    let removed_words = prefix.split_whitespace().count();
+    let remaining_chars = sanitized.chars().count();
+    let remaining_words = sanitized.split_whitespace().count();
+    *text = sanitized;
+    let dropped = text.trim().is_empty();
+    emit_committed_echo_prefix_span(
+        guard,
+        gateway_call_id,
+        quality_session,
+        redaction_mode,
+        CommittedEchoPrefixSpan {
+            action: if dropped {
+                "dropped_empty"
+            } else {
+                "trimmed_prefix"
+            },
+            removed_chars,
+            removed_words,
+            remaining_chars,
+            remaining_words,
+            prefix_age_ms: age_ms as u64,
+        },
+    );
+    dropped
+}
+
+fn take_echo_prefix_candidate(
+    guard: &mut GatewayState,
+    gateway_call_id: &str,
+) -> Option<(String, i64)> {
+    let call = guard.calls.get_mut(gateway_call_id)?;
+    let prefix = call.last_echo_suppressed_text.take()?;
+    let at = call.last_echo_suppressed_at.take()?;
+    let age_ms = Utc::now().signed_duration_since(at).num_milliseconds();
+    Some((prefix, age_ms))
+}
+
+struct CommittedEchoPrefixSpan {
+    action: &'static str,
+    removed_chars: usize,
+    removed_words: usize,
+    remaining_chars: usize,
+    remaining_words: usize,
+    prefix_age_ms: u64,
+}
+
+fn emit_committed_echo_prefix_span(
+    guard: &mut GatewayState,
+    gateway_call_id: &str,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    redaction_mode: RedactionMode,
+    span: CommittedEchoPrefixSpan,
+) {
+    let config_id = quality_session
+        .map(|session| session.config_id.clone())
+        .unwrap_or_else(|| guard.quality.config.config_id());
+    let payload = json!({
+        "action": span.action,
+        "removed_chars": span.removed_chars,
+        "removed_words": span.removed_words,
+        "remaining_chars": span.remaining_chars,
+        "remaining_words": span.remaining_words,
+        "prefix_age_ms": span.prefix_age_ms,
+    });
+    let payload = match payload {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    guard.emit_quality_span_finished(
+        gateway_call_id,
+        QualitySpanEmission {
+            config_id,
+            redaction_mode,
+            span_name: "conversation.committed_echo_prefix",
+            category: "echo_suppression",
+            duration: Duration::ZERO,
+            critical_path: true,
+            concurrent: false,
+            payload,
+        },
+    );
+}
+
+fn transcript_event_with_text(event: &TranscriptEvent, text: String) -> TranscriptEvent {
+    match event {
+        TranscriptEvent::Partial { update, .. } => TranscriptEvent::Partial {
+            text,
+            update: update.clone(),
+        },
+        TranscriptEvent::Final { update, .. } => TranscriptEvent::Final {
+            text,
+            update: update.clone(),
+        },
+    }
+}
+
 fn tts_in_echo_window(tts: &TtsPlaybackState, tail_window_ms: i64) -> bool {
     match tts.status {
         TtsPlaybackStatus::Queued
@@ -3628,7 +3815,7 @@ async fn record_transcript_events(
         } else {
             "transcript.partial"
         };
-        let text = event.event.text().to_string();
+        let mut text = event.event.text().to_string();
         let suppressed = event.is_suppressed();
         reset_requested |= event.requires_session_reset();
         let call = guard.calls.get(gateway_call_id);
@@ -3752,6 +3939,19 @@ async fn record_transcript_events(
             continue;
         }
 
+        if matches!(kind, TranscriptKind::Final)
+            && sanitize_committed_echo_prefix(
+                &mut guard,
+                gateway_call_id,
+                echo_config,
+                context.quality_session,
+                redaction_mode,
+                &mut text,
+            )
+        {
+            continue;
+        }
+
         let turn_id = matches!(kind, TranscriptKind::Final).then(new_local_turn_id);
         guard.add_transcript(gateway_call_id, kind.clone(), text.clone());
         if matches!(kind, TranscriptKind::Final) {
@@ -3802,7 +4002,7 @@ async fn record_transcript_events(
             });
         }
         conversation_events.push(ConversationTranscriptEvent {
-            event: event.event.clone(),
+            event: transcript_event_with_text(&event.event, text.clone()),
             turn_id,
             confidence: transcript_confidence,
             stability: transcript_stability,
@@ -5692,6 +5892,146 @@ mod tests {
         assert!(call.transcripts.is_empty());
         assert_eq!(call.final_transcript, "");
         assert_eq!(call.echo_suppressed_transcripts, 1);
+    }
+
+    #[test]
+    fn quarantined_echo_prefix_trims_only_leading_tokens() {
+        assert_eq!(
+            trim_quarantined_echo_prefix(
+                "Gateway will begin. Stop now, please repeat this replacement sentence clearly",
+                "gateway will begin",
+            ),
+            Some("Stop now, please repeat this replacement sentence clearly".to_string())
+        );
+        assert_eq!(
+            trim_quarantined_echo_prefix(
+                "Stop now, gateway will begin should remain when it is not a prefix",
+                "gateway will begin",
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_echo_prefix_final_is_trimmed_before_forwarding() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        let (quality_tx, mut quality_rx) = mpsc::channel(16);
+        {
+            let mut guard = state.write().await;
+            guard.set_quality_event_sink(
+                crate::quality::QualityEventSink::with_sender(quality_tx),
+                None,
+            );
+            guard.start_tts_job(
+                &gateway_call_id,
+                "tts_echo".to_string(),
+                LiveTtsBackend::Kokoro82m,
+                "The gateway will begin repeating this long sentence so I can interrupt it during playback.",
+            );
+            guard.mark_tts_frames_queued(&gateway_call_id, "tts_echo", 20);
+        }
+        let format = MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        };
+
+        let suppressed = record_transcript_events(
+            &state,
+            &gateway_call_id,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Partial {
+                text: "Gateway will begin".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: Some(&text_calls),
+                early_response: None,
+                quality_session: None,
+                echo_config: None,
+                partial_speech_state: CallerSpeechState::Speaking,
+            },
+        )
+        .await;
+        assert!(suppressed.conversation_events.is_empty());
+
+        let outcome = record_transcript_events(
+            &state,
+            &gateway_call_id,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text:
+                    "Gateway will begin. Stop now, please repeat this replacement sentence clearly"
+                        .to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: Some(&text_calls),
+                early_response: None,
+                quality_session: None,
+                echo_config: None,
+                partial_speech_state: CallerSpeechState::Speaking,
+            },
+        )
+        .await;
+
+        assert!(!outcome.reset_requested);
+        assert_eq!(outcome.conversation_events.len(), 1);
+        assert_eq!(
+            outcome.conversation_events[0].event.text(),
+            "Stop now, please repeat this replacement sentence clearly"
+        );
+        let frame = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            frame,
+            GatewayTextFrame::CallerTurn { text, .. }
+                if text == "Stop now, please repeat this replacement sentence clearly"
+        ));
+
+        let mut saw_suppressed = false;
+        let mut saw_trimmed = false;
+        while let Ok(Some(event)) =
+            time::timeout(Duration::from_millis(100), quality_rx.recv()).await
+        {
+            if event.event == "transcript.suppressed" {
+                saw_suppressed = true;
+            }
+            if event.event == "voice.span.finished"
+                && event.payload["span"] == json!("conversation.committed_echo_prefix")
+                && event.payload["action"] == json!("trimmed_prefix")
+            {
+                saw_trimmed = true;
+            }
+            if saw_suppressed && saw_trimmed {
+                break;
+            }
+        }
+        assert!(
+            saw_suppressed,
+            "assistant echo suppression event should be emitted"
+        );
+        assert!(saw_trimmed, "committed prefix trim span should be emitted");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(
+            call.final_transcript,
+            "Stop now, please repeat this replacement sentence clearly"
+        );
+        assert_eq!(call.echo_suppressed_transcripts, 1);
+        assert!(call.last_echo_suppressed_text.is_none());
     }
 
     #[tokio::test]
