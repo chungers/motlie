@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 PDT | @codex-541 | Added the live-test breadcrumb roadmap for PR #565: every run now updates this PLAN, commits a redacted `docs/tests/*.toml` run record, and links the latest result/next hypothesis so future agents can resume without tmux context. |
 | 2026-06-12 PDT | @codex-366-impl | Resolved #488 generality review by moving final-settle fragment classifiers and conversation final-coalescing hold knobs into `VoiceQualityConfig.endpoint` with default-preserving values; `bins/telnyx-agent` now opts into `motlie.telnyx.text.partials.v1` for live advisory partial delivery. |
 | 2026-06-12 PDT | @codex-366-impl | Addressed #481/David stability ruling: opt-in `caller.partial` forwards backend-native `confidence` plus gateway-estimated stream-convergence/churn `stability`; stability is only for preparation/routing/debounce, never truth, confidence, calibrated probability, final response input, or a value to combine with confidence. |
 | 2026-06-11 PDT | @codex-366-impl | Generalized conversation final coalescing from smoke-test-only wording: coalescing handlers now use the 350 ms `endpoint.merge_window_ms` committed-turn debounce, and TTS starts from a 40-char first chunk by default. |
@@ -90,6 +91,66 @@ Execution policy for the initial implementation:
 - `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
 - all work needed only for those follow-on pairings belongs in phase 10 or later
 - phases are capability layers; milestones #364-#367 are shippable increments gated in Phase 8, so Phase 6 API/text-call tasks define contracts and stubs until their milestone 4 implementation gate
+
+---
+
+## Live Test Breadcrumb Roadmap
+
+This section is the durable handoff trail for PR #565 live tuning. After every
+live run, update this section and commit a redacted copy of that run's hybrid
+config/results TOML under `docs/tests/`. The local `$HOME/telnyx-test` copy may
+contain live routing values; the committed copy must keep placeholders only.
+
+### Run Records
+
+| Run | Mode | Committed record | Grade | Key result | Next action |
+| --- | --- | --- | --- | --- | --- |
+| 20260626-163544-7dcbe571-identity-bargein-v1 | inbound Identity/repeat, barge-in enabled, no turn batching | [docs/tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml](./tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml) | B | Active playback canceled once, replacement played, 0 underruns, 0 transport loss; raw ASR captured one assistant-echo fragment that was suppressed before agent dispatch. | Add agent-visible transcript artifacts and explicit cancel/replacement latency spans before treating raw transcript WER as the control metric. |
+
+### Current Roadmap
+
+- [x] Record the 2026-06-26 barge-in Identity run with redacted config/results
+  TOML in `docs/tests/`.
+  DESIGN reference: `DESIGN-545-conversation-policy.md`, `Conversation policy modes`
+- [ ] Emit an explicit agent-visible transcript artifact or quality event. Raw
+  ASR transcripts include suppressed assistant echo by design; WER and
+  processor-facing analysis need the exact post-suppression text stream seen by
+  the conversation handler.
+  DESIGN reference: `PROFILING.md`, `Application-turn traceability`
+- [ ] Add first-class latency spans for `final_asr_to_first_audio` and
+  `barge_cancel_to_replacement_first_audio`. Do not keep inferring these from
+  `quality.turn.playback_linked` timestamps.
+  DESIGN reference: `PROFILING.md`, `Barge-in span links`
+- [ ] Run the next barge-in Identity config-only test with
+  `voice_quality.conversation_policy.post_barge_in_silence_ms = 900` while
+  keeping partial/final ASR barge-in thresholds unchanged. Success is lower
+  replacement latency without stale echo replay or missed replacement speech.
+  DESIGN reference: `TESTING.md`, `Barge-In Policy Profiles`
+- [ ] Re-run the no-barge-in Identity baseline after the transcript/latency
+  observability fixes. Success is ordered FIFO repeats, no missed final words,
+  and no hidden suppressed-echo contamination in scored WER.
+  DESIGN reference: `TESTING.md`, `Bounded Pending Repeat-Reliability Profile`
+- [ ] Only after Identity latency/reliability stabilizes, test the same policy
+  surface with the prompt-handler/turn-batching path. Keep the policy boundary
+  independent of Identity semantics; no keyword matching or ASR-vs-assistant
+  semantic comparison is allowed for correctness decisions.
+  DESIGN reference: `DESIGN-545-conversation-policy.md`, `Policy insertion points`
+
+### Per-Run Update Rule
+
+For every future live run:
+
+- create a fresh local `$HOME/telnyx-test/runs/<run-id>/<run-id>.toml` startup
+  config
+- append structured results to that same local hybrid TOML after hangup
+- create a redacted committed copy at
+  `bins/telnyx-gateway/docs/tests/<run-id>.example.toml`
+- link the committed record in the Run Records table above
+- revise the Current Roadmap checklist when the run changes the next best
+  hypothesis
+
+Do not commit human phone numbers, live Telnyx connection IDs, tailnet hosts,
+public live hosts, or literal secrets.
 
 ---
 

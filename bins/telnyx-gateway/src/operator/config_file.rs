@@ -949,6 +949,56 @@ Mentioning generation_mod here is fine because this is not config.
         }
     }
 
+    #[test]
+    fn docs_live_run_test_records_parse_strictly() {
+        let relative = "docs/tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml";
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let raw = std::fs::read_to_string(&path).expect("read docs live-run test record");
+        let config = LoadedGatewayConfig::load(&path).expect("load docs live-run test record");
+
+        assert!(raw.starts_with("+++\n"), "{relative}");
+        assert!(raw.contains("<telnyx-connection-id>"), "{relative}");
+        assert!(raw.contains("<telnyx-phone-number>"), "{relative}");
+        assert!(raw.contains("<public-host>"), "{relative}");
+        assert!(raw.contains("## Run Results"), "{relative}");
+        assert_eq!(config.telnyx.api_key_ref, "env:TELNYX_API_KEY");
+        assert_eq!(
+            config.telnyx.selected_connection_id.as_deref(),
+            Some("<telnyx-connection-id>")
+        );
+        assert_eq!(
+            config.telnyx.selected_phone_number.as_deref(),
+            Some("<telnyx-phone-number>")
+        );
+        assert_eq!(
+            config.gateway.webhook_url.as_deref(),
+            Some("https://<public-host>/telnyx/webhooks")
+        );
+        assert_eq!(
+            config.gateway.media_url.as_deref(),
+            Some("wss://<public-host>/telnyx/media")
+        );
+        assert_eq!(
+            config.gateway.from_number.as_deref(),
+            Some("<telnyx-phone-number>")
+        );
+        assert!(config.conversation.enabled, "{relative}");
+        assert!(config.conversation.barge_in_enabled, "{relative}");
+        assert_eq!(
+            config.conversation.processor,
+            ConversationProcessorKind::Identity
+        );
+        assert_eq!(config.conversation.tts_backend, LiveTtsBackend::Kokoro82m);
+        assert_eq!(
+            config.voice_quality.tts.generation_mode,
+            crate::quality::TtsGenerationMode::Streaming
+        );
+        assert_eq!(config.voice_quality.tts.streaming_start_buffer_ms, 300);
+        assert_eq!(config.voice_quality.tts.tail_pad_ms, 200);
+        assert!(config.voice_quality.barge_in.enabled, "{relative}");
+        assert!(config.voice_quality.logging.enabled, "{relative}");
+    }
+
     #[tokio::test]
     async fn state_dump_round_trips_durable_gateway_config() {
         let log_path = std::env::temp_dir().join(format!(

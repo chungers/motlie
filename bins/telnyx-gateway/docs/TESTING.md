@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-26 PDT | @codex-541 | Added the PR breadcrumb requirement: each live run must update PLAN.md and commit a redacted `docs/tests/*.toml` run record linked from the roadmap. |
 | 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad tuning knobs for outbound pacing reliability. |
 | 2026-06-25 PDT | @codex-541 | Recorded the current barge-in coalesce-after-silence tuning profile and latest live-run result; tightened the next-run protocol to keep qualitative feedback out of Identity repeat capture. |
 | 2026-06-25 PDT | @codex-541 | Added final-ASR active-playback confidence gating after a failed barge-in run showed short finals could still cancel replacement playback. |
@@ -586,6 +587,12 @@ Every scored pass must be recorded in the structured run-record block below.
 After hangup, append machine-readable result blocks below the closing `+++`
 delimiter in the same run file. Markdown notes are allowed, but these structured
 blocks are required whenever their data exists.
+
+For PR tuning work, also create a redacted committed copy of the completed run
+record under `bins/telnyx-gateway/docs/tests/<run-id>.example.toml` and update
+[`PLAN.md`](PLAN.md)'s Live Test Breadcrumb Roadmap with the result and next
+hypothesis. The committed copy must keep placeholder routing values and secret
+references only.
 
 For each scored WER pass, append one TOML block with exact text or checksum and
 all edit counts:
