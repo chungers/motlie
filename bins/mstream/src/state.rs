@@ -28,11 +28,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::build_info;
 use crate::jsonl;
 use crate::protocol::{
-    AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, DoctorRequest,
-    EventsRequest, HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest,
-    LeaveRequest, NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
-    SessionListRequest, SessionMarkRequest, SessionRetagRequest, SnapshotRequest,
-    SummaryInputRequest, TimerStartRequest, WorkstreamSettings,
+    AgentState, AttachCommandRecord, AttachResolveRecord, AttachResolveRequest, BroadcastRequest,
+    ClientRequest, CloseRequest, ConnectRequest, DoctorRequest, EventsRequest, HandoffArmRequest,
+    InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest, NewRequest,
+    OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest, SessionListRequest,
+    SessionMarkRequest, SessionRetagRequest, SnapshotRequest, SummaryInputRequest,
+    TimerStartRequest, WorkstreamSettings,
 };
 use crate::tags;
 use crate::timeline::PublicCursor;
@@ -825,6 +826,9 @@ impl DaemonState {
         request: ClientRequest,
     ) -> anyhow::Result<Vec<Value>> {
         match request {
+            ClientRequest::ResolveAttach(request) => {
+                Self::resolve_attach_shared(shared, request).await
+            }
             ClientRequest::Connect(request) => Self::connect_shared(shared, request).await,
             ClientRequest::Scan { alias } => Self::scan_shared(shared, alias).await,
             ClientRequest::Close(request) => Self::close_shared(shared, request).await,
@@ -1085,6 +1089,31 @@ impl DaemonState {
                 eprintln!("mstream output audit marker failed for {workstream}: {err}");
             }
         }
+    }
+
+    async fn resolve_attach_shared(
+        shared: Arc<Mutex<Self>>,
+        request: AttachResolveRequest,
+    ) -> anyhow::Result<Vec<Value>> {
+        let target: SessionTarget = request.target.parse()?;
+        let handle = {
+            let state = shared.lock().await;
+            state.host_handle(target.host_alias())?
+        };
+        let resolved = Self::resolve_target(handle, target).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+            .await?;
+        let command = resolved
+            .target
+            .attach_command(request.mode.attach_mode())
+            .await?;
+        let record = AttachResolveRecord {
+            record_type: "ok".to_string(),
+            op: "attach_resolve".to_string(),
+            target: resolved.spec.to_string(),
+            command: attach_command_record(&command),
+        };
+        Ok(vec![serde_json::to_value(record)?])
     }
 
     async fn connect_shared(
@@ -6630,6 +6659,18 @@ fn datetime_option_json(timestamp: Option<DateTime<Utc>>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn attach_command_record(command: &motlie_tmux::AttachCommand) -> AttachCommandRecord {
+    AttachCommandRecord {
+        program: command.program().to_string_lossy().into_owned(),
+        args: command
+            .args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect(),
+        shell: command.shell_command(),
+    }
+}
+
 fn option_u64_json(value: Option<u64>) -> Value {
     value.map(Value::from).unwrap_or(Value::Null)
 }
@@ -6643,6 +6684,7 @@ fn add_secs(timestamp: DateTime<Utc>, seconds: u64) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::AttachResolveMode;
 
     fn mock_host(alias: &str, mock: motlie_tmux::transport::MockTransport) -> HostHandle {
         HostHandle::with_alias(motlie_tmux::TransportKind::Mock(mock), None, alias)
@@ -6683,6 +6725,18 @@ mod tests {
         motlie_tmux::transport::MockTransport::new()
             .with_error("list-sessions", &error)
             .with_default("")
+    }
+
+    #[test]
+    fn attach_resolve_mode_maps_to_libtmux_attach_mode() {
+        assert_eq!(
+            AttachResolveMode::Pty.attach_mode(),
+            motlie_tmux::AttachMode::PtyHandoff
+        );
+        assert_eq!(
+            AttachResolveMode::WindowInjection.attach_mode(),
+            motlie_tmux::AttachMode::WindowInjection
+        );
     }
 
     fn fast_channel_manager_state() -> DaemonState {

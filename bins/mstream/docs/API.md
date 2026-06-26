@@ -4,6 +4,12 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 | @codex-570-impl | Clarified that `attach` command construction is delegated to libtmux `AttachMode`; mstream owns only RPC and visit-window lifecycle. |
+| 2026-06-26 | @codex-570-impl | Documented direct `env -u TMUX` local attach for `attach --here` and failed visit-pane diagnostics before cleanup. |
+| 2026-06-25 | @codex-570-impl | Documented auto-sweep on `attach --here` and the at-most-one stale attach window invariant. |
+| 2026-06-25 | @codex-570-impl | Updated `attach --here` docs for multi-client `switch-client -c` forwarding and visit-pane-exit cleanup. |
+| 2026-06-25 | @codex-570-impl | Clarified standalone `attach --sweep` cleanup and that `attach --here` blocks for the visit lifecycle. |
+| 2026-06-25 | @codex-570-impl | Documented `mstream attach <target> [--here] [--sweep] [--print]` for daemon-resolved attach commands, PTY handoff, and tagged caller-tmux visits. |
 | 2026-06-23 | @codex-561-design | Implemented B3 cleanup contract: `doctor --quarantine-dead` and `--prune-quarantined` operate only on confirmed-dead rows and preserve unreachable rows per #401 lifecycle hygiene. |
 | 2026-06-10 | @mstream453-impl | Added issue #453 mstream fixes: delivery acknowledgement, missing-session roster cleanup, replayed cross-workstream memberships, `snapshot --target`, daemon build identity, timer start upsert behavior, timer paste-mode selection, and delivery primitive parity controls. |
 | 2026-06-07 | @codex-401-impl | Clarified issue #409 audit durability: non-`agent_output` events are lossless-enqueued, high-volume `agent_output` is best-effort with observable degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
@@ -126,6 +132,58 @@ Daemon records are keyed by `(host, tmux session_id)`, for example
 use the resolved stable target when the session exists. `scan` reconciles by
 session id, updates display names after rename, and drops a stale in-memory
 record if tmux reuses an id with a different session creation timestamp.
+
+## Attach
+
+```sh
+mstream attach local::codex-worker --print
+mstream attach local::codex-worker
+mstream attach local::codex-worker --here
+mstream attach local::codex-worker --sweep
+mstream attach --sweep
+```
+
+`attach` asks the daemon to resolve `<host>::<session-or-id>` to the same tmux
+attach argv used by `motlie-tmux`. The daemon maps the requested attach context
+to `motlie_tmux::AttachMode` and receives an opaque `AttachCommand`; mstream does
+not assemble tmux or ssh argv. The daemon does not take over a PTY; it only
+validates the connected host/target and returns the command. `--print` writes
+that shell-safe command line to stdout and does not attach. Without `--sweep`,
+shell wrappers and agent TUIs can ask for the exact command without side effects.
+
+When the caller is not inside tmux, the default behavior is foreground PTY
+handoff: `mstream` runs the daemon-resolved command with the current terminal as
+stdin/stdout/stderr and returns the attach child shell status. Local targets in
+this path keep the bare local tmux attach command. When `$TMUX` is set, `--here`
+is selected automatically. `--here` asks the daemon for a window-injection attach
+command; localhost/same-server targets use a direct local command such as
+`env -u TMUX tmux attach-session -t $N` so the nested client runs in the visit
+pane without tripping tmux's `$TMUX` nesting refusal and without requiring SSH
+authentication. Remote targets continue to use SSH attach commands. Both local
+and remote injected visits keep the same nested-client return behavior, including
+returning to the caller tmux session with `Ctrl-b 0`.
+
+`--here` creates a detached local caller-tmux window named `mstream-attach`,
+tags it with `@mstream/attach=true` and target/spawn metadata, switches each
+attached client of the caller session to that window with
+`switch-client -c <tty>`, and waits until the injected visit pane exits or
+disappears. Before creating each visit window, `--here` also auto-sweeps
+inactive `@mstream/attach` windows in the caller tmux server. The `--here`
+invocation blocks until the visit pane exits, so orchestrators that need their
+prompt back while the user is visiting must run it in the background. Successful
+visit exits self-kill the injected window; failed attach exits leave the pane
+long enough for `mstream` to capture exit status and pane output, report a
+target-specific error, then reap the window. If the user walks away from a visit
+while the nested attach keeps running, the next `attach --here` reaps that
+inactive stale window before creating a new one, so at most one stale attach
+window can exist at a time.
+
+`--sweep` is caller-tmux cleanup. Before resolving or attaching, it scans
+local tmux windows for inactive `@mstream/attach` windows and kills them while
+leaving the active visit window untouched. The same sweep runs automatically
+before every `--here` visit window is created. The explicit flag still provides
+standalone cleanup as `mstream attach --sweep`, even when the prior target is
+gone; standalone cleanup requires `$TMUX`.
 
 ## Session Assignment
 

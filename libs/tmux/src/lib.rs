@@ -14,7 +14,9 @@ pub mod transport;
 pub mod types;
 mod uri;
 
-pub use attach::{AttachExit, AttachOptions};
+pub use attach::{
+    run_attach_command_with_options, AttachCommand, AttachExit, AttachMode, AttachOptions,
+};
 pub use capture::{
     has_visible_text, normalize_plain_text, normalize_screen_stable, overlap_deduplicate,
     pane_tail_excerpt, strip_ansi,

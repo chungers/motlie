@@ -4,6 +4,11 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 | @codex-570-impl | Moved attach command construction behind libtmux `AttachMode`; mstream keeps only resolve RPC and visit-window lifecycle policy. |
+| 2026-06-26 | @codex-570-impl | Switched local caller-tmux attach visits to direct `env -u TMUX` local attach plus failed-pane diagnostics before reap. |
+| 2026-06-25 | @codex-570-impl | Added auto-sweep-on-attach to bound abandoned `--here` visits to at most one stale window. |
+| 2026-06-25 | @codex-570-impl | Updated attach design after live dogfood: switch all caller-session clients explicitly and reap on visit-pane exit rather than session active-window polling. |
+| 2026-06-25 | @codex-570-impl | Added issue #570 attach/forward-terminal design: daemon attach-command resolution plus client-owned PTY handoff or tagged caller-tmux window injection and reap. |
 | 2026-06-07 | @codex-401-impl | Defined issue #409 audit durability contract: non-`agent_output` events are lossless, `agent_output` is best-effort with degraded counters, shutdown drains the writer, and phone scrubbing covers multiline/Unicode digit runs. |
 | 2026-06-07 | @codex-401-impl | Reconciled issue #409 durable audit log semantics with the state/recovery requirements: redacted socket-adjacent event JSONL is replayed on startup, but host/session/timer/workflow state remains non-durable. |
 | 2026-06-06 | @codex-401-impl | Added issue #401 lifecycle semantics: `quarantined` state, workstream-retained `retire`, gated `reclaim`, and scan-time registry reconciliation. |
@@ -127,6 +132,9 @@ unstick collaborators.
   display active sessions by the workstream assigned through mstream.
 - FR22: Rename and retag live sessions without recreating them, while keeping
   daemon tracking keyed by stable tmux session id.
+- FR23: Support `mstream attach <target> [--here] [--sweep] [--print]`: the
+  daemon resolves the connected tmux target to attach argv, while the client
+  owns PTY handoff or caller-tmux window injection and reaping.
 
 ### State And Recovery Requirements
 
@@ -385,6 +393,45 @@ After connecting hosts, the daemon hydrates by scanning tmux:
 If a workstream has no tagged sessions, it cannot be reconstructed after
 restart. This is acceptable for the first design because the no-local-state
 requirement is stronger than durable empty-workstream metadata.
+
+### Attach / Forward Terminal
+
+`mstream attach <target> [--here] [--sweep] [--print]` is a thin CLI and
+lifecycle layer over existing `motlie-tmux` attach transport. The daemon owns
+only target resolution: it resolves the connected `FleetTargetSpec` to a fresh
+session `Target`, verifies the session has not been reused, and returns the
+`AttachCommand` argv. The daemon never attempts to attach because it has no
+foreground PTY.
+
+The client chooses the realization:
+
+- `--print` writes the shell-safe attach command and performs no attach side
+  effect; cleanup only runs when `--sweep` is also present.
+- Outside tmux, the default is PTY handoff: the client requests
+  `motlie_tmux::AttachMode::PtyHandoff`, runs the returned opaque attach argv
+  with the caller terminal inherited, and returns the attach child shell status.
+  Local targets keep the bare local tmux attach command in this path.
+- Inside tmux (`$TMUX` set, or explicit `--here`), the client asks the daemon for
+  a `motlie_tmux::AttachMode::WindowInjection` command. Libtmux owns the command
+  matrix: local targets become direct local attach with `TMUX` removed
+  (`env -u TMUX tmux attach ...`) while remote targets keep SSH attach. Both
+  forms preserve the same nested-client return behavior, including `Ctrl-b 0`
+  back to the caller session. The client auto-sweeps inactive
+  `@mstream/attach` windows in the caller tmux server, creates a detached
+  caller-tmux window running the resolved attach command, tags it with
+  `@mstream/attach` plus target/spawn metadata, switches every attached client
+  of the caller session to that window with `switch-client -c <tty>`, then waits
+  for the injected visit pane to exit or disappear before cleanup.
+
+Injected windows are ephemeral mstream-owned visit windows. Cleanup is keyed to
+two triggers: successful inner detach exits the visit pane and self-kills the
+current window; failed attach exits preserve the dead pane long enough for
+`mstream` to capture exit status/output, report a target-specific error, and
+then reap the window; if a user walks away while the nested attach stays alive,
+the next `attach --here` auto-sweep removes that inactive stale window before
+creating another one. Because every `--here` attach sweeps before create, at
+most one stale attach window can exist at a time. Standalone `--sweep` remains
+the explicit cleanup-now command and preserves any active visit window.
 
 ### Workstream Commands
 

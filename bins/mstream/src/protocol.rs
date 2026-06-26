@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use motlie_tmux::AttachMode;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_WORKSTREAM_EVENT_LIMIT: usize = 1_000;
@@ -88,6 +89,7 @@ impl InterruptKey {
 pub enum ClientRequest {
     DaemonStatus,
     DaemonStop,
+    ResolveAttach(AttachResolveRequest),
     Connect(ConnectRequest),
     Hosts,
     Scan {
@@ -146,6 +148,46 @@ pub enum ClientRequest {
     Snapshot(SnapshotRequest),
     SummaryInput(SummaryInputRequest),
     Recruit(RecruitRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachResolveRequest {
+    pub target: String,
+    #[serde(default)]
+    pub mode: AttachResolveMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachResolveMode {
+    #[default]
+    Pty,
+    WindowInjection,
+}
+
+impl AttachResolveMode {
+    pub fn attach_mode(self) -> AttachMode {
+        match self {
+            AttachResolveMode::Pty => AttachMode::PtyHandoff,
+            AttachResolveMode::WindowInjection => AttachMode::WindowInjection,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachCommandRecord {
+    pub program: String,
+    pub args: Vec<String>,
+    pub shell: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachResolveRecord {
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub op: String,
+    pub target: String,
+    pub command: AttachCommandRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
