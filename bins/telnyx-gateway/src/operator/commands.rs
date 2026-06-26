@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegistry};
 use crate::call_control::{
@@ -47,6 +47,8 @@ impl OperatorSourceChannel {
         }
     }
 }
+
+const TELNYX_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct GatewayContext {
@@ -147,32 +149,31 @@ impl GatewayContext {
                 target.as_deref(),
                 self.session.selected_call.as_deref(),
             )?;
-            let (gateway_call_id, call_control_id) = {
-                let call = guard
-                    .calls
-                    .get_mut(&call_id)
-                    .ok_or_else(|| DriverError::NotFound {
-                        kind: "call",
-                        name: call_id.clone(),
-                    })?;
-                if call.status != CallStatus::PendingInbound {
-                    return Err(DriverError::message(format!(
-                        "call {} is {}, expected waiting",
-                        call.gateway_call_id,
-                        call.status.label()
-                    )));
-                }
-                call.asr_backend = Some(asr_backend);
-                call.status = CallStatus::Answering;
-                call.push_timeline("operator requested answer");
-                call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
-                (
-                    call.gateway_call_id.clone(),
-                    call.ids.call_control_id.clone(),
-                )
-            };
-            guard.attach_conversation(&gateway_call_id, ConversationMode::Auto);
-            (gateway_call_id, call_control_id, media_url, media)
+            let call = guard
+                .calls
+                .get_mut(&call_id)
+                .ok_or_else(|| DriverError::NotFound {
+                    kind: "call",
+                    name: call_id.clone(),
+                })?;
+            if call.status != CallStatus::PendingInbound {
+                return Err(DriverError::message(format!(
+                    "call {} is {}, expected waiting",
+                    call.gateway_call_id,
+                    call.status.label()
+                )));
+            }
+            call.asr_backend = Some(asr_backend);
+            call.last_error = None;
+            call.status = CallStatus::Answering;
+            call.push_timeline("operator requested answer");
+            call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
+            (
+                call.gateway_call_id.clone(),
+                call.ids.call_control_id.clone(),
+                media_url,
+                media,
+            )
         };
         self.session.selected_call = Some(gateway_call_id.clone());
 
@@ -184,14 +185,69 @@ impl GatewayContext {
             );
         }
 
-        self.telnyx
-            .answer_call(&AnswerRequest {
+        let answer_result = tokio::time::timeout(
+            TELNYX_ANSWER_TIMEOUT,
+            self.telnyx.answer_call(&AnswerRequest {
                 call_control_id: &call_control_id,
                 stream_url: &stream_url,
                 media,
-            })
-            .await
-            .map_err(driver_anyhow)?;
+            }),
+        )
+        .await;
+        let answer_result = match answer_result {
+            Ok(result) => result.map_err(driver_anyhow),
+            Err(_) => Err(DriverError::message(format!(
+                "Telnyx answer timed out after {} ms",
+                TELNYX_ANSWER_TIMEOUT.as_millis()
+            ))),
+        };
+        if let Err(error) = answer_result {
+            let error_message = error.to_string();
+            let mut guard = self.state.write().await;
+            let mut should_detach = false;
+            if let Some(call) = guard.calls.get_mut(&gateway_call_id) {
+                call.last_error = Some(error_message.clone());
+                if call.status == CallStatus::Answering {
+                    call.status = CallStatus::PendingInbound;
+                    call.asr_backend = None;
+                    should_detach = call.conversation.attached;
+                    call.push_timeline(format!(
+                        "answer failed; returned to waiting: {error_message}"
+                    ));
+                } else {
+                    call.push_timeline(format!(
+                        "answer failed after state changed: {error_message}"
+                    ));
+                }
+            }
+            if should_detach {
+                guard.detach_conversation(&gateway_call_id);
+            }
+            guard.log(
+                LogLevel::Warn,
+                format!("answer failed for inbound call {gateway_call_id}: {error_message}"),
+            );
+            return Err(error);
+        }
+
+        {
+            let mut guard = self.state.write().await;
+            let should_attach = guard
+                .calls
+                .get(&gateway_call_id)
+                .map(|call| call.status == CallStatus::Answering)
+                .unwrap_or(false);
+            if should_attach {
+                guard.attach_conversation(&gateway_call_id, ConversationMode::Auto);
+            } else {
+                guard.log(
+                    LogLevel::Warn,
+                    format!(
+                        "answer accepted after inbound call {gateway_call_id} left answering state"
+                    ),
+                );
+            }
+        }
 
         tracing::info!(
             gateway_call_id,
@@ -4971,6 +5027,74 @@ mod tests {
         assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
         assert!(call.conversation.attached);
         assert_eq!(call.conversation.mode, ConversationMode::Auto);
+    }
+
+    #[tokio::test]
+    async fn failed_answer_returns_call_to_waiting_for_retry() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+            guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: None,
+                },
+                None,
+                None,
+                CallStatus::PendingInbound,
+            )
+        };
+        let failing_telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, false);
+        let context = GatewayContext::new(state.clone(), failing_telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let error = engine
+            .run_line("answer")
+            .await
+            .expect_err("missing API key should fail answer");
+
+        assert!(error.to_string().contains("missing Telnyx API key"));
+        {
+            let guard = state.read().await;
+            let call = guard
+                .calls
+                .get(&gateway_call_id)
+                .expect("call remains tracked");
+            assert_eq!(call.status, CallStatus::PendingInbound);
+            assert_eq!(call.asr_backend, None);
+            assert!(!call.conversation.attached);
+            assert!(call
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("missing Telnyx API key")));
+            assert!(call
+                .timeline
+                .iter()
+                .any(|entry| entry.message.contains("answer failed; returned to waiting")));
+        }
+
+        let retry_telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let retry_context = GatewayContext::new(state.clone(), retry_telnyx);
+        let mut retry_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(retry_context);
+
+        let output = retry_engine.run_line("answer").await.expect("retry answer");
+
+        assert_eq!(
+            output.lines,
+            vec![format!("answer requested for {gateway_call_id}")]
+        );
+        let guard = state.read().await;
+        let call = guard
+            .calls
+            .get(&gateway_call_id)
+            .expect("call remains tracked after retry");
+        assert_eq!(call.status, CallStatus::Answering);
+        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
+        assert!(call.conversation.attached);
+        assert_eq!(call.last_error, None);
     }
 
     #[tokio::test]
