@@ -152,6 +152,16 @@ pub enum ClientRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachResolveRequest {
     pub target: String,
+    #[serde(default)]
+    pub mode: AttachResolveMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachResolveMode {
+    #[default]
+    Pty,
+    WindowInjection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

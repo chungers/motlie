@@ -14,9 +14,9 @@ use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
 use motlie_agent as agent;
 use motlie_tmux::{
-    CreateSessionOptions, Fleet, FleetTargetSpec, HostHandle, KeySequence, ResolvedFleetTarget,
-    SessionEnvVar, SessionInfo, SessionInventory, SessionTag, SinkEvent, SshConfig, Target,
-    TargetOutput,
+    ssh_attach_command_with_options, AttachCommand, AttachOptions, CreateSessionOptions, Fleet,
+    FleetTargetSpec, HostHandle, KeySequence, ResolvedFleetTarget, SessionEnvVar, SessionInfo,
+    SessionInventory, SessionTag, SinkEvent, SshConfig, Target, TargetOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -28,12 +28,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::build_info;
 use crate::jsonl;
 use crate::protocol::{
-    AgentState, AttachCommandRecord, AttachResolveRecord, AttachResolveRequest, BroadcastRequest,
-    ClientRequest, CloseRequest, ConnectRequest, DoctorRequest, EventsRequest, HandoffArmRequest,
-    InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest, NewRequest,
-    OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest, SessionListRequest,
-    SessionMarkRequest, SessionRetagRequest, SnapshotRequest, SummaryInputRequest,
-    TimerStartRequest, WorkstreamSettings,
+    AgentState, AttachCommandRecord, AttachResolveMode, AttachResolveRecord, AttachResolveRequest,
+    BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, DoctorRequest, EventsRequest,
+    HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
+    NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
+    SessionListRequest, SessionMarkRequest, SessionRetagRequest, SnapshotRequest,
+    SummaryInputRequest, TimerStartRequest, WorkstreamSettings,
 };
 use crate::tags;
 use crate::timeline::PublicCursor;
@@ -1096,14 +1096,19 @@ impl DaemonState {
         request: AttachResolveRequest,
     ) -> anyhow::Result<Vec<Value>> {
         let target: SessionTarget = request.target.parse()?;
-        let handle = {
+        let (handle, host_uri) = {
             let state = shared.lock().await;
-            state.host_handle(target.host_alias())?
+            let host_uri = state
+                .hosts
+                .get(target.host_alias())
+                .map(|record| record.uri.clone());
+            (state.host_handle(target.host_alias())?, host_uri)
         };
         let resolved = Self::resolve_target(handle, target).await?;
         Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
             .await?;
-        let command = resolved.target.attach_command().await?;
+        let command =
+            Self::attach_command_for_resolve(&resolved, host_uri.as_deref(), request.mode).await?;
         let record = AttachResolveRecord {
             record_type: "ok".to_string(),
             op: "attach_resolve".to_string(),
@@ -1111,6 +1116,48 @@ impl DaemonState {
             command: attach_command_record(&command),
         };
         Ok(vec![serde_json::to_value(record)?])
+    }
+
+    async fn attach_command_for_resolve(
+        resolved: &ResolvedTarget,
+        host_uri: Option<&str>,
+        mode: AttachResolveMode,
+    ) -> anyhow::Result<AttachCommand> {
+        if mode == AttachResolveMode::WindowInjection {
+            if let Some(command) = Self::loopback_ssh_attach_command(resolved, host_uri)? {
+                return Ok(command);
+            }
+        }
+        Ok(resolved.target.attach_command().await?)
+    }
+
+    fn loopback_ssh_attach_command(
+        resolved: &ResolvedTarget,
+        host_uri: Option<&str>,
+    ) -> anyhow::Result<Option<AttachCommand>> {
+        let Some(host_uri) = host_uri else {
+            return Ok(None);
+        };
+        let config = SshConfig::parse(host_uri).with_context(|| {
+            format!(
+                "failed to parse connected host URI for attach target {}",
+                resolved.spec
+            )
+        })?;
+        if !config.is_localhost() {
+            return Ok(None);
+        }
+        let target = resolved
+            .target
+            .session_id()
+            .with_context(|| format!("attach target {} is not a session", resolved.spec))?;
+        Ok(Some(ssh_attach_command_with_options(
+            &config,
+            "tmux",
+            config.socket(),
+            target,
+            &AttachOptions::default(),
+        )))
     }
 
     async fn connect_shared(
@@ -6721,6 +6768,53 @@ mod tests {
         motlie_tmux::transport::MockTransport::new()
             .with_error("list-sessions", &error)
             .with_default("")
+    }
+
+    #[tokio::test]
+    async fn resolve_attach_window_injection_uses_loopback_ssh_for_localhost_uri() {
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ worker $203 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        state.hosts.insert(
+            "local".to_string(),
+            HostRecord {
+                uri: "ssh://dchung@localhost".to_string(),
+                labels: BTreeMap::new(),
+                capacity: BTreeMap::new(),
+                work_root: None,
+            },
+        );
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::resolve_attach_shared(
+            Arc::clone(&shared),
+            AttachResolveRequest {
+                target: "local::$203".to_string(),
+                mode: AttachResolveMode::WindowInjection,
+            },
+        )
+        .await
+        .expect("resolve attach");
+
+        let record: AttachResolveRecord =
+            serde_json::from_value(records[0].clone()).expect("attach record");
+        assert_eq!(record.target, "local::$203");
+        assert_eq!(record.command.program, "ssh");
+        assert_eq!(record.command.args[0], "-t");
+        assert!(record
+            .command
+            .args
+            .iter()
+            .any(|arg| arg == "dchung@localhost"));
+        assert!(record
+            .command
+            .args
+            .iter()
+            .any(|arg| arg.contains("attach-session") && arg.contains("$203")));
+        assert!(record.command.shell.contains("dchung@localhost"));
+        assert!(record.command.shell.contains("attach-session"));
     }
 
     fn fast_channel_manager_state() -> DaemonState {

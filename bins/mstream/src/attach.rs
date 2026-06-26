@@ -11,20 +11,30 @@ use tokio::time::{sleep, Duration};
 use crate::cli::AttachArgs;
 use crate::client;
 use crate::protocol::{
-    AttachCommandRecord, AttachResolveRecord, AttachResolveRequest, ClientRequest,
+    AttachCommandRecord, AttachResolveMode, AttachResolveRecord, AttachResolveRequest,
+    ClientRequest,
 };
 
 const ATTACH_TAG: &str = "@mstream/attach";
 const ATTACH_TARGET_TAG: &str = "@mstream/attach-target";
 const ATTACH_SPAWNED_BY_TAG: &str = "@mstream/attach-spawned-by";
 const ATTACH_CREATED_AT_TAG: &str = "@mstream/attach-created-at";
+const ATTACH_READY_TAG: &str = "@mstream/attach-ready";
 const ATTACH_WINDOW_NAME: &str = "mstream-attach";
+const ATTACH_FAILURE_CAPTURE_LINES: &str = "-120";
 const RETURN_POLL_MS: u64 = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AttachWindow {
     window_id: String,
     pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VisitPaneState {
+    Running,
+    Dead { exit_status: Option<i32> },
+    Gone,
 }
 
 pub async fn run(socket: &Path, args: AttachArgs) -> anyhow::Result<i32> {
@@ -43,7 +53,12 @@ pub async fn run(socket: &Path, args: AttachArgs) -> anyhow::Result<i32> {
         None if args.sweep => return Ok(0),
         None => bail!("<target> is required unless --sweep is used"),
     };
-    let resolved = resolve_attach_command(socket, target).await?;
+    let mode = if here {
+        AttachResolveMode::WindowInjection
+    } else {
+        AttachResolveMode::Pty
+    };
+    let resolved = resolve_attach_command(socket, target, mode).await?;
 
     if args.print {
         println!("{}", resolved.command.shell);
@@ -69,8 +84,9 @@ pub async fn run(socket: &Path, args: AttachArgs) -> anyhow::Result<i32> {
 async fn resolve_attach_command(
     socket: &Path,
     target: String,
+    mode: AttachResolveMode,
 ) -> anyhow::Result<AttachResolveRecord> {
-    let request = ClientRequest::ResolveAttach(AttachResolveRequest { target });
+    let request = ClientRequest::ResolveAttach(AttachResolveRequest { target, mode });
     let records = client::send_request(socket, &request).await?;
     let record = records
         .into_iter()
@@ -109,7 +125,7 @@ async fn attach_here(resolved: &AttachResolveRecord) -> anyhow::Result<()> {
         let _ = kill_window(&visit.window_id);
         return Err(err);
     }
-    wait_for_visit_pane_exit_and_reap(&visit).await
+    wait_for_visit_pane_exit_and_reap(&visit, &resolved.target).await
 }
 
 fn prepare_attach_here_visit(
@@ -215,11 +231,24 @@ fn create_attach_window(
     ])?;
     let visit = parse_attach_window(&output)?;
 
-    if let Err(err) = tag_attach_window(&visit.window_id, resolved) {
+    if let Err(err) = prepare_attach_window_for_release(&visit, resolved) {
         let _ = kill_window(&visit.window_id);
         return Err(err);
     }
     Ok(visit)
+}
+
+fn prepare_attach_window_for_release(
+    visit: &AttachWindow,
+    resolved: &AttachResolveRecord,
+) -> anyhow::Result<()> {
+    set_visit_pane_remain_on_exit(&visit.pane_id)?;
+    tag_attach_window(&visit.window_id, resolved)?;
+    set_window_option(&visit.window_id, ATTACH_READY_TAG, "true")
+}
+
+fn set_visit_pane_remain_on_exit(pane_id: &str) -> anyhow::Result<()> {
+    tmux_status(["set-option", "-p", "-t", pane_id, "remain-on-exit", "on"])
 }
 
 fn parse_attach_window(output: &str) -> anyhow::Result<AttachWindow> {
@@ -255,34 +284,105 @@ fn set_window_option(window_id: &str, key: &str, value: &str) -> anyhow::Result<
 
 fn attach_window_shell(attach_shell: &str) -> String {
     format!(
-        "status=0; {attach_shell} || status=$?; tmux kill-window -t \"$TMUX_PANE\" >/dev/null 2>&1 || true; exit $status"
+        "ready_tries=600; while [ \"$ready_tries\" -gt 0 ]; do if [ \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{{{ATTACH_READY_TAG}}}' 2>/dev/null)\" = \"true\" ]; then break; fi; ready_tries=$((ready_tries - 1)); sleep 0.05; done; if [ \"$ready_tries\" -le 0 ]; then tmux kill-window -t \"$TMUX_PANE\" >/dev/null 2>&1 || true; exit 124; fi; status=0; {{ {attach_shell}; }} || status=$?; if [ \"$status\" -eq 0 ]; then tmux kill-window -t \"$TMUX_PANE\" >/dev/null 2>&1 || true; fi; exit \"$status\""
     )
 }
 
-async fn wait_for_visit_pane_exit_and_reap(visit: &AttachWindow) -> anyhow::Result<()> {
+async fn wait_for_visit_pane_exit_and_reap(
+    visit: &AttachWindow,
+    target: &str,
+) -> anyhow::Result<()> {
     loop {
         sleep(Duration::from_millis(RETURN_POLL_MS)).await;
-        match visit_pane_is_running(&visit.pane_id) {
-            Ok(true) => {}
-            Ok(false) => {
-                kill_window(&visit.window_id)?;
-                return Ok(());
+        match visit_pane_state(&visit.pane_id)? {
+            VisitPaneState::Running => {}
+            VisitPaneState::Gone => return Ok(()),
+            VisitPaneState::Dead { exit_status } => {
+                let pane_output = capture_visit_pane_output(&visit.pane_id);
+                return reap_dead_visit(visit, target, exit_status, &pane_output, kill_window);
             }
-            Err(_) => return Ok(()),
         }
     }
 }
 
-fn visit_pane_is_running(pane_id: &str) -> anyhow::Result<bool> {
-    match tmux_output(["display-message", "-p", "-t", pane_id, "#{pane_dead}"]) {
-        Ok(output) => match output.trim() {
-            "0" => Ok(true),
-            "1" => Ok(false),
-            value => bail!("tmux pane_dead returned unexpected value: {value}"),
-        },
-        Err(err) if tmux_error_contains(&err, "can't find pane") => Ok(false),
-        Err(err) if tmux_error_contains(&err, "can't find window") => Ok(false),
+fn visit_pane_state(pane_id: &str) -> anyhow::Result<VisitPaneState> {
+    match tmux_output([
+        "display-message",
+        "-p",
+        "-t",
+        pane_id,
+        "#{pane_dead}\t#{pane_dead_status}",
+    ]) {
+        Ok(output) => parse_visit_pane_state(&output),
+        Err(err) if tmux_error_contains(&err, "can't find pane") => Ok(VisitPaneState::Gone),
+        Err(err) if tmux_error_contains(&err, "can't find window") => Ok(VisitPaneState::Gone),
         Err(err) => Err(err),
+    }
+}
+
+fn parse_visit_pane_state(output: &str) -> anyhow::Result<VisitPaneState> {
+    let line = output.trim_end();
+    let (dead, status) = line.split_once('\t').unwrap_or((line, ""));
+    match dead.trim() {
+        "0" => Ok(VisitPaneState::Running),
+        "1" => {
+            let status = status.trim();
+            let exit_status = if status.is_empty() {
+                None
+            } else {
+                Some(
+                    status
+                        .parse::<i32>()
+                        .with_context(|| format!("invalid tmux pane_dead_status: {status}"))?,
+                )
+            };
+            Ok(VisitPaneState::Dead { exit_status })
+        }
+        value => bail!("tmux pane_dead returned unexpected value: {value}"),
+    }
+}
+
+fn capture_visit_pane_output(pane_id: &str) -> String {
+    tmux_output([
+        "capture-pane",
+        "-p",
+        "-t",
+        pane_id,
+        "-S",
+        ATTACH_FAILURE_CAPTURE_LINES,
+    ])
+    .unwrap_or_else(|err| format!("<failed to capture pane output: {err}>"))
+}
+
+fn reap_dead_visit(
+    visit: &AttachWindow,
+    target: &str,
+    exit_status: Option<i32>,
+    pane_output: &str,
+    kill: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    kill(&visit.window_id)?;
+    if exit_status == Some(0) {
+        return Ok(());
+    }
+    Err(attach_failure_error(target, exit_status, pane_output))
+}
+
+fn attach_failure_error(
+    target: &str,
+    exit_status: Option<i32>,
+    pane_output: &str,
+) -> anyhow::Error {
+    let status = exit_status
+        .map(|status| status.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let pane_output = pane_output.trim_end();
+    if pane_output.is_empty() {
+        anyhow!("attach {target} failed in visit window with exit status {status}; no pane output captured")
+    } else {
+        anyhow!(
+            "attach {target} failed in visit window with exit status {status}; pane output:\n{pane_output}"
+        )
     }
 }
 
@@ -385,12 +485,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attach_window_shell_self_kills_after_attach_exits() {
-        let shell = attach_window_shell("ssh -t host 'tmux attach-session -t '\''$1'\'''");
+    fn attach_window_shell_waits_for_ready_tag_and_self_kills_success_only() {
+        let shell = attach_window_shell("ssh -t host 'tmux attach-session -t '''$1''''");
 
+        assert!(shell.contains("#{@mstream/attach-ready}"));
+        assert!(shell.contains("sleep 0.05"));
+        assert!(shell.contains("exit 124"));
         assert!(shell.contains("ssh -t host"));
-        assert!(shell.contains("tmux kill-window -t \"$TMUX_PANE\""));
-        assert!(shell.contains("exit $status"));
+        assert!(shell.contains(
+            "} || status=$?; if [ \"$status\" -eq 0 ]; then tmux kill-window -t \"$TMUX_PANE\""
+        ));
+        assert!(shell.contains("exit \"$status\""));
+    }
+
+    #[test]
+    fn parse_visit_pane_state_reads_running_dead_and_status() {
+        assert_eq!(
+            parse_visit_pane_state("0\t\n").unwrap(),
+            VisitPaneState::Running
+        );
+        assert_eq!(
+            parse_visit_pane_state("1\t255\n").unwrap(),
+            VisitPaneState::Dead {
+                exit_status: Some(255)
+            }
+        );
+        assert_eq!(
+            parse_visit_pane_state("1\t\n").unwrap(),
+            VisitPaneState::Dead { exit_status: None }
+        );
+        assert!(parse_visit_pane_state("unexpected\t0\n")
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected value"));
+    }
+
+    #[test]
+    fn failed_visit_is_reaped_and_reports_captured_output() {
+        let visit = AttachWindow {
+            window_id: "@7".to_string(),
+            pane_id: "%13".to_string(),
+        };
+        let killed = std::cell::RefCell::new(Vec::new());
+
+        let err = reap_dead_visit(
+            &visit,
+            "local::$203",
+            Some(255),
+            "ssh: connect to host localhost port 22: Connection refused\n",
+            |window_id| {
+                killed.borrow_mut().push(window_id.to_string());
+                Ok(())
+            },
+        )
+        .expect_err("failed attach should return a clear error");
+
+        assert_eq!(killed.into_inner(), vec!["@7"]);
+        let message = err.to_string();
+        assert!(message.contains("local::$203"));
+        assert!(message.contains("exit status 255"));
+        assert!(message.contains("Connection refused"));
     }
 
     #[test]
