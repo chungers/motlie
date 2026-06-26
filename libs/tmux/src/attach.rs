@@ -102,7 +102,7 @@ pub(crate) fn ssh_attach_command(
     ssh_attach_command_with_options(config, tmux_bin, socket, target, &AttachOptions::default())
 }
 
-pub fn ssh_attach_command_with_options(
+pub(crate) fn ssh_attach_command_with_options(
     config: &SshConfig,
     tmux_bin: &str,
     socket: Option<&TmuxSocket>,

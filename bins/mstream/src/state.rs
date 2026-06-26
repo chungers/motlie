@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,9 +15,9 @@ use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
 use motlie_agent as agent;
 use motlie_tmux::{
-    ssh_attach_command_with_options, AttachCommand, AttachOptions, CreateSessionOptions, Fleet,
-    FleetTargetSpec, HostHandle, KeySequence, ResolvedFleetTarget, SessionEnvVar, SessionInfo,
-    SessionInventory, SessionTag, SinkEvent, SshConfig, Target, TargetOutput,
+    AttachCommand, CreateSessionOptions, Fleet, FleetTargetSpec, HostHandle, KeySequence,
+    ResolvedFleetTarget, SessionEnvVar, SessionInfo, SessionInventory, SessionTag, SinkEvent,
+    SshConfig, Target, TargetOutput, TmuxSocket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1124,14 +1125,14 @@ impl DaemonState {
         mode: AttachResolveMode,
     ) -> anyhow::Result<AttachCommand> {
         if mode == AttachResolveMode::WindowInjection {
-            if let Some(command) = Self::loopback_ssh_attach_command(resolved, host_uri)? {
+            if let Some(command) = Self::local_nested_attach_command(resolved, host_uri)? {
                 return Ok(command);
             }
         }
         Ok(resolved.target.attach_command().await?)
     }
 
-    fn loopback_ssh_attach_command(
+    fn local_nested_attach_command(
         resolved: &ResolvedTarget,
         host_uri: Option<&str>,
     ) -> anyhow::Result<Option<AttachCommand>> {
@@ -1151,13 +1152,16 @@ impl DaemonState {
             .target
             .session_id()
             .with_context(|| format!("attach target {} is not a session", resolved.spec))?;
-        Ok(Some(ssh_attach_command_with_options(
-            &config,
-            "tmux",
-            config.socket(),
-            target,
-            &AttachOptions::default(),
-        )))
+        let mut args = vec![
+            OsString::from("-u"),
+            OsString::from("TMUX"),
+            OsString::from("tmux"),
+        ];
+        args.extend(tmux_socket_args(config.socket()));
+        args.push(OsString::from("attach-session"));
+        args.push(OsString::from("-t"));
+        args.push(OsString::from(target));
+        Ok(Some(AttachCommand::new("env", args)))
     }
 
     async fn connect_shared(
@@ -6703,6 +6707,14 @@ fn datetime_option_json(timestamp: Option<DateTime<Utc>>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn tmux_socket_args(socket: Option<&TmuxSocket>) -> Vec<OsString> {
+    match socket {
+        None => Vec::new(),
+        Some(TmuxSocket::Name(name)) => vec![OsString::from("-L"), OsString::from(name.as_str())],
+        Some(TmuxSocket::Path(path)) => vec![OsString::from("-S"), OsString::from(path.as_str())],
+    }
+}
+
 fn attach_command_record(command: &motlie_tmux::AttachCommand) -> AttachCommandRecord {
     AttachCommandRecord {
         program: command.program().to_string_lossy().into_owned(),
@@ -6771,7 +6783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_attach_window_injection_uses_loopback_ssh_for_localhost_uri() {
+    async fn resolve_attach_window_injection_unsets_tmux_for_localhost_uri() {
         let mock = motlie_tmux::transport::MockTransport::new()
             .with_response("list-sessions", "__MOTLIE_S__ worker $203 100 0 1  150\n")
             .with_default("");
@@ -6780,7 +6792,7 @@ mod tests {
         state.hosts.insert(
             "local".to_string(),
             HostRecord {
-                uri: "ssh://dchung@localhost".to_string(),
+                uri: "ssh://dchung@localhost?socket-name=mstream-test".to_string(),
                 labels: BTreeMap::new(),
                 capacity: BTreeMap::new(),
                 work_root: None,
@@ -6801,19 +6813,24 @@ mod tests {
         let record: AttachResolveRecord =
             serde_json::from_value(records[0].clone()).expect("attach record");
         assert_eq!(record.target, "local::$203");
-        assert_eq!(record.command.program, "ssh");
-        assert_eq!(record.command.args[0], "-t");
+        assert_eq!(record.command.program, "env");
+        assert_eq!(record.command.args[0], "-u");
+        assert_eq!(record.command.args[1], "TMUX");
+        assert_eq!(record.command.args[2], "tmux");
+        assert!(!record.command.args.iter().any(|arg| arg == "ssh"));
+        assert!(record
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == [String::from("-L"), String::from("mstream-test")]));
         assert!(record
             .command
             .args
             .iter()
-            .any(|arg| arg == "dchung@localhost"));
-        assert!(record
-            .command
-            .args
-            .iter()
-            .any(|arg| arg.contains("attach-session") && arg.contains("$203")));
-        assert!(record.command.shell.contains("dchung@localhost"));
+            .any(|arg| arg == "attach-session"));
+        assert!(record.command.args.iter().any(|arg| arg == "$203"));
+        assert!(record.command.shell.contains("env"));
+        assert!(record.command.shell.contains("TMUX"));
         assert!(record.command.shell.contains("attach-session"));
     }
 

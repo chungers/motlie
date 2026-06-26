@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-26 | @codex-570-impl | Added local loopback SSH resolution for caller-tmux attach visits plus failed-pane diagnostics before reap. |
+| 2026-06-26 | @codex-570-impl | Switched local caller-tmux attach visits to direct `env -u TMUX` local attach plus failed-pane diagnostics before reap. |
 | 2026-06-25 | @codex-570-impl | Added auto-sweep-on-attach to bound abandoned `--here` visits to at most one stale window. |
 | 2026-06-25 | @codex-570-impl | Updated attach design after live dogfood: switch all caller-session clients explicitly and reap on visit-pane exit rather than session active-window polling. |
 | 2026-06-25 | @codex-570-impl | Added issue #570 attach/forward-terminal design: daemon attach-command resolution plus client-owned PTY handoff or tagged caller-tmux window injection and reap. |
@@ -411,9 +411,11 @@ The client chooses the realization:
   Local targets keep the bare local tmux attach command in this path.
 - Inside tmux (`$TMUX` set, or explicit `--here`), the client asks the daemon for
   a window-injection attach command. Localhost/same-server targets are resolved
-  to SSH loopback (`ssh -t user@localhost tmux attach ...`) so injected visits
-  use the same terminal boundary as remote targets instead of nesting a bare
-  tmux client in the caller tmux server. The client auto-sweeps inactive
+  to direct local attach with `TMUX` removed (`env -u TMUX tmux attach ...`) so
+  injected visits create a fresh nested client without SSH authentication and
+  without tmux's `$TMUX` nesting refusal. Remote targets keep SSH attach. Both
+  forms preserve the same nested-client return behavior, including `Ctrl-b 0`
+  back to the caller session. The client auto-sweeps inactive
   `@mstream/attach` windows in the caller tmux server, creates a detached
   caller-tmux window running the resolved attach command, tags it with
   `@mstream/attach` plus target/spawn metadata, switches every attached client

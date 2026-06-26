@@ -532,7 +532,7 @@ mod tests {
             &visit,
             "local::$203",
             Some(255),
-            "ssh: connect to host localhost port 22: Connection refused\n",
+            "can't find session: $203\n",
             |window_id| {
                 killed.borrow_mut().push(window_id.to_string());
                 Ok(())
@@ -544,7 +544,7 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("local::$203"));
         assert!(message.contains("exit status 255"));
-        assert!(message.contains("Connection refused"));
+        assert!(message.contains("can't find session"));
     }
 
     #[test]

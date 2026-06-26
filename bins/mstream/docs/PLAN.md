@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-26 | @codex-570-impl | Added loopback-SSH attach resolution for local `--here` visits and failed visit-pane diagnostic/reap tests. |
+| 2026-06-26 | @codex-570-impl | Switched local `--here` visits to `env -u TMUX` attach and kept failed visit-pane diagnostic/reap tests. |
 | 2026-06-25 | @codex-570-impl | Added default `--here` auto-sweep before visit-window creation and documented the at-most-one stale window invariant. |
 | 2026-06-25 | @codex-570-impl | Updated attach phase notes after live dogfood: explicit multi-client switching and visit-pane-exit cleanup. |
 | 2026-06-25 | @codex-570-impl | Added issue #570 attach implementation tasks and validation gates for daemon resolution, PTY handoff, caller-tmux window injection, and reaping. |
@@ -596,7 +596,8 @@ Tasks:
   APIs without moving CLI or window lifecycle policy into `libs/tmux`.
 - [x] 12.2 Add a daemon RPC that resolves `<host>::<session-or-id>` to a fresh
   session target and returns the daemon-resolved attach argv, including a
-  window-injection resolve mode that maps localhost targets to loopback SSH.
+  window-injection resolve mode that maps localhost targets to `env -u TMUX`
+  local attach.
 - [x] 12.3 Add `mstream attach <target> [--here] [--sweep] [--print]` with
   `--print` command emission and default foreground PTY handoff.
 - [x] 12.4 Implement caller-tmux `--here` behavior, auto-selected when `$TMUX`
@@ -608,8 +609,9 @@ Tasks:
   pane exit-status/output capture before reap, already-gone kill tolerance,
   default `--here` auto-sweep, and standalone inactive tagged-window `--sweep`.
 - [x] 12.6 Cover attach command rendering, client command reconstruction,
-  loopback SSH resolution, release-barrier shell construction, failed visit
-  reap/error reporting, and inactive sweep selection with focused unit tests.
+  `TMUX`-unset local attach resolution, release-barrier shell construction,
+  failed visit reap/error reporting, and inactive sweep selection with focused
+  unit tests.
 
 Validation:
 
@@ -639,11 +641,12 @@ creating the next visit, switch every attached client of the caller session to
 the visit window, and leave no inactive attach window after the injected pane
 exits. Walking away from a visit may leave one inactive stale window while the
 nested attach remains alive; the next `--here` attach must reap it before
-creating another. Local `--here` visits should resolve to loopback SSH while
-non-tmux local PTY handoff keeps bare tmux attach. Failed loopback SSH should
-report target, exit status, and captured pane output, then reap the visit so a
-later attach is not blocked. `--sweep` should kill inactive tagged visit
-windows and preserve the active visit window.
+creating another. Local `--here` visits should resolve to `env -u TMUX` local
+attach while non-tmux local PTY handoff keeps bare tmux attach and remote
+`--here` keeps SSH. Failed local attach should report target, exit status, and
+captured pane output, then reap the visit so a later attach is not blocked.
+`--sweep` should kill inactive tagged visit windows and preserve the active
+visit window.
 
 ## End-To-End Validation Plan
 

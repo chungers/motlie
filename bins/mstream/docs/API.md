@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-26 | @codex-570-impl | Documented local loopback SSH for `attach --here` and failed visit-pane diagnostics before cleanup. |
+| 2026-06-26 | @codex-570-impl | Documented direct `env -u TMUX` local attach for `attach --here` and failed visit-pane diagnostics before cleanup. |
 | 2026-06-25 | @codex-570-impl | Documented auto-sweep on `attach --here` and the at-most-one stale attach window invariant. |
 | 2026-06-25 | @codex-570-impl | Updated `attach --here` docs for multi-client `switch-client -c` forwarding and visit-pane-exit cleanup. |
 | 2026-06-25 | @codex-570-impl | Clarified standalone `attach --sweep` cleanup and that `attach --here` blocks for the visit lifecycle. |
@@ -153,10 +153,12 @@ handoff: `mstream` runs the daemon-resolved command with the current terminal as
 stdin/stdout/stderr and returns the attach child shell status. Local targets in
 this path keep the bare local tmux attach command. When `$TMUX` is set, `--here`
 is selected automatically. `--here` asks the daemon for a window-injection attach
-command; localhost/same-server targets use an SSH loopback command such as
-`ssh -t user@localhost 'tmux attach-session -t $N'` so the visit pane behaves
-like a remote attach instead of nesting a bare tmux client in the caller tmux
-server.
+command; localhost/same-server targets use a direct local command such as
+`env -u TMUX tmux attach-session -t $N` so the nested client runs in the visit
+pane without tripping tmux's `$TMUX` nesting refusal and without requiring SSH
+authentication. Remote targets continue to use SSH attach commands. Both local
+and remote injected visits keep the same nested-client return behavior, including
+returning to the caller tmux session with `Ctrl-b 0`.
 
 `--here` creates a detached local caller-tmux window named `mstream-attach`,
 tags it with `@mstream/attach=true` and target/spawn metadata, switches each

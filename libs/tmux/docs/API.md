@@ -22,7 +22,6 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-26 | @codex-570-impl | Documented public `ssh_attach_command_with_options` for explicit SSH attach command construction while keeping lifecycle policy outside `libs/tmux`. |
 | 2026-06-25 | @codex-570-impl | Documented public `AttachCommand` resolution/rendering APIs used by mstream attach while preserving tmux transport ownership. |
 | 2026-05-30 | @codex-359-og | Added explicit session-id sink filters, documented that session-name filters no longer match stable `$N` ids, and clarified scoped discontinuity delivery. |
 | 2026-05-30 | @codex-355-rv | Added stable session-id target specs and documented that resolved `Target::target_string()` uses tmux ids while names remain display metadata. |
@@ -981,12 +980,6 @@ let exit = tokio::task::spawn_blocking(move || {
 spawning plus `shell_command()` for shell-safe display or wrapper handoff. This
 is still transport only: higher-level CLI policy, daemon RPCs, and tmux window
 lifecycle remain outside `motlie-tmux`.
-
-Consumers that explicitly need SSH command construction can call
-`ssh_attach_command_with_options(config, tmux_bin, socket, target, options)`.
-This reuses the same SSH argv, socket, host-key, identity-file, and quoting rules
-as `Target::attach_command()` for remote hosts; deciding when to force SSH
-loopback and how to own/reap any caller-tmux windows remains consumer policy.
 
 ### Session Status Bar Overrides
 
