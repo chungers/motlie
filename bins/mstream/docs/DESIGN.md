@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 | @codex-570-impl | Moved attach command construction behind libtmux `AttachMode`; mstream keeps only resolve RPC and visit-window lifecycle policy. |
 | 2026-06-26 | @codex-570-impl | Switched local caller-tmux attach visits to direct `env -u TMUX` local attach plus failed-pane diagnostics before reap. |
 | 2026-06-25 | @codex-570-impl | Added auto-sweep-on-attach to bound abandoned `--here` visits to at most one stale window. |
 | 2026-06-25 | @codex-570-impl | Updated attach design after live dogfood: switch all caller-session clients explicitly and reap on visit-pane exit rather than session active-window polling. |
@@ -406,14 +407,14 @@ The client chooses the realization:
 
 - `--print` writes the shell-safe attach command and performs no attach side
   effect; cleanup only runs when `--sweep` is also present.
-- Outside tmux, the default is PTY handoff: the client runs the resolved argv
-  with the caller terminal inherited and returns the attach child shell status.
+- Outside tmux, the default is PTY handoff: the client requests
+  `motlie_tmux::AttachMode::PtyHandoff`, runs the returned opaque attach argv
+  with the caller terminal inherited, and returns the attach child shell status.
   Local targets keep the bare local tmux attach command in this path.
 - Inside tmux (`$TMUX` set, or explicit `--here`), the client asks the daemon for
-  a window-injection attach command. Localhost/same-server targets are resolved
-  to direct local attach with `TMUX` removed (`env -u TMUX tmux attach ...`) so
-  injected visits create a fresh nested client without SSH authentication and
-  without tmux's `$TMUX` nesting refusal. Remote targets keep SSH attach. Both
+  a `motlie_tmux::AttachMode::WindowInjection` command. Libtmux owns the command
+  matrix: local targets become direct local attach with `TMUX` removed
+  (`env -u TMUX tmux attach ...`) while remote targets keep SSH attach. Both
   forms preserve the same nested-client return behavior, including `Ctrl-b 0`
   back to the caller session. The client auto-sweeps inactive
   `@mstream/attach` windows in the caller tmux server, creates a detached

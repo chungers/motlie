@@ -37,6 +37,16 @@ pub struct AttachOptions {
     pub suppress_transition_output: bool,
 }
 
+/// Attach command realization mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AttachMode {
+    /// Build a command for a nested attach running inside an existing tmux pane.
+    WindowInjection,
+    /// Build a command for handing the caller's current PTY to the attach child.
+    #[default]
+    PtyHandoff,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachCommand {
     program: OsString,
@@ -90,6 +100,23 @@ pub(crate) fn local_attach_command(
     args.push(OsString::from("-t"));
     args.push(OsString::from(target));
     AttachCommand::new(tmux_bin, args)
+}
+
+pub(crate) fn local_nested_attach_command(
+    tmux_bin: &str,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> AttachCommand {
+    let mut args = vec![
+        OsString::from("-u"),
+        OsString::from("TMUX"),
+        OsString::from(tmux_bin),
+    ];
+    args.extend(tmux_socket_args(socket));
+    args.push(OsString::from("attach-session"));
+    args.push(OsString::from("-t"));
+    args.push(OsString::from(target));
+    AttachCommand::new("env", args)
 }
 
 #[cfg(test)]

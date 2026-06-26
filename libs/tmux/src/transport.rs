@@ -1822,6 +1822,14 @@ pub struct SshTransport {
 }
 
 impl SshTransport {
+    #[cfg(test)]
+    pub(crate) fn for_test(config: SshConfig) -> Self {
+        SshTransport {
+            pool: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            config,
+        }
+    }
+
     /// Connect to a remote host via SSH and authenticate using an explicit
     /// key file (`identity-file`) or ssh-agent (default).
     ///

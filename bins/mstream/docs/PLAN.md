@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 | @codex-570-impl | Refactored attach command construction behind libtmux `AttachMode` while keeping mstream window lifecycle policy separate. |
 | 2026-06-26 | @codex-570-impl | Switched local `--here` visits to `env -u TMUX` attach and kept failed visit-pane diagnostic/reap tests. |
 | 2026-06-25 | @codex-570-impl | Added default `--here` auto-sweep before visit-window creation and documented the at-most-one stale window invariant. |
 | 2026-06-25 | @codex-570-impl | Updated attach phase notes after live dogfood: explicit multi-client switching and visit-pane-exit cleanup. |
@@ -593,11 +594,11 @@ Design references:
 Tasks:
 
 - [x] 12.1 Expose the existing `motlie-tmux` attach command/runner transport
-  APIs without moving CLI or window lifecycle policy into `libs/tmux`.
+  APIs, including `AttachMode`, without moving CLI or window lifecycle policy
+  into `libs/tmux`.
 - [x] 12.2 Add a daemon RPC that resolves `<host>::<session-or-id>` to a fresh
-  session target and returns the daemon-resolved attach argv, including a
-  window-injection resolve mode that maps localhost targets to `env -u TMUX`
-  local attach.
+  session target and returns the libtmux-resolved attach argv for either
+  `AttachMode::PtyHandoff` or `AttachMode::WindowInjection`.
 - [x] 12.3 Add `mstream attach <target> [--here] [--sweep] [--print]` with
   `--print` command emission and default foreground PTY handoff.
 - [x] 12.4 Implement caller-tmux `--here` behavior, auto-selected when `$TMUX`
@@ -608,10 +609,10 @@ Tasks:
   target/spawn metadata, success-only self-kill after nested attach exit, failed
   pane exit-status/output capture before reap, already-gone kill tolerance,
   default `--here` auto-sweep, and standalone inactive tagged-window `--sweep`.
-- [x] 12.6 Cover attach command rendering, client command reconstruction,
-  `TMUX`-unset local attach resolution, release-barrier shell construction,
-  failed visit reap/error reporting, and inactive sweep selection with focused
-  unit tests.
+- [x] 12.6 Cover attach command rendering, the libtmux attach-mode matrix,
+  client command reconstruction, release-barrier shell construction, failed
+  visit reap/error reporting, and inactive sweep selection with focused unit
+  tests.
 
 Validation:
 

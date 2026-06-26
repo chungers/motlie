@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 | @codex-570-impl | Clarified that `attach` command construction is delegated to libtmux `AttachMode`; mstream owns only RPC and visit-window lifecycle. |
 | 2026-06-26 | @codex-570-impl | Documented direct `env -u TMUX` local attach for `attach --here` and failed visit-pane diagnostics before cleanup. |
 | 2026-06-25 | @codex-570-impl | Documented auto-sweep on `attach --here` and the at-most-one stale attach window invariant. |
 | 2026-06-25 | @codex-570-impl | Updated `attach --here` docs for multi-client `switch-client -c` forwarding and visit-pane-exit cleanup. |
@@ -143,7 +144,9 @@ mstream attach --sweep
 ```
 
 `attach` asks the daemon to resolve `<host>::<session-or-id>` to the same tmux
-attach argv used by `motlie-tmux`. The daemon does not take over a PTY; it only
+attach argv used by `motlie-tmux`. The daemon maps the requested attach context
+to `motlie_tmux::AttachMode` and receives an opaque `AttachCommand`; mstream does
+not assemble tmux or ssh argv. The daemon does not take over a PTY; it only
 validates the connected host/target and returns the command. `--print` writes
 that shell-safe command line to stdout and does not attach. Without `--sweep`,
 shell wrappers and agent TUIs can ask for the exact command without side effects.

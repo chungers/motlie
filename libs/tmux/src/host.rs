@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
 
-use crate::attach::{self, AttachCommand, AttachOptions};
+use crate::attach::{self, AttachCommand, AttachMode, AttachOptions};
 use crate::capture;
 use crate::control;
 use crate::discovery;
@@ -2704,16 +2704,18 @@ impl Target {
         }
     }
 
-    /// Build the command that would attach the current process PTY to this tmux session.
-    pub async fn attach_command(&self) -> Result<AttachCommand> {
-        self.attach_command_with_options(&AttachOptions::default())
+    /// Build the command that would attach to this tmux session using the
+    /// requested transport attach mode.
+    pub async fn attach_command(&self, mode: AttachMode) -> Result<AttachCommand> {
+        self.attach_command_with_options(mode, &AttachOptions::default())
             .await
     }
 
-    /// Build the command that would attach the current process PTY to this
-    /// tmux session with explicit attach options.
+    /// Build the command that would attach to this tmux session using the
+    /// requested transport attach mode and explicit attach options.
     pub async fn attach_command_with_options(
         &self,
+        mode: AttachMode,
         options: &AttachOptions,
     ) -> Result<AttachCommand> {
         let session = match &self.address {
@@ -2734,20 +2736,23 @@ impl Target {
         let target = session.id.as_str();
         let tmux_bin = self.inner.resolve_tmux_bin().await;
 
-        match &self.inner.transport {
-            TransportKind::Local(_) => Ok(attach::local_attach_command(
+        match (&self.inner.transport, mode) {
+            (TransportKind::Local(_), AttachMode::PtyHandoff) => Ok(attach::local_attach_command(
                 &tmux_bin,
                 self.inner.socket.as_ref(),
                 target,
             )),
-            TransportKind::Ssh(ssh) => Ok(attach::ssh_attach_command_with_options(
+            (TransportKind::Local(_), AttachMode::WindowInjection) => Ok(
+                attach::local_nested_attach_command(&tmux_bin, self.inner.socket.as_ref(), target),
+            ),
+            (TransportKind::Ssh(ssh), _) => Ok(attach::ssh_attach_command_with_options(
                 ssh.config(),
                 &tmux_bin,
                 self.inner.socket.as_ref(),
                 target,
                 options,
             )),
-            TransportKind::Mock(_) => Err(Error::State(
+            (TransportKind::Mock(_), _) => Err(Error::State(
                 "attach_command is not supported for mock transports".to_string(),
             )),
         }
@@ -2765,7 +2770,9 @@ impl Target {
         &self,
         options: &AttachOptions,
     ) -> Result<crate::AttachExit> {
-        let command = self.attach_command_with_options(options).await?;
+        let command = self
+            .attach_command_with_options(AttachMode::PtyHandoff, options)
+            .await?;
         let options = *options;
         tokio::task::spawn_blocking(move || {
             attach::run_attach_command_with_options(command, options)
@@ -3265,6 +3272,11 @@ fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
 
 #[cfg(test)]
 impl HostHandle {
+    fn set_tmux_bin_for_test(&self, tmux_bin: &str) {
+        let mut cached = self.inner.tmux_bin.lock().expect("tmux_bin lock poisoned");
+        *cached = Some(tmux_bin.to_string());
+    }
+
     /// Create a Target for testing without querying tmux.
     pub fn create_target_for_test(&self, session_name: &str) -> Target {
         Target {
@@ -3285,10 +3297,100 @@ impl HostHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::MockTransport;
+    use crate::transport::{LocalTransport, MockTransport, SshConfig, SshTransport};
 
     fn mock_host(mock: MockTransport) -> HostHandle {
         HostHandle::new(TransportKind::Mock(mock), None)
+    }
+
+    fn attach_test_target(host: &HostHandle) -> Target {
+        host.target_for_session_info(SessionInfo {
+            name: "worker".to_string(),
+            id: SessionId::for_test("$203"),
+            created: 0,
+            attached_count: 0,
+            window_count: 1,
+            group: None,
+            activity: 0,
+        })
+    }
+
+    fn attach_program(command: &AttachCommand) -> String {
+        command.program().to_string_lossy().into_owned()
+    }
+
+    fn attach_args(command: &AttachCommand) -> Vec<String> {
+        command
+            .args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn attach_command_mode_matrix_local_and_remote() {
+        let local = HostHandle::with_alias(
+            TransportKind::Local(LocalTransport::new()),
+            Some(TmuxSocket::Name("mstream-test".into())),
+            "local",
+        );
+        local.set_tmux_bin_for_test("tmux");
+        let target = attach_test_target(&local);
+
+        let pty = target.attach_command(AttachMode::PtyHandoff).await.unwrap();
+        assert_eq!(attach_program(&pty), "tmux");
+        assert_eq!(
+            attach_args(&pty),
+            ["-L", "mstream-test", "attach-session", "-t", "$203"]
+        );
+
+        let nested = target
+            .attach_command(AttachMode::WindowInjection)
+            .await
+            .unwrap();
+        assert_eq!(attach_program(&nested), "env");
+        assert_eq!(
+            attach_args(&nested),
+            [
+                "-u",
+                "TMUX",
+                "tmux",
+                "-L",
+                "mstream-test",
+                "attach-session",
+                "-t",
+                "$203",
+            ]
+        );
+
+        let remote = HostHandle::with_alias(
+            TransportKind::Ssh(SshTransport::for_test(SshConfig::new(
+                "remote.example",
+                "dchung",
+            ))),
+            Some(TmuxSocket::Path("/tmp/tmux.sock".into())),
+            "remote",
+        );
+        remote.set_tmux_bin_for_test("tmux");
+        let target = attach_test_target(&remote);
+
+        let pty = target.attach_command(AttachMode::PtyHandoff).await.unwrap();
+        assert_eq!(attach_program(&pty), "ssh");
+        assert_eq!(
+            attach_args(&pty),
+            [
+                "-t",
+                "dchung@remote.example",
+                "'tmux' -S '/tmp/tmux.sock' attach-session -t '$203'",
+            ]
+        );
+
+        let nested = target
+            .attach_command(AttachMode::WindowInjection)
+            .await
+            .unwrap();
+        assert_eq!(attach_program(&nested), "ssh");
+        assert_eq!(attach_args(&nested), attach_args(&pty));
     }
 
     #[tokio::test]

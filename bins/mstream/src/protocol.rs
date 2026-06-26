@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use motlie_tmux::AttachMode;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_WORKSTREAM_EVENT_LIMIT: usize = 1_000;
@@ -162,6 +163,15 @@ pub enum AttachResolveMode {
     #[default]
     Pty,
     WindowInjection,
+}
+
+impl AttachResolveMode {
+    pub fn attach_mode(self) -> AttachMode {
+        match self {
+            AttachResolveMode::Pty => AttachMode::PtyHandoff,
+            AttachResolveMode::WindowInjection => AttachMode::WindowInjection,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
