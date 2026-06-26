@@ -37,7 +37,7 @@ These rules hold across every section below. They are stated once here; later se
 9. **No unilateral scope decisions.** As orchestrator/coordinator you do not own scope. Never defer, drop, postpone, descope, or split a review finding or requirement into a follow-on — or otherwise change agreed scope — without **explicit, documented human approval**. Surface the tradeoff and your recommendation, then wait; if something is genuinely out of scope or blocked, flag it and let the human decide. Record the human's decision (who, when, and the issue/PR link for any follow-on) where the work is tracked. A human-approved follow-on is allowed; an orchestrator-initiated deferral is not. The same bar applies to collaborator agents: if one proposes a deferral or scope change, route it to the human — do not sanction it yourself.
 10. **Relay human decisions with high fidelity, and verify they land.** Capture each human design decision exactly as stated — names, values, ranges, scope — and relay it to implementers verbatim where specifics matter; do not paraphrase away or substitute your own wording. Track every directed change to **landed-and-verified**: confirm the merged code/CLI actually matches the directive (e.g. the renamed flag exists, the value is in range), and **surface any drop, divergence, or silent revert immediately** — never document the divergent reality as if it were settled. A directive is not done until you have verified it shipped as specified. If reality and a prior directive conflict, flag the conflict to the human rather than quietly adopting reality.
 11. **Ground status claims in observations.** When reporting status, distinguish what you *observed* from what you *inferred*, and know what each signal proves: `delivery_verified` means the message landed in the agent's composer and submitted — nothing more; an agent's `busy`/`active` state is liveness, not evidence it is working on *your* task (it may be serving another principal). Before reporting "X is doing Y", confirm via a pane read (`snapshot --target`) or a posted artifact (PR push, commit, comment). Inference is acceptable when labeled as inference ("inferred from delivery + busy state"); grounded confirmation is required for anything a human will act on.
-12. **Name agents by their tmux session name — always.** The ONE canonical identity of any agent is its tmux session name (`tmux display-message -p '#S'`, written `@{session_name}`). Agents self-identify by it in every comment/commit/handoff; you (orchestrator/PM) refer to agents by it in every status report, relay, and handoff to the user — NEVER by the cwd / working-directory name, a cwd-derived handle, or the mstream session id (`$NNN`, a transient tooling handle only). A reassigned or long-lived session's cwd and prior self-id drift from its real tmux name (e.g. tmux `codex-541-amd2` vs cwd `…/codex-367-design`); on repurpose, rename the session so name==identity==work and have the agent re-self-identify, and resolve the true name from live tmux — not stale mstream `identity`/`cwd`. See Agent Session Naming.
+12. **Name agents by their tmux session name — always.** The ONE canonical identity of any agent is its tmux session name (`tmux display-message -p '#S'`, written `@{session_name}`). Agents self-identify by it in every comment/commit/handoff; you (orchestrator/PM) refer to agents by it in every status report, relay, and handoff to the user — NEVER by the cwd / working-directory name, a cwd-derived handle, or the mstream session id (`$NNN`, a transient tooling handle only). A reassigned or long-lived session's cwd and prior self-id drift from its real tmux name (e.g. tmux `codex-541-amd2` vs cwd `…/codex-367-design`); on repurpose, rename the session so name==identity==work and have the agent re-self-identify, and resolve the true name via `mstream doctor` (which reports the live tmux name + `name_drift`) — not stale mstream `identity`/`cwd`, and not raw `ssh … tmux ls` (Invariant 2). See Agent Session Naming.
 
 ## Prerequisites To Collect
 
@@ -52,7 +52,7 @@ Before opening a workstream, gather these. Ask the user for anything missing (In
 
 ## mstream Command Reference
 
-Authoritative surface, pinned to mstream **v0.1.0** (motlie `main` @ `b1799d6`). Every command also accepts `--socket <SOCKET>`; prefer `MSTREAM_SOCKET` or the default socket path over repeating the flag. Consult `--help` only if the installed binary differs from this table (Invariant: do not rediscover basic shapes during normal orchestration).
+Authoritative surface, pinned to mstream **v0.1.0** (motlie `main` @ `b1fc6847`). Every command also accepts `--socket <SOCKET>`; prefer `MSTREAM_SOCKET` or the default socket path over repeating the flag. Consult `--help` only if the installed binary differs from this table (Invariant: do not rediscover basic shapes during normal orchestration).
 
 Shared enums:
 
@@ -83,6 +83,7 @@ Shared enums:
 | | `reclaim <target>` | Terminal teardown: kill tmux + deregister. **GATED**: requires `managed` + `quarantined` | |
 | | `session list` | List sessions | |
 | | `session mark <target> --state --summary` | Annotate session state | |
+| | `rename <target> <new-name>` | Rename a session (atomically `tmux rename-session`; keeps name==identity) | `--role`, `--workstream`, `--mmux-label` |
 | Messaging | `send <ws> <target> --text` | Send to one session | `--enter`/`--no-prompt-submit` (deprecated alias `--no-enter`), `--interrupt-first`, `--settle-ms` (500), `--submit-retries` (1), `--submit-retry-delay-ms` (750), `--paste-mode bracketed\|literal`, `--require-state`, `--set-state` |
 | | `broadcast <ws> --text` | Send to many | `--enter`/`--no-prompt-submit` (deprecated alias `--no-enter`), `--role`, `--state`, `--paste-mode`, `--settle-ms` (500), `--submit-retries` (1), `--submit-retry-delay-ms` (750) |
 | | `interrupt <target>` | Non-destructive interrupt | `--key esc\|ctrl-c` (esc) |
@@ -92,9 +93,11 @@ Shared enums:
 | | `timer list` | List timers | `--workstream` |
 | | `timer stop <name>` / `timer fire <name>` | Stop / test-fire a timer | |
 | Observation | `status <ws>` | Liveness snapshot | `--active-window-secs` (30), `--idle-after-secs` (300) |
+| | `doctor` | Reconcile live tmux name + liveness; surface `name_drift`/dead/unreachable | `--cached`, `--no-reconcile`, `--quarantine-dead`, `--prune-quarantined` |
 | | `events <ws>` | Timeline | `--limit` (200), `--readable`, `--after` |
 | | `snapshot <ws>` | Pane capture | `--max-chars` (12000), `--after` |
 | | `summary-input <ws>` | Input/activity summary | `--max-chars` (12000), `--since` |
+| Navigation | `attach [target]` | Forward the operator's terminal to a session ("take me there") | `--here`, `--sweep`, `--print` |
 
 `<target>` is `<host-alias>::<tmux-session>` (e.g. `amd1::opus47-337-rv`).
 
@@ -486,7 +489,7 @@ Before recruiting, propose a staffing plan to the user:
 - model or agent type, if known
 - role: implementer, reviewer, product manager, release manager, etc.
 - why the candidate fits the role based on availability, prior context, metadata, or recent work
-- diversity rule: use different agent families where practical, for example Codex implementer and Claude-family reviewer
+- reviewer nomination: pick reviewers by the **lens** the work needs (layering/abstraction, security, idiomatic Rust, architecture, performance) and the **platform** it touches (CUDA/AMD/Mac/telephony), in addition to **independence** (a different agent reviewing someone else's work — same single GitHub account) and **agent-family diversity** (e.g. Codex implementer + Claude-family reviewer)
 - distinguish session identity from executable name. For example, use `opus47` in the tmux session name to record the model, but start it with the `claude` CLI executable if that is the available command.
 
 Also include a risk and quality-bar briefing for the team before work starts:
@@ -538,7 +541,7 @@ The ONE canonical name for any agent is its **tmux session name** (`tmux display
 
 - When you repurpose/reassign a session to new work, **rename the tmux session** to match (so session name == identity == current workstream), and tell the agent to **re-self-identify** to the new `@{session_name}`.
 - Until a session is renamed, refer to it by its **actual** tmux session name (`tmux display-message -p '#S'`), never the cwd or the old handle.
-- When in doubt about an agent's true name, resolve it from the live tmux session name, not from mstream `identity`/`cwd` fields (which can be stale).
+- When in doubt about an agent's true name, resolve it via `mstream doctor` (which reports the live tmux name + flags `name_drift`), not from mstream `identity`/`cwd` fields (which can be stale) and not via raw `ssh … tmux ls` (Invariant 2).
 
 ## Work Directories And Worktrees
 
@@ -763,6 +766,20 @@ Acceptance and merge rules:
 - After issue closeout or follow-up creation, tell all parties to stand by.
 - Do not close the workstream automatically after merge; the user decides whether the workstream is good enough to close.
 
+**Live-dogfood gate (interactive/terminal-facing features).** When a change hands
+over a terminal or alters interactive UX (e.g. `attach`, TUI flows), `cargo` gates
+and code review are not sufficient — it needs a human live test at a real
+(multi-client) tmux. **Ask the human to run that validation before merge, unless
+they explicitly said to "shepherd to merge"** (which grants you agency to drive
+it). Recommend the gate; do not merge such a change on green gates + review alone.
+
+**Independent second lens (boundary-critical work).** For layering- or
+boundary-critical changes, after the primary reviewer accepts, consider a second
+independent agent auditing the *final* state through a different lens (e.g. a
+Codex layering/architecture audit after a Claude architect review). Independence
+means a different agent on someone else's work — **not** a different GitHub
+account (one gh account always).
+
 ## Communication
 
 Use `mstream` as the communication channel:
@@ -788,6 +805,13 @@ mstream send issue-337-tmux-fleet-api amd1::gpt55-337-og \
 ```
 
 Use this as a targeted retry, not as a default duplicate-send, so you do not accidentally submit stale text twice.
+
+**Large briefs churn the composer.** A brief over a few hundred chars to a Codex
+TUI lands as a held `[Pasted Content]` block that does NOT auto-submit, and
+submit nudges *duplicate* it. For anything long, post the full brief as a durable
+PR/issue comment and `send` only a short (<~250 char, single-line) pointer to it
+(e.g. "see my comment on PR #N → `gh pr view N --comments`; do X"). Keep agent
+briefs short; let durable GitHub comments carry the detail.
 
 For non-destructive interruption:
 
@@ -828,6 +852,13 @@ Use `mstream status` liveness fields to decide when to look deeper:
 `quiet` means activity is outside the active window but not yet idle, `idle`
 means the session has been quiet beyond the idle threshold, `missing` means the
 tmux session is gone, and `unknown` means the host activity refresh failed.
+
+Use `mstream doctor` to reconcile session fidelity against live tmux: it surfaces
+the **live tmux name**, `name_drift` (cached name ≠ live), `liveness`
+(`live`/`dead`/`unreachable`), and `death_kind`. This is the in-band way to catch
+agent-name drift — prefer it over raw `ssh … tmux ls` (Invariant 2).
+`--quarantine-dead`/`--prune-quarantined` drive the #401 dead-session lifecycle
+(they act only on confirmed-dead rows, never `unreachable`).
 
 Treat `mstream status` as the first polling layer:
 
@@ -911,6 +942,33 @@ mstream handoff arm issue-337-tmux-fleet-api \
   --on done \
   --task "The implementer pushed the issue #337 branch and the coordinator marked it ready. Review the branch and post must-fix feedback."
 ```
+
+## Navigating A Human To A Session (attach)
+
+`mstream attach <target> --here` forwards the operator's terminal to a managed
+session ("take me there"). Two modes, both returning the same way:
+
+- **Orchestrator inside tmux** (normal setup): injects a tagged visit window into
+  the caller tmux; the operator views the target and presses `Ctrl-b 0` to return.
+  **Auto-sweep runs on every `--here`**, so at most one stale visit window ever
+  lingers (the most recent walk-away); `--sweep` cleans it on demand. mstream
+  **owns and reaps** the window — the operator need not exit anything.
+- **Plain terminal / no tmux:** use `--print` and let the operator run the
+  resolved command (single-PTY handoff; not agent-drivable).
+
+```sh
+mstream attach amd1::gpt55-337-og --here     # forward operator; Ctrl-b 0 returns
+mstream attach amd1::gpt55-337-og --print    # print the command for the operator to run
+mstream attach --sweep                       # reap stale visit windows now
+```
+
+Caveats:
+
+- **Do not verify the switch with `tmux list-clients`** — its active-window read
+  is unreliable and can show "not switched" even when it worked. Confirm with
+  `mstream snapshot`/capture of the visit window and the operator's own eyes.
+- Keep the orchestrator **inside a tmux session** so "take me there" stays
+  agent-drivable (window-injection needs a caller tmux).
 
 ## Closing Workstreams
 
