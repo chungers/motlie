@@ -138,7 +138,89 @@ evidence = [
 
 [[gate]]
 id = "github-release-published"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T06:04:32Z"
+completed_by = "@chungers"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "github-release", ref = "https://github.com/chungers/motlie/releases/tag/2026-06-bright-beacon", note = "GitHub Release 2026-06-bright-beacon is live with 9 assets; master issue remains open for David's final release gate." },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/motlie-mmux-v0.1.1-darwin-arm64.tar.gz", sha256 = "99bd2b7d022de5414682448c81ee3b3cc55ed7bd7f780b23875a84ecc3ffd079", note = "archive asset sha256 from live SHA256SUMS" },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/motlie-mmux-v0.1.1-linux-arm64-musl.tar.gz", sha256 = "1371b4de2ca4e8f09c267c8cedcd2c097c586fe9f5c7e712bfdba5494b6e54ff", note = "archive asset sha256 from live SHA256SUMS" },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/motlie-mmux-v0.1.1-linux-x64-musl.tar.gz", sha256 = "4863318722d06022f42d3f764a3f84bc6e2ac96320731176bdf93e6a2c25bb38", note = "archive asset sha256 from live SHA256SUMS" },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/motlie-mstream-v0.1.0-darwin-arm64.tar.gz", sha256 = "f3343992233eb208e97221b9e562194af87c5ce9b14cda01b0ddda695983ef33", note = "archive asset sha256 from live SHA256SUMS" },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "8086b491abb821fedc0addaddc65f6e6fbd42d72e974626b190b56120eecd990", note = "archive asset sha256 from live SHA256SUMS" },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", sha256 = "4746a1494b476daa2262a0db6184b23db379450849bbe40fb21d835504b3fe8a", note = "archive asset sha256 from live SHA256SUMS" },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/install-mmux.sh", sha256 = "2addbbad280ca67556fc8c85e0ecacb14a75dbe5a4d9f10fa3d298746a051ce5", note = "installer script asset sha256 from live SHA256SUMS; installer validation is recorded in installer-validated gates" },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/install-mstream.sh", sha256 = "5e21a0085a691970859439cf67d5dec8cdc84d35851ba2d9a824c3d69353460f", note = "installer script asset sha256 from live SHA256SUMS; installer validation is recorded in installer-validated gates" },
+  { kind = "release-asset", ref = "https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/SHA256SUMS", sha256 = "44fd9445d402e724989af34640b013de975420c40e64198ac32c0e164b9e68aa", note = "checksum manifest asset downloaded from the live GitHub Release" },
+]
+
+[[gate]]
+id = "installer-validated"
+target_id = ""
+channel = "installer"
+rollup = true
+state = "complete"
+completed_at = "2026-06-27T06:10:23Z"
+completed_by = "@ops48-orchestrator"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "validation", ref = "../VALIDATION_EVIDENCE.md", note = "release-pinned installers passed end-to-end on linux-x64-musl, linux-arm64-musl, and darwin-arm64 for both mmux and mstream; closes scoped installer validation issues #575 and #578 after PR merge" },
+]
+
+[[gate]]
+id = "installer-validated"
+target_id = "linux-x64-musl"
+channel = "installer"
+state = "complete"
+completed_at = "2026-06-27T06:10:23Z"
+completed_by = "@ops48-orchestrator"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "host", ref = "amd1", note = "Linux 6.17.0-29-generic x86_64" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/install-{mmux,mstream}.sh | PREFIX=/tmp/bb-validate sh", note = "user-prefix validation per David's choice; installer default remains /usr/local" },
+  { kind = "installer-output", ref = "../VALIDATION_EVIDENCE.md#linux-x64-musl--host-amd1-linux-6170-29-generic-x86_64", note = "downloaded linux-x64-musl archives and SHA256SUMS; checksum passed; extracted; installed to /tmp/bb-validate/bin/<bin>; Installed from 2026-06-bright-beacon" },
+  { kind = "runtime", ref = "/tmp/bb-validate/bin/mmux --version; /tmp/bb-validate/bin/mstream --version", note = "mmux 0.1.1; mstream 0.1.0" },
+  { kind = "file", ref = "/tmp/bb-validate/bin/mmux; /tmp/bb-validate/bin/mstream", note = "ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped" },
+]
+
+[[gate]]
+id = "installer-validated"
+target_id = "linux-arm64-musl"
+channel = "installer"
+state = "complete"
+completed_at = "2026-06-27T06:10:23Z"
+completed_by = "@ops48-orchestrator"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "host", ref = "local/dgx", note = "Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/install-{mmux,mstream}.sh | PREFIX=/tmp/bb-validate sh", note = "user-prefix validation per David's choice; installer default remains /usr/local" },
+  { kind = "installer-output", ref = "../VALIDATION_EVIDENCE.md#linux-arm64-musl--host-localdgx-linux-6170-1018-nvidia-aarch64", note = "downloaded linux-arm64-musl archives and SHA256SUMS; checksum passed; extracted; installed to /tmp/bb-validate/bin/<bin>; Installed from 2026-06-bright-beacon" },
+  { kind = "runtime", ref = "/tmp/bb-validate/bin/mmux --version; /tmp/bb-validate/bin/mstream --version", note = "mmux 0.1.1; mstream 0.1.0" },
+  { kind = "file", ref = "/tmp/bb-validate/bin/mmux; /tmp/bb-validate/bin/mstream", note = "ELF 64-bit LSB executable, ARM aarch64, statically linked, not stripped; mmux BuildID 0f76c7bb; mstream BuildID b69d9904" },
+]
+
+[[gate]]
+id = "installer-validated"
+target_id = "darwin-arm64"
+channel = "installer"
+state = "complete"
+completed_at = "2026-06-27T06:10:23Z"
+completed_by = "@ops48-orchestrator"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "host", ref = "mac1", note = "Darwin 24.6.0 arm64" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/install-{mmux,mstream}.sh | PREFIX=/tmp/bb-validate sh", note = "user-prefix validation per David's choice; benign locale warnings only; installer default remains /usr/local" },
+  { kind = "installer-output", ref = "../VALIDATION_EVIDENCE.md#darwin-arm64--host-mac1-darwin-2460-arm64", note = "downloaded darwin-arm64 archives and SHA256SUMS; checksum passed; extracted; installed; re-signed installed binary ad-hoc; Installed from 2026-06-bright-beacon" },
+  { kind = "runtime", ref = "/tmp/bb-validate/bin/mmux --version; /tmp/bb-validate/bin/mstream --version", note = "mmux 0.1.1; mstream 0.1.0" },
+  { kind = "file", ref = "/tmp/bb-validate/bin/mmux; /tmp/bb-validate/bin/mstream", note = "Mach-O 64-bit executable arm64" },
+  { kind = "codesign", ref = "codesign --verify --strict --verbose=2 /tmp/bb-validate/bin/mmux; codesign --verify --strict --verbose=2 /tmp/bb-validate/bin/mstream", note = "valid on disk; satisfies its Designated Requirement for both binaries" },
+]
 
 [[gate]]
 id = "post-release-ledger-committed"

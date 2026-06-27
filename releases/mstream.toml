@@ -86,11 +86,11 @@ source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
 evidence = [
   { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mstream --bin mstream -- -C linker=rust-lld", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
-  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mstream: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "7090748c0350a1334457b32879bea2e621d49061f0af945b9ea4532bb0c4a03e", note = "linux-x64-musl binary checksum" },
+  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mstream: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "dfd0fff505b574d1c1c710092d4ead31bfb164c89d1bb19f3a96e2f11961ef4d", note = "linux-x64-musl binary checksum" },
   { kind = "ldd", ref = "ldd target/x86_64-unknown-linux-musl/release/mstream", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mstream", note = "static-pie dynamic section has no NEEDED entries" },
   { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mstream --version", note = "not executed on this aarch64 host; qemu-x86_64 unavailable" },
-  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", sha256 = "e2da052dad2c1560fe390aab623add1897d6e1143c5dd1bfe73ac3ee9e1a6d95", note = "candidate archive contains ./bin/mstream only" },
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", sha256 = "4746a1494b476daa2262a0db6184b23db379450849bbe40fb21d835504b3fe8a", note = "candidate archive contains ./bin/mstream only" },
   { kind = "contents", ref = "tar -tzf target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", note = "./, ./bin/, ./bin/mstream" },
 ]
 
@@ -112,11 +112,11 @@ source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
 evidence = [
   { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mstream --bin mstream", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
-  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mstream: ELF 64-bit LSB executable, ARM aarch64, statically linked, BuildID[sha1]=2c84c94b0f2e53f2d56daaf006e89bf28f4c8caa, not stripped", sha256 = "547887c180af210fc71753480abcca6ab180c2b6220b86fe085a726d07b51607", note = "linux-arm64-musl binary checksum" },
+  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mstream: ELF 64-bit LSB executable, ARM aarch64, statically linked, BuildID[sha1]=2c84c94b0f2e53f2d56daaf006e89bf28f4c8caa, not stripped", sha256 = "0a5a19a7868a9c96e782b9637f24df221e47662500034f9881fa509abf625b99", note = "linux-arm64-musl binary checksum" },
   { kind = "ldd", ref = "ldd target/aarch64-unknown-linux-musl/release/mstream", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mstream", note = "There is no dynamic section in this file." },
   { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mstream --version", note = "mstream 0.1.0" },
-  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "9d4db7c874e42195f6188e716e5f7d6c412f0c9f91f54a8d81bd7d26a6130a78", note = "candidate archive contains ./bin/mstream only" },
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "8086b491abb821fedc0addaddc65f6e6fbd42d72e974626b190b56120eecd990", note = "candidate archive contains ./bin/mstream only" },
   { kind = "contents", ref = "tar -tzf target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", note = "./, ./bin/, ./bin/mstream" },
 ]
 
@@ -137,11 +137,11 @@ source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
 evidence = [
   { kind = "command", ref = "cargo build --release --locked --target aarch64-apple-darwin -p motlie-mstream --bin mstream", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
   { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08); cargo 1.92.0 (344c4567c 2025-10-21)", note = "host mac1 aarch64-apple-darwin" },
-  { kind = "file", ref = "target/aarch64-apple-darwin/release/mstream: Mach-O 64-bit executable arm64", sha256 = "c36041dcfa37f03ae109f08be380d4c1265b529042bc01d44a15ecc938ba2916", note = "darwin-arm64 signed binary checksum" },
+  { kind = "file", ref = "target/aarch64-apple-darwin/release/mstream: Mach-O 64-bit executable arm64", sha256 = "1f6e733e55e59dc526fae0329fa6dc2c8700f3f665e6474fd61caf6776f2b9a4", note = "darwin-arm64 signed binary checksum" },
   { kind = "codesign", ref = "codesign --force --sign - target/aarch64-apple-darwin/release/mstream", note = "ad-hoc signed build-path binary; Signature=adhoc; CDHash=552cf6d8dbc24eb0ce97353d67f2103a89e2d261" },
   { kind = "codesign-verify", ref = "codesign --verify --strict --verbose=2 target/aarch64-apple-darwin/release/mstream", note = "valid on disk; satisfies its Designated Requirement" },
   { kind = "runtime", ref = "target/aarch64-apple-darwin/release/mstream --version", note = "mstream 0.1.0" },
-  { kind = "archive", ref = "target/release-archives/motlie-mstream-v0.1.0-darwin-arm64.tar.gz", sha256 = "1b92a5b5dc944caea732585d9ee91716a3219be9d11a88faee685354c952ec8a", note = "candidate archive contains bin/mstream only" },
+  { kind = "archive", ref = "target/release-archives/motlie-mstream-v0.1.0-darwin-arm64.tar.gz", sha256 = "f3343992233eb208e97221b9e562194af87c5ce9b14cda01b0ddda695983ef33", note = "candidate archive contains bin/mstream only" },
   { kind = "contents", ref = "tar -tzf target/release-archives/motlie-mstream-v0.1.0-darwin-arm64.tar.gz", note = "bin/mstream" },
   { kind = "codesign", ref = "codesign --force --sign - /tmp/motlie-mstream-darwin-arm64.dhGdoy/bin/mstream", note = "re-signed extracted archive payload; Signature=adhoc; CDHash=552cf6d8dbc24eb0ce97353d67f2103a89e2d261" },
   { kind = "codesign-verify", ref = "codesign --verify --strict --verbose=2 /tmp/motlie-mstream-darwin-arm64.dhGdoy/bin/mstream", note = "valid on disk; satisfies its Designated Requirement" },
@@ -174,7 +174,7 @@ deferred_reason = ""
 evidence = [
   { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mstream --bin mstream -- -C linker=rust-lld", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
-  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mstream: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "7090748c0350a1334457b32879bea2e621d49061f0af945b9ea4532bb0c4a03e", note = "linux-x64-musl binary checksum" },
+  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mstream: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "dfd0fff505b574d1c1c710092d4ead31bfb164c89d1bb19f3a96e2f11961ef4d", note = "linux-x64-musl binary checksum" },
   { kind = "ldd", ref = "ldd target/x86_64-unknown-linux-musl/release/mstream", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mstream", note = "static-pie dynamic section has no NEEDED entries" },
   { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mstream --version", note = "not executed on this aarch64 host; qemu-x86_64 unavailable" },
@@ -192,7 +192,7 @@ deferred_reason = ""
 evidence = [
   { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mstream --bin mstream", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
-  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mstream: ELF 64-bit LSB executable, ARM aarch64, statically linked, BuildID[sha1]=2c84c94b0f2e53f2d56daaf006e89bf28f4c8caa, not stripped", sha256 = "547887c180af210fc71753480abcca6ab180c2b6220b86fe085a726d07b51607", note = "linux-arm64-musl binary checksum" },
+  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mstream: ELF 64-bit LSB executable, ARM aarch64, statically linked, BuildID[sha1]=2c84c94b0f2e53f2d56daaf006e89bf28f4c8caa, not stripped", sha256 = "0a5a19a7868a9c96e782b9637f24df221e47662500034f9881fa509abf625b99", note = "linux-arm64-musl binary checksum" },
   { kind = "ldd", ref = "ldd target/aarch64-unknown-linux-musl/release/mstream", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mstream", note = "There is no dynamic section in this file." },
   { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mstream --version", note = "mstream 0.1.0" },
@@ -222,7 +222,7 @@ completed_by = "@codex-release-eng"
 source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
 deferred_reason = ""
 evidence = [
-  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", sha256 = "e2da052dad2c1560fe390aab623add1897d6e1143c5dd1bfe73ac3ee9e1a6d95", note = "candidate archive contains ./bin/mstream only" },
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", sha256 = "4746a1494b476daa2262a0db6184b23db379450849bbe40fb21d835504b3fe8a", note = "candidate archive contains ./bin/mstream only" },
   { kind = "contents", ref = "tar -tzf motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", note = "./, ./bin/, ./bin/mstream" },
 ]
 
@@ -236,7 +236,7 @@ completed_by = "@codex-release-eng"
 source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
 deferred_reason = ""
 evidence = [
-  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "9d4db7c874e42195f6188e716e5f7d6c412f0c9f91f54a8d81bd7d26a6130a78", note = "candidate archive contains ./bin/mstream only" },
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "8086b491abb821fedc0addaddc65f6e6fbd42d72e974626b190b56120eecd990", note = "candidate archive contains ./bin/mstream only" },
   { kind = "contents", ref = "tar -tzf motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", note = "./, ./bin/, ./bin/mstream" },
 ]
 
@@ -266,7 +266,7 @@ deferred_reason = ""
 evidence = [
   { kind = "command", ref = "cargo build --release --locked --target aarch64-apple-darwin -p motlie-mstream --bin mstream", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
   { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08); cargo 1.92.0 (344c4567c 2025-10-21)", note = "host mac1 aarch64-apple-darwin" },
-  { kind = "file", ref = "target/aarch64-apple-darwin/release/mstream: Mach-O 64-bit executable arm64", sha256 = "c36041dcfa37f03ae109f08be380d4c1265b529042bc01d44a15ecc938ba2916", note = "darwin-arm64 signed binary checksum" },
+  { kind = "file", ref = "target/aarch64-apple-darwin/release/mstream: Mach-O 64-bit executable arm64", sha256 = "1f6e733e55e59dc526fae0329fa6dc2c8700f3f665e6474fd61caf6776f2b9a4", note = "darwin-arm64 signed binary checksum" },
   { kind = "runtime", ref = "target/aarch64-apple-darwin/release/mstream --version", note = "mstream 0.1.0" },
 ]
 
@@ -324,7 +324,7 @@ completed_by = "@codex-darwin-rel"
 source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
 deferred_reason = ""
 evidence = [
-  { kind = "archive", ref = "target/release-archives/motlie-mstream-v0.1.0-darwin-arm64.tar.gz", sha256 = "1b92a5b5dc944caea732585d9ee91716a3219be9d11a88faee685354c952ec8a", note = "candidate archive contains bin/mstream only" },
+  { kind = "archive", ref = "target/release-archives/motlie-mstream-v0.1.0-darwin-arm64.tar.gz", sha256 = "f3343992233eb208e97221b9e562194af87c5ce9b14cda01b0ddda695983ef33", note = "candidate archive contains bin/mstream only" },
   { kind = "contents", ref = "tar -tzf target/release-archives/motlie-mstream-v0.1.0-darwin-arm64.tar.gz", note = "bin/mstream" },
   { kind = "codesign-verify", ref = "codesign --verify --strict --verbose=2 /tmp/motlie-mstream-darwin-arm64.dhGdoy/bin/mstream", note = "extracted payload valid on disk; satisfies its Designated Requirement" },
   { kind = "runtime", ref = "/tmp/motlie-mstream-darwin-arm64.dhGdoy/bin/mstream --version", note = "mstream 0.1.0" },
@@ -335,25 +335,66 @@ id = "installer-validated"
 target_id = ""
 channel = "installer"
 rollup = true
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T06:10:23Z"
+completed_by = "@ops48-orchestrator"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "validation", ref = "../VALIDATION_EVIDENCE.md", note = "release-pinned mstream installer passed end-to-end on linux-x64-musl, linux-arm64-musl, and darwin-arm64; closes scoped installer validation issue #578 after PR merge" },
+]
 
 [[gate]]
 id = "installer-validated"
 target_id = "linux-x64-musl"
 channel = "installer"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T06:10:23Z"
+completed_by = "@ops48-orchestrator"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "host", ref = "amd1", note = "Linux 6.17.0-29-generic x86_64" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/install-mstream.sh | PREFIX=/tmp/bb-validate sh", note = "user-prefix validation per David's choice; installer default remains /usr/local" },
+  { kind = "installer-output", ref = "../VALIDATION_EVIDENCE.md#linux-x64-musl--host-amd1-linux-6170-29-generic-x86_64", note = "downloaded mstream linux-x64-musl archive and SHA256SUMS; checksum passed; extracted; installed to /tmp/bb-validate/bin/mstream; Installed from 2026-06-bright-beacon" },
+  { kind = "runtime", ref = "/tmp/bb-validate/bin/mstream --version", note = "mstream 0.1.0" },
+  { kind = "file", ref = "/tmp/bb-validate/bin/mstream", note = "ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped" },
+]
 
 [[gate]]
 id = "installer-validated"
 target_id = "linux-arm64-musl"
 channel = "installer"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T06:10:23Z"
+completed_by = "@ops48-orchestrator"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "host", ref = "local/dgx", note = "Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/install-mstream.sh | PREFIX=/tmp/bb-validate sh", note = "user-prefix validation per David's choice; installer default remains /usr/local" },
+  { kind = "installer-output", ref = "../VALIDATION_EVIDENCE.md#linux-arm64-musl--host-localdgx-linux-6170-1018-nvidia-aarch64", note = "downloaded mstream linux-arm64-musl archive and SHA256SUMS; checksum passed; extracted; installed to /tmp/bb-validate/bin/mstream; Installed from 2026-06-bright-beacon" },
+  { kind = "runtime", ref = "/tmp/bb-validate/bin/mstream --version", note = "mstream 0.1.0" },
+  { kind = "file", ref = "/tmp/bb-validate/bin/mstream", note = "ELF 64-bit LSB executable, ARM aarch64, statically linked, not stripped; BuildID b69d9904" },
+]
 
 [[gate]]
 id = "installer-validated"
 target_id = "darwin-arm64"
 channel = "installer"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T06:10:23Z"
+completed_by = "@ops48-orchestrator"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "host", ref = "mac1", note = "Darwin 24.6.0 arm64" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-06-bright-beacon/install-mstream.sh | PREFIX=/tmp/bb-validate sh", note = "user-prefix validation per David's choice; benign locale warnings only; installer default remains /usr/local" },
+  { kind = "installer-output", ref = "../VALIDATION_EVIDENCE.md#darwin-arm64--host-mac1-darwin-2460-arm64", note = "downloaded mstream darwin-arm64 archive and SHA256SUMS; checksum passed; extracted; installed; re-signed installed binary ad-hoc; Installed from 2026-06-bright-beacon" },
+  { kind = "runtime", ref = "/tmp/bb-validate/bin/mstream --version", note = "mstream 0.1.0" },
+  { kind = "file", ref = "/tmp/bb-validate/bin/mstream", note = "Mach-O 64-bit executable arm64" },
+  { kind = "codesign", ref = "codesign --verify --strict --verbose=2 /tmp/bb-validate/bin/mstream", note = "valid on disk; satisfies its Designated Requirement" },
+]
 
 [[gate]]
 id = "npm-published"
