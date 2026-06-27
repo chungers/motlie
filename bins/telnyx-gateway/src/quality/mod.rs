@@ -10,6 +10,6 @@ pub use config::{
 };
 pub use events::{
     insert_transcript_text_fields, transcript_plaintext_included, ActiveAsrQualitySession,
-    CallerTurnEventMetadata, QualityEvent, QualityEventContext, QualityEventPayload,
-    QualityEventSink,
+    CallerTurnEventMetadata, ProcessorVisibleTurnEventMetadata, QualityEvent, QualityEventContext,
+    QualityEventPayload, QualityEventSink,
 };

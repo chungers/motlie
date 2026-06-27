@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 20:51 PDT | @codex-541 | Added processor-visible transcript quality events plus first-audio latency spans for conversation turns and barge-in replacements; updated the PR #565 live-test roadmap to use these artifacts before the next run. |
 | 2026-06-26 PDT | @codex-541 | Added the live-test breadcrumb roadmap for PR #565: every run now updates this PLAN, commits a redacted `docs/tests/*.toml` run record, and links the latest result/next hypothesis so future agents can resume without tmux context. |
 | 2026-06-12 PDT | @codex-366-impl | Resolved #488 generality review by moving final-settle fragment classifiers and conversation final-coalescing hold knobs into `VoiceQualityConfig.endpoint` with default-preserving values; `bins/telnyx-agent` now opts into `motlie.telnyx.text.partials.v1` for live advisory partial delivery. |
 | 2026-06-12 PDT | @codex-366-impl | Addressed #481/David stability ruling: opt-in `caller.partial` forwards backend-native `confidence` plus gateway-estimated stream-convergence/churn `stability`; stability is only for preparation/routing/debounce, never truth, confidence, calibrated probability, final response input, or a value to combine with confidence. |
@@ -112,14 +113,16 @@ contain live routing values; the committed copy must keep placeholders only.
 - [x] Record the 2026-06-26 barge-in Identity run with redacted config/results
   TOML in `docs/tests/`.
   DESIGN reference: `DESIGN-545-conversation-policy.md`, `Conversation policy modes`
-- [ ] Emit an explicit agent-visible transcript artifact or quality event. Raw
-  ASR transcripts include suppressed assistant echo by design; WER and
-  processor-facing analysis need the exact post-suppression text stream seen by
-  the conversation handler.
+- [x] Emit an explicit agent-visible transcript artifact or quality event.
+  @codex-541, 2026-06-26 20:51 PDT: `conversation.processor_visible_turn`
+  records the exact post-suppression/coalesced text handed to the conversation
+  processor, with source ASR session and utterance IDs. Transcript text follows
+  the configured redaction policy.
   DESIGN reference: `PROFILING.md`, `Application-turn traceability`
-- [ ] Add first-class latency spans for `final_asr_to_first_audio` and
-  `barge_cancel_to_replacement_first_audio`. Do not keep inferring these from
-  `quality.turn.playback_linked` timestamps.
+- [x] Add first-class first-audio latency spans instead of inferring them from
+  playback-link timestamps. @codex-541, 2026-06-26 20:51 PDT: live runs can
+  now score `conversation.visible_turn_to_first_audio` and
+  `barge_in.cancel_terminal_to_replacement_first_audio` from quality JSONL.
   DESIGN reference: `PROFILING.md`, `Barge-in span links`
 - [ ] Run the next barge-in Identity config-only test with
   `voice_quality.conversation_policy.post_barge_in_silence_ms = 900` while

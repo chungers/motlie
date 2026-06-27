@@ -130,6 +130,8 @@ pub struct OutboundFrameQualityContext {
     pub request_started_at: Instant,
     pub turn_finalized_at: Option<Instant>,
     pub latest_turn_finalized_at: Option<Instant>,
+    pub processor_visible_turn_at: Option<Instant>,
+    pub barge_in_cancel_terminal_at: Option<Instant>,
     pub turn_id: Option<String>,
     pub coalesced_turn_ids: Vec<String>,
     pub queued_at: Instant,
@@ -1119,6 +1121,58 @@ async fn maybe_emit_first_frame_span(
                 critical_path: true,
                 concurrent: false,
                 payload: first_audio_payload,
+            },
+        );
+    }
+    if let Some(visible_at) = quality.processor_visible_turn_at {
+        let payload = map_from_value(json!({
+            "playback_id": frame.playback_id.as_str(),
+            "turn_id": quality.turn_id.as_deref(),
+            "queue_depth": queue_depth,
+            "processor_visible_to_request_ms": quality
+                .request_started_at
+                .saturating_duration_since(visible_at)
+                .as_millis() as u64,
+            "coalesced_turn_count": quality.coalesced_turn_ids.len(),
+            "coalesced_turn_ids": quality.coalesced_turn_ids.as_slice(),
+        }));
+        state.write().await.emit_quality_span_finished(
+            call_id,
+            QualitySpanEmission {
+                config_id: quality.config_id.clone(),
+                redaction_mode: quality.redaction_mode,
+                span_name: "conversation.visible_turn_to_first_audio",
+                category: "turn_taking",
+                duration: visible_at.elapsed(),
+                critical_path: true,
+                concurrent: false,
+                payload,
+            },
+        );
+    }
+    if let Some(cancel_terminal_at) = quality.barge_in_cancel_terminal_at {
+        let payload = map_from_value(json!({
+            "playback_id": frame.playback_id.as_str(),
+            "turn_id": quality.turn_id.as_deref(),
+            "queue_depth": queue_depth,
+            "cancel_terminal_to_request_ms": quality
+                .request_started_at
+                .saturating_duration_since(cancel_terminal_at)
+                .as_millis() as u64,
+            "coalesced_turn_count": quality.coalesced_turn_ids.len(),
+            "coalesced_turn_ids": quality.coalesced_turn_ids.as_slice(),
+        }));
+        state.write().await.emit_quality_span_finished(
+            call_id,
+            QualitySpanEmission {
+                config_id: quality.config_id.clone(),
+                redaction_mode: quality.redaction_mode,
+                span_name: "barge_in.cancel_terminal_to_replacement_first_audio",
+                category: "barge_in",
+                duration: cancel_terminal_at.elapsed(),
+                critical_path: true,
+                concurrent: false,
+                payload,
             },
         );
     }
@@ -3283,6 +3337,8 @@ async fn emit_asr_final_reconciliation(
 struct ConversationTranscriptEvent {
     event: TranscriptEvent,
     turn_id: Option<String>,
+    source_asr_session_ids: Vec<String>,
+    source_utterance_ids: Vec<String>,
     confidence: Option<f32>,
     stability: Option<f32>,
 }
@@ -3308,6 +3364,8 @@ async fn forward_conversation_events(
             quality_config,
             conversation::ConversationTranscriptMetadata {
                 turn_id: event.turn_id.as_deref(),
+                source_asr_session_ids: Some(&event.source_asr_session_ids),
+                source_utterance_ids: Some(&event.source_utterance_ids),
                 confidence: event.confidence,
                 stability: event.stability,
             },
@@ -4001,9 +4059,19 @@ async fn record_transcript_events(
                 quality_session: session.clone(),
             });
         }
+        let source_asr_session_ids = context
+            .quality_session
+            .map(|session| vec![session.asr_session_id.clone()])
+            .unwrap_or_default();
+        let source_utterance_ids = context
+            .quality_session
+            .map(|session| vec![session.utterance_id.clone()])
+            .unwrap_or_default();
         conversation_events.push(ConversationTranscriptEvent {
             event: transcript_event_with_text(&event.event, text.clone()),
             turn_id,
+            source_asr_session_ids,
+            source_utterance_ids,
             confidence: transcript_confidence,
             stability: transcript_stability,
         });

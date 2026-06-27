@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-26 20:51 PDT | @codex-541 | Added processor-visible transcript event and first-audio latency span names to the required live-run result protocol. |
 | 2026-06-26 PDT | @codex-541 | Added the PR breadcrumb requirement: each live run must update PLAN.md and commit a redacted `docs/tests/*.toml` run record linked from the roadmap. |
 | 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad tuning knobs for outbound pacing reliability. |
 | 2026-06-25 PDT | @codex-541 | Recorded the current barge-in coalesce-after-silence tuning profile and latest live-run result; tightened the next-run protocol to keep qualitative feedback out of Identity repeat capture. |
@@ -626,7 +627,9 @@ alignment = [
 ```
 
 For each live run, append a stable latency/quality block. Use `null` only when a
-metric is genuinely unavailable from the run artifacts:
+metric is genuinely unavailable from the run artifacts. The processor-visible
+transcript control stream is the `conversation.processor_visible_turn` quality
+event, not raw ASR finals, because raw ASR may contain suppressed assistant echo:
 
 ```toml
 [result_latency]
@@ -650,6 +653,22 @@ max_ms = 0
 
 [[result_latency.span]]
 name = "tts.request_to_first_audio"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+
+[[result_latency.span]]
+name = "conversation.visible_turn_to_first_audio"
+n = 0
+min_ms = 0
+p50_ms = 0
+p95_ms = 0
+max_ms = 0
+
+[[result_latency.span]]
+name = "barge_in.cancel_terminal_to_replacement_first_audio"
 n = 0
 min_ms = 0
 p50_ms = 0
@@ -938,7 +957,13 @@ N, the gateway emits one `turn_batch_prompt_complete` event with source-turn
 count, `completion_reason`, and `accumulation_ms`, then speaks one joined echo.
 The existing `quality.turn.playback_linked` event includes the turn-batch id,
 epoch, response turn id, and completion reason so delivery/cancel outcome can be
-joined back to the prompt.
+joined back to the prompt. `conversation.processor_visible_turn` records the
+exact text the processor saw after suppression/coalescing, and
+`conversation.visible_turn_to_first_audio` records the processor-visible to
+first-audio latency for the resulting speech. When barge-in cancels active
+playback and a replacement is queued,
+`barge_in.cancel_terminal_to_replacement_first_audio` records the terminal
+cancel-to-replacement-audio latency.
 
 Run three variants when validating a change:
 

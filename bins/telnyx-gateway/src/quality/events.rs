@@ -204,6 +204,40 @@ impl QualityEvent {
         Self::new(context, "text_call.caller_turn.sent", payload)
     }
 
+    pub fn conversation_processor_visible_turn(
+        context: QualityEventContext,
+        turn_id: Option<&str>,
+        text: &str,
+        include_transcript_text: bool,
+        metadata: ProcessorVisibleTurnEventMetadata<'_>,
+    ) -> Self {
+        let redaction_mode = context.redaction_mode;
+        let mut payload = map_from_value(json!({
+            "turn_id": turn_id,
+            "processor": metadata.processor,
+            "response_mode": metadata.response_mode,
+            "confidence": metadata.confidence,
+            "coalesced_turn_count": metadata.coalesced_turn_ids.len(),
+            "coalesced_turn_ids": metadata.coalesced_turn_ids,
+            "source_asr_session_ids": metadata.source_asr_session_ids,
+            "source_utterance_ids": metadata.source_utterance_ids,
+            "text_words": text.split_whitespace().count(),
+            "text_chars": text.chars().count(),
+            "transcript_text_included": transcript_plaintext_included(
+                redaction_mode,
+                include_transcript_text
+            ),
+        }));
+        insert_transcript_text_fields(
+            &mut payload,
+            redaction_mode,
+            include_transcript_text,
+            "text",
+            text,
+        );
+        Self::new(context, "conversation.processor_visible_turn", payload)
+    }
+
     pub fn transcript_suppressed(
         context: QualityEventContext,
         session: Option<&ActiveAsrQualitySession>,
@@ -366,6 +400,16 @@ pub struct CallerTurnEventMetadata {
     pub confidence: Option<f32>,
     pub transcript_event_count: usize,
     pub coalesced_turn_ids: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ProcessorVisibleTurnEventMetadata<'a> {
+    pub coalesced_turn_ids: &'a [String],
+    pub source_asr_session_ids: &'a [String],
+    pub source_utterance_ids: &'a [String],
+    pub processor: &'a str,
+    pub response_mode: &'a str,
+    pub confidence: Option<f32>,
 }
 
 pub fn transcript_plaintext_included(
@@ -761,6 +805,43 @@ mod tests {
         assert_eq!(summary.event, "quality.report.summary");
         assert_eq!(summary.payload["attempted_turns"], 1);
         assert_eq!(summary.payload["played_turns"], 1);
+    }
+
+    #[test]
+    fn processor_visible_turn_event_uses_transcript_redaction_policy() {
+        let context = QualityEventContext::new(
+            5,
+            "run_test",
+            Some("gwc_test".to_string()),
+            "cfg_test",
+            RedactionMode::HashedText,
+        );
+        let coalesced_turn_ids = vec!["turn_1".to_string(), "turn_2".to_string()];
+        let source_asr_session_ids = vec!["asr_1".to_string()];
+        let source_utterance_ids = vec!["utt_1".to_string()];
+        let event = QualityEvent::conversation_processor_visible_turn(
+            context,
+            Some("turn_1"),
+            "visible caller text",
+            true,
+            ProcessorVisibleTurnEventMetadata {
+                coalesced_turn_ids: &coalesced_turn_ids,
+                source_asr_session_ids: &source_asr_session_ids,
+                source_utterance_ids: &source_utterance_ids,
+                processor: "identity",
+                response_mode: "command",
+                confidence: Some(0.91),
+            },
+        );
+
+        assert_eq!(event.event, "conversation.processor_visible_turn");
+        assert_eq!(event.payload["turn_id"], "turn_1");
+        assert_eq!(event.payload["coalesced_turn_count"], 2);
+        assert_eq!(event.payload["source_asr_session_ids"][0], "asr_1");
+        assert_eq!(event.payload["processor"], "identity");
+        assert_eq!(event.payload["transcript_text_included"], false);
+        assert!(event.payload.get("text").is_none());
+        assert!(event.payload.get("text_sha256").is_some());
     }
 
     #[test]

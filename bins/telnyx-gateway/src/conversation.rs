@@ -21,8 +21,8 @@ use crate::conversation_policy::{
 use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
-    CallStatus, ConversationMode, LogLevel, QualityPlaybackMetadata, QualitySpanEmission,
-    SharedState, TurnBatchActiveState,
+    CallStatus, ConversationMode, LogLevel, QualityConversationProcessorVisibleTurn,
+    QualityPlaybackMetadata, QualitySpanEmission, SharedState, TurnBatchActiveState,
 };
 pub use crate::processors::{
     ConversationCommittedTurn, ConversationProcessorInput, ConversationProcessorKind,
@@ -402,6 +402,8 @@ struct ConversationFinalInput {
     final_transcript_at: Instant,
     debounce: Duration,
     turn_id: Option<String>,
+    source_asr_session_ids: Vec<String>,
+    source_utterance_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -418,6 +420,8 @@ struct PendingConversationFinal {
     latest_final_transcript_at: Instant,
     generation: u64,
     turn_ids: Vec<String>,
+    source_asr_session_ids: Vec<String>,
+    source_utterance_ids: Vec<String>,
     active_hold_kind: Option<ConversationFinalHoldKind>,
     active_hold_started_at: Option<Instant>,
     playback_hold_count: u64,
@@ -431,8 +435,11 @@ struct PendingConversationFinal {
 struct ConversationTurnContext {
     finalized_at: Option<Instant>,
     latest_finalized_at: Option<Instant>,
+    processor_visible_turn_at: Option<Instant>,
     turn_id: Option<String>,
     coalesced_turn_ids: Vec<String>,
+    source_asr_session_ids: Vec<String>,
+    source_utterance_ids: Vec<String>,
     metadata: QualityPlaybackMetadata,
 }
 
@@ -445,6 +452,8 @@ struct PendingConversationSay {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConversationTranscriptMetadata<'a> {
     pub turn_id: Option<&'a str>,
+    pub source_asr_session_ids: Option<&'a [String]>,
+    pub source_utterance_ids: Option<&'a [String]>,
     pub confidence: Option<f32>,
     pub stability: Option<f32>,
 }
@@ -614,6 +623,14 @@ pub async fn handle_transcript_event_with_metadata(
                 final_transcript_at,
                 debounce,
                 turn_id: metadata.turn_id.map(str::to_string),
+                source_asr_session_ids: metadata
+                    .source_asr_session_ids
+                    .map(<[String]>::to_vec)
+                    .unwrap_or_default(),
+                source_utterance_ids: metadata
+                    .source_utterance_ids
+                    .map(<[String]>::to_vec)
+                    .unwrap_or_default(),
             },
         )
         .await;
@@ -630,10 +647,19 @@ pub async fn handle_transcript_event_with_metadata(
             ConversationTurnContext {
                 finalized_at: Some(final_transcript_at),
                 latest_finalized_at: Some(final_transcript_at),
+                processor_visible_turn_at: None,
                 turn_id: metadata.turn_id.map(str::to_string),
                 coalesced_turn_ids: metadata
                     .turn_id
                     .map(|id| vec![id.to_string()])
+                    .unwrap_or_default(),
+                source_asr_session_ids: metadata
+                    .source_asr_session_ids
+                    .map(<[String]>::to_vec)
+                    .unwrap_or_default(),
+                source_utterance_ids: metadata
+                    .source_utterance_ids
+                    .map(<[String]>::to_vec)
                     .unwrap_or_default(),
                 metadata: QualityPlaybackMetadata::default(),
             },
@@ -652,6 +678,14 @@ pub async fn handle_transcript_event_with_metadata(
             final_transcript_at,
             debounce: conversation_final_debounce(snapshot.endpoint_merge_window_ms),
             turn_id: metadata.turn_id.map(str::to_string),
+            source_asr_session_ids: metadata
+                .source_asr_session_ids
+                .map(<[String]>::to_vec)
+                .unwrap_or_default(),
+            source_utterance_ids: metadata
+                .source_utterance_ids
+                .map(<[String]>::to_vec)
+                .unwrap_or_default(),
         },
     )
     .await;
@@ -716,6 +750,14 @@ async fn clear_barge_in_policy_window(runtime: &ConversationRuntime, gateway_cal
         .remove(gateway_call_id);
 }
 
+fn extend_unique(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+
 async fn schedule_conversation_final(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
@@ -734,6 +776,8 @@ async fn schedule_conversation_final(
                 latest_final_transcript_at: input.final_transcript_at,
                 generation: 0,
                 turn_ids: input.turn_id.iter().cloned().collect(),
+                source_asr_session_ids: input.source_asr_session_ids.clone(),
+                source_utterance_ids: input.source_utterance_ids.clone(),
                 active_hold_kind: None,
                 active_hold_started_at: None,
                 playback_hold_count: 0,
@@ -752,6 +796,11 @@ async fn schedule_conversation_final(
                 entry.turn_ids.push(turn_id);
             }
         }
+        extend_unique(
+            &mut entry.source_asr_session_ids,
+            input.source_asr_session_ids,
+        );
+        extend_unique(&mut entry.source_utterance_ids, input.source_utterance_ids);
         entry.latest_final_transcript_at = input.final_transcript_at;
         entry.generation = entry.generation.saturating_add(1);
         entry.generation
@@ -862,8 +911,11 @@ async fn schedule_conversation_final(
                 ConversationTurnContext {
                     finalized_at: Some(pending.final_transcript_at),
                     latest_finalized_at: Some(pending.latest_final_transcript_at),
+                    processor_visible_turn_at: None,
                     turn_id: pending.turn_ids.first().cloned(),
                     coalesced_turn_ids: pending.turn_ids,
+                    source_asr_session_ids: pending.source_asr_session_ids,
+                    source_utterance_ids: pending.source_utterance_ids,
                     metadata: QualityPlaybackMetadata::default(),
                 },
             )
@@ -1345,7 +1397,7 @@ async fn dispatch_final_transcript_to_processor(
     gateway_call_id: &str,
     event: TranscriptEvent,
     quality_config: Option<&VoiceQualityConfig>,
-    turn_context: ConversationTurnContext,
+    mut turn_context: ConversationTurnContext,
 ) -> anyhow::Result<()> {
     if !runtime.processor_enabled() {
         return Ok(());
@@ -1360,10 +1412,28 @@ async fn dispatch_final_transcript_to_processor(
     if !snapshot.attached {
         return Ok(());
     }
-    state
-        .write()
-        .await
-        .record_conversation_user_turn(gateway_call_id, transcript_text.clone());
+    let processor_visible_at = Instant::now();
+    turn_context.processor_visible_turn_at = Some(processor_visible_at);
+    {
+        let mut guard = state.write().await;
+        guard.record_conversation_user_turn(gateway_call_id, transcript_text.clone());
+        guard.emit_quality_conversation_processor_visible_turn(
+            gateway_call_id,
+            QualityConversationProcessorVisibleTurn {
+                config_id: &snapshot.config_id,
+                redaction_mode: snapshot.redaction_mode,
+                include_transcript_text: snapshot.quality_config.logging.include_transcript_text,
+                turn_id: turn_context.turn_id.as_deref(),
+                text: &transcript_text,
+                coalesced_turn_ids: &turn_context.coalesced_turn_ids,
+                source_asr_session_ids: &turn_context.source_asr_session_ids,
+                source_utterance_ids: &turn_context.source_utterance_ids,
+                processor: snapshot.processor.label(),
+                response_mode: snapshot.processor.response_mode_label(),
+                confidence: latest_transcript_confidence(&event),
+            },
+        );
+    }
 
     let processor_input = ConversationProcessorInput::CommittedTurn(ConversationCommittedTurn {
         call_id: gateway_call_id.to_string(),
@@ -2559,9 +2629,9 @@ async fn queue_conversation_speech(
     conflict_policy: SpeechConflictPolicy,
     turn_context: ConversationTurnContext,
 ) {
-    let speech_output = {
-        let guard = state.read().await;
-        guard
+    let (speech_output, barge_in_cancel_terminal_at) = {
+        let mut guard = state.write().await;
+        let speech_output = guard
             .calls
             .get(gateway_call_id)
             .map(|call| call.speech_output)
@@ -2570,7 +2640,10 @@ async fn queue_conversation_speech(
                     guard.conversation_tts_backend,
                     &guard.quality.config.tts,
                 )
-            })
+            });
+        let barge_in_cancel_terminal_at =
+            guard.take_last_barge_in_cancel_terminal_at(gateway_call_id);
+        (speech_output, barge_in_cancel_terminal_at)
     };
     let queued = speech::queue_speech_with_request(
         state,
@@ -2584,10 +2657,12 @@ async fn queue_conversation_speech(
             conflict_policy,
             turn_finalized_at: turn_context.finalized_at,
             latest_turn_finalized_at: turn_context.latest_finalized_at,
+            processor_visible_turn_at: turn_context.processor_visible_turn_at,
+            barge_in_cancel_terminal_at,
             turn_id: turn_context.turn_id,
             coalesced_turn_ids: turn_context.coalesced_turn_ids,
-            source_asr_session_ids: Vec::new(),
-            source_utterance_ids: Vec::new(),
+            source_asr_session_ids: turn_context.source_asr_session_ids,
+            source_utterance_ids: turn_context.source_utterance_ids,
             prebuffer_chunks_override: None,
             speech_output: Some(speech_output),
             metadata: turn_context.metadata,
@@ -3295,6 +3370,8 @@ second"
                 turn_id: Some("turn-blue"),
                 confidence: Some(0.91),
                 stability: None,
+                source_asr_session_ids: None,
+                source_utterance_ids: None,
             },
         )
         .await
@@ -4223,8 +4300,11 @@ second"
             ConversationTurnContext {
                 finalized_at: None,
                 latest_finalized_at: None,
+                processor_visible_turn_at: None,
                 turn_id: Some("turn_test".to_string()),
                 coalesced_turn_ids: vec!["turn_test".to_string()],
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
                 metadata: QualityPlaybackMetadata::default(),
             },
         )

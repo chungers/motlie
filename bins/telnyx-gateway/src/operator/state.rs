@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,9 @@ use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
-    ActiveAsrQualitySession, CallerTurnEventMetadata, QualityEvent, QualityEventContext,
-    QualityEventSink, RedactionMode, TtsGenerationMode, TtsQualityConfig, VoiceQualityConfig,
+    ActiveAsrQualitySession, CallerTurnEventMetadata, ProcessorVisibleTurnEventMetadata,
+    QualityEvent, QualityEventContext, QualityEventSink, RedactionMode, TtsGenerationMode,
+    TtsQualityConfig, VoiceQualityConfig,
 };
 use crate::tts::LiveTtsBackend;
 
@@ -286,6 +287,21 @@ pub struct QualityPlaybackLinkage {
     pub source_utterance_ids: Vec<String>,
     pub source_label: String,
     pub metadata: QualityPlaybackMetadata,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QualityConversationProcessorVisibleTurn<'a> {
+    pub config_id: &'a str,
+    pub redaction_mode: RedactionMode,
+    pub include_transcript_text: bool,
+    pub turn_id: Option<&'a str>,
+    pub text: &'a str,
+    pub coalesced_turn_ids: &'a [String],
+    pub source_asr_session_ids: &'a [String],
+    pub source_utterance_ids: &'a [String],
+    pub processor: &'a str,
+    pub response_mode: &'a str,
+    pub confidence: Option<f32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -784,6 +800,7 @@ pub struct CallSession {
     pub last_echo_suppressed_preview: Option<String>,
     pub last_echo_suppressed_text: Option<String>,
     pub last_echo_suppressed_at: Option<DateTime<Utc>>,
+    pub last_barge_in_cancel_terminal_at: Option<Instant>,
     pub conversation: ConversationState,
     pub speech_output: SpeechOutputConfig,
     pub quality_turns: QualityTurnReportState,
@@ -818,6 +835,7 @@ impl CallSession {
             last_echo_suppressed_preview: None,
             last_echo_suppressed_text: None,
             last_echo_suppressed_at: None,
+            last_barge_in_cancel_terminal_at: None,
             conversation: ConversationState::default(),
             speech_output: SpeechOutputConfig::default(),
             quality_turns: QualityTurnReportState::default(),
@@ -1184,6 +1202,35 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
+    pub fn emit_quality_conversation_processor_visible_turn(
+        &mut self,
+        gateway_call_id: &str,
+        visible_turn: QualityConversationProcessorVisibleTurn<'_>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::conversation_processor_visible_turn(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                visible_turn.config_id.to_string(),
+                visible_turn.redaction_mode,
+            ),
+            visible_turn.turn_id,
+            visible_turn.text,
+            visible_turn.include_transcript_text,
+            ProcessorVisibleTurnEventMetadata {
+                coalesced_turn_ids: visible_turn.coalesced_turn_ids,
+                source_asr_session_ids: visible_turn.source_asr_session_ids,
+                source_utterance_ids: visible_turn.source_utterance_ids,
+                processor: visible_turn.processor,
+                response_mode: visible_turn.response_mode,
+                confidence: visible_turn.confidence,
+            },
+        );
+        self.quality.event_sink.emit(event);
+    }
+
     pub fn emit_quality_caller_partial_sent(
         &mut self,
         gateway_call_id: &str,
@@ -1338,6 +1385,9 @@ impl GatewayState {
         reason: Option<&str>,
     ) {
         let record = self.calls.get_mut(gateway_call_id).and_then(|call| {
+            if status == "canceled" && reason == Some("barge_in") {
+                call.last_barge_in_cancel_terminal_at = Some(Instant::now());
+            }
             call.quality_turns
                 .record_terminal(playback_id, status, reason)
         });
@@ -1710,6 +1760,15 @@ impl GatewayState {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.quality_turns.record_turn_batch_output_rejected(reason);
         }
+    }
+
+    pub fn take_last_barge_in_cancel_terminal_at(
+        &mut self,
+        gateway_call_id: &str,
+    ) -> Option<Instant> {
+        self.calls
+            .get_mut(gateway_call_id)
+            .and_then(|call| call.last_barge_in_cancel_terminal_at.take())
     }
 
     pub fn record_conversation_proposal(&mut self, gateway_call_id: &str, text: String) {
@@ -2261,6 +2320,40 @@ mod tests {
         let tts = call.tts.as_ref().expect("new TTS should remain active");
         assert_eq!(tts.playback_id, "tts_new");
         assert_eq!(tts.status, TtsPlaybackStatus::Queued);
+    }
+
+    #[test]
+    fn barge_in_cancel_terminal_timestamp_is_one_shot() {
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = state.add_or_update_outbound_call(
+            TelnyxIds {
+                call_control_id: "call-1".to_string(),
+                call_session_id: Some("session-1".to_string()),
+                call_leg_id: Some("leg-1".to_string()),
+                stream_id: Some("stream-1".to_string()),
+            },
+            None,
+            None,
+            CallStatus::MediaStarted,
+        );
+
+        state.record_quality_playback_terminal(&call_id, "tts_test", "finished", None);
+        assert!(state
+            .take_last_barge_in_cancel_terminal_at(&call_id)
+            .is_none());
+
+        state.record_quality_playback_terminal(&call_id, "tts_test", "canceled", Some("operator"));
+        assert!(state
+            .take_last_barge_in_cancel_terminal_at(&call_id)
+            .is_none());
+
+        state.record_quality_playback_terminal(&call_id, "tts_test", "canceled", Some("barge_in"));
+        assert!(state
+            .take_last_barge_in_cancel_terminal_at(&call_id)
+            .is_some());
+        assert!(state
+            .take_last_barge_in_cancel_terminal_at(&call_id)
+            .is_none());
     }
 
     #[test]
