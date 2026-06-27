@@ -1,0 +1,248 @@
+schema_version = 1
+kind = "motlie.binary-release"
+state = "planned"
+
+[identity]
+binary = "mmux"
+version = "0.1.1"
+release_name = "2026-06-bright-beacon"
+
+[release]
+notes_path = "releases/mmux.md"
+
+[build]
+cargo_package = "motlie-mmux"
+cargo_bin = "mmux"
+profile = "release"
+locked = true
+cargo_lock_policy = "must-be-committed-and-unchanged-at-final-tag"
+
+[toolchain]
+rust_policy = "record-rustc-and-cargo-version-in-evidence"
+darwin_cross = "cargo-zigbuild"
+darwin_cross_policy = "v0-default-for-darwin-from-linux"
+linux_default_libc = "musl"
+linux_static_policy = "default-static-musl-when-feasible"
+linux_gnu_policy = "fallback-for-glibc-or-cuda-runtime"
+linux_gnu_glibc_floor_policy = "record-host-and-binary-glibc-floor-for-gnu-targets"
+linux_musl_toolchain = "rustup-target-and-cargo-build-target"
+linux_musl_toolchain_policy = "use-cargo-zigbuild-only-when-c-deps-need-musl-aware-linker"
+required_evidence_universal = ["rustc -Vv", "cargo -V"]
+darwin_cross_required_evidence = ["cargo zigbuild -V", "zig version"]
+linux_musl_required_evidence = ["file <binary>", "ldd <binary>", "readelf -d <binary>"]
+linux_gnu_required_evidence = ["objdump -T <binary> | grep GLIBC_ | sort -u", "ldd --version"]
+
+[signing]
+identity = "adhoc"
+macos_verify_installed_path = true
+
+[install]
+command = "mmux"
+default_path = "/usr/local/bin/mmux"
+force_command_safe = true
+
+[archive]
+enabled = true
+linux_default_libc = "musl"
+musl_enabled = true
+gnu_enabled = false
+darwin_policy = "apple-silicon-only"
+asset_prefix = "motlie-mmux"
+format = "tar.gz"
+binary_path = "bin/mmux"
+include = []
+deferred_include = ["README.md", "LICENSE"]
+deferred_include_reason = "Keep archive payloads minimal for this manual v0 release event; final archives contain bin/mmux only."
+
+[installer]
+enabled = true
+script = "install-mmux.sh"
+source_path = "releases/install/install-mmux.sh"
+default_source = "archive"
+
+[npm]
+enabled = false
+deferred_reason = "npm publication is explicitly deferred for 2026-06-bright-beacon and must not appear in release-note install guidance."
+
+[homebrew]
+enabled = false
+deferred_reason = "Homebrew publication is explicitly deferred for 2026-06-bright-beacon and must not appear in release-note install guidance."
+
+[[target]]
+id = "linux-x64-musl"
+os = "linux"
+arch = "x64"
+libc = "musl"
+linkage = "static"
+rust_target = "x86_64-unknown-linux-musl"
+archive_asset = "motlie-mmux-v0.1.1-linux-x64-musl.tar.gz"
+archive_binary_path = "bin/mmux"
+
+[target.status]
+state = "planned"
+
+[[target]]
+id = "linux-arm64-musl"
+os = "linux"
+arch = "arm64"
+libc = "musl"
+linkage = "static"
+rust_target = "aarch64-unknown-linux-musl"
+archive_asset = "motlie-mmux-v0.1.1-linux-arm64-musl.tar.gz"
+archive_binary_path = "bin/mmux"
+
+[target.status]
+state = "planned"
+
+[[target]]
+id = "darwin-arm64"
+os = "darwin"
+arch = "arm64"
+rust_target = "aarch64-apple-darwin"
+archive_asset = "motlie-mmux-v0.1.1-darwin-arm64.tar.gz"
+archive_binary_path = "bin/mmux"
+requires_macos_signing = true
+
+[target.status]
+state = "planned"
+
+[[gate]]
+id = "linux-builds-staged"
+target_id = ""
+channel = "archive"
+rollup = true
+state = "planned"
+
+[[gate]]
+id = "linux-builds-staged"
+target_id = "linux-x64-musl"
+channel = "archive"
+state = "planned"
+
+[[gate]]
+id = "linux-builds-staged"
+target_id = "linux-arm64-musl"
+channel = "archive"
+state = "planned"
+
+[[gate]]
+id = "linux-archives-packaged"
+target_id = ""
+channel = "archive"
+rollup = true
+state = "planned"
+
+[[gate]]
+id = "linux-archives-packaged"
+target_id = "linux-x64-musl"
+channel = "archive"
+state = "planned"
+
+[[gate]]
+id = "linux-archives-packaged"
+target_id = "linux-arm64-musl"
+channel = "archive"
+state = "planned"
+
+[[gate]]
+id = "darwin-builds-staged"
+target_id = ""
+channel = "archive"
+rollup = true
+state = "planned"
+
+[[gate]]
+id = "darwin-builds-staged"
+target_id = "darwin-arm64"
+channel = "archive"
+state = "planned"
+
+[[gate]]
+id = "darwin-codesign-staged"
+target_id = ""
+channel = "archive"
+rollup = true
+state = "planned"
+
+[[gate]]
+id = "darwin-codesign-staged"
+target_id = "darwin-arm64"
+channel = "archive"
+state = "planned"
+
+[[gate]]
+id = "darwin-archives-packaged"
+target_id = ""
+channel = "archive"
+rollup = true
+state = "planned"
+
+[[gate]]
+id = "darwin-archives-packaged"
+target_id = "darwin-arm64"
+channel = "archive"
+state = "planned"
+
+[[gate]]
+id = "installer-validated"
+target_id = ""
+channel = "installer"
+rollup = true
+state = "planned"
+
+[[gate]]
+id = "installer-validated"
+target_id = "linux-x64-musl"
+channel = "installer"
+state = "planned"
+
+[[gate]]
+id = "installer-validated"
+target_id = "linux-arm64-musl"
+channel = "installer"
+state = "planned"
+
+[[gate]]
+id = "installer-validated"
+target_id = "darwin-arm64"
+channel = "installer"
+state = "planned"
+
+[[gate]]
+id = "npm-published"
+target_id = ""
+channel = "npm"
+rollup = true
+state = "deferred"
+completed_at = "2026-06-27T03:31:36Z"
+completed_by = "@codex-release-eng"
+source_commit = "aaecf9179fcf32e73d8f60a2c69fa12d8de6cfdc"
+deferred_reason = "npm channel deferred for 2026-06-bright-beacon by release-owner direction."
+evidence = [
+  { kind = "human-direction", ref = "chat: Defer npm and Homebrew", note = "Release owner said to defer npm and not show it in release notes." },
+]
+
+[[gate]]
+id = "homebrew-formula-published"
+target_id = ""
+channel = "homebrew"
+state = "deferred"
+completed_at = "2026-06-27T03:31:36Z"
+completed_by = "@codex-release-eng"
+source_commit = "aaecf9179fcf32e73d8f60a2c69fa12d8de6cfdc"
+deferred_reason = "Homebrew channel deferred for 2026-06-bright-beacon by release-owner direction."
+evidence = [
+  { kind = "human-direction", ref = "chat: Defer npm and Homebrew", note = "Release owner said to defer Homebrew and not show it in release notes." },
+]
+
+[[gate]]
+id = "homebrew-bottle-published"
+target_id = ""
+channel = "homebrew"
+rollup = true
+state = "deferred"
+completed_at = "2026-06-27T03:31:36Z"
+completed_by = "@codex-release-eng"
+source_commit = "aaecf9179fcf32e73d8f60a2c69fa12d8de6cfdc"
+deferred_reason = "deferred under same release-owner direction as homebrew-formula-published."
+evidence = []
