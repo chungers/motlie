@@ -81,12 +81,12 @@ Manual v0 release sequence:
 4. Push the release branch. Do not open a PR that merges it to `main`.
 5. Create a master tracking issue and record it in the workspace manifest tracking metadata.
 6. Create scoped sub-issues for platform/channel/gate work; each should instruct the operator to open a sub-PR back to the release branch.
-7. Land platform/channel sub-PRs into the release branch; each sub-PR updates manifest status and closes its sub-issue.
+7. Land platform/channel sub-PRs into the release branch; each sub-PR updates manifest status and closes its sub-issue. Note: merging into the **release branch does NOT auto-close** a sub-PR's `Closes #N` issue (GitHub only auto-closes on the default branch), so close sub-issues explicitly with `gh issue close` when their gate completes.
 8. Cherry-pick reusable source, doc, skill, or tooling fixes to `main` through separate PRs when needed. Use `git cherry-pick -x` so each commit carries the `(cherry picked from commit <release-branch-sha>)` lineage trailer; see the "Cherry-pick fixes from a release branch to `main`" section below for the full procedure.
 9. Generate final notes/ledger state from manifests plus issue/PR evidence after required gates complete or defer.
 10. Create the final source tag from the release branch after explicit approval.
 11. Build, sign, package, and publish final artifacts from the final tag.
-12. Validate release-pinned installers and update `installer-validated` gates.
+12. Validate release-pinned installers and update `installer-validated` gates. The installer downloads its asset from the GitHub Release, so this step is **gated on step 11 (publish) and cannot run before the Release exists** — never attempt installer-validation pre-publish. Run the published `curl|sh` installer on a host matching each target arch (a user-writable `PREFIX` avoids sudo); record host, command, installer-output, install-path, runtime `--version`, and (Darwin) `codesign --verify` evidence.
 13. Publish native npm packages and update `motlie/homebrew-tap`.
 14. Push a final release-branch ledger commit that marks manifests `state = "published"` and records final URLs/checksums/package links.
 15. Close the master issue only after the GitHub Release is live and final ledger state is pushed.
@@ -180,6 +180,7 @@ GitHub constraints:
 - A full GitHub Release is tag-centric, not PR-centric.
 - The final tag must point to the exact source commit used for final artifacts.
 - Staging evidence from a release branch does not replace final build/signing from the final tag if the commit changed.
+- Rust builds are not byte-reproducible (embedded build paths / `BuildID`), so the final from-tag artifact and binary sha256 will differ from staging **even when the source is unchanged** (e.g. only docs changed since staging). Treat the final from-tag shas as authoritative, publish those, and record them in the ledger; the staging shas are superseded — do not block on staging-vs-final sha mismatch.
 - Do not move the release tag to include post-release ledger metadata.
 - Release branches never merge to `main`; cherry-pick fixes back instead.
 - Concurrent release branches are allowed. Pull relevant fixes from `main` into another release branch with a normal merge from `main`.
@@ -204,6 +205,7 @@ Manifest status rules:
 Package build rules:
 
 - Build archives and npm package directories from final artifacts produced from `RELEASE_TAG`; staging package directories are evidence only.
+- When packaging **Darwin** archives on macOS, set `COPYFILE_DISABLE=1` and strip xattrs (`tar --no-xattrs`, or bsdtar `--no-mac-metadata`) so the archive contains only `bin/<binary>`. Plain macOS `tar` injects AppleDouble `._*` resource-fork files and `com.apple.provenance` xattrs that would otherwise ship in the public release. Verify with `tar -tzf <archive>` (expect only `bin/<binary>`, no `._*`) before publishing.
 - Native npm package directories are generated from per-target `npm_package`, `npm_bin_path`, `bin_command`, and `node_launcher = false`; run `npm pack --dry-run`, install the generated `.tgz`, and execute the installed binary before publishing.
 - Homebrew release work happens in `motlie/homebrew-tap`; formulae build from the final source tag and run the installed binary from Homebrew's install path.
 - Package publication updates target-specific `npm-published`, `homebrew-formula-published`, or `homebrew-bottle-published` gates with package URL, version, checksum/provenance when available, source tag, actor, and command evidence.
