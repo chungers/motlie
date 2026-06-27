@@ -79,7 +79,20 @@ archive_asset = "motlie-mstream-v0.1.0-linux-x64-musl.tar.gz"
 archive_binary_path = "bin/mstream"
 
 [target.status]
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+evidence = [
+  { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mstream --bin mstream -- -C linker=rust-lld", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
+  { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mstream: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "7090748c0350a1334457b32879bea2e621d49061f0af945b9ea4532bb0c4a03e", note = "linux-x64-musl binary checksum" },
+  { kind = "ldd", ref = "ldd target/x86_64-unknown-linux-musl/release/mstream", note = "not a dynamic executable" },
+  { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mstream", note = "static-pie dynamic section has no NEEDED entries" },
+  { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mstream --version", note = "not executed on this aarch64 host; qemu-x86_64 unavailable" },
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", sha256 = "e2da052dad2c1560fe390aab623add1897d6e1143c5dd1bfe73ac3ee9e1a6d95", note = "candidate archive contains ./bin/mstream only" },
+  { kind = "contents", ref = "tar -tzf target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", note = "./, ./bin/, ./bin/mstream" },
+]
 
 [[target]]
 id = "linux-arm64-musl"
@@ -92,7 +105,20 @@ archive_asset = "motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz"
 archive_binary_path = "bin/mstream"
 
 [target.status]
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+evidence = [
+  { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mstream --bin mstream", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
+  { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mstream: ELF 64-bit LSB executable, ARM aarch64, statically linked, BuildID[sha1]=2c84c94b0f2e53f2d56daaf006e89bf28f4c8caa, not stripped", sha256 = "547887c180af210fc71753480abcca6ab180c2b6220b86fe085a726d07b51607", note = "linux-arm64-musl binary checksum" },
+  { kind = "ldd", ref = "ldd target/aarch64-unknown-linux-musl/release/mstream", note = "not a dynamic executable" },
+  { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mstream", note = "There is no dynamic section in this file." },
+  { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mstream --version", note = "mstream 0.1.0" },
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "9d4db7c874e42195f6188e716e5f7d6c412f0c9f91f54a8d81bd7d26a6130a78", note = "candidate archive contains ./bin/mstream only" },
+  { kind = "contents", ref = "tar -tzf target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", note = "./, ./bin/, ./bin/mstream" },
+]
 
 [[target]]
 id = "darwin-arm64"
@@ -111,38 +137,92 @@ id = "linux-builds-staged"
 target_id = ""
 channel = "archive"
 rollup = true
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "rollup", ref = "linux-builds-staged target rows", note = "linux-x64-musl and linux-arm64-musl rows staged on host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+]
 
 [[gate]]
 id = "linux-builds-staged"
 target_id = "linux-x64-musl"
 channel = "archive"
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mstream --bin mstream -- -C linker=rust-lld", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
+  { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mstream: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "7090748c0350a1334457b32879bea2e621d49061f0af945b9ea4532bb0c4a03e", note = "linux-x64-musl binary checksum" },
+  { kind = "ldd", ref = "ldd target/x86_64-unknown-linux-musl/release/mstream", note = "not a dynamic executable" },
+  { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mstream", note = "static-pie dynamic section has no NEEDED entries" },
+  { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mstream --version", note = "not executed on this aarch64 host; qemu-x86_64 unavailable" },
+]
 
 [[gate]]
 id = "linux-builds-staged"
 target_id = "linux-arm64-musl"
 channel = "archive"
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mstream --bin mstream", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
+  { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mstream: ELF 64-bit LSB executable, ARM aarch64, statically linked, BuildID[sha1]=2c84c94b0f2e53f2d56daaf006e89bf28f4c8caa, not stripped", sha256 = "547887c180af210fc71753480abcca6ab180c2b6220b86fe085a726d07b51607", note = "linux-arm64-musl binary checksum" },
+  { kind = "ldd", ref = "ldd target/aarch64-unknown-linux-musl/release/mstream", note = "not a dynamic executable" },
+  { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mstream", note = "There is no dynamic section in this file." },
+  { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mstream --version", note = "mstream 0.1.0" },
+]
 
 [[gate]]
 id = "linux-archives-packaged"
 target_id = ""
 channel = "archive"
 rollup = true
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "rollup", ref = "linux-archives-packaged target rows", note = "linux-x64-musl and linux-arm64-musl rows staged on host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+]
 
 [[gate]]
 id = "linux-archives-packaged"
 target_id = "linux-x64-musl"
 channel = "archive"
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", sha256 = "e2da052dad2c1560fe390aab623add1897d6e1143c5dd1bfe73ac3ee9e1a6d95", note = "candidate archive contains ./bin/mstream only" },
+  { kind = "contents", ref = "tar -tzf motlie-mstream-v0.1.0-linux-x64-musl.tar.gz", note = "./, ./bin/, ./bin/mstream" },
+]
 
 [[gate]]
 id = "linux-archives-packaged"
 target_id = "linux-arm64-musl"
 channel = "archive"
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "9d4db7c874e42195f6188e716e5f7d6c412f0c9f91f54a8d81bd7d26a6130a78", note = "candidate archive contains ./bin/mstream only" },
+  { kind = "contents", ref = "tar -tzf motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz", note = "./, ./bin/, ./bin/mstream" },
+]
 
 [[gate]]
 id = "darwin-builds-staged"

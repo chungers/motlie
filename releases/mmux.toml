@@ -79,7 +79,20 @@ archive_asset = "motlie-mmux-v0.1.1-linux-x64-musl.tar.gz"
 archive_binary_path = "bin/mmux"
 
 [target.status]
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+evidence = [
+  { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mmux --bin mmux -- -C linker=rust-lld", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
+  { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mmux: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "70a3281c27ab15a094c386b3d5c6b22d7988b923baad16682b35cd368c790d10", note = "linux-x64-musl binary checksum" },
+  { kind = "ldd", ref = "ldd target/x86_64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
+  { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mmux", note = "static-pie dynamic section has no NEEDED entries" },
+  { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mmux --version", note = "not executed on this aarch64 host; qemu-x86_64 unavailable" },
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mmux-v0.1.1-linux-x64-musl.tar.gz", sha256 = "10fa042b62dae16f667b568a7b4344973b88ab6eeafc8b3a57caf1397517af02", note = "candidate archive contains ./bin/mmux only" },
+  { kind = "contents", ref = "tar -tzf target/release-assets/2026-06-bright-beacon/motlie-mmux-v0.1.1-linux-x64-musl.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+]
 
 [[target]]
 id = "linux-arm64-musl"
@@ -92,7 +105,20 @@ archive_asset = "motlie-mmux-v0.1.1-linux-arm64-musl.tar.gz"
 archive_binary_path = "bin/mmux"
 
 [target.status]
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+evidence = [
+  { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mmux --bin mmux", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
+  { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mmux: ELF 64-bit LSB executable, ARM aarch64, statically linked, BuildID[sha1]=e16f42864e272889a707dd1f3e2fda5c1b378a79, not stripped", sha256 = "d313be86621335c290f005e17a3066e5ff67bf12f5a10eb9c0aa2f3d28130dc0", note = "linux-arm64-musl binary checksum" },
+  { kind = "ldd", ref = "ldd target/aarch64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
+  { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mmux", note = "There is no dynamic section in this file." },
+  { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mmux --version", note = "mmux 0.1.1" },
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mmux-v0.1.1-linux-arm64-musl.tar.gz", sha256 = "413d39d14541ffe719f57bc3b7ef8529876b4041078511aea7c968ff9f8a7bd4", note = "candidate archive contains ./bin/mmux only" },
+  { kind = "contents", ref = "tar -tzf target/release-assets/2026-06-bright-beacon/motlie-mmux-v0.1.1-linux-arm64-musl.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+]
 
 [[target]]
 id = "darwin-arm64"
@@ -111,38 +137,92 @@ id = "linux-builds-staged"
 target_id = ""
 channel = "archive"
 rollup = true
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "rollup", ref = "linux-builds-staged target rows", note = "linux-x64-musl and linux-arm64-musl rows staged on host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+]
 
 [[gate]]
 id = "linux-builds-staged"
 target_id = "linux-x64-musl"
 channel = "archive"
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mmux --bin mmux -- -C linker=rust-lld", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
+  { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mmux: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "70a3281c27ab15a094c386b3d5c6b22d7988b923baad16682b35cd368c790d10", note = "linux-x64-musl binary checksum" },
+  { kind = "ldd", ref = "ldd target/x86_64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
+  { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mmux", note = "static-pie dynamic section has no NEEDED entries" },
+  { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mmux --version", note = "not executed on this aarch64 host; qemu-x86_64 unavailable" },
+]
 
 [[gate]]
 id = "linux-builds-staged"
 target_id = "linux-arm64-musl"
 channel = "archive"
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mmux --bin mmux", note = "staging build from release branch source commit bc246a580cc9eb6b7bf29ed8b108047309c55408" },
+  { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mmux: ELF 64-bit LSB executable, ARM aarch64, statically linked, BuildID[sha1]=e16f42864e272889a707dd1f3e2fda5c1b378a79, not stripped", sha256 = "d313be86621335c290f005e17a3066e5ff67bf12f5a10eb9c0aa2f3d28130dc0", note = "linux-arm64-musl binary checksum" },
+  { kind = "ldd", ref = "ldd target/aarch64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
+  { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mmux", note = "There is no dynamic section in this file." },
+  { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mmux --version", note = "mmux 0.1.1" },
+]
 
 [[gate]]
 id = "linux-archives-packaged"
 target_id = ""
 channel = "archive"
 rollup = true
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "rollup", ref = "linux-archives-packaged target rows", note = "linux-x64-musl and linux-arm64-musl rows staged on host spark-2f6e aarch64-unknown-linux-gnu; Linux 6.17.0-1018-nvidia aarch64" },
+]
 
 [[gate]]
 id = "linux-archives-packaged"
 target_id = "linux-x64-musl"
 channel = "archive"
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mmux-v0.1.1-linux-x64-musl.tar.gz", sha256 = "10fa042b62dae16f667b568a7b4344973b88ab6eeafc8b3a57caf1397517af02", note = "candidate archive contains ./bin/mmux only" },
+  { kind = "contents", ref = "tar -tzf motlie-mmux-v0.1.1-linux-x64-musl.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+]
 
 [[gate]]
 id = "linux-archives-packaged"
 target_id = "linux-arm64-musl"
 channel = "archive"
-state = "planned"
+state = "staged"
+completed_at = "2026-06-27T03:53:04Z"
+completed_by = "@codex-release-eng"
+source_commit = "bc246a580cc9eb6b7bf29ed8b108047309c55408"
+deferred_reason = ""
+evidence = [
+  { kind = "archive", ref = "target/release-assets/2026-06-bright-beacon/motlie-mmux-v0.1.1-linux-arm64-musl.tar.gz", sha256 = "413d39d14541ffe719f57bc3b7ef8529876b4041078511aea7c968ff9f8a7bd4", note = "candidate archive contains ./bin/mmux only" },
+  { kind = "contents", ref = "tar -tzf motlie-mmux-v0.1.1-linux-arm64-musl.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+]
 
 [[gate]]
 id = "darwin-builds-staged"
