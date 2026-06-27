@@ -116,7 +116,14 @@ evidence = [
 
 [[gate]]
 id = "release-notes-approved"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T05:33:27Z"
+completed_by = "@chungers"
+source_commit = "fc9fd7642e8197ae4aaa270611f53cfb1cb77a43"
+deferred_reason = ""
+evidence = [
+  { kind = "pull-request", ref = "https://github.com/chungers/motlie/pull/581", note = "David (@chungers), release owner, approved the finalized release notes via the release session; PR #581 carries releases/notes.md, releases/mmux.md, and releases/mstream.md." },
+]
 
 [[gate]]
 id = "final-tag-created"
