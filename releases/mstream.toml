@@ -341,7 +341,7 @@ completed_by = "@ops48-orchestrator"
 source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
 deferred_reason = ""
 evidence = [
-  { kind = "validation", ref = "../VALIDATION_EVIDENCE.md", note = "release-pinned mstream installer passed end-to-end on linux-x64-musl, linux-arm64-musl, and darwin-arm64; closes scoped installer validation issue #578 after PR merge" },
+  { kind = "validation", ref = "../VALIDATION_EVIDENCE.md", note = "rollup complete because installer-validated target rows linux-x64-musl, linux-arm64-musl, and darwin-arm64 are complete for mstream; closes scoped installer validation issue #578 after PR merge" },
 ]
 
 [[gate]]

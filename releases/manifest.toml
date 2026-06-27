@@ -1,6 +1,6 @@
 schema_version = 1
 kind = "motlie.workspace-release"
-state = "planned"
+state = "published"
 
 [identity]
 release_name = "2026-06-bright-beacon"
@@ -55,11 +55,16 @@ binary = "mmux"
 version = "0.1.1"
 manifest = "releases/mmux.toml"
 notes_path = "releases/mmux.md"
-state = "planned"
-final_artifacts_complete = false
-published = false
-github_release_assets = []
-channels_complete = []
+state = "published"
+final_artifacts_complete = true
+published = true
+github_release_assets = [
+  "motlie-mmux-v0.1.1-linux-x64-musl.tar.gz",
+  "motlie-mmux-v0.1.1-linux-arm64-musl.tar.gz",
+  "motlie-mmux-v0.1.1-darwin-arm64.tar.gz",
+  "install-mmux.sh",
+]
+channels_complete = ["archive", "installer"]
 channels_deferred = ["npm", "homebrew"]
 deferred_channels_followup = "npm and Homebrew are out of scope for 2026-06-bright-beacon per release owner direction; do not include these channels in release-note install guidance."
 
@@ -68,11 +73,16 @@ binary = "mstream"
 version = "0.1.0"
 manifest = "releases/mstream.toml"
 notes_path = "releases/mstream.md"
-state = "planned"
-final_artifacts_complete = false
-published = false
-github_release_assets = []
-channels_complete = []
+state = "published"
+final_artifacts_complete = true
+published = true
+github_release_assets = [
+  "motlie-mstream-v0.1.0-linux-x64-musl.tar.gz",
+  "motlie-mstream-v0.1.0-linux-arm64-musl.tar.gz",
+  "motlie-mstream-v0.1.0-darwin-arm64.tar.gz",
+  "install-mstream.sh",
+]
+channels_complete = ["archive", "installer"]
 channels_deferred = ["npm", "homebrew"]
 deferred_channels_followup = "npm and Homebrew are out of scope for 2026-06-bright-beacon per release owner direction; do not include these channels in release-note install guidance."
 
@@ -224,7 +234,16 @@ evidence = [
 
 [[gate]]
 id = "post-release-ledger-committed"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T06:19:34Z"
+completed_by = "@chungers"
+source_commit = "0199ae193b548442fd1eecf1c49a58e3789da107"
+deferred_reason = ""
+evidence = [
+  { kind = "github-release", ref = "https://github.com/chungers/motlie/releases/tag/2026-06-bright-beacon", note = "GitHub Release 2026-06-bright-beacon is published and live." },
+  { kind = "pull-request", ref = "https://github.com/chungers/motlie/pull/582", note = "Final source tag ledger merged into release/2026-06-bright-beacon." },
+  { kind = "pull-request", ref = "https://github.com/chungers/motlie/pull/583", note = "GitHub Release publication and per-target installer validation ledger merged into release/2026-06-bright-beacon." },
+]
 
 [[gate]]
 id = "master-issue-closed"
