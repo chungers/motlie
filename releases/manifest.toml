@@ -247,4 +247,10 @@ evidence = [
 
 [[gate]]
 id = "master-issue-closed"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T06:30:00Z"
+completed_by = "@chungers"
+source_commit = "8deb33c"
+evidence = [
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/572", note = "master issue #572 closed completed after release published + all gates complete" },
+]
