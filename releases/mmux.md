@@ -4,19 +4,19 @@
 
 ## Summary
 
-[DRAFT — needs David] `mmux` 0.1.1 updates Motlie's TUI tmux session selector while preserving the host-wide deployment model used by the prior release.
+`mmux` 0.1.1 updates Motlie's TUI tmux session selector while preserving the host-wide deployment model used by the prior release.
 
 ## Changes
 
-[DRAFT — needs David] Adds visible stable session ids in list rows so operators can distinguish renamed or similarly named sessions.
+Adds visible stable session ids in list rows so operators can distinguish renamed or similarly named sessions.
 
-[DRAFT — needs David] Adds list-pane quick search with `/` for case-insensitive substring matching.
+Adds list-pane quick search with `/` for case-insensitive substring matching.
 
-[DRAFT — needs David] Adds list-pane sorting controls for name, tag grouping, host grouping, and return-to-activity sorting.
+Adds list-pane sorting controls for name, tag grouping, host grouping, and return-to-activity sorting.
 
-[DRAFT — needs David] Keeps endpoint labels derived from SSH endpoint identity, including user, host, non-default port, and non-default tmux socket.
+Keeps endpoint labels derived from SSH endpoint identity, including user, host, non-default port, and non-default tmux socket.
 
-[DRAFT — needs David] Keeps the package version visible through `mmux --version` and the Help modal.
+Keeps the package version visible through `mmux --version` and the Help modal.
 
 ## Install
 
@@ -44,15 +44,15 @@ Linux targets are static musl builds. The Darwin target is Apple Silicon only, a
 
 ## Compatibility
 
-[DRAFT — needs David] `mmux` still requires `tmux` on the target host.
+`mmux` still requires `tmux` on the target host.
 
 The direct installer installs the native binary to `/usr/local/bin/mmux` by default.
 
-[DRAFT — needs David] `/usr/local/bin/mmux` remains the recommended path for SSH `ForceCommand` deployments.
+`/usr/local/bin/mmux` remains the recommended path for SSH `ForceCommand` deployments.
 
 ## Known Issues
 
-[DRAFT — needs David] SSH `ForceCommand` integration tests remain environment-gated.
+SSH `ForceCommand` integration tests remain environment-gated.
 
 Archive payloads contain only `bin/mmux`.
 

@@ -4,19 +4,19 @@
 
 ## Summary
 
-[DRAFT — needs David] This is the first `mstream` release artifact set, packaging Motlie's agent-facing tmux workstream orchestrator for direct archive and installer distribution.
+This is the first `mstream` release artifact set, packaging Motlie's agent-facing tmux workstream orchestrator for direct archive and installer distribution.
 
 ## Changes
 
-[DRAFT — needs David] Ships daemon lifecycle commands: `daemon start`, `daemon status`, and `daemon stop`.
+Ships daemon lifecycle commands: `daemon start`, `daemon status`, and `daemon stop`.
 
-[DRAFT — needs David] Ships host and workstream management commands: `connect`, `hosts`, `scan`, `disconnect`, `open`, `label`, `list`, `show`, and `close`.
+Ships host and workstream management commands: `connect`, `hosts`, `scan`, `disconnect`, `open`, `label`, `list`, `show`, and `close`.
 
-[DRAFT — needs David] Ships agent and session workflow commands: `join`, `new`, `leave`, `retire`, `reclaim`, `send`, `interrupt`, `broadcast`, `rename`, `session list`, and `session retag`.
+Ships agent and session workflow commands: `join`, `new`, `leave`, `retire`, `reclaim`, `send`, `interrupt`, `broadcast`, `rename`, `session list`, and `session retag`.
 
-[DRAFT — needs David] Ships handoff, timer, status, doctor, events, snapshot, summary-input, recruit, and attach command surfaces.
+Ships handoff, timer, status, doctor, events, snapshot, summary-input, recruit, and attach command surfaces.
 
-[DRAFT — needs David] Persists durable socket-adjacent JSONL audit events so readable events can survive daemon restart.
+Persists durable socket-adjacent JSONL audit events so readable events can survive daemon restart.
 
 ## Install
 
@@ -44,15 +44,15 @@ Linux targets are static musl builds. The Darwin target is Apple Silicon only, a
 
 ## Compatibility
 
-[DRAFT — needs David] `mstream` is an orchestrator-facing command and is not an SSH `ForceCommand` entrypoint.
+`mstream` is an orchestrator-facing command and is not an SSH `ForceCommand` entrypoint.
 
-[DRAFT — needs David] `mstream` expects reachable tmux targets and uses a local Unix-domain socket path selected by `--socket`, `MSTREAM_SOCKET`, or the default `/tmp/mstream-${USER}.sock`.
+`mstream` expects reachable tmux targets and uses a local Unix-domain socket path selected by `--socket`, `MSTREAM_SOCKET`, or the default `/tmp/mstream-${USER}.sock`.
 
 ## Known Issues
 
-[DRAFT — needs David] Host metadata is daemon memory only; after daemon restart, reconnect hosts and run `scan` to hydrate tagged sessions from tmux.
+Host metadata is daemon memory only; after daemon restart, reconnect hosts and run `scan` to hydrate tagged sessions from tmux.
 
-[DRAFT — needs David] Snapshot and summary-input use bounded one-shot tmux capture for joined sessions; deeper pane/process-state stuck hints remain follow-up work.
+Snapshot and summary-input use bounded one-shot tmux capture for joined sessions; deeper pane/process-state stuck hints remain follow-up work.
 
 Archive payloads contain only `bin/mstream`.
 

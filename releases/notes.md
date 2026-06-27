@@ -4,7 +4,7 @@ Brownfield Motlie binary release for `mmux` 0.1.1 and `mstream` 0.1.0.
 
 ## Summary
 
-[DRAFT — needs David] This release refreshes `mmux`, Motlie's tmux session selector, and introduces the first release artifact set for `mstream`, Motlie's agent-facing workstream orchestrator.
+This release refreshes `mmux`, Motlie's tmux session selector, and introduces the first release artifact set for `mstream`, Motlie's agent-facing workstream orchestrator.
 
 ## Binaries
 
@@ -39,9 +39,9 @@ The installer scripts select the platform-matched archive, download `SHA256SUMS`
 
 ## Changes
 
-[DRAFT — needs David] `mmux` 0.1.1 carries the post-apex usability work described in the per-binary notes.
+`mmux` 0.1.1 carries the post-apex usability work described in the per-binary notes.
 
-[DRAFT — needs David] `mstream` 0.1.0 packages the implemented CLI and daemon surface for direct archive and installer distribution.
+`mstream` 0.1.0 packages the implemented CLI and daemon surface for direct archive and installer distribution.
 
 See per-binary notes:
 
@@ -62,7 +62,7 @@ codesign --verify --strict --verbose=2 <installed-path>
 
 ## Known Issues
 
-[DRAFT — needs David] Confirm whether there are any user-facing breaking changes, migration notes, or known issues beyond the per-binary items listed below.
+Known issues are listed in the per-binary notes.
 
 Archive payloads contain only the executable at `bin/<binary>`.
 
