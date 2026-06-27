@@ -17,12 +17,19 @@ main_fix_policy = "cherry-pick-source-fixes-only"
 product_scope = "brownfield"
 
 [tracking]
-master_issue = ""
-master_issue_state = "not-created"
+master_issue = "https://github.com/chungers/motlie/issues/572"
+master_issue_state = "open"
 master_issue_policy = "close-after-github-release-live-and-final-ledger-pushed"
 sub_issue_policy = "one-or-more-issues-per-platform-channel-or-binary-gate"
 label = "release:2026-06-bright-beacon"
-sub_issues = []
+sub_issues = [
+  { id = 573, scope = "mmux: linux artifacts", url = "https://github.com/chungers/motlie/issues/573" },
+  { id = 574, scope = "mmux: darwin arm64 signing", url = "https://github.com/chungers/motlie/issues/574" },
+  { id = 575, scope = "mmux: installer validation", url = "https://github.com/chungers/motlie/issues/575" },
+  { id = 576, scope = "mstream: linux artifacts", url = "https://github.com/chungers/motlie/issues/576" },
+  { id = 577, scope = "mstream: darwin arm64 signing", url = "https://github.com/chungers/motlie/issues/577" },
+  { id = 578, scope = "mstream: installer validation", url = "https://github.com/chungers/motlie/issues/578" },
+]
 
 [release]
 tag = "2026-06-bright-beacon"
@@ -82,11 +89,30 @@ evidence = [
 
 [[gate]]
 id = "master-issue-created"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T03:47:23Z"
+completed_by = "@codex-release-eng"
+source_commit = "23bccf72"
+deferred_reason = ""
+evidence = [
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/572", note = "master tracking issue created for 2026-06-bright-beacon" },
+]
 
 [[gate]]
 id = "sub-issues-created"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T03:47:23Z"
+completed_by = "@codex-release-eng"
+source_commit = "23bccf72"
+deferred_reason = ""
+evidence = [
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/573", note = "mmux: linux artifacts" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/574", note = "mmux: darwin arm64 signing" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/575", note = "mmux: installer validation" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/576", note = "mstream: linux artifacts" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/577", note = "mstream: darwin arm64 signing" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/578", note = "mstream: installer validation" },
+]
 
 [[gate]]
 id = "release-notes-approved"
