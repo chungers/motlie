@@ -525,11 +525,26 @@ impl PendingOutputOrder {
 pub struct ConversationPolicyConfig {
     #[serde(default)]
     pub mode: ConversationPolicyMode,
+    #[serde(default = "default_conversation_policy_active_playback_hold_ms")]
     pub active_playback_hold_ms: u64,
+    #[serde(default = "default_conversation_policy_max_pending_outputs")]
     pub max_pending_outputs: usize,
     #[serde(default)]
     pub pending_output_order: PendingOutputOrder,
+    #[serde(default = "default_conversation_policy_post_barge_in_silence_ms")]
     pub post_barge_in_silence_ms: u64,
+}
+
+fn default_conversation_policy_active_playback_hold_ms() -> u64 {
+    ConversationPolicyConfig::default().active_playback_hold_ms
+}
+
+fn default_conversation_policy_max_pending_outputs() -> usize {
+    ConversationPolicyConfig::default().max_pending_outputs
+}
+
+fn default_conversation_policy_post_barge_in_silence_ms() -> u64 {
+    ConversationPolicyConfig::default().post_barge_in_silence_ms
 }
 
 impl Default for ConversationPolicyConfig {
@@ -2745,6 +2760,29 @@ mod tests {
         assert_eq!(config.tts.generation_mode, TtsGenerationMode::Streaming);
         assert_eq!(config.tts.streaming_start_buffer_ms, 420);
         assert_eq!(config.tts.tail_pad_ms, 240);
+    }
+
+    #[test]
+    fn toml_accepts_partial_conversation_policy_config() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.conversation_policy]
+            mode = "barge_in_cancel_only"
+            "#,
+        )
+        .expect("parse partial conversation policy config");
+
+        assert_eq!(
+            config.conversation_policy.mode,
+            ConversationPolicyMode::BargeInCancelOnly
+        );
+        assert_eq!(config.conversation_policy.active_playback_hold_ms, 1_000);
+        assert_eq!(config.conversation_policy.max_pending_outputs, 1);
+        assert_eq!(
+            config.conversation_policy.pending_output_order,
+            PendingOutputOrder::LatestOnly
+        );
+        assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 1_200);
     }
 
     #[test]

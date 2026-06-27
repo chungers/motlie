@@ -218,7 +218,7 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 # Latest-only keeps replacement speech from being queued behind stale interrupted output.
 pending_output_order = "latest_only"
-# Hold after barge-in so replacement fragments can coalesce before dispatch.
+# Per-deployment sliding silence window after barge-in; higher values trade replacement latency for fragment coalescing.
 post_barge_in_silence_ms = 1200
 
 [voice_quality.echo_suppression]
@@ -422,4 +422,4 @@ agent_visible_turn_3 = "Marker Green confirms replacement complete"
 summary = "Barge-in behavior passed mechanically: active playback was canceled once, replacement and marker turns played, no failures, no transport loss, and outbound pacing had zero underruns. The round is graded B because raw ASR still captured one assistant-echo fragment, although that fragment was correctly suppressed before the agent/text-call path."
 what_worked = ["call answered and media streamed", "barge-in canceled active playback", "replacement turn was not lost", "no outbound underruns", "agent-visible transcript stayed in order"]
 issues = ["raw transcript contains a suppressed assistant-echo final", "turn-to-first-audio remains around 1.7-1.8s", "final marker ASR dropped 'the' and changed 'completed' to 'complete'"]
-next_changes = ["make scored/agent-visible transcript artifacts explicit so raw suppressed assistant echo cannot contaminate WER or future analysis", "add explicit latency events for final-to-first-audio and cancel-to-replacement-first-audio instead of inferring from linked quality events", "test a lower post_barge_in_silence_ms value, likely 900ms, to reduce replacement latency without weakening partial-ASR cancel", "consider tightening assistant-echo final quarantine metrics so suppressed raw finals are visible as suppression counts, not as apparent caller turns"]
+next_changes = ["make scored/agent-visible transcript artifacts explicit so raw suppressed assistant echo cannot contaminate WER or future analysis", "add explicit latency events for final-to-first-audio and cancel-to-replacement-first-audio instead of inferring from linked quality events", "test a lower sliding post_barge_in_silence_ms value, likely 900ms, to reduce replacement latency without weakening partial-ASR cancel", "consider tightening assistant-echo final quarantine metrics so suppressed raw finals are visible as suppression counts, not as apparent caller turns"]

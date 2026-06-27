@@ -220,7 +220,7 @@ impl ConversationPolicyConfig {
             return BargeInPolicyDecision::inactive(trigger, self.mode);
         }
         if evidence.active_playback
-            && !transcript_evidence_allows_barge_in(barge_in, trigger, evidence)
+            && !transcript_evidence_allows_barge_in(self.mode, barge_in, trigger, evidence)
         {
             return BargeInPolicyDecision::ignored_transcript(trigger, self.mode);
         }
@@ -272,15 +272,42 @@ impl ConversationPolicyConfig {
 }
 
 fn transcript_evidence_allows_barge_in(
+    mode: ConversationPolicyMode,
     barge_in: &BargeInQualityConfig,
     trigger: BargeInTrigger,
     evidence: BargeInTranscriptEvidence<'_>,
 ) -> bool {
-    if evidence.char_count() < barge_in.transcript_min_chars
-        || evidence.word_count() < barge_in.transcript_min_words
+    let char_count = evidence.char_count();
+    let word_count = evidence.word_count();
+    if mode == ConversationPolicyMode::CurrentCompat {
+        let legacy_length_allowed = match trigger {
+            BargeInTrigger::Partial => char_count >= 3,
+            BargeInTrigger::Final => word_count > 0,
+            BargeInTrigger::SpeechOnset => true,
+        };
+        return legacy_length_allowed
+            && transcript_scores_allow_barge_in(barge_in, trigger, evidence);
+    }
+
+    let short_interrupt_allowed = match trigger {
+        BargeInTrigger::Partial => word_count == 1 && char_count >= 3,
+        BargeInTrigger::Final => word_count == 1 && char_count >= 2,
+        BargeInTrigger::SpeechOnset => true,
+    };
+    if !short_interrupt_allowed
+        && (char_count < barge_in.transcript_min_chars
+            || word_count < barge_in.transcript_min_words)
     {
         return false;
     }
+    transcript_scores_allow_barge_in(barge_in, trigger, evidence)
+}
+
+fn transcript_scores_allow_barge_in(
+    barge_in: &BargeInQualityConfig,
+    trigger: BargeInTrigger,
+    evidence: BargeInTranscriptEvidence<'_>,
+) -> bool {
     match trigger {
         BargeInTrigger::Partial => {
             score_meets_threshold(evidence.confidence, barge_in.partial_min_confidence)
@@ -457,13 +484,13 @@ mod tests {
     }
 
     #[test]
-    fn short_partial_during_active_playback_is_ignored() {
+    fn tiny_partial_during_active_playback_is_ignored() {
         let policy = ConversationPolicyConfig::default();
         let decision = policy.decide_transcript_barge_in(
             &BargeInQualityConfig::default(),
             BargeInTrigger::Partial,
             BargeInTranscriptEvidence {
-                text: "Blue",
+                text: "uh",
                 active_playback: true,
                 confidence: Some(0.91),
                 stability: Some(0.91),
@@ -472,6 +499,42 @@ mod tests {
 
         assert!(!decision.cancels_playback());
         assert!(!decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn current_compat_short_partial_during_active_playback_can_cancel() {
+        let policy = ConversationPolicyConfig::default();
+        let decision = policy.decide_transcript_barge_in(
+            &BargeInQualityConfig::default(),
+            BargeInTrigger::Partial,
+            BargeInTranscriptEvidence {
+                text: "stop",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: Some(0.91),
+            },
+        );
+
+        assert!(decision.cancels_playback());
+        assert!(decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn current_compat_short_final_during_active_playback_can_cancel() {
+        let policy = ConversationPolicyConfig::default();
+        let decision = policy.decide_transcript_barge_in(
+            &BargeInQualityConfig::default(),
+            BargeInTrigger::Final,
+            BargeInTranscriptEvidence {
+                text: "no",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: None,
+            },
+        );
+
+        assert!(decision.cancels_playback());
+        assert!(decision.forwards_caller_transcript());
     }
 
     #[test]

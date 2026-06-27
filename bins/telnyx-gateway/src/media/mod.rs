@@ -1088,42 +1088,40 @@ async fn maybe_emit_first_frame_span(
             .saturating_duration_since(quality.request_started_at)
             .as_millis() as u64,
     }));
-    {
-        let mut guard = state.write().await;
-        guard.mark_tts_first_audio_latency_and_pacing(
-            call_id,
-            &frame.playback_id,
-            first_audio_latency_ms,
-            pacing.pre_audio_wait_ticks,
-            pacing.underrun_ticks,
-        );
-        guard.emit_quality_span_finished(
-            call_id,
-            QualitySpanEmission {
-                config_id: quality.config_id.clone(),
-                redaction_mode: quality.redaction_mode,
-                span_name: "media.first_frame_send",
-                category: "playback_transport",
-                duration: quality.queued_at.elapsed(),
-                critical_path: true,
-                concurrent: false,
-                payload: first_frame_payload,
-            },
-        );
-        guard.emit_quality_span_finished(
-            call_id,
-            QualitySpanEmission {
-                config_id: quality.config_id.clone(),
-                redaction_mode: quality.redaction_mode,
-                span_name: "tts.request_to_first_audio",
-                category: "tts_generation",
-                duration: quality.request_started_at.elapsed(),
-                critical_path: true,
-                concurrent: false,
-                payload: first_audio_payload,
-            },
-        );
-    }
+    let mut guard = state.write().await;
+    guard.mark_tts_first_audio_latency_and_pacing(
+        call_id,
+        &frame.playback_id,
+        first_audio_latency_ms,
+        pacing.pre_audio_wait_ticks,
+        pacing.underrun_ticks,
+    );
+    guard.emit_quality_span_finished(
+        call_id,
+        QualitySpanEmission {
+            config_id: quality.config_id.clone(),
+            redaction_mode: quality.redaction_mode,
+            span_name: "media.first_frame_send",
+            category: "playback_transport",
+            duration: quality.queued_at.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload: first_frame_payload,
+        },
+    );
+    guard.emit_quality_span_finished(
+        call_id,
+        QualitySpanEmission {
+            config_id: quality.config_id.clone(),
+            redaction_mode: quality.redaction_mode,
+            span_name: "tts.request_to_first_audio",
+            category: "tts_generation",
+            duration: quality.request_started_at.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload: first_audio_payload,
+        },
+    );
     if let Some(visible_at) = quality.processor_visible_turn_at {
         let payload = map_from_value(json!({
             "playback_id": frame.playback_id.as_str(),
@@ -1136,7 +1134,7 @@ async fn maybe_emit_first_frame_span(
             "coalesced_turn_count": quality.coalesced_turn_ids.len(),
             "coalesced_turn_ids": quality.coalesced_turn_ids.as_slice(),
         }));
-        state.write().await.emit_quality_span_finished(
+        guard.emit_quality_span_finished(
             call_id,
             QualitySpanEmission {
                 config_id: quality.config_id.clone(),
@@ -1162,7 +1160,7 @@ async fn maybe_emit_first_frame_span(
             "coalesced_turn_count": quality.coalesced_turn_ids.len(),
             "coalesced_turn_ids": quality.coalesced_turn_ids.as_slice(),
         }));
-        state.write().await.emit_quality_span_finished(
+        guard.emit_quality_span_finished(
             call_id,
             QualitySpanEmission {
                 config_id: quality.config_id.clone(),
@@ -1205,7 +1203,7 @@ async fn maybe_emit_first_frame_span(
                 )),
             );
         }
-        state.write().await.emit_quality_span_finished(
+        guard.emit_quality_span_finished(
             call_id,
             QualitySpanEmission {
                 config_id: quality.config_id.clone(),
