@@ -127,7 +127,14 @@ evidence = [
 
 [[gate]]
 id = "final-tag-created"
-state = "planned"
+state = "complete"
+completed_at = "2026-06-27T05:52:11Z"
+completed_by = "@chungers"
+source_commit = "8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab"
+deferred_reason = ""
+evidence = [
+  { kind = "tag", ref = "2026-06-bright-beacon", note = "Annotated tag object 5c7a6ac28cd799990774a1bac0936a0b462c5e4b is pushed to origin and peels to commit 8deb33ccc6a8419f029fdc15b5083d4f6b37a3ab. David (@chungers), release owner, authorized the final source tag." },
+]
 
 [[gate]]
 id = "github-release-published"
