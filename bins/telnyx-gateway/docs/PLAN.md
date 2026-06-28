@@ -108,6 +108,7 @@ contain live routing values; the committed copy must keep placeholders only.
 | --- | --- | --- | --- | --- | --- |
 | 20260626-163544-7dcbe571-identity-bargein-v1 | inbound Identity/repeat, barge-in enabled, no turn batching | [docs/tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml](./tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml) | B | Active playback canceled once, replacement played, 0 underruns, 0 transport loss; raw ASR captured one assistant-echo fragment that was suppressed before agent dispatch. | Add agent-visible transcript artifacts and explicit cancel/replacement latency spans before treating raw transcript WER as the control metric. |
 | 20260628-135818-336e9087-layera-nobarge-identity-v1 | inbound Identity/repeat, barge-in disabled, no turn batching | [docs/tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml](./tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml) | C+ | Core measured sentence recognized exactly, including `hang up`, and 2/2 non-hangup playbacks completed; strict script WER 20.59%, two ASR finals split one passage, and outbound pacing still showed 58 underruns with one 1180 ms max gap. | Keep bounded FIFO baseline, then run one controlled endpoint-merge/final-settle probe and one separate TTS pacing probe. |
+| 20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1 | inbound Identity/repeat, barge-in disabled, no turn batching, TTS start buffer 450 ms | [docs/tests/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.example.toml](./tests/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.example.toml) | B | One-knob pacing probe completed 2/2 playbacks with 0 underruns and 73 ms max inter-frame gap; caller feedback was better; core measured sentence including `hang up` was exact. | Promote `streaming_start_buffer_ms = 450`, then test endpoint segmentation, barge-in with 450, and turn-batching N=2 prompt visibility as separate runs. |
 
 ### Current Roadmap
 
@@ -135,10 +136,22 @@ contain live routing values; the committed copy must keep placeholders only.
   `merge_window_ms = 180`. Success is one processor-visible turn for the
   script without adding stale tail latency.
   DESIGN reference: `TESTING.md`, `Next No-Barge-In Follow-Up`
-- [ ] Run a separate TTS pacing probe from the same baseline, changing exactly
-  one of `streaming_start_buffer_ms = 450` or `prebuffer_chunks = 2`. Success
-  is lower outbound underruns and max inter-frame gap without unacceptable
-  first-audio latency regression.
+- [ ] Re-run the current barge-in Identity profile with
+  `streaming_start_buffer_ms = 450`. Success is 0 outbound underruns during
+  interruption/replacement playback, fast cancel-to-replacement latency, and no
+  stale echo replay.
+  DESIGN reference: `TESTING.md`, `Barge-In Policy Profiles`
+- [ ] Run turn-batched Identity N=2 after the no-barge-in and barge-in pacing
+  probes. Success is one prompt-handler-visible joined prompt with two source
+  turns, not two separate single-turn prompts; keep barge-in off unless testing
+  reset-on-barge-in behavior.
+  DESIGN reference: `TESTING.md`, `Protocol B: Turns-Batching Smoke Test`
+- [x] Run a separate TTS pacing probe from the same baseline. @codex-541,
+  2026-06-28 PDT: `streaming_start_buffer_ms = 450` completed with 0
+  underruns and 73 ms max inter-frame gap, versus the prior 300 ms run's 58
+  underruns and 1180 ms max gap. Promote 450 as the current no-barge-in
+  Identity pacing baseline; defer `prebuffer_chunks = 2` unless underruns
+  return.
   DESIGN reference: `CONFIGS.md`, `TTS`
 - [x] Re-run the no-barge-in Identity baseline after the transcript/latency
   observability fixes. @codex-541, 2026-06-28 PDT: run

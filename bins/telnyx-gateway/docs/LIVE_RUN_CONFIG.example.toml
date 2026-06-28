@@ -155,8 +155,8 @@ max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 # Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
-# Normal streaming TTS frames to hold before first playback frame; 0 disables.
-streaming_start_buffer_ms = 300
+# Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in pacing baseline uses 450 ms.
+streaming_start_buffer_ms = 450
 # Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
 tail_pad_ms = 200
 

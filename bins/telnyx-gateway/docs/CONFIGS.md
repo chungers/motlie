@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Promoted `streaming_start_buffer_ms = 450` as the current no-barge-in Identity TTS pacing baseline after the live pacing probe eliminated underruns. |
 | 2026-06-28 PDT | @codex-541 | Marked the current inbound Identity no-barge-in live-test baseline as the best repeat-reliability starting point after Layer A score-gated barge-in landed. |
 | 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad tuning knobs for outbound pacing reliability. |
 | 2026-06-25 PDT | @codex-541 | Added the current barge-in coalesce-after-silence Identity profile and live-run findings. |
@@ -172,7 +173,7 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | `max_text_chunk_chars` | `70` | Later chunk packing budget for the current no-barge-in Identity baseline. |
 | `first_chunk_max_chars` | `40` | Hard cap for the first incremental TTS request; if the first sentence or unsentenced segment is longer, the remainder goes through normal `max_text_chunk_chars` packing. |
 | `prebuffer_chunks` | `1` | Buffered-mode prepared chunks required before playback starts. |
-| `streaming_start_buffer_ms` | `300` | Normal streaming TTS frame prebuffer before first playback frame; raise to smooth pacing, lower for first-audio latency. |
+| `streaming_start_buffer_ms` | `450` | Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in Identity pacing baseline. Lower for latency only if underruns remain controlled. |
 | `tail_pad_ms` | `200` | Silence frames appended before the final Telnyx mark for normal committed TTS, protecting final syllables from mark/tail clipping. |
 
 ### Early Response
@@ -261,7 +262,7 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
-streaming_start_buffer_ms = 300
+streaming_start_buffer_ms = 450
 tail_pad_ms = 200
 
 [voice_quality.early_response]
@@ -295,15 +296,16 @@ post_barge_in_silence_ms = 1200
 ```
 
 The current 2026-06-28 inbound Identity no-barge-in baseline keeps these
-values as the best repeat-reliability starting point. The 2026-06-28 run
-recognized the core measured sentence exactly, including `hang up`, but split
-one intended passage into two ASR finals and still showed outbound pacing
-underruns. The earlier 2026-06-24 run with this profile completed 12/12
-attempted playbacks with 0 canceled/failed playbacks and good reported audio
-quality. Layer A keeps barge-in score knobs visible in the config for telemetry
-and fail-closed policy validation, but this profile still disables
-cancellation. Next tune endpoint segmentation and TTS/serial playback latency
-as separate one-knob probes.
+values as the best repeat-reliability starting point, with
+`streaming_start_buffer_ms = 450` now promoted for TTS pacing. The 450 ms probe
+completed 2/2 playbacks with 0 underruns and a 73 ms max inter-frame gap,
+compared with the prior 300 ms run's 58 underruns and 1180 ms max gap. The core
+measured sentence remained exact, including `hang up`, while endpoint
+segmentation still split one intended passage into two ASR finals. Layer A keeps
+barge-in score knobs visible in the config for telemetry and fail-closed policy
+validation, but this profile still disables cancellation. Next validate this TTS
+pacing baseline under barge-in and turn-batching N=2 after the no-barge-in
+endpoint segmentation probe.
 
 Recommended barge-in Identity smoke-test profile:
 
@@ -321,7 +323,7 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
-streaming_start_buffer_ms = 300
+streaming_start_buffer_ms = 450
 tail_pad_ms = 200
 
 [voice_quality.early_response]
@@ -365,11 +367,13 @@ post_barge_in_silence_ms = 1200
 
 The 2026-06-25 barge-in Identity run with this profile canceled active playback
 within 12 ms, had 0 outbound underruns, and produced clear reported audio. Keep
-this as the current interruption profile. For the next run, avoid the spoken
-phrase `barge in` because ASR rendered it poorly; use a clearer trigger such as
-`Stop now. Please repeat this replacement sentence.` Collect qualitative
-feedback only after hangup or after `conversation smoke-test off`, otherwise
-Identity/repeat will capture and repeat the feedback as more caller turns.
+this as the current interruption profile, but re-run it with the shared 450 ms
+TTS start buffer before declaring the pacing baseline validated under barge-in.
+For the next run, avoid the spoken phrase `barge in` because ASR rendered it
+poorly; use a clearer trigger such as `Stop now. Please repeat this replacement
+sentence.` Collect qualitative feedback only after hangup or after
+`conversation smoke-test off`, otherwise Identity/repeat will capture and repeat
+the feedback as more caller turns.
 
 ### Echo Suppression
 

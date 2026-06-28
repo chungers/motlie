@@ -1,13 +1,13 @@
 +++
 # Redacted Motlie Telnyx inbound identity smoke-test config/record example.
-# @codex-535 2026-06-17 PDT -- Copy this file to
-# $HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>.toml, replace placeholders locally,
+# @codex-541 2026-06-28 PDT -- Copy this file to
+# $HOME/telnyx-test/runs/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.toml, replace placeholders locally,
 # run telnyx-gateway with --config pointing at that copied file, then append
 # results below the closing +++ delimiter. Never commit the local copy after
 # replacing placeholders with live routing values.
 
 # Canonical Motlie Telnyx gateway startup config.
-# @codex-535 2026-06-16 PDT -- Keep this file parse-clean under the strict
+# @codex-541 2026-06-28 PDT -- Keep this file parse-clean under the strict
 # `telnyx-gateway --config` loader; use secret references, never literal keys.
 
 version = 1
@@ -22,7 +22,7 @@ socket = "/tmp/motlie-telnyx-gateway.sock"
 # Shared ASR/TTS artifact root. `$HOME` and `~` are expanded by the loader.
 artifact_root = "$HOME/artifacts/hf-cache"
 # Structured process log target for live tuning sessions.
-log_file = "$HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>.log"
+log_file = "$HOME/telnyx-test/runs/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.log"
 
 [telnyx]
 # Telnyx API base; override only for mocks or future Telnyx environments.
@@ -48,11 +48,11 @@ media_codec = "PCMU"
 # Sample rate paired with the selected codec.
 media_sample_rate_hz = 8000
 # Capture root for raw media, decoded WAV, ASR input WAV, and transcripts.
-capture_dir = "$HOME/telnyx-test/runs/<inbound-identity-run-id>/captures"
+capture_dir = "$HOME/telnyx-test/runs/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1/captures"
 # Default outbound caller ID; use the selected Telnyx number.
 from_number = "<telnyx-phone-number>"
 # Default destination for `state dump` / shutdown dumps.
-state_path = "$HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>-state.toml"
+state_path = "$HOME/telnyx-test/runs/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1-state.toml"
 
 [inbound]
 # Safe default: wait for explicit `answer`; use `auto-transcribe` only for trusted tests.
@@ -76,7 +76,7 @@ warm_models = true
 
 [quality_logging]
 # Durable JSONL sink path used when `[voice_quality.logging] enabled = true`.
-path = "$HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>-quality.jsonl"
+path = "$HOME/telnyx-test/runs/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1-quality.jsonl"
 
 [voice_quality]
 # Baseline profile applied first; explicit tables below override individual knobs.
@@ -155,7 +155,7 @@ max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 # Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
-# Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in pacing baseline uses 450 ms.
+# Normal streaming TTS frames to hold before first playback frame; 0 disables.
 streaming_start_buffer_ms = 450
 # Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
 tail_pad_ms = 200
@@ -298,103 +298,180 @@ max_inappropriate_cancel_rate = 0.03
 
 ## Run Metadata
 
-- Run ID: <inbound-identity-run-id>
+- Run ID: 20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1
 - Direction: inbound manual-answer
-- Created: 2026-06-17 15:19 PDT
-- Created by: @codex-535
-- Config and result record: `$HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>.toml`
-- Source example: `bins/telnyx-gateway/docs/LIVE_RUN_INBOUND_IDENTITY.example.toml`
-- Privacy: placeholders only; local copies may contain live routing values and must remain uncommitted.
+- Created: 2026-06-28 14:18 PDT
+- Created by: @codex-541
+- Git SHA: `b5ecbbedc8d2b37849b9803ac3ad49e0a85102b1`
+- Config and result record: `$HOME/telnyx-test/runs/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.toml`
+- Source baseline: `$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.toml`
+- Privacy: committed copy is redacted; live routing values remain only in the local `$HOME/telnyx-test` copy.
 
-## Procedure Snapshot
+## Hypothesis
 
-- Gateway started with `--config $HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>.toml`.
-- Caller dialed the configured Telnyx number; operator answered the waiting inbound call manually.
-- Identity processor was enabled before the call through config: `conversation.enabled=true`, `processor="identity"`.
-- Streaming TTS, clause-gated early response, disabled barge-in, model warming, and quality logging were enabled.
-- Caller was instructed to read the identity/repeat script once, then wait silently for playback before giving qualitative feedback.
+Change exactly one TTS pacing knob from the current no-barge-in Identity baseline:
+
+```toml
+[voice_quality.tts]
+streaming_start_buffer_ms = 450 # baseline was 300
+```
+
+Expected effect: reduce outbound underruns and max inter-frame gap without making first-audio latency unacceptable.
 
 ## Caller Script
 
 ```text
-This is a Motlie inbound identity smoke test.
-I will read one continuous passage, then pause so the gateway can repeat what it heard.
-The quick brown fox walked past the live gateway while I was still speaking, and I want the system to repeat this as soon as it can without waiting for a long silence.
-Now I am going to stop for a natural endpoint.
+This is a Motlie no-barge-in TTS pacing probe. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker green starts the measured sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now stop speaking and wait for the repeat playback. Marker green ends the measured sentence.
 ```
 
 ## Run Results
 
-### 2026-06-17 15:19 PDT, @codex-535 -- redacted inbound sample
+### 2026-06-28 14:21 PDT, @codex-541 -- no-barge-in Identity TTS pacing probe
 
-Status: sample completed record. Replace these values with real run metrics in the local copied file.
+Status: completed. Caller qualitative feedback: better.
 
-Quantitative sample:
+Quantitative summary:
 
 - Calls answered: 1 inbound manual-answer call.
-- ASR sessions: 1 active caller stream.
-- Caller turns: 4 committed finals.
-- Identity playback: 4 queued, 4 started, 3 completed, 1 canceled by hangup.
-- Endpoint trailing silence: p50 740 ms, p95 900 ms.
-- TTS request-to-first-audio: p50 1800 ms, p95 3300 ms.
-- Media transport: 0 reported packet loss in the call summary.
-- WER: not scored; this was an identity/repeat quality smoke test.
+- ASR backend: kroko-2025 / sherpa-zipformer-en-kroko-2025-08-06.
+- Media: PCMU 8 kHz mono.
+- Config delta from previous no-barge-in baseline: `streaming_start_buffer_ms = 450` instead of `300`; no code change.
+- Caller turns: 2 committed finals.
+- Raw ASR final events: 2.
+- Identity playback: 2 attempted turns/playbacks, 2 completed, 0 canceled, 0 failed.
+- Dropped quality events: 0.
+- Excluded turns without playback: 0 in final call-terminal summary.
+- Inbound transport: 3370 packets, 0 lost, 0 reordered, jitter p50 1 ms, p95 7 ms, max 105 ms.
+- Outbound pacing: 1153 frames, 0 underruns, inter-frame gap p50 20 ms, p95 21 ms, max 73 ms, queue depth p50 147, p95 255.
+- `conversation.visible_turn_to_first_audio`: n=2, min 1538 ms, p50/max 1690 ms.
+- `tts.request_to_first_audio`: n=2, min 1538 ms, p50/max 1690 ms.
+- `turn.finalize_to_first_audio`: n=2, min 1828 ms, p50/max 14001 ms.
+- `conversation.final_debounce`: n=2, min 137 ms, max 12462 ms.
+- Strict script WER: 13.64% over 66 reference words (S=6, D=0, I=3).
+- Measured core sentence was recognized exactly, including `hang up`: `The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end.`
 
-Structured latency/quality sample:
+Assembled transcript:
 
-```toml
-[result_latency]
-schema_version = 1
-source = "quality_jsonl"
-quality_events = 0
-caller_turns = 0
-raw_asr_final_events = 0
-attempted_playbacks = 0
-completed_playbacks = 0
-canceled_playbacks = 0
-dropped_quality_events = 0
-
-[[result_latency.span]]
-name = "asr.endpoint_wait"
-n = 0
-min_ms = 0
-p50_ms = 0
-p95_ms = 0
-max_ms = 0
-
-[[result_latency.span]]
-name = "tts.request_to_first_audio"
-n = 0
-min_ms = 0
-p50_ms = 0
-p95_ms = 0
-max_ms = 0
+```text
+This is a Montally no barch and TTS pacing probe. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Green starts a measure sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now Now stop speaking, and wait for the repeat playback. Marker green ends the measure sentence hanging up
 ```
-
-Structured WER status:
-
-```toml
-[wer_summary]
-schema_version = 1
-wer_passes = 0
-reason = "identity/repeat quality smoke test; no WER passage was scored"
-```
-
-Qualitative sample:
-
-- Caller heard repeat-back, so the identity processor path was active.
-- Caller reported response timing as slightly late but understandable.
-- Audio was intelligible with no obvious clipping.
-- No barge-in cancellation was expected or observed.
 
 Analysis:
 
-- Inbound manual-answer isolates the caller's phone number from committed artifacts because the operator does not need to write a destination number into scripts or docs.
-- Identity repeat confirms the ASR final, conversation dispatch, streaming TTS, media playback, and echo-suppression path in one smoke test.
-- If repeated fragments occur, rerun with the same config but instruct the caller to read once and stay silent until playback completes; extra turns during silence indicate playback leakage or endpoint/echo-suppression failure.
+- This was a pure config-knob run on the same pushed code. The only intended runtime change was `voice_quality.tts.streaming_start_buffer_ms = 450`.
+- The TTS pacing hypothesis passed for this sample: previous run had 58 underruns and a 1180 ms max inter-frame gap; this run had 0 underruns and a 73 ms max gap.
+- The cost was a modest first-audio increase compared with the prior run: `tts.request_to_first_audio` p50/max moved from 1612 ms to 1690 ms. That tradeoff is acceptable for the current no-barge-in repeat-reliability baseline.
+- ASR/endpoint segmentation still split the intended passage into two finals. The first final ended at `I will now`; the second restarted `Now stop speaking...`. This is separate from the TTS pacing fix.
+- The word `hanging up` entered the transcript after the scripted end marker, so future WER/control runs should avoid spoken coordination until after Identity is detached or the call is ended.
 
-Next-run tuning:
+Next-run tuning / fixes:
 
-- Keep `conversation.final_coalescing_enabled = true` and `voice_quality.barge_in.enabled = false` for the next inbound identity run.
-- Compare `voice_quality.early_response.audio_mode = "speak_provisionally"` against `"prepare_only"` if repeat-loop risk needs isolation.
-- Record strict and trimmed WER only in a separate WER-only run or after muting/detaching identity repeat.
+- Promote `streaming_start_buffer_ms = 450` as the current no-barge-in Identity pacing baseline.
+- Do not also change `prebuffer_chunks` unless underruns return; the 450 ms start buffer already removed underruns in this run.
+- Next no-barge-in test should isolate endpoint segmentation, changing exactly one endpointing knob: candidate `final_settle_ms = 650` or `merge_window_ms = 180`, not both.
+
+[[wer_pass]]
+schema_version = 1
+reference_id = "tts-startbuf450-nobarge-script-v1"
+reference_text = """This is a Motlie no-barge-in TTS pacing probe. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker green starts the measured sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now stop speaking and wait for the repeat playback. Marker green ends the measured sentence."""
+reference_sha256 = "4f9355e64c62202b232b5dafb438bad113a4afa1e4256fa1d21759133c250582"
+raw_asr_text = """This is a Montally no barch and TTS pacing probe. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Green starts a measure sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now Now stop speaking, and wait for the repeat playback. Marker green ends the measure sentence hanging up"""
+scored_hypothesis_text = """This is a Montally no barch and TTS pacing probe. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Green starts a measure sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now Now stop speaking, and wait for the repeat playback. Marker green ends the measure sentence hanging up"""
+trim_policy = "strict_full"
+trim_start_marker = "Marker green starts the measured sentence"
+trim_end_marker = "Marker green ends the measured sentence"
+normalization_policy = "lowercase; replace hyphen with space; strip punctuation except apostrophes; collapse whitespace; score word tokens"
+wer_tool = "local levenshtein word scorer"
+wer_tool_commit = "b5ecbbedc8d2b37849b9803ac3ad49e0a85102b1"
+reference_word_count = 66
+hypothesis_word_count = 69
+wer_percent = 13.64
+substitutions = 6
+deletions = 0
+insertions = 3
+alignment = [
+  { op = "sub", reference = "motlie", hypothesis = "montally" },
+  { op = "sub", reference = "barge", hypothesis = "barch" },
+  { op = "sub", reference = "in", hypothesis = "and" },
+  { op = "sub", reference = "the", hypothesis = "a" },
+  { op = "sub", reference = "measured", hypothesis = "measure" },
+  { op = "ins", reference = "", hypothesis = "now" },
+  { op = "sub", reference = "measured", hypothesis = "measure" },
+  { op = "ins", reference = "", hypothesis = "hanging" },
+  { op = "ins", reference = "", hypothesis = "up" },
+]
+
+[result_latency]
+schema_version = 1
+source = "quality_jsonl"
+quality_events = 73
+caller_turns = 2
+raw_asr_final_events = 2
+attempted_playbacks = 2
+completed_playbacks = 2
+canceled_playbacks = 0
+failed_playbacks = 0
+dropped_quality_events = 0
+excluded_turns_without_playback = 0
+
+[[result_latency.span]]
+name = "asr.endpoint_wait"
+n = 1
+min_ms = 840
+p50_ms = 840
+p95_ms = 840
+max_ms = 840
+
+[[result_latency.span]]
+name = "tts.request_to_first_audio"
+n = 2
+min_ms = 1538
+p50_ms = 1690
+p95_ms = 1690
+max_ms = 1690
+
+[[result_latency.span]]
+name = "conversation.visible_turn_to_first_audio"
+n = 2
+min_ms = 1538
+p50_ms = 1690
+p95_ms = 1690
+max_ms = 1690
+
+[[result_latency.span]]
+name = "conversation.final_debounce"
+n = 2
+min_ms = 137
+p50_ms = 12462
+p95_ms = 12462
+max_ms = 12462
+
+[[result_latency.span]]
+name = "turn.finalize_to_first_audio"
+n = 2
+min_ms = 1828
+p50_ms = 14001
+p95_ms = 14001
+max_ms = 14001
+
+[result_transport.inbound]
+codec = "PCMU"
+sample_rate_hz = 8000
+packets_total = 3370
+lost_packets = 0
+reordered_frames = 0
+jitter_ms_p50 = 1
+jitter_ms_p95 = 7
+jitter_ms_max = 105
+
+[result_transport.outbound]
+frames_sent = 1153
+underrun_count = 0
+inter_frame_gap_ms_p50 = 20
+inter_frame_gap_ms_p95 = 21
+inter_frame_gap_ms_max = 73
+queue_depth_p50 = 147
+queue_depth_p95 = 255
+pre_audio_wait_ms_estimate = 3140
+append_starvation_ms_estimate = 0
+post_mark_wait_ms_estimate = 220

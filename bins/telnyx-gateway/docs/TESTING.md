@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Promoted `streaming_start_buffer_ms = 450` for the no-barge-in Identity TTS pacing baseline and recorded that barge-in plus turn-batching N=2 still require separate validation. |
 | 2026-06-28 PDT | @codex-541 | Reaffirmed the current best inbound Identity no-barge-in live-test knobs after Layer A score-gated barge-in landed: bounded FIFO pending output, streaming Kokoro first-chunk/tail padding, clause early response, and conservative score telemetry. |
 | 2026-06-26 20:51 PDT | @codex-541 | Added processor-visible transcript event and first-audio latency span names to the required live-run result protocol. |
 | 2026-06-26 PDT | @codex-541 | Added the PR breadcrumb requirement: each live run must update PLAN.md and commit a redacted `docs/tests/*.toml` run record linked from the roadmap. |
@@ -110,7 +111,7 @@ warm_models = true
 generation_mode = "streaming"
 chunking_enabled = true
 prebuffer_chunks = 1
-streaming_start_buffer_ms = 300
+streaming_start_buffer_ms = 450
 tail_pad_ms = 200
 
 [voice_quality.early_response]
@@ -164,7 +165,7 @@ knobs for traceability:
 - `voice_quality.tts.max_text_chunk_chars = 70`
 - `voice_quality.tts.first_chunk_max_chars = 40`
 - `voice_quality.tts.prebuffer_chunks = 1`
-- `voice_quality.tts.streaming_start_buffer_ms = 300`
+- `voice_quality.tts.streaming_start_buffer_ms = 450`
 - `voice_quality.tts.tail_pad_ms = 200`
 - `voice_quality.endpoint.trailing_silence_ms = 850`
 - `voice_quality.endpoint.merge_window_ms = 120`
@@ -229,7 +230,7 @@ generation_mode = "streaming"
 chunking_enabled = true
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
-streaming_start_buffer_ms = 300
+streaming_start_buffer_ms = 450
 tail_pad_ms = 200
 
 [voice_quality.early_response]
@@ -285,7 +286,7 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
-streaming_start_buffer_ms = 300
+streaming_start_buffer_ms = 450
 tail_pad_ms = 200
 
 [voice_quality.early_response]
@@ -328,7 +329,24 @@ Success criteria:
 - Queue growth remains bounded by `max_pending_outputs`; overflow should be
   recorded as dropped pending output rather than unbounded serial playback.
 
-Latest 2026-06-28 result:
+Latest 2026-06-28 TTS pacing result:
+
+- Run record: `docs/tests/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.example.toml`.
+- One config knob changed from the prior no-barge-in baseline:
+  `streaming_start_buffer_ms = 450` instead of `300`.
+- Caller feedback: better.
+- Outbound pacing improved materially: 0 underruns and 73 ms max inter-frame
+  gap, compared with the prior run's 58 underruns and 1180 ms max gap.
+- Playback delivery: 2 attempted playbacks, 2 completed, 0 canceled, 0 failed,
+  0 dropped quality events, and 0 excluded turns without playback.
+- First-audio cost was modest for this sample: `tts.request_to_first_audio`
+  p50/max was 1690 ms, versus 1612 ms in the prior 300 ms run.
+- Strict full-script WER was 13.64% over 66 reference words. The core measured
+  sentence was recognized exactly, including `hang up`.
+- Endpoint segmentation still split one intended passage into two finals, and
+  spoken coordination (`hanging up`) entered the transcript after the end marker.
+
+Previous 2026-06-28 no-barge-in result:
 
 - Run record: `docs/tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml`.
 - Core measured sentence was recognized exactly, including `hang up`.
@@ -342,7 +360,7 @@ Latest 2026-06-28 result:
   completed playbacks, 1 caller-hangup-canceled playback, 0 failed playbacks, 0
   dropped quality events, and 0 excluded turns without playback.
 - Transport was clean inbound: 4868 packets, 0 lost, jitter p50 2 ms and p95 13
-  ms. Outbound pacing still needs work: 58 underruns and one 1180 ms max
+  ms. Outbound pacing still needed work: 58 underruns and one 1180 ms max
   inter-frame gap.
 
 Previous 2026-06-24 result:
@@ -409,7 +427,7 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
-streaming_start_buffer_ms = 300
+streaming_start_buffer_ms = 450
 tail_pad_ms = 200
 
 [voice_quality.early_response]
@@ -497,12 +515,12 @@ Next barge-in Identity run:
 ### Next No-Barge-In Follow-Up
 
 For the next no-barge-in Identity run, keep the bounded FIFO policy fixed and do
-not re-enable turn batching. The 2026-06-28 run keeps this as the best
-repeat-reliability baseline, while the remaining work is endpoint segmentation
-and outbound pacing.
+not re-enable turn batching. The 2026-06-28 450 ms pacing run keeps this as the
+best repeat-reliability and pacing baseline, while the remaining no-barge-in
+work is endpoint segmentation.
 
-Hold this baseline unless testing one explicit hypothesis. Change either one
-endpointing knob or one TTS pacing knob per run, not both:
+Hold this baseline unless testing one explicit hypothesis. Change one
+endpointing knob per run:
 
 ```toml
 [voice_quality.endpoint]
@@ -526,9 +544,18 @@ Next hypotheses, one per run:
 - Endpoint segmentation: test exactly one of `final_settle_ms = 650` or
   `merge_window_ms = 180`; success is one processor-visible turn for the script
   without stale tail latency or overmerging unrelated speech.
-- TTS pacing: test exactly one of `streaming_start_buffer_ms = 450` or
-  `prebuffer_chunks = 2`; success is lower outbound underruns and lower max
-  inter-frame gap without an unacceptable first-audio regression.
+- TTS pacing: keep `streaming_start_buffer_ms = 450` as the current baseline.
+  Do not test `prebuffer_chunks = 2` unless underruns return under the 450 ms
+  setting.
+- Barge-in validation: after the endpoint segmentation probe, re-run the current
+  `barge_in_coalesce_after_silence` Identity profile with the shared 450 ms TTS
+  start buffer to confirm interruption/replacement playback still has 0
+  underruns and acceptable first-audio latency.
+- Turn-batching validation: after barge-in is revalidated, run
+  `processor = "turn_batched_identity"` with fixed N=2 and confirm the prompt
+  handler sees one joined prompt with two source turns, not two separate
+  single-turn prompts. Keep this separate from barge-in unless explicitly
+  testing reset-on-barge-in behavior.
 - Protocol cleanliness: provide/read the script before answer or immediately
   from the run config so coordination speech does not contaminate WER, and hang
   up only after confirming the final repeat has completed.
