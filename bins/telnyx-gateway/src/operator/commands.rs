@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegistry};
 use crate::call_control::{
@@ -47,6 +47,8 @@ impl OperatorSourceChannel {
         }
     }
 }
+
+const TELNYX_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct GatewayContext {
@@ -147,32 +149,31 @@ impl GatewayContext {
                 target.as_deref(),
                 self.session.selected_call.as_deref(),
             )?;
-            let (gateway_call_id, call_control_id) = {
-                let call = guard
-                    .calls
-                    .get_mut(&call_id)
-                    .ok_or_else(|| DriverError::NotFound {
-                        kind: "call",
-                        name: call_id.clone(),
-                    })?;
-                if call.status != CallStatus::PendingInbound {
-                    return Err(DriverError::message(format!(
-                        "call {} is {}, expected waiting",
-                        call.gateway_call_id,
-                        call.status.label()
-                    )));
-                }
-                call.asr_backend = Some(asr_backend);
-                call.status = CallStatus::Answering;
-                call.push_timeline("operator requested answer");
-                call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
-                (
-                    call.gateway_call_id.clone(),
-                    call.ids.call_control_id.clone(),
-                )
-            };
-            guard.attach_conversation(&gateway_call_id, ConversationMode::Auto);
-            (gateway_call_id, call_control_id, media_url, media)
+            let call = guard
+                .calls
+                .get_mut(&call_id)
+                .ok_or_else(|| DriverError::NotFound {
+                    kind: "call",
+                    name: call_id.clone(),
+                })?;
+            if call.status != CallStatus::PendingInbound {
+                return Err(DriverError::message(format!(
+                    "call {} is {}, expected waiting",
+                    call.gateway_call_id,
+                    call.status.label()
+                )));
+            }
+            call.asr_backend = Some(asr_backend);
+            call.last_error = None;
+            call.status = CallStatus::Answering;
+            call.push_timeline("operator requested answer");
+            call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
+            (
+                call.gateway_call_id.clone(),
+                call.ids.call_control_id.clone(),
+                media_url,
+                media,
+            )
         };
         self.session.selected_call = Some(gateway_call_id.clone());
 
@@ -184,14 +185,69 @@ impl GatewayContext {
             );
         }
 
-        self.telnyx
-            .answer_call(&AnswerRequest {
+        let answer_result = tokio::time::timeout(
+            TELNYX_ANSWER_TIMEOUT,
+            self.telnyx.answer_call(&AnswerRequest {
                 call_control_id: &call_control_id,
                 stream_url: &stream_url,
                 media,
-            })
-            .await
-            .map_err(driver_anyhow)?;
+            }),
+        )
+        .await;
+        let answer_result = match answer_result {
+            Ok(result) => result.map_err(driver_anyhow),
+            Err(_) => Err(DriverError::message(format!(
+                "Telnyx answer timed out after {} ms",
+                TELNYX_ANSWER_TIMEOUT.as_millis()
+            ))),
+        };
+        if let Err(error) = answer_result {
+            let error_message = error.to_string();
+            let mut guard = self.state.write().await;
+            let mut should_detach = false;
+            if let Some(call) = guard.calls.get_mut(&gateway_call_id) {
+                call.last_error = Some(error_message.clone());
+                if call.status == CallStatus::Answering {
+                    call.status = CallStatus::PendingInbound;
+                    call.asr_backend = None;
+                    should_detach = call.conversation.attached;
+                    call.push_timeline(format!(
+                        "answer failed; returned to waiting: {error_message}"
+                    ));
+                } else {
+                    call.push_timeline(format!(
+                        "answer failed after state changed: {error_message}"
+                    ));
+                }
+            }
+            if should_detach {
+                guard.detach_conversation(&gateway_call_id);
+            }
+            guard.log(
+                LogLevel::Warn,
+                format!("answer failed for inbound call {gateway_call_id}: {error_message}"),
+            );
+            return Err(error);
+        }
+
+        {
+            let mut guard = self.state.write().await;
+            let should_attach = guard
+                .calls
+                .get(&gateway_call_id)
+                .map(|call| call.status == CallStatus::Answering)
+                .unwrap_or(false);
+            if should_attach {
+                guard.attach_conversation(&gateway_call_id, ConversationMode::Auto);
+            } else {
+                guard.log(
+                    LogLevel::Warn,
+                    format!(
+                        "answer accepted after inbound call {gateway_call_id} left answering state"
+                    ),
+                );
+            }
+        }
 
         tracing::info!(
             gateway_call_id,
@@ -852,6 +908,8 @@ pub enum QualityTtsCommand {
     MaxTextChunkChars { n: usize },
     FirstChunkMaxChars { n: usize },
     PrebufferChunks { n: usize },
+    StreamingStartBufferMs { ms: u64 },
+    TailPadMs { ms: u64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1866,6 +1924,8 @@ async fn start_speech(
             conflict_policy: speech::SpeechConflictPolicy::Reject,
             turn_finalized_at: None,
             latest_turn_finalized_at: None,
+            processor_visible_turn_at: None,
+            barge_in_cancel_terminal_at: None,
             turn_id: None,
             coalesced_turn_ids: Vec::new(),
             source_asr_session_ids: Vec::new(),
@@ -2498,6 +2558,8 @@ async fn approve_conversation_proposal(
             conflict_policy: speech::SpeechConflictPolicy::Reject,
             turn_finalized_at: None,
             latest_turn_finalized_at: None,
+            processor_visible_turn_at: None,
+            barge_in_cancel_terminal_at: None,
             turn_id: None,
             coalesced_turn_ids: Vec::new(),
             source_asr_session_ids: Vec::new(),
@@ -2849,6 +2911,11 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             quality.config.tts.prebuffer_chunks
         ),
         format!(
+            "tts.streaming_start_buffer_ms={}",
+            quality.config.tts.streaming_start_buffer_ms
+        ),
+        format!("tts.tail_pad_ms={}", quality.config.tts.tail_pad_ms),
+        format!(
             "early_response.enabled={}",
             quality.config.early_response.enabled
         ),
@@ -3090,6 +3157,8 @@ chunking_enabled={}
 max_text_chunk_chars={}
 first_chunk_max_chars={}
 prebuffer_chunks={}
+streaming_start_buffer_ms={}
+tail_pad_ms={}
 conversation_backend={}
 conversation_incremental={}
 streaming_compatible={}",
@@ -3098,6 +3167,8 @@ streaming_compatible={}",
                 tts.max_text_chunk_chars,
                 tts.first_chunk_max_chars,
                 tts.prebuffer_chunks,
+                tts.streaming_start_buffer_ms,
+                tts.tail_pad_ms,
                 backend.label(),
                 if factory.supports_incremental() {
                     "yes"
@@ -3154,6 +3225,15 @@ streaming_compatible={}",
         QualityTtsCommand::PrebufferChunks { n } => {
             mutate_quality_config(context, |config| Ok(config.set_tts_prebuffer_chunks(n))).await
         }
+        QualityTtsCommand::StreamingStartBufferMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_tts_streaming_start_buffer_ms(ms))
+            })
+            .await
+        }
+        QualityTtsCommand::TailPadMs { ms } => {
+            mutate_quality_config(context, |config| Ok(config.set_tts_tail_pad_ms(ms))).await
+        }
     }
 }
 
@@ -3173,9 +3253,7 @@ fn early_response_boundary_label(value: BoundaryRequirement) -> &'static str {
 }
 
 fn early_response_missing_signal_label(value: MissingSignalPolicy) -> &'static str {
-    match value {
-        MissingSignalPolicy::Conservative => "conservative",
-    }
+    value.label()
 }
 
 fn early_response_start_timing_label(value: EarlyResponseStartTiming) -> &'static str {
@@ -3397,12 +3475,19 @@ async fn quality_barge_in_command(
             let guard = context.state.read().await;
             let barge_in = &guard.quality.config.barge_in;
             Ok(CommandOutput::text(format!(
-                "enabled={}\nspeech_onset_cancel_enabled={}\nonset_during_playback={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\nclear_timeout_ms={}",
+                "enabled={}\nspeech_onset_cancel_enabled={}\nonset_during_playback={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\ntranscript_min_chars={}\ntranscript_min_words={}\nmissing_signal_policy={}\npartial_min_confidence={}\npartial_min_stability={}\nfinal_min_confidence={}\nfinal_min_stability={}\nclear_timeout_ms={}",
                 barge_in.enabled,
                 barge_in.speech_onset_cancel_enabled,
                 barge_in.onset_during_playback.label(),
                 barge_in.partial_asr_cancel_enabled,
                 barge_in.final_asr_cancel_enabled,
+                barge_in.transcript_min_chars,
+                barge_in.transcript_min_words,
+                barge_in.missing_signal_policy.label(),
+                optional_score_label(barge_in.partial_min_confidence),
+                optional_score_label(barge_in.partial_min_stability),
+                optional_score_label(barge_in.final_min_confidence),
+                optional_score_label(barge_in.final_min_stability),
                 barge_in.clear_timeout_ms
             )))
         }
@@ -3844,6 +3929,8 @@ fn quality_help() -> String {
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
+        "quality tts streaming-start-buffer-ms <ms>     range=0..2000 default=300ms applies=new_playback_request",
+        "quality tts tail-pad-ms <ms>                   range=0..2000 default=200ms applies=new_playback_request",
         "quality early-response status|on|off",
         "quality early-response boundary <none|clause|sentence> default=clause applies=new_call",
         "quality early-response start-timing <endpoint-candidate-only|while-speaking>",
@@ -3857,6 +3944,13 @@ fn quality_help() -> String {
         "quality barge-in onset-during-playback defer-to-partial|trust default=defer_to_partial applies=next_asr_session",
         "quality barge-in partial-asr on|off            bool default=true applies=next_asr_session",
         "quality barge-in final-asr on|off              bool default=true applies=next_asr_session",
+        "quality barge-in transcript_min_chars          TOML-only telemetry range=0..200 default=6 applies=new_turn",
+        "quality barge-in transcript_min_words          TOML-only telemetry range=0..50 default=2 applies=new_turn",
+        "quality barge-in missing_signal_policy         TOML-only conservative default=conservative applies=new_turn",
+        "quality barge-in partial_min_confidence        TOML-only range=0.0..1.0 default=none applies=new_turn",
+        "quality barge-in partial_min_stability         TOML-only range=0.0..1.0 default=none applies=new_turn",
+        "quality barge-in final_min_confidence          TOML-only range=0.0..1.0 default=none applies=new_turn",
+        "quality barge-in final_min_stability           TOML-only range=0.0..1.0 default=none applies=new_turn",
         "quality barge-in clear-timeout-ms <ms>         range=100..10000 default=1000ms applies=new_turn",
         "quality echo-suppression status|on|off         bool default=true applies=next_asr_session",
         "quality echo-suppression min-text-chars <n>    range=1..500 default=10 applies=next_asr_session",
@@ -4940,6 +5034,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_answer_returns_call_to_waiting_for_retry() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+            guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: None,
+                },
+                None,
+                None,
+                CallStatus::PendingInbound,
+            )
+        };
+        let failing_telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, false);
+        let context = GatewayContext::new(state.clone(), failing_telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let error = engine
+            .run_line("answer")
+            .await
+            .expect_err("missing API key should fail answer");
+
+        assert!(error.to_string().contains("missing Telnyx API key"));
+        {
+            let guard = state.read().await;
+            let call = guard
+                .calls
+                .get(&gateway_call_id)
+                .expect("call remains tracked");
+            assert_eq!(call.status, CallStatus::PendingInbound);
+            assert_eq!(call.asr_backend, None);
+            assert!(!call.conversation.attached);
+            assert!(call
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("missing Telnyx API key")));
+            assert!(call
+                .timeline
+                .iter()
+                .any(|entry| entry.message.contains("answer failed; returned to waiting")));
+        }
+
+        let retry_telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let retry_context = GatewayContext::new(state.clone(), retry_telnyx);
+        let mut retry_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(retry_context);
+
+        let output = retry_engine.run_line("answer").await.expect("retry answer");
+
+        assert_eq!(
+            output.lines,
+            vec![format!("answer requested for {gateway_call_id}")]
+        );
+        let guard = state.read().await;
+        let call = guard
+            .calls
+            .get(&gateway_call_id)
+            .expect("call remains tracked after retry");
+        assert_eq!(call.status, CallStatus::Answering);
+        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
+        assert!(call.conversation.attached);
+        assert_eq!(call.last_error, None);
+    }
+
+    #[tokio::test]
     async fn answer_rejects_non_pending_call() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         {
@@ -5132,6 +5294,9 @@ mod tests {
         let call_id = {
             let mut guard = state.write().await;
             guard.set_quality_event_sink(QualityEventSink::with_sender(quality_tx), None);
+            guard.quality.config.set_tts_tail_pad_ms(0);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
             add_streaming_call(&mut guard, "call-1", "stream-1")
         };
         let media = SharedMediaRegistry::default();
@@ -6076,6 +6241,18 @@ mod tests {
             .expect("set prebuffer chunks");
         assert!(prebuffer_output.lines[0].contains("key=tts.prebuffer_chunks"));
         assert!(prebuffer_output.lines[0].contains("applies=new_playback_request"));
+        let start_buffer_output = engine
+            .run_line("quality tts streaming-start-buffer-ms 450")
+            .await
+            .expect("set streaming start buffer");
+        assert!(start_buffer_output.lines[0].contains("key=tts.streaming_start_buffer_ms"));
+        assert!(start_buffer_output.lines[0].contains("applies=new_playback_request"));
+        let tail_pad_output = engine
+            .run_line("quality tts tail-pad-ms 250")
+            .await
+            .expect("set tail pad");
+        assert!(tail_pad_output.lines[0].contains("key=tts.tail_pad_ms"));
+        assert!(tail_pad_output.lines[0].contains("applies=new_playback_request"));
 
         let status = engine
             .run_line("quality tts status")
@@ -6097,6 +6274,11 @@ mod tests {
         assert!(status
             .lines
             .iter()
+            .any(|line| line == "streaming_start_buffer_ms=450"));
+        assert!(status.lines.iter().any(|line| line == "tail_pad_ms=250"));
+        assert!(status
+            .lines
+            .iter()
             .any(|line| line == "conversation_incremental=yes"));
         assert!(status
             .lines
@@ -6111,6 +6293,8 @@ mod tests {
         assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
         assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
         assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
+        assert_eq!(guard.quality.config.tts.streaming_start_buffer_ms, 450);
+        assert_eq!(guard.quality.config.tts.tail_pad_ms, 250);
     }
 
     #[tokio::test]

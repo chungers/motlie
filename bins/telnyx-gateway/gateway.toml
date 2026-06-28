@@ -145,8 +145,12 @@ chunking_enabled = true
 max_text_chunk_chars = 90
 # Maximum characters in the first TTS chunk; `0` disables the special first limit.
 first_chunk_max_chars = 40
-# Buffered-mode prebuffer chunks before playback starts.
+# Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
+# Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in pacing baseline uses 450 ms.
+streaming_start_buffer_ms = 450
+# Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 # Provisional early-response stage; committed finals still flow when false.
@@ -191,8 +195,36 @@ onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 # Cancel on final ASR overlap.
 final_asr_cancel_enabled = true
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on length.
+transcript_min_chars = 6
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on word count.
+transcript_min_words = 2
+# Missing configured ASR score signals fail closed for non-compat barge-in cancellation.
+missing_signal_policy = "conservative"
+# Minimum partial-ASR confidence for active-playback cancellation.
+partial_min_confidence = 0.50
+# Minimum partial-ASR stability for active-playback cancellation.
+partial_min_stability = 0.50
+# Minimum final-ASR confidence for active-playback cancellation.
+final_min_confidence = 0.70
+# Optional final-ASR stability floor; leave unset until final ASR reports stability.
+# final_min_stability = 0.50
 # Time allowed for media clear/mark handling.
 clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+# Modes: current_compat, no_barge_in_bounded_pending, barge_in_cancel_only,
+# barge_in_coalesce_after_silence.
+# EXPERIMENTAL — not yet live-validated. The barge-in modes failed a live quality sample (post-playback echo/fragment finals escaping as new turns); a general post-playback dispatch-guard code fix is required before production use — see #587. The validated default path is current_compat / no-barge-in.
+mode = "current_compat"
+# Diagnostic hold budget for policy-managed pending output behind active playback.
+active_playback_hold_ms = 1000
+# Maximum assistant outputs retained by bounded pending policies.
+max_pending_outputs = 1
+# `latest_only` replaces pending output; `fifo` drains retained outputs in order.
+pending_output_order = "latest_only"
+# Reserved silence window for future barge-in regenerate/coalesce policies.
+post_barge_in_silence_ms = 1200
 
 [voice_quality.echo_suppression]
 # Suppress transcripts that match active assistant TTS, except same-source provisional audio.

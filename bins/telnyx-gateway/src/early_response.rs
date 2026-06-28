@@ -53,6 +53,14 @@ pub enum MissingSignalPolicy {
     Conservative,
 }
 
+impl MissingSignalPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EarlyResponseStartTiming {
@@ -914,6 +922,8 @@ async fn start_provisional_speech(
             conflict_policy: SpeechConflictPolicy::CancelAndReplace,
             turn_finalized_at: None,
             latest_turn_finalized_at: None,
+            processor_visible_turn_at: None,
+            barge_in_cancel_terminal_at: None,
             turn_id: Some(provisional_turn_id.clone()),
             coalesced_turn_ids: Vec::new(),
             source_asr_session_ids: Vec::new(),
@@ -1104,6 +1114,8 @@ async fn queue_committed_speech_with_media_wait(
                 conflict_policy,
                 turn_finalized_at: Some(intent.timing.finalized_at),
                 latest_turn_finalized_at: Some(intent.timing.finalized_at),
+                processor_visible_turn_at: None,
+                barge_in_cancel_terminal_at: None,
                 turn_id: Some(intent.turn_id.clone()),
                 coalesced_turn_ids: vec![intent.turn_id.clone()],
                 source_asr_session_ids: Vec::new(),

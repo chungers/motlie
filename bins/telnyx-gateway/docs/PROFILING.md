@@ -17,6 +17,7 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad controls for outbound pacing and tail reliability. |
 | 2026-06-18 PDT | @codex-367-design | Clarified that text-call playback and latest-response knobs apply to new text-call sessions, matching live config snapshot behavior. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Simplified gateway startup around one durable `--config <gateway.toml>` file; `state dump` now emits readable TOML with full `[voice_quality.*]`, while `.repl` scripts are limited to interactive `source <path>` command replay. |
 | 2026-06-15 PDT | @codex-m6-ds-rv | Removed the smoke-command committed-final debounce side effect and exposed `early_response.boundary` as a live-safe knob so identity tests can accept stable unpunctuated partials without changing stricter real-agent modes. |
@@ -1034,7 +1035,9 @@ Prompt requirements:
 | `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. Applies to buffered synthesis and to streaming mode, where the gateway opens incremental TTS requests per prepared text chunk. For committed streaming turns, the gateway holds the first tiny text chunk until the next prepared text chunk has audio to avoid outbound underruns; provisional append playback stays one-frame JIT. |
 | `tts.max_text_chunk_chars` | `Count` | `40..500` | `90` | clamp to range | new playback request | Packs complete sentence segments up to this size before falling back to word splits for oversized segments. |
 | `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `40` | `0` disables, otherwise clamp to range | new playback request | Sentence-boundary first-chunk ramp for lower first-audio latency; `0` restores full-size first-chunk synthesis. |
-| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Prepared text chunks required before playback starts; the telephony default starts playback as soon as the first prepared chunk is available. Raise this only when a deployment explicitly prefers extra smoothing over first-audio latency. |
+| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Buffered-mode prepared text chunks required before playback starts. |
+| `tts.streaming_start_buffer_ms` | `DurationMs` | `0..2000` | `300` | clamp to range | new playback request | Normal streaming TTS frames held before the first playback frame; `0` disables. This is the primary underrun-smoothing knob for committed streaming playback. |
+| `tts.tail_pad_ms` | `DurationMs` | `0..2000` | `200` | clamp to range | new playback request | Silence frames appended before the final Telnyx mark for normal committed TTS; protects final syllables from mark/tail clipping. |
 | `early_response.enabled` | `bool` | `true,false` | `false` | reject non-bool | new call | Enables the opt-in provisional ASR-input stage for new calls. It feeds the selected per-call `ConversationProcessorKind`; it does not choose a separate response processor. Use `quality early-response on` before dialing for live identity tests. |
 | `early_response.boundary` | enum | `none,clause,sentence` | `clause` | reject unknown | new call | Minimum text boundary before a partial can start provisional processor work. `none` is useful for identity latency smoke tests with stable unpunctuated ASR partials; `clause` and `sentence` preserve semantic-boundary gating for real agents. |
 | `early_response.start_timing` | enum | `while_speaking,endpoint_candidate_only` | `while_speaking` | reject unknown | new call | Selects whether stable partials may start provisional work while the caller is still speaking or only after the low-energy endpoint-candidate window. `while_speaking` is the live-test default for snappier identity/agent response; `endpoint_candidate_only` preserves the older conservative delay. |
@@ -1043,7 +1046,19 @@ Prompt requirements:
 | `barge_in.onset_during_playback` | `OnsetDuringPlaybackPolicy` enum | `defer_to_partial`, `trust` | `defer_to_partial` | reject unknown | next ASR session | Distinguishes audible assistant echo from real caller interruption. The default keeps the live-tuned echo guard but still allows onset cancellation when active playback is not yet audible or has no echo signature. |
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
 | `barge_in.final_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Final ASR cancel path. |
+| `barge_in.transcript_min_chars` | `Count` | `0..200` | `6` | clamp to range | new turn | Telemetry-only ASR drift field; non-compat cancellation does not gate on character count. |
+| `barge_in.transcript_min_words` | `Count` | `0..50` | `2` | clamp to range | new turn | Telemetry-only ASR drift field; non-compat cancellation does not gate on word count. |
+| `barge_in.missing_signal_policy` | enum | `conservative` | `conservative` | reject unknown | new turn | Missing/unconfigured required ASR score signals fail closed for non-compat cancellation. |
+| `barge_in.partial_min_confidence` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Required partial-ASR confidence floor before non-compat active-playback cancellation. |
+| `barge_in.partial_min_stability` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Required partial-ASR stability floor before non-compat active-playback cancellation. |
+| `barge_in.final_min_confidence` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Required final-ASR confidence floor before non-compat active-playback cancellation. |
+| `barge_in.final_min_stability` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Optional final-ASR stability floor before active-playback cancellation; leave unset when the backend does not emit final stability. |
 | `barge_in.clear_timeout_ms` | `DurationMs` | `100..10000` | `1000` | clamp to range | new cancel request | Clear/terminal wait. |
+| `conversation_policy.mode` | enum | `current_compat,no_barge_in_bounded_pending,barge_in_cancel_only,barge_in_coalesce_after_silence` | `current_compat` | reject unknown | new policy decision | Selects the conversation arbitration policy for no-barge-in output overlap and valid barge-in cancellation/coalescing triggers. |
+| `conversation_policy.active_playback_hold_ms` | `DurationMs` | `0..180000` | `1000` | clamp to range | new policy decision | Diagnostic hold budget for policy-managed pending assistant output behind active playback; bounded-pending mode records retained max-hold telemetry instead of dropping. |
+| `conversation_policy.max_pending_outputs` | `Count` | `1..64` | `1` | clamp to range | new policy decision | Maximum assistant outputs retained by bounded pending policies. |
+| `conversation_policy.pending_output_order` | enum | `latest_only,fifo` | `latest_only` | reject unknown | new policy decision | Ordering policy for retained assistant output; identity smoke tests use `fifo`, normal agent behavior usually uses `latest_only`. |
+| `conversation_policy.post_barge_in_silence_ms` | `DurationMs` | `0..30000` | `1200` | clamp to range | post-barge-in final dispatch | Silence/coalescing window for `barge_in_coalesce_after_silence`. |
 | `echo_suppression.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables the text-domain last line of defense for assistant echo suppression before forwarding transcripts. |
 | `echo_suppression.min_text_chars` | `Count` | `1..500` | `10` | clamp to range | next ASR session | Minimum normalized transcript length before text-similarity echo suppression is considered. |
 | `echo_suppression.tail_window_ms` | `DurationMs` | `0..10000` | `2000` | clamp to range | next ASR session | Window after outbound TTS tail in which normalized text-similarity echo suppression is eligible. |
@@ -1121,6 +1136,8 @@ chunking_enabled = true
 max_text_chunk_chars = 90
 first_chunk_max_chars = 40
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.text_call]
 max_active_turns = 32
@@ -1135,7 +1152,21 @@ speech_onset_cancel_enabled = true
 onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
+transcript_min_chars = 6
+transcript_min_words = 2
+missing_signal_policy = "conservative"
+partial_min_confidence = 0.50
+partial_min_stability = 0.50
+final_min_confidence = 0.70
+# final_min_stability intentionally unset until final ASR reports stability.
 clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+mode = "current_compat"
+active_playback_hold_ms = 1000
+max_pending_outputs = 1
+pending_output_order = "latest_only"
+post_barge_in_silence_ms = 1200
 
 [voice_quality.echo_suppression]
 enabled = true
@@ -1352,6 +1383,8 @@ quality tts chunking on|off
 quality tts max-text-chunk-chars <n>
 quality tts first-chunk-max-chars <n>
 quality tts prebuffer-chunks <n>
+quality tts streaming-start-buffer-ms <ms>
+quality tts tail-pad-ms <ms>
 quality early-response status
 quality early-response on|off
 quality early-response boundary none|clause|sentence

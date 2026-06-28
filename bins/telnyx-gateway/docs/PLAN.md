@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 20:51 PDT | @codex-541 | Added processor-visible transcript quality events plus first-audio latency spans for conversation turns and barge-in replacements; updated the PR #565 live-test roadmap to use these artifacts before the next run. |
+| 2026-06-26 PDT | @codex-541 | Added the live-test breadcrumb roadmap for PR #565: every run now updates this PLAN, commits a redacted `docs/tests/*.toml` run record, and links the latest result/next hypothesis so future agents can resume without tmux context. |
 | 2026-06-12 PDT | @codex-366-impl | Resolved #488 generality review by moving final-settle fragment classifiers and conversation final-coalescing hold knobs into `VoiceQualityConfig.endpoint` with default-preserving values; `bins/telnyx-agent` now opts into `motlie.telnyx.text.partials.v1` for live advisory partial delivery. |
 | 2026-06-12 PDT | @codex-366-impl | Addressed #481/David stability ruling: opt-in `caller.partial` forwards backend-native `confidence` plus gateway-estimated stream-convergence/churn `stability`; stability is only for preparation/routing/debounce, never truth, confidence, calibrated probability, final response input, or a value to combine with confidence. |
 | 2026-06-11 PDT | @codex-366-impl | Generalized conversation final coalescing from smoke-test-only wording: coalescing handlers now use the 350 ms `endpoint.merge_window_ms` committed-turn debounce, and TTS starts from a 40-char first chunk by default. |
@@ -90,6 +92,100 @@ Execution policy for the initial implementation:
 - `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
 - all work needed only for those follow-on pairings belongs in phase 10 or later
 - phases are capability layers; milestones #364-#367 are shippable increments gated in Phase 8, so Phase 6 API/text-call tasks define contracts and stubs until their milestone 4 implementation gate
+
+---
+
+## Live Test Breadcrumb Roadmap
+
+This section is the durable handoff trail for PR #565 live tuning. After every
+live run, update this section and commit a redacted copy of that run's hybrid
+config/results TOML under `docs/tests/`. The local `$HOME/telnyx-test` copy may
+contain live routing values; the committed copy must keep placeholders only.
+
+### Run Records
+
+| Run | Mode | Committed record | Grade | Key result | Next action |
+| --- | --- | --- | --- | --- | --- |
+| 20260626-163544-7dcbe571-identity-bargein-v1 | inbound Identity/repeat, barge-in enabled, no turn batching | [docs/tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml](./tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml) | B | Active playback canceled once, replacement played, 0 underruns, 0 transport loss; raw ASR captured one assistant-echo fragment that was suppressed before agent dispatch. | Add agent-visible transcript artifacts and explicit cancel/replacement latency spans before treating raw transcript WER as the control metric. |
+| 20260628-135818-336e9087-layera-nobarge-identity-v1 | inbound Identity/repeat, barge-in disabled, no turn batching | [docs/tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml](./tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml) | C+ | Core measured sentence recognized exactly, including `hang up`, and 2/2 non-hangup playbacks completed; strict script WER 20.59%, two ASR finals split one passage, and outbound pacing still showed 58 underruns with one 1180 ms max gap. | Keep bounded FIFO baseline, then run one controlled endpoint-merge/final-settle probe and one separate TTS pacing probe. |
+| 20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1 | inbound Identity/repeat, barge-in disabled, no turn batching, TTS start buffer 450 ms | [docs/tests/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.example.toml](./tests/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.example.toml) | B | One-knob pacing probe completed 2/2 playbacks with 0 underruns and 73 ms max inter-frame gap; caller feedback was better; core measured sentence including `hang up` was exact. | Promote `streaming_start_buffer_ms = 450`, then test endpoint segmentation, barge-in with 450, and turn-batching N=2 prompt visibility as separate runs. |
+| 20260628-155011-09337980-bargein-startbuf450-v1 | inbound Identity/repeat, barge-in enabled, no turn batching, TTS start buffer 450 ms | [docs/tests/20260628-155011-09337980-bargein-startbuf450-v1.example.toml](./tests/20260628-155011-09337980-bargein-startbuf450-v1.example.toml) | D | Failed quality sample: caller reported words out of sequence and missing phrases; processor saw 6 turns, 4 cancels, 2 completed playbacks, strict WER 30.30%, and outbound pacing had 77 underruns with 1119 ms max gap. | Treat this as a code correctness problem in post-barge-in echo/fragment dispatch, not a tuning-only problem; fix before the next barge-in run. |
+
+### Current Roadmap
+
+- [x] Record the 2026-06-26 barge-in Identity run with redacted config/results
+  TOML in `docs/tests/`.
+  DESIGN reference: `DESIGN-545-conversation-policy.md`, `Conversation policy modes`
+- [x] Emit an explicit agent-visible transcript artifact or quality event.
+  @codex-541, 2026-06-26 20:51 PDT: `conversation.processor_visible_turn`
+  records the exact post-suppression/coalesced text handed to the conversation
+  processor, with source ASR session and utterance IDs. Transcript text follows
+  the configured redaction policy.
+  DESIGN reference: `PROFILING.md`, `Application-turn traceability`
+- [x] Add first-class first-audio latency spans instead of inferring them from
+  playback-link timestamps. @codex-541, 2026-06-26 20:51 PDT: live runs can
+  now score `conversation.visible_turn_to_first_audio` and
+  `barge_in.cancel_terminal_to_replacement_first_audio` from quality JSONL.
+  DESIGN reference: `PROFILING.md`, `Barge-in span links`
+- [ ] Implement a general post-barge-in echo/fragment dispatch guard before the
+  next barge-in live run. The 2026-06-28 450 ms barge-in run showed that short
+  post-playback finals such as `up now` and garbled assistant-echo fragments can
+  still become new Identity turns. Success is suppressing or holding those
+  fragments without relying on Identity semantics, script keywords, or domain
+  biasing.
+  DESIGN reference: `TESTING.md`, `Barge-In Policy Profiles`
+- [ ] Run a no-barge-in endpoint segmentation probe from the 2026-06-28
+  bounded FIFO baseline, changing exactly one of `final_settle_ms = 650` or
+  `merge_window_ms = 180`. Success is one processor-visible turn for the
+  script without adding stale tail latency.
+  DESIGN reference: `TESTING.md`, `Next No-Barge-In Follow-Up`
+- [x] Re-run the current barge-in Identity profile with
+  `streaming_start_buffer_ms = 450`. @codex-541, 2026-06-28 PDT: run
+  `20260628-155011-09337980-bargein-startbuf450-v1` failed. The 450 ms TTS
+  buffer remains the no-barge-in pacing baseline, but barge-in needs a code fix
+  for post-playback echo/fragment dispatch before further knob-only tests.
+  DESIGN reference: `TESTING.md`, `Barge-In Policy Profiles`
+- [ ] Run turn-batched Identity N=2 after the no-barge-in and barge-in pacing
+  probes. Success is one prompt-handler-visible joined prompt with two source
+  turns, not two separate single-turn prompts; keep barge-in off unless testing
+  reset-on-barge-in behavior.
+  DESIGN reference: `TESTING.md`, `Protocol B: Turns-Batching Smoke Test`
+- [x] Run a separate TTS pacing probe from the same baseline. @codex-541,
+  2026-06-28 PDT: `streaming_start_buffer_ms = 450` completed with 0
+  underruns and 73 ms max inter-frame gap, versus the prior 300 ms run's 58
+  underruns and 1180 ms max gap. Promote 450 as the current no-barge-in
+  Identity pacing baseline; defer `prebuffer_chunks = 2` unless underruns
+  return.
+  DESIGN reference: `CONFIGS.md`, `TTS`
+- [x] Re-run the no-barge-in Identity baseline after the transcript/latency
+  observability fixes. @codex-541, 2026-06-28 PDT: run
+  `20260628-135818-336e9087-layera-nobarge-identity-v1` validated that the
+  core measured sentence and `hang up` were recognized exactly, but the longer
+  script split into two ASR finals and outbound pacing still recorded 58
+  underruns. Keep the bounded FIFO profile as baseline; tune endpoint
+  segmentation and TTS pacing as separate next hypotheses.
+  DESIGN reference: `TESTING.md`, `Bounded Pending Repeat-Reliability Profile`
+- [ ] Only after Identity latency/reliability stabilizes, test the same policy
+  surface with the prompt-handler/turn-batching path. Keep the policy boundary
+  independent of Identity semantics; no keyword matching or ASR-vs-assistant
+  semantic comparison is allowed for correctness decisions.
+  DESIGN reference: `DESIGN-545-conversation-policy.md`, `Policy insertion points`
+
+### Per-Run Update Rule
+
+For every future live run:
+
+- create a fresh local `$HOME/telnyx-test/runs/<run-id>/<run-id>.toml` startup
+  config
+- append structured results to that same local hybrid TOML after hangup
+- create a redacted committed copy at
+  `bins/telnyx-gateway/docs/tests/<run-id>.example.toml`
+- link the committed record in the Run Records table above
+- revise the Current Roadmap checklist when the run changes the next best
+  hypothesis
+
+Do not commit human phone numbers, live Telnyx connection IDs, tailnet hosts,
+public live hosts, or literal secrets.
 
 ---
 

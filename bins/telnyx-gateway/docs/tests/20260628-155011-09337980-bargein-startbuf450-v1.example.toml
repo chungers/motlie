@@ -1,13 +1,13 @@
 +++
 # Redacted Motlie Telnyx inbound identity smoke-test config/record example.
-# @codex-535 2026-06-17 PDT -- Copy this file to
-# $HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>.toml, replace placeholders locally,
+# @codex-541 2026-06-28 PDT -- Copy this file to
+# $HOME/telnyx-test/runs/20260628-155011-09337980-bargein-startbuf450-v1/20260628-155011-09337980-bargein-startbuf450-v1.toml, replace placeholders locally,
 # run telnyx-gateway with --config pointing at that copied file, then append
 # results below the closing +++ delimiter. Never commit the local copy after
 # replacing placeholders with live routing values.
 
 # Canonical Motlie Telnyx gateway startup config.
-# @codex-535 2026-06-16 PDT -- Keep this file parse-clean under the strict
+# @codex-541 2026-06-28 PDT -- Keep this file parse-clean under the strict
 # `telnyx-gateway --config` loader; use secret references, never literal keys.
 
 version = 1
@@ -22,7 +22,7 @@ socket = "/tmp/motlie-telnyx-gateway.sock"
 # Shared ASR/TTS artifact root. `$HOME` and `~` are expanded by the loader.
 artifact_root = "$HOME/artifacts/hf-cache"
 # Structured process log target for live tuning sessions.
-log_file = "$HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>.log"
+log_file = "$HOME/telnyx-test/runs/20260628-155011-09337980-bargein-startbuf450-v1/20260628-155011-09337980-bargein-startbuf450-v1.log"
 
 [telnyx]
 # Telnyx API base; override only for mocks or future Telnyx environments.
@@ -48,11 +48,11 @@ media_codec = "PCMU"
 # Sample rate paired with the selected codec.
 media_sample_rate_hz = 8000
 # Capture root for raw media, decoded WAV, ASR input WAV, and transcripts.
-capture_dir = "$HOME/telnyx-test/runs/<inbound-identity-run-id>/captures"
+capture_dir = "$HOME/telnyx-test/runs/20260628-155011-09337980-bargein-startbuf450-v1/captures"
 # Default outbound caller ID; use the selected Telnyx number.
 from_number = "<telnyx-phone-number>"
 # Default destination for `state dump` / shutdown dumps.
-state_path = "$HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>-state.toml"
+state_path = "$HOME/telnyx-test/runs/20260628-155011-09337980-bargein-startbuf450-v1/20260628-155011-09337980-bargein-startbuf450-v1-state.toml"
 
 [inbound]
 # Safe default: wait for explicit `answer`; use `auto-transcribe` only for trusted tests.
@@ -64,7 +64,7 @@ enabled = true
 # Coalesce/debounce committed finals before processor dispatch when enabled.
 final_coalescing_enabled = true
 # Startup bridge for the runtime barge-in owner under `[voice_quality.barge_in]`.
-barge_in_enabled = false
+barge_in_enabled = true
 # Static dispatch boundary. `identity` is the current checked-in processor.
 processor = "identity"
 # Conversation/manual TTS backend. Streaming mode below requires an incremental backend.
@@ -76,7 +76,7 @@ warm_models = true
 
 [quality_logging]
 # Durable JSONL sink path used when `[voice_quality.logging] enabled = true`.
-path = "$HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>-quality.jsonl"
+path = "$HOME/telnyx-test/runs/20260628-155011-09337980-bargein-startbuf450-v1/20260628-155011-09337980-bargein-startbuf450-v1-quality.jsonl"
 
 [voice_quality]
 # Baseline profile applied first; explicit tables below override individual knobs.
@@ -155,7 +155,7 @@ max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 # Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
-# Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in pacing baseline uses 450 ms.
+# Normal streaming TTS frames to hold before first playback frame; 0 disables.
 streaming_start_buffer_ms = 450
 # Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
 tail_pad_ms = 200
@@ -194,15 +194,15 @@ provisional_max_prebuffer_frames = 1
 
 [voice_quality.barge_in]
 # Enable interruption/cancellation of active TTS from caller speech.
-enabled = false
+enabled = true
 # Cancel on frame-level speech onset when policy allows it.
-speech_onset_cancel_enabled = false
+speech_onset_cancel_enabled = true
 # `defer_to_partial` waits for partial ASR confirmation during playback.
 onset_during_playback = "defer_to_partial"
 # Cancel on meaningful partial ASR overlap.
-partial_asr_cancel_enabled = false
+partial_asr_cancel_enabled = true
 # Cancel on final ASR overlap.
-final_asr_cancel_enabled = false
+final_asr_cancel_enabled = true
 # Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on length.
 transcript_min_chars = 6
 # Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on word count.
@@ -222,13 +222,13 @@ clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]
 # Identity smoke tests keep barge-in off and drain a bounded FIFO repeat queue.
-mode = "no_barge_in_bounded_pending"
+mode = "barge_in_coalesce_after_silence"
 # Diagnostic hold budget before recording retained max-hold telemetry.
 active_playback_hold_ms = 1000
 # Maximum completed processor outputs retained behind active playback.
-max_pending_outputs = 3
+max_pending_outputs = 1
 # FIFO preserves deterministic repeat order for WER/smoke-test scripts.
-pending_output_order = "fifo"
+pending_output_order = "latest_only"
 # Reserved for barge-in coalescing profiles; inactive for this no-barge-in mode.
 post_barge_in_silence_ms = 1200
 
@@ -298,103 +298,174 @@ max_inappropriate_cancel_rate = 0.03
 
 ## Run Metadata
 
-- Run ID: <inbound-identity-run-id>
+- Run ID: 20260628-155011-09337980-bargein-startbuf450-v1
 - Direction: inbound manual-answer
-- Created: 2026-06-17 15:19 PDT
-- Created by: @codex-535
-- Config and result record: `$HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>.toml`
-- Source example: `bins/telnyx-gateway/docs/LIVE_RUN_INBOUND_IDENTITY.example.toml`
-- Privacy: placeholders only; local copies may contain live routing values and must remain uncommitted.
+- Created: 2026-06-28 15:50 PDT
+- Created by: @codex-541
+- Git SHA: `093379800b6b2a6c1cc12520f91138042406125e`
+- Config and result record: `$HOME/telnyx-test/runs/20260628-155011-09337980-bargein-startbuf450-v1/20260628-155011-09337980-bargein-startbuf450-v1.toml`
+- Source baseline: `$HOME/telnyx-test/runs/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.toml`
+- Privacy: local copy contains live routing values; committed copy must be redacted before PR use.
 
-## Procedure Snapshot
+## Hypothesis
 
-- Gateway started with `--config $HOME/telnyx-test/runs/<inbound-identity-run-id>/<inbound-identity-run-id>.toml`.
-- Caller dialed the configured Telnyx number; operator answered the waiting inbound call manually.
-- Identity processor was enabled before the call through config: `conversation.enabled=true`, `processor="identity"`.
-- Streaming TTS, clause-gated early response, disabled barge-in, model warming, and quality logging were enabled.
-- Caller was instructed to read the identity/repeat script once, then wait silently for playback before giving qualitative feedback.
+Validate the documented barge-in Identity profile with the shared 450 ms TTS start buffer. Expected behavior: caller interruption cancels active assistant playback, replacement speech is preserved and dispatched once after the post-barge-in silence window, and outbound pacing remains stable with no underruns.
 
 ## Caller Script
 
 ```text
-This is a Motlie inbound identity smoke test.
-I will read one continuous passage, then pause so the gateway can repeat what it heard.
-The quick brown fox walked past the live gateway while I was still speaking, and I want the system to repeat this as soon as it can without waiting for a long silence.
-Now I am going to stop for a natural endpoint.
+This is a Motlie barge-in timing test. I will start with a long sentence so the gateway begins repeating it while I am still on the call. The first sentence should be interrupted before it finishes playing back. Stop now. Please repeat this replacement sentence clearly after the interruption. The replacement sentence contains marker silver, marker orange, and the words hang up near the end.
 ```
 
 ## Run Results
 
-### 2026-06-17 15:19 PDT, @codex-535 -- redacted inbound sample
+### 2026-06-28 15:58 PDT, @codex-541 -- barge-in Identity 450 ms TTS buffer probe
 
-Status: sample completed record. Replace these values with real run metrics in the local copied file.
+Status: failed quality sample. Caller qualitative feedback: bad; words were out of sequence and phrases were missing.
 
-Quantitative sample:
+Quantitative summary:
 
 - Calls answered: 1 inbound manual-answer call.
-- ASR sessions: 1 active caller stream.
-- Caller turns: 4 committed finals.
-- Identity playback: 4 queued, 4 started, 3 completed, 1 canceled by hangup.
-- Endpoint trailing silence: p50 740 ms, p95 900 ms.
-- TTS request-to-first-audio: p50 1800 ms, p95 3300 ms.
-- Media transport: 0 reported packet loss in the call summary.
-- WER: not scored; this was an identity/repeat quality smoke test.
+- ASR backend: kroko-2025 / sherpa-zipformer-en-kroko-2025-08-06.
+- Media: PCMU 8 kHz mono.
+- Config delta from current no-barge-in 450 ms baseline: barge-in enabled with `barge_in_coalesce_after_silence`; no turn batching.
+- TTS pacing knob under validation: `streaming_start_buffer_ms = 450`.
+- Caller turns / raw ASR finals: 6.
+- Identity playback: 6 attempted playbacks, 4 canceled, 2 completed, 0 failed.
+- Dropped quality events: 0.
+- Excluded turns without playback: 0 in final call-terminal summary.
+- Inbound transport: 3948 packets, 0 lost, 0 reordered, jitter p50 2 ms, p95 20 ms, max 321 ms.
+- Outbound pacing: 584 frames, 77 underruns, inter-frame gap p50 20 ms, p95 20 ms, max 1119 ms, queue depth p50 63, p95 181.
+- `tts.request_to_first_audio`: n=4, min 778 ms, max 1402 ms.
+- `conversation.visible_turn_to_first_audio`: n=4, min 778 ms, max 1402 ms.
+- `barge_in.cancel_terminal_to_replacement_first_audio`: n=3, min 1980 ms, max 6998 ms.
+- Strict full-script WER: 30.30% over 66 reference words (S=4, D=2, I=14).
 
-Structured latency/quality sample:
+Agent-visible turn sequence inferred from final ASR / text-call dispatch order:
 
-```toml
-[result_latency]
-schema_version = 1
-source = "quality_jsonl"
-quality_events = 0
-caller_turns = 0
-raw_asr_final_events = 0
-attempted_playbacks = 0
-completed_playbacks = 0
-canceled_playbacks = 0
-dropped_quality_events = 0
+1. `This is a marked lead barge in timing test. I will start with a long sentence, so the gateway begins repeating it while I'm still on the call. The first sentence should be interrupted before it finishes playing back`
+2. `stop now. Please repeat this replacement sentence clearly after the interruption.`
+3. `but now`
+4. `the replacement sentence contains marker, silver, marker, orange, and words hang out near the`
+5. `up now`
+6. `He's been paint this replacement sentence clearly after the interrup`
 
-[[result_latency.span]]
-name = "asr.endpoint_wait"
-n = 0
-min_ms = 0
-p50_ms = 0
-p95_ms = 0
-max_ms = 0
+Assembled transcript:
 
-[[result_latency.span]]
-name = "tts.request_to_first_audio"
-n = 0
-min_ms = 0
-p50_ms = 0
-p95_ms = 0
-max_ms = 0
+```text
+This is a marked lead barge in timing test. I will start with a long sentence, so the gateway begins repeating it while I'm still on the call. The first sentence should be interrupted before it finishes playing back stop now. Please repeat this replacement sentence clearly after the interruption. but now the replacement sentence contains marker, silver, marker, orange, and words hang out near the up now He's been paint this replacement sentence clearly after the interrup
 ```
-
-Structured WER status:
-
-```toml
-[wer_summary]
-schema_version = 1
-wer_passes = 0
-reason = "identity/repeat quality smoke test; no WER passage was scored"
-```
-
-Qualitative sample:
-
-- Caller heard repeat-back, so the identity processor path was active.
-- Caller reported response timing as slightly late but understandable.
-- Audio was intelligible with no obvious clipping.
-- No barge-in cancellation was expected or observed.
 
 Analysis:
 
-- Inbound manual-answer isolates the caller's phone number from committed artifacts because the operator does not need to write a destination number into scripts or docs.
-- Identity repeat confirms the ASR final, conversation dispatch, streaming TTS, media playback, and echo-suppression path in one smoke test.
-- If repeated fragments occur, rerun with the same config but instruct the caller to read once and stay silent until playback completes; extra turns during silence indicate playback leakage or endpoint/echo-suppression failure.
+- This run invalidates the assumption that the 450 ms TTS buffer alone is sufficient for barge-in quality. It improved no-barge-in pacing in the previous run, but barge-in cancel/replacement churn still produced 77 outbound underruns and a 1119 ms max inter-frame gap.
+- The main user-visible failure was not a single ASR substitution. The processor saw six turns: the intended opening sentence, the intended stop/replacement sentence, then four continuation/echo-like fragments. Identity repeated those fragments, creating out-of-order playback.
+- Echo suppression worked for two `Replacement sentence contain` candidates, but it did not suppress the later garbled fragments `up now` and `He's been paint ...`; those passed through as caller turns and were repeated.
+- The post-barge-in coalescing policy did not produce one clean consolidated replacement turn. It accepted short or partial finals (`but now`, `up now`) as standalone turns after the silence window, then later accepted a garbled echo fragment.
+- Transport into the gateway was clean enough for this conclusion: 0 packet loss and 0 reordered frames. The quality problem is in ASR/echo/turn arbitration and outbound pacing under cancel churn, not carrier loss.
 
-Next-run tuning:
+Next engineering direction:
 
-- Keep `conversation.final_coalescing_enabled = true` and `voice_quality.barge_in.enabled = false` for the next inbound identity run.
-- Compare `voice_quality.early_response.audio_mode = "speak_provisionally"` against `"prepare_only"` if repeat-loop risk needs isolation.
-- Record strict and trimmed WER only in a separate WER-only run or after muting/detaching identity repeat.
+- Do not tune this with only larger TTS buffers. The failure is turn hygiene under active/recent assistant playback.
+- Add a general post-barge-in dispatch guard: during active playback and a short post-playback echo window, short or low-content finals should be suppressed or held unless they have strong non-echo evidence.
+- Make `barge_in_coalesce_after_silence` treat replacement speech as a sliding speech/ASR window and require a stable non-echo replacement candidate before dispatch, rather than dispatching every accepted final independently.
+- Preserve the no-barge-in 450 ms TTS baseline, but do not promote 450 ms as barge-in-validated.
+
+[[wer_pass]]
+schema_version = 1
+reference_id = "bargein-startbuf450-script-v1"
+reference_text = """This is a Motlie barge-in timing test. I will start with a long sentence so the gateway begins repeating it while I am still on the call. The first sentence should be interrupted before it finishes playing back. Stop now. Please repeat this replacement sentence clearly after the interruption. The replacement sentence contains marker silver, marker orange, and the words hang up near the end."""
+reference_sha256 = "610327beac6ce2c4f79bdea9a42965c139219c52ede82122b6ed0bfd9b7ce4bf"
+raw_asr_text = """This is a marked lead barge in timing test. I will start with a long sentence, so the gateway begins repeating it while I'm still on the call. The first sentence should be interrupted before it finishes playing back stop now. Please repeat this replacement sentence clearly after the interruption. but now the replacement sentence contains marker, silver, marker, orange, and words hang out near the up now He's been paint this replacement sentence clearly after the interrup"""
+scored_hypothesis_text = """This is a marked lead barge in timing test. I will start with a long sentence, so the gateway begins repeating it while I'm still on the call. The first sentence should be interrupted before it finishes playing back stop now. Please repeat this replacement sentence clearly after the interruption. but now the replacement sentence contains marker, silver, marker, orange, and words hang out near the up now He's been paint this replacement sentence clearly after the interrup"""
+trim_policy = "strict_full"
+normalization_policy = "lowercase; replace hyphen with space; strip punctuation except apostrophes; collapse whitespace; score word tokens"
+wer_tool = "local levenshtein word scorer"
+wer_tool_commit = "093379800b6b2a6c1cc12520f91138042406125e"
+reference_word_count = 66
+hypothesis_word_count = 78
+wer_percent = 30.30
+substitutions = 4
+deletions = 2
+insertions = 14
+alignment = [
+  { op = "sub", reference = "motlie", hypothesis = "marked" },
+  { op = "ins", reference = "", hypothesis = "lead" },
+  { op = "sub", reference = "i", hypothesis = "i'm" },
+  { op = "del", reference = "am", hypothesis = "" },
+  { op = "ins", reference = "", hypothesis = "but" },
+  { op = "ins", reference = "", hypothesis = "now" },
+  { op = "del", reference = "the", hypothesis = "" },
+  { op = "sub", reference = "up", hypothesis = "out" },
+  { op = "sub", reference = "end", hypothesis = "up" },
+  { op = "ins", reference = "", hypothesis = "now" },
+  { op = "ins", reference = "", hypothesis = "he's" },
+  { op = "ins", reference = "", hypothesis = "been" },
+  { op = "ins", reference = "", hypothesis = "paint" },
+  { op = "ins", reference = "", hypothesis = "this" },
+  { op = "ins", reference = "", hypothesis = "replacement" },
+  { op = "ins", reference = "", hypothesis = "sentence" },
+  { op = "ins", reference = "", hypothesis = "clearly" },
+  { op = "ins", reference = "", hypothesis = "after" },
+  { op = "ins", reference = "", hypothesis = "the" },
+  { op = "ins", reference = "", hypothesis = "interrup" },
+]
+
+[result_latency]
+schema_version = 1
+source = "quality_jsonl"
+quality_events = 183
+caller_turns = 6
+raw_asr_final_events = 6
+attempted_playbacks = 6
+completed_playbacks = 2
+canceled_playbacks = 4
+failed_playbacks = 0
+dropped_quality_events = 0
+excluded_turns_without_playback = 0
+
+[[result_latency.span]]
+name = "tts.request_to_first_audio"
+n = 4
+min_ms = 778
+p50_ms = 1245
+p95_ms = 1402
+max_ms = 1402
+
+[[result_latency.span]]
+name = "conversation.visible_turn_to_first_audio"
+n = 4
+min_ms = 778
+p50_ms = 1246
+p95_ms = 1402
+max_ms = 1402
+
+[[result_latency.span]]
+name = "barge_in.cancel_terminal_to_replacement_first_audio"
+n = 3
+min_ms = 1980
+p50_ms = 5738
+p95_ms = 6998
+max_ms = 6998
+
+[result_transport.inbound]
+codec = "PCMU"
+sample_rate_hz = 8000
+packets_total = 3948
+lost_packets = 0
+reordered_frames = 0
+jitter_ms_p50 = 2
+jitter_ms_p95 = 20
+jitter_ms_max = 321
+
+[result_transport.outbound]
+frames_sent = 584
+underrun_count = 77
+inter_frame_gap_ms_p50 = 20
+inter_frame_gap_ms_p95 = 20
+inter_frame_gap_ms_max = 1119
+queue_depth_p50 = 63
+queue_depth_p95 = 181
+pre_audio_wait_ms_estimate = 5640
+append_starvation_ms_estimate = 0
+post_mark_wait_ms_estimate = 380

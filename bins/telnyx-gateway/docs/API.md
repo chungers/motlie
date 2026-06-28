@@ -8,6 +8,7 @@ Current API snapshot for the Telnyx gateway operator/TUI/socket control surface.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad controls for outbound pacing and tail reliability. |
 | 2026-06-18 PDT | @codex-367-design | Documented `speak` as safe manual speech injection for an attached call, distinct from future operator interrupt/takeover semantics tracked in #551, and clarified text-call knob apply boundaries. |
 | 2026-06-16 PDT | @codex-535 | Scrubbed live routing from the checked-in canonical `gateway.toml`; local live runs should materialize values only in `$HOME/telnyx-test/gateway.toml` and start with `--config`. |
 | 2026-06-16 PDT | @codex-535 | Added checked-in canonical `bins/telnyx-gateway/gateway.toml` and tightened strict TOML parsing for nested `[voice_quality.*]` tables. |
@@ -89,6 +90,8 @@ tts use kokoro-82m
 quality tts generation-mode streaming
 quality tts chunking on
 quality tts prebuffer-chunks 1
+quality tts streaming-start-buffer-ms 300
+quality tts tail-pad-ms 200
 quality early-response on
 quality early-response boundary none
 quality early-response start-timing endpoint-candidate-only
@@ -165,6 +168,8 @@ path = "./quality-events.jsonl"
 generation_mode = "streaming"
 chunking_enabled = true
 prebuffer_chunks = 1
+streaming_start_buffer_ms = 300
+tail_pad_ms = 200
 
 [voice_quality.logging]
 enabled = true
@@ -239,7 +244,9 @@ Only `enabled`, `boundary`, and `start_timing` are currently exposed as live com
 | `quality tts chunking on|off` | bool | `true` | new playback request | Enables sentence/word text chunking before TTS. |
 | `quality tts max-text-chunk-chars <n>` | `40..500` | `90` | new playback request | Steady-state packed text chunk limit. |
 | `quality tts first-chunk-max-chars <n>` | `0` or `40..500` | `40` | new playback request | First chunk ramp; `0` disables. |
-| `quality tts prebuffer-chunks <n>` | `1..64` | `1` | new playback request | Prepared chunks required before committed playback starts. |
+| `quality tts prebuffer-chunks <n>` | `1..64` | `1` | new playback request | Buffered-mode prepared chunks required before committed playback starts. |
+| `quality tts streaming-start-buffer-ms <ms>` | `0..2000` | `300` | new playback request | Normal streaming TTS frame prebuffer before first playback frame; `0` disables. |
+| `quality tts tail-pad-ms <ms>` | `0..2000` | `200` | new playback request | Normal committed TTS silence appended before the final Telnyx mark; `0` disables. |
 
 ### Barge-In and Echo Suppression
 
@@ -250,6 +257,8 @@ Only `enabled`, `boundary`, and `start_timing` are currently exposed as live com
 | `quality barge-in onset-during-playback <defer-to-partial|trust>` | enum | `defer_to_partial` | next ASR session | Echo guard vs immediate interruption during active playback. |
 | `quality barge-in partial-asr on|off` | bool | `true` | next ASR session | Partial-ASR cancellation. |
 | `quality barge-in final-asr on|off` | bool | `true` | next ASR session | Final-ASR cancellation. |
+| `barge_in.missing_signal_policy` | `conservative` | `conservative` | new turn | TOML-only; missing or unconfigured required ASR score signals fail closed for non-compat cancellation. |
+| `barge_in.transcript_min_chars`, `barge_in.transcript_min_words` | count | `6`, `2` | new turn | TOML-only telemetry fields for ASR switch drift; non-compat cancellation does not gate on these counts. |
 | `quality barge-in clear-timeout-ms <ms>` | `100..10000` | `1000` | new cancel request | Clear/terminal wait timeout. |
 | `quality echo-suppression on|off` | bool | `true` | next ASR session | Text-domain assistant echo suppression. |
 | `quality echo-suppression min-text-chars <n>` | `1..500` | `10` | next ASR session | Minimum transcript length for echo matching. |

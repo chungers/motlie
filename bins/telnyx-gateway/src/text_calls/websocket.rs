@@ -1695,6 +1695,8 @@ pub async fn queue_fallback_and_wait(
             },
             turn_finalized_at: None,
             latest_turn_finalized_at: None,
+            processor_visible_turn_at: None,
+            barge_in_cancel_terminal_at: None,
             turn_id: None,
             coalesced_turn_ids: Vec::new(),
             source_asr_session_ids: Vec::new(),
