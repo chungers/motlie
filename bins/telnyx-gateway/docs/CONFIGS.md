@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Marked `barge_in_coalesce_after_silence` experimental and not live-validated pending the post-playback dispatch guard tracked in #587. |
 | 2026-06-28 PDT | @codex-541 | Marked the barge-in Identity profile as not yet validated under the 450 ms TTS pacing baseline after post-playback fragments escaped as new turns. |
 | 2026-06-28 PDT | @codex-541 | Promoted `streaming_start_buffer_ms = 450` as the current no-barge-in Identity TTS pacing baseline after the live pacing probe eliminated underruns. |
 | 2026-06-28 PDT | @codex-541 | Marked the current inbound Identity no-barge-in live-test baseline as the best repeat-reliability starting point after Layer A score-gated barge-in landed. |
@@ -244,8 +245,8 @@ Policy modes:
   bounded pending assistant outputs and drains them after playback clears.
 - `barge_in_cancel_only`: valid caller interruption cancels active output and
   preserves caller ASR without automatic stale replay.
-- `barge_in_coalesce_after_silence`: cancel plus post-barge-in silence
-  coalescing before processor dispatch.
+- `barge_in_coalesce_after_silence`: EXPERIMENTAL — not yet live-validated. The barge-in modes failed a live quality sample (post-playback echo/fragment finals escaping as new turns); a general post-playback dispatch-guard code fix is required before production use — see #587. The validated default path is current_compat / no-barge-in.
+  Cancel plus post-barge-in silence coalescing before processor dispatch.
 
 Recommended no-barge-in Identity smoke-test profile:
 
@@ -359,6 +360,7 @@ final_min_confidence = 0.70
 clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]
+# EXPERIMENTAL — not yet live-validated. The barge-in modes failed a live quality sample (post-playback echo/fragment finals escaping as new turns); a general post-playback dispatch-guard code fix is required before production use — see #587. The validated default path is current_compat / no-barge-in.
 mode = "barge_in_coalesce_after_silence"
 active_playback_hold_ms = 1000
 max_pending_outputs = 1

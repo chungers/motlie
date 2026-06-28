@@ -215,6 +215,7 @@ clear_timeout_ms = 1000
 [voice_quality.conversation_policy]
 # Modes: current_compat, no_barge_in_bounded_pending, barge_in_cancel_only,
 # barge_in_coalesce_after_silence.
+# EXPERIMENTAL — not yet live-validated. The barge-in modes failed a live quality sample (post-playback echo/fragment finals escaping as new turns); a general post-playback dispatch-guard code fix is required before production use — see #587. The validated default path is current_compat / no-barge-in.
 mode = "current_compat"
 # Diagnostic hold budget for policy-managed pending output behind active playback.
 active_playback_hold_ms = 1000
