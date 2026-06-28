@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Recorded the failed barge-in Identity 450 ms run: post-playback ASR fragments escaped as new turns, so the next barge-in step is a code fix rather than knob-only tuning. |
 | 2026-06-28 PDT | @codex-541 | Promoted `streaming_start_buffer_ms = 450` for the no-barge-in Identity TTS pacing baseline and recorded that barge-in plus turn-batching N=2 still require separate validation. |
 | 2026-06-28 PDT | @codex-541 | Reaffirmed the current best inbound Identity no-barge-in live-test knobs after Layer A score-gated barge-in landed: bounded FIFO pending output, streaming Kokoro first-chunk/tail padding, clause early response, and conservative score telemetry. |
 | 2026-06-26 20:51 PDT | @codex-541 | Added processor-visible transcript event and first-audio latency span names to the required live-run result protocol. |
@@ -479,38 +480,52 @@ Success criteria:
 - Echo-guard still defers likely assistant echo to partial/final ASR before
   cancellation.
 
-Latest 2026-06-25 result:
+Latest 2026-06-28 result:
 
-- Use `barge_in_coalesce_after_silence` as the current barge-in Identity
-  profile. The completed run recorded 6 caller turns, 6 attempted playbacks, 4
-  barge-in cancels, 2 completed playbacks, 0 failed playbacks, 0 dropped quality
-  events, and 0 excluded turns without playback.
-- Barge-in cancel latency was fast: p50 11 ms and max 12 ms from cancel request
-  to terminal playback status.
-- Transport was clean: no outbound underruns, outbound skipped packets 0, and
-  carrier MOS 4.50.
-- Scripted baseline WER was 6.67% (`rolled -> rolls`). The interruption line
-  WER was 41.67%, mostly because `barge in` was recognized as `Harja`.
-- Human feedback was positive: audio was clear, playback stopped in time, and
-  the replacement sentence appeared to play back without missing fragments.
-- The run was not a clean WER/control sample because qualitative feedback after
-  the replacement entered Identity repeat and produced additional turns.
+- Run record: `docs/tests/20260628-155011-09337980-bargein-startbuf450-v1.example.toml`.
+- The run failed the human quality bar: caller reported words out of sequence and
+  missing phrases.
+- Config was the documented `barge_in_coalesce_after_silence` Identity profile
+  with `streaming_start_buffer_ms = 450`, no turn batching, and conservative
+  missing-signal barge-in policy.
+- Prompt-handler-visible sequence had six turns instead of one clean
+  replacement: opening sentence, stop/replacement sentence, `but now`, the
+  marker sentence missing the end, `up now`, and a garbled assistant-echo
+  fragment.
+- Final summary: 6 caller turns/raw ASR finals, 6 attempted playbacks, 4
+  canceled, 2 completed, 0 failed, 0 dropped quality events, and 0 excluded
+  turns without playback.
+- Strict full-script WER was 30.30% over 66 reference words, driven mostly by
+  insertions from echo/fragment replay.
+- Transport inbound was clean enough for this conclusion: 3948 packets, 0 lost,
+  0 reordered. Outbound pacing regressed under cancel/replacement churn: 77
+  underruns and 1119 ms max inter-frame gap.
+- Conclusion: do not continue barge-in as knob-only tuning. The next step is a
+  code fix to suppress or hold short/garbled post-playback finals during active
+  playback and the short echo window, without relying on Identity semantics,
+  script keywords, or domain biasing.
+
+Previous 2026-06-25 result:
+
+- `barge_in_coalesce_after_silence` canceled active playback within 12 ms, had 0
+  outbound underruns, and produced clear reported audio in that sample.
+- The 2026-06-28 repeat showed the profile is not robust enough under
+  replacement-sentence echo/fragment conditions, so treat 2026-06-25 as an
+  encouraging sample, not a validated baseline.
 
 Next barge-in Identity run:
 
-- Keep the profile above unchanged.
-- Avoid the phrase `barge in` in the caller-spoken replacement line; use a
-  phonetically cleaner trigger such as `Stop now. Please repeat this replacement
-  sentence.` Domain/hotword biasing remains deferred.
+- Do not run another config-only barge-in probe first.
+- Implement a general post-barge-in dispatch guard: during active assistant
+  playback and a short post-playback echo window, short or low-content finals
+  should be suppressed or held unless they carry strong non-echo evidence.
 - Keep `voice_quality.barge_in.missing_signal_policy = "conservative"`,
   `partial_min_confidence = 0.50`, `partial_min_stability = 0.50`, and
   `final_min_confidence = 0.70`; leave `final_min_stability` unset until final
-  ASR emits stability. This preserves high-confidence interruption while
-  suppressing score-missing or low-confidence fragments captured from assistant
-  echo or coordination speech.
-- After the replacement playback completes, hang up or run
-  `conversation smoke-test off` before collecting qualitative feedback. Feedback
-  spoken while Identity is attached is part of the call and will be repeated.
+  ASR emits stability.
+- After the code fix, rerun this same profile with the same script shape and
+  verify one clean replacement turn, 0 stale echo replay, and stable outbound
+  pacing.
 
 ### Next No-Barge-In Follow-Up
 

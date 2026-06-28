@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Marked the barge-in Identity profile as not yet validated under the 450 ms TTS pacing baseline after post-playback fragments escaped as new turns. |
 | 2026-06-28 PDT | @codex-541 | Promoted `streaming_start_buffer_ms = 450` as the current no-barge-in Identity TTS pacing baseline after the live pacing probe eliminated underruns. |
 | 2026-06-28 PDT | @codex-541 | Marked the current inbound Identity no-barge-in live-test baseline as the best repeat-reliability starting point after Layer A score-gated barge-in landed. |
 | 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad tuning knobs for outbound pacing reliability. |
@@ -365,13 +366,14 @@ pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
 ```
 
-The 2026-06-25 barge-in Identity run with this profile canceled active playback
-within 12 ms, had 0 outbound underruns, and produced clear reported audio. Keep
-this as the current interruption profile, but re-run it with the shared 450 ms
-TTS start buffer before declaring the pacing baseline validated under barge-in.
-For the next run, avoid the spoken phrase `barge in` because ASR rendered it
-poorly; use a clearer trigger such as `Stop now. Please repeat this replacement
-sentence.` Collect qualitative feedback only after hangup or after
+The 2026-06-28 barge-in Identity run with this profile and
+`streaming_start_buffer_ms = 450` failed the human quality bar: short and
+post-playback echo-like ASR finals escaped as new turns, Identity repeated them
+out of sequence, and outbound pacing recorded 77 underruns. Keep this profile as
+the current code-fix reproduction case, not as a validated barge-in baseline.
+The next change should improve post-barge-in echo/fragment dispatch generally;
+do not try to recover this path by changing only TTS buffer or silence-window
+knobs. Collect qualitative feedback only after hangup or after
 `conversation smoke-test off`, otherwise Identity/repeat will capture and repeat
 the feedback as more caller turns.
 

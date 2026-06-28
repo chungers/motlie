@@ -962,6 +962,11 @@ Mentioning generation_mod here is fine because this is not config.
                 false,
                 450,
             ),
+            (
+                "docs/tests/20260628-155011-09337980-bargein-startbuf450-v1.example.toml",
+                true,
+                450,
+            ),
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
             let raw = std::fs::read_to_string(&path).expect("read docs live-run test record");
