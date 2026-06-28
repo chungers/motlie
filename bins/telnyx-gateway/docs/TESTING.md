@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Reaffirmed the current best inbound Identity no-barge-in live-test knobs after Layer A score-gated barge-in landed: bounded FIFO pending output, streaming Kokoro first-chunk/tail padding, clause early response, and conservative score telemetry. |
 | 2026-06-26 20:51 PDT | @codex-541 | Added processor-visible transcript event and first-audio latency span names to the required live-run result protocol. |
 | 2026-06-26 PDT | @codex-541 | Added the PR breadcrumb requirement: each live run must update PLAN.md and commit a redacted `docs/tests/*.toml` run record linked from the roadmap. |
 | 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad tuning knobs for outbound pacing reliability. |
@@ -148,8 +149,10 @@ cargo run -p motlie-telnyx-gateway --features "sherpa piper kokoro" -- \
   --config "$HOME/telnyx-test/runs/<run-id>/<run-id>.toml"
 ```
 
-The current default live identity/repeat tuning profile is the 2026-06-24
-no-barge-in bounded-pending profile:
+The current default live identity/repeat tuning profile is the 2026-06-28
+Layer A no-barge-in bounded-pending profile. It preserves the 2026-06-24
+repeat-reliability knobs and records the conservative Layer A score-gating
+knobs for traceability:
 
 - `conversation.final_coalescing_enabled = true`
 - `conversation.processor = "identity"`
@@ -178,6 +181,11 @@ no-barge-in bounded-pending profile:
 - `voice_quality.early_response.debounce_ms = 180`
 - `voice_quality.early_response.max_updates_per_utterance = 1`
 - `voice_quality.barge_in.enabled = false`
+- `voice_quality.barge_in.missing_signal_policy = "conservative"`
+- `voice_quality.barge_in.partial_min_confidence = 0.50`
+- `voice_quality.barge_in.partial_min_stability = 0.50`
+- `voice_quality.barge_in.final_min_confidence = 0.70`
+- `voice_quality.barge_in.final_min_stability` unset until final ASR reports stability
 - `voice_quality.echo_suppression.enabled = true`
 - `voice_quality.logging.enabled = true`
 
@@ -320,7 +328,24 @@ Success criteria:
 - Queue growth remains bounded by `max_pending_outputs`; overflow should be
   recorded as dropped pending output rather than unbounded serial playback.
 
-Latest 2026-06-24 result:
+Latest 2026-06-28 result:
+
+- Run record: `docs/tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml`.
+- Core measured sentence was recognized exactly, including `hang up`.
+- Strict full-script WER was 20.59% over 68 reference words. Errors were mostly
+  domain/marker words (`Motlie`, `barge-in`, `smoke`, marker ending) plus one
+  inserted phrase (`I will now not`).
+- The longer script split into two ASR finals: the first ended at `hang up`, and
+  the second restarted with `near the end`. This produced two processor-visible
+  Identity turns for one intended passage.
+- Final summary: 2 caller turns, 2 raw ASR finals, 3 attempted playbacks, 2
+  completed playbacks, 1 caller-hangup-canceled playback, 0 failed playbacks, 0
+  dropped quality events, and 0 excluded turns without playback.
+- Transport was clean inbound: 4868 packets, 0 lost, jitter p50 2 ms and p95 13
+  ms. Outbound pacing still needs work: 58 underruns and one 1180 ms max
+  inter-frame gap.
+
+Previous 2026-06-24 result:
 
 - Human feedback: solid improvement, good audio quality, with some remaining
   fragment misses such as `hang` vs `hang up`.
@@ -331,11 +356,8 @@ Latest 2026-06-24 result:
   fix.
 - Scoped scripted-span WER was 13.33%, but coordination speech happened after
   answer, so treat the WER as diagnostic rather than a clean benchmark.
-- Latency tail remains the next bottleneck: `turn.finalize_to_first_audio` p95
-  was 10.748 s and max was 19.431 s during serial Identity playback. The next
-  run should verify the shared streaming TTS fix that enforces
-  `first_chunk_max_chars` even when the first sentence or unsentenced segment is
-  longer than the cap.
+- Latency tail remains a bottleneck: `turn.finalize_to_first_audio` p95 was
+  10.748 s and max was 19.431 s during serial Identity playback.
 
 ### Barge-In Policy Profiles
 
@@ -475,10 +497,12 @@ Next barge-in Identity run:
 ### Next No-Barge-In Follow-Up
 
 For the next no-barge-in Identity run, keep the bounded FIFO policy fixed and do
-not re-enable turn batching. The 2026-06-24 run suggests repeat reliability is
-mostly improved, while the remaining work is fragment accuracy and latency tail.
+not re-enable turn batching. The 2026-06-28 run keeps this as the best
+repeat-reliability baseline, while the remaining work is endpoint segmentation
+and outbound pacing.
 
-Hold this baseline unless testing one explicit hypothesis:
+Hold this baseline unless testing one explicit hypothesis. Change either one
+endpointing knob or one TTS pacing knob per run, not both:
 
 ```toml
 [voice_quality.endpoint]
@@ -499,16 +523,15 @@ post_barge_in_silence_ms = 1200
 
 Next hypotheses, one per run:
 
-- TTS first-audio/serial latency: verify the shared first-chunk cap fix before
-  changing TTS knobs; success is lower `tts.request_to_first_audio` p95 while
-  preserving audio quality.
-- Tail-fragment recovery: test `conversation_incomplete_tail_hold_ms = 300..500`
-  only if final words continue to be cut; success is fewer final-word
-  substitutions/deletions without overmerging adjacent turns.
-- Coalesced source-turn accounting: verify `excluded_turns_without_playback = 0`
-  when one playback intentionally covers multiple source turns.
+- Endpoint segmentation: test exactly one of `final_settle_ms = 650` or
+  `merge_window_ms = 180`; success is one processor-visible turn for the script
+  without stale tail latency or overmerging unrelated speech.
+- TTS pacing: test exactly one of `streaming_start_buffer_ms = 450` or
+  `prebuffer_chunks = 2`; success is lower outbound underruns and lower max
+  inter-frame gap without an unacceptable first-audio regression.
 - Protocol cleanliness: provide/read the script before answer or immediately
-  from the run config so coordination speech does not contaminate WER.
+  from the run config so coordination speech does not contaminate WER, and hang
+  up only after confirming the final repeat has completed.
 
 Domain/hotword biasing is intentionally deferred; do not tune domain vocabulary
 until endpointing, repeat reliability, and latency are stable.

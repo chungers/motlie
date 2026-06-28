@@ -107,6 +107,7 @@ contain live routing values; the committed copy must keep placeholders only.
 | Run | Mode | Committed record | Grade | Key result | Next action |
 | --- | --- | --- | --- | --- | --- |
 | 20260626-163544-7dcbe571-identity-bargein-v1 | inbound Identity/repeat, barge-in enabled, no turn batching | [docs/tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml](./tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml) | B | Active playback canceled once, replacement played, 0 underruns, 0 transport loss; raw ASR captured one assistant-echo fragment that was suppressed before agent dispatch. | Add agent-visible transcript artifacts and explicit cancel/replacement latency spans before treating raw transcript WER as the control metric. |
+| 20260628-135818-336e9087-layera-nobarge-identity-v1 | inbound Identity/repeat, barge-in disabled, no turn batching | [docs/tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml](./tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml) | C+ | Core measured sentence recognized exactly, including `hang up`, and 2/2 non-hangup playbacks completed; strict script WER 20.59%, two ASR finals split one passage, and outbound pacing still showed 58 underruns with one 1180 ms max gap. | Keep bounded FIFO baseline, then run one controlled endpoint-merge/final-settle probe and one separate TTS pacing probe. |
 
 ### Current Roadmap
 
@@ -129,9 +130,23 @@ contain live routing values; the committed copy must keep placeholders only.
   keeping partial/final ASR barge-in thresholds unchanged. Success is lower
   replacement latency without stale echo replay or missed replacement speech.
   DESIGN reference: `TESTING.md`, `Barge-In Policy Profiles`
-- [ ] Re-run the no-barge-in Identity baseline after the transcript/latency
-  observability fixes. Success is ordered FIFO repeats, no missed final words,
-  and no hidden suppressed-echo contamination in scored WER.
+- [ ] Run a no-barge-in endpoint segmentation probe from the 2026-06-28
+  bounded FIFO baseline, changing exactly one of `final_settle_ms = 650` or
+  `merge_window_ms = 180`. Success is one processor-visible turn for the
+  script without adding stale tail latency.
+  DESIGN reference: `TESTING.md`, `Next No-Barge-In Follow-Up`
+- [ ] Run a separate TTS pacing probe from the same baseline, changing exactly
+  one of `streaming_start_buffer_ms = 450` or `prebuffer_chunks = 2`. Success
+  is lower outbound underruns and max inter-frame gap without unacceptable
+  first-audio latency regression.
+  DESIGN reference: `CONFIGS.md`, `TTS`
+- [x] Re-run the no-barge-in Identity baseline after the transcript/latency
+  observability fixes. @codex-541, 2026-06-28 PDT: run
+  `20260628-135818-336e9087-layera-nobarge-identity-v1` validated that the
+  core measured sentence and `hang up` were recognized exactly, but the longer
+  script split into two ASR finals and outbound pacing still recorded 58
+  underruns. Keep the bounded FIFO profile as baseline; tune endpoint
+  segmentation and TTS pacing as separate next hypotheses.
   DESIGN reference: `TESTING.md`, `Bounded Pending Repeat-Reliability Profile`
 - [ ] Only after Identity latency/reliability stabilizes, test the same policy
   surface with the prompt-handler/turn-batching path. Keep the policy boundary

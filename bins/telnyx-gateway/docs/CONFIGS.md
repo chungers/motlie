@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Marked the current inbound Identity no-barge-in live-test baseline as the best repeat-reliability starting point after Layer A score-gated barge-in landed. |
 | 2026-06-25 PDT | @codex-541 | Added committed streaming TTS start-buffer and tail-pad tuning knobs for outbound pacing reliability. |
 | 2026-06-25 PDT | @codex-541 | Added the current barge-in coalesce-after-silence Identity profile and live-run findings. |
 | 2026-06-25 PDT | @codex-541 | Documented final-ASR active-playback confidence/stability gates for barge-in policy tuning. |
@@ -293,10 +294,16 @@ pending_output_order = "fifo"
 post_barge_in_silence_ms = 1200
 ```
 
-The 2026-06-24 inbound Identity run with this profile completed 12/12 attempted
-playbacks with 0 canceled/failed playbacks and good reported audio quality. Keep
-this as the repeat-reliability baseline. Next tune ASR fragment/domain accuracy
-and TTS/serial playback latency separately.
+The current 2026-06-28 inbound Identity no-barge-in baseline keeps these
+values as the best repeat-reliability starting point. The 2026-06-28 run
+recognized the core measured sentence exactly, including `hang up`, but split
+one intended passage into two ASR finals and still showed outbound pacing
+underruns. The earlier 2026-06-24 run with this profile completed 12/12
+attempted playbacks with 0 canceled/failed playbacks and good reported audio
+quality. Layer A keeps barge-in score knobs visible in the config for telemetry
+and fail-closed policy validation, but this profile still disables
+cancellation. Next tune endpoint segmentation and TTS/serial playback latency
+as separate one-knob probes.
 
 Recommended barge-in Identity smoke-test profile:
 

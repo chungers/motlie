@@ -1,0 +1,479 @@
++++
+# Redacted Motlie Telnyx inbound identity smoke-test config/record example.
+# @codex-535 2026-06-17 PDT -- Copy this file to
+# $HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.toml, replace placeholders locally,
+# run telnyx-gateway with --config pointing at that copied file, then append
+# results below the closing +++ delimiter. Never commit the local copy after
+# replacing placeholders with live routing values.
+
+# Canonical Motlie Telnyx gateway startup config.
+# @codex-535 2026-06-16 PDT -- Keep this file parse-clean under the strict
+# `telnyx-gateway --config` loader; use secret references, never literal keys.
+
+version = 1
+
+[process]
+# HTTP/WebSocket bind address for local gateway traffic.
+bind = "127.0.0.1:8080"
+# Start the interactive TUI. Headless agent-driven runs usually keep this false.
+tui = false
+# Optional Unix-domain command socket for local operator/agent control.
+socket = "/tmp/motlie-telnyx-gateway.sock"
+# Shared ASR/TTS artifact root. `$HOME` and `~` are expanded by the loader.
+artifact_root = "$HOME/artifacts/hf-cache"
+# Structured process log target for live tuning sessions.
+log_file = "$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.log"
+
+[telnyx]
+# Telnyx API base; override only for mocks or future Telnyx environments.
+api_base = "https://api.telnyx.com/v2"
+# Secret reference only. The loader resolves `env:TELNYX_API_KEY` at runtime.
+api_key_ref = "env:TELNYX_API_KEY"
+# Dry-run skips Telnyx-mutating API calls while preserving local config flow.
+dry_run = false
+# Telnyx Call Control connection/application used for live tuning.
+selected_connection_id = "<telnyx-connection-id>"
+# Optional human-readable application name for operator status; set when known.
+# selected_application_name = "motlie-live"
+# Selected Telnyx number in E.164 form. Keep placeholders in committed examples.
+selected_phone_number = "<telnyx-phone-number>"
+
+[gateway]
+# Public webhook URL that Telnyx calls for call-control events.
+webhook_url = "https://<public-host>/telnyx/webhooks"
+# Public media WebSocket URL that Telnyx streams media to.
+media_url = "wss://<public-host>/telnyx/media"
+# Known-good telephony media path; use `L16` + `16000` for ASR A/B runs.
+media_codec = "PCMU"
+# Sample rate paired with the selected codec.
+media_sample_rate_hz = 8000
+# Capture root for raw media, decoded WAV, ASR input WAV, and transcripts.
+capture_dir = "$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/captures"
+# Default outbound caller ID; use the selected Telnyx number.
+from_number = "<telnyx-phone-number>"
+# Default destination for `state dump` / shutdown dumps.
+state_path = "$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1-state.toml"
+
+[inbound]
+# Safe default: wait for explicit `answer`; use `auto-transcribe` only for trusted tests.
+mode = "manual"
+
+[conversation]
+# Gateway-local conversation processor enablement for new calls.
+enabled = true
+# Coalesce/debounce committed finals before processor dispatch when enabled.
+final_coalescing_enabled = true
+# Startup bridge for the runtime barge-in owner under `[voice_quality.barge_in]`.
+barge_in_enabled = false
+# Static dispatch boundary. `identity` is the current checked-in processor.
+processor = "identity"
+# Conversation/manual TTS backend. Streaming mode below requires an incremental backend.
+tts_backend = "kokoro-82m"
+
+[startup]
+# Warm selected ASR/TTS models at process startup for live identity calls.
+warm_models = true
+
+[quality_logging]
+# Durable JSONL sink path used when `[voice_quality.logging] enabled = true`.
+path = "$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1-quality.jsonl"
+
+[voice_quality]
+# Baseline profile applied first; explicit tables below override individual knobs.
+profile = "balanced"
+
+[voice_quality.speech]
+# RMS energy gate for caller speech detection.
+rms_threshold = 220.0
+# Peak amplitude gate for caller speech detection.
+peak_threshold = 1100
+# Quiet gap before speech-onset barge-in may fire.
+onset_min_silence_ms = 180
+
+[voice_quality.endpoint]
+# Final endpoint trailing silence window. Latest no-barge-in Identity baseline uses 850 ms.
+trailing_silence_ms = 850
+# Minimum final-turn word count before committed dispatch.
+min_turn_words = 2
+# Minimum final-turn character count before committed dispatch.
+min_turn_chars = 6
+# Merge window for adjacent ASR finals from one spoken thought.
+merge_window_ms = 120
+# Hold window for structurally incomplete final fragments.
+final_settle_ms = 500
+# Punctuation suffixes that indicate a fragment should continue.
+final_settle_trailing_punctuation = [",", ":", ";"]
+# Leading words that commonly start a dependent fragment.
+final_settle_lead_words = ["although", "because", "whereas", "while", "when", "if", "unless", "since", "before", "after", "though"]
+# Tail words that commonly make a fragment incomplete.
+final_settle_tail_words = ["a", "an", "also", "the", "and", "or", "but", "if", "then", "than", "because", "so", "to", "of", "for", "with", "without", "in", "on", "at", "by", "from", "as", "is", "are", "was", "were", "be", "being", "been", "this", "that", "these", "those", "my", "your", "our", "their", "his", "her", "its"]
+# Dangling suffixes that should hold for continuation.
+final_settle_dangling_suffixes = ["'", "-"]
+# Tail words that may hold conversation dispatch while prior playback is active.
+conversation_tail_words = ["a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "did", "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might", "must", "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were", "where", "will", "with", "would"]
+# Max hold for incomplete conversation tails.
+conversation_incomplete_tail_hold_ms = 250
+# Native ASR confidence threshold below which incomplete tails may hold.
+conversation_low_confidence_threshold_percent = 45
+# Poll cadence while waiting for active playback before dispatch.
+conversation_playback_hold_poll_ms = 10
+# Max active-playback hold before dispatch/deferred Say gives up; 0 lets the conversation policy own bounded pending output.
+conversation_playback_max_hold_ms = 0
+# Hard cap for committed turn words.
+max_turn_words = 80
+# Hard cap for committed turn duration.
+max_turn_duration_ms = 12000
+
+[voice_quality.asr]
+# Repeated-token run length treated as hallucination/suppression.
+repeated_token_run_threshold = 16
+# Repeated `Q` run length treated as hallucination/suppression.
+repeated_q_run_threshold = 8
+# Extra ASR flush padding after local endpoint.
+finish_pad_ms = 320
+
+[voice_quality.text_call]
+# Maximum outstanding caller turns per text-call session.
+max_active_turns = 32
+# Time to wait for appserver media readiness.
+media_ready_timeout_ms = 20000
+# Time to wait for playback completion before text-call timeout.
+playback_wait_timeout_ms = 180000
+# Newer responses supersede stale older responses when true.
+latest_response_wins = true
+# Appserver callback timeout for outbound HTTP calls.
+callback_timeout_ms = 5000
+
+[voice_quality.tts]
+# `streaming` requires an incremental-capable backend such as Kokoro.
+generation_mode = "streaming"
+# Split long replies into text chunks before synthesis.
+chunking_enabled = true
+# Maximum characters in later TTS chunks.
+max_text_chunk_chars = 70
+# Maximum characters in the first TTS chunk; `0` disables the special first limit.
+first_chunk_max_chars = 40
+# Buffered-mode prepared text chunks before playback starts.
+prebuffer_chunks = 1
+# Normal streaming TTS frames to hold before first playback frame; 0 disables.
+streaming_start_buffer_ms = 300
+# Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
+tail_pad_ms = 200
+
+[voice_quality.early_response]
+# Provisional early-response stage; committed finals still flow when false.
+enabled = true
+# `speak_provisionally` plays provisional TTS; `prepare_only` suppresses provisional audio.
+audio_mode = "speak_provisionally"
+# Minimum provisional text characters before policy can fire.
+min_text_chars = 18
+# Minimum provisional text tokens before policy can fire.
+min_text_tokens = 4
+# Required boundary before provisional response: `none`, `clause`, or `sentence`.
+boundary = "clause"
+# Minimum ASR confidence required for provisional response.
+min_confidence = 0.70
+# Minimum partial stability required for provisional response.
+min_stability = 0.80
+# Missing configured confidence/stability signals fail conservative.
+missing_signal_policy = "conservative"
+# Speech states allowed to start provisional response.
+allowed_start_speech_states = ["speaking", "endpoint_candidate"]
+# Speech states allowed to update provisional response.
+allowed_update_speech_states = ["endpoint_candidate", "finalizing"]
+# Debounce between provisional updates.
+debounce_ms = 180
+# Maximum provisional updates per utterance.
+max_updates_per_utterance = 1
+# `while_speaking` is aggressive; `endpoint_candidate_only` is conservative.
+start_timing = "while_speaking"
+# Append is allowed only for explicit prefix-monotonic backend policy.
+append_mode = "replace_only"
+# Hard-capped leakage window for provisional TTS.
+provisional_max_prebuffer_frames = 1
+
+[voice_quality.barge_in]
+# Enable interruption/cancellation of active TTS from caller speech.
+enabled = false
+# Cancel on frame-level speech onset when policy allows it.
+speech_onset_cancel_enabled = false
+# `defer_to_partial` waits for partial ASR confirmation during playback.
+onset_during_playback = "defer_to_partial"
+# Cancel on meaningful partial ASR overlap.
+partial_asr_cancel_enabled = false
+# Cancel on final ASR overlap.
+final_asr_cancel_enabled = false
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on length.
+transcript_min_chars = 6
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on word count.
+transcript_min_words = 2
+# Missing configured ASR score signals fail closed for non-compat barge-in cancellation.
+missing_signal_policy = "conservative"
+# Minimum partial-ASR confidence for active-playback cancellation.
+partial_min_confidence = 0.50
+# Minimum partial-ASR stability for active-playback cancellation.
+partial_min_stability = 0.50
+# Minimum final-ASR confidence for active-playback cancellation.
+final_min_confidence = 0.70
+# Optional final-ASR stability floor; leave unset until final ASR reports stability.
+# final_min_stability = 0.50
+# Time allowed for media clear/mark handling.
+clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+# Identity smoke tests keep barge-in off and drain a bounded FIFO repeat queue.
+mode = "no_barge_in_bounded_pending"
+# Diagnostic hold budget before recording retained max-hold telemetry.
+active_playback_hold_ms = 1000
+# Maximum completed processor outputs retained behind active playback.
+max_pending_outputs = 3
+# FIFO preserves deterministic repeat order for WER/smoke-test scripts.
+pending_output_order = "fifo"
+# Reserved for barge-in coalescing profiles; inactive for this no-barge-in mode.
+post_barge_in_silence_ms = 1200
+
+[voice_quality.echo_suppression]
+# Suppress transcripts that match active assistant TTS, except same-source provisional audio.
+enabled = true
+# Minimum normalized text length for echo matching.
+min_text_chars = 8
+# Tail window after playback completion for echo matching.
+tail_window_ms = 2500
+# Token coverage threshold for short echo candidates.
+short_token_coverage_percent = 66
+# Longest common token run threshold for short echo candidates.
+short_longest_token_run = 2
+# Token count where long-candidate thresholds apply.
+long_min_tokens = 4
+# Token coverage threshold for long echo candidates.
+long_token_coverage_percent = 60
+# Longest common token run threshold for long echo candidates.
+long_longest_token_run = 3
+
+[voice_quality.logging]
+# Enables JSONL quality events at `[quality_logging].path`.
+enabled = true
+# Bounded async event queue capacity.
+queue_capacity = 65536
+# Per-frame sampling ratio for high-volume media events.
+per_frame_sample_rate = 0.0
+# Keep transcript text out of quality logs by default.
+include_transcript_text = false
+# Metrics-only redaction preserves counts/hashes without plaintext.
+redaction_mode = "metrics-only"
+
+[voice_quality.quality_judge]
+# Optional quality judge worker.
+enabled = false
+# `offline` records/report-only batches; `live-sample` samples during live operation.
+mode = "offline"
+# Sampling ratio for judge jobs.
+sample_rate = 0.0
+# Judge model label or selector.
+model = "default"
+# Batch size for judge processing.
+batch_size = 20
+# Per-batch judge timeout.
+timeout_ms = 30000
+
+[voice_quality.targets]
+# Target p50 endpoint trailing silence for profiling.
+p50_endpoint_trailing_silence_ms = 900
+# Target p95 endpoint trailing silence for profiling.
+p95_endpoint_trailing_silence_ms = 1300
+# Target p50 turn-to-playback latency.
+p50_turn_to_playback_started_ms = 1200
+# Target p95 turn-to-playback latency.
+p95_turn_to_playback_started_ms = 2500
+# Maximum tolerated incomplete-turn rate.
+max_incomplete_turn_rate = 0.05
+# Maximum tolerated overmerge rate.
+max_overmerged_turn_rate = 0.05
+# Maximum tolerated garbled-turn rate.
+max_garbled_turn_rate = 0.03
+# Maximum tolerated inappropriate-cancel rate.
+max_inappropriate_cancel_rate = 0.03
++++
+
+
+## Run Metadata
+
+- Run ID: 20260628-135818-336e9087-layera-nobarge-identity-v1
+- Direction: inbound manual-answer
+- Created: 2026-06-28 13:58 PDT
+- Created by: @codex-541
+- Git SHA: `336e908738cb887fcfda7065f38b0abb5f004d7e`
+- Config and result record: `$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.toml`
+- Source example: `bins/telnyx-gateway/docs/LIVE_RUN_INBOUND_IDENTITY.example.toml`
+- Privacy: committed copy is redacted; live routing values remain only in the local `$HOME/telnyx-test` copy.
+
+## Procedure Snapshot
+
+- Gateway started with `--config $HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.toml`.
+- Caller dialed the configured Telnyx number; operator answered the waiting inbound call manually.
+- Identity processor was enabled before the call through config: `conversation.enabled=true`, `processor="identity"`.
+- Streaming TTS, clause-gated early response, disabled barge-in, model warming, quality logging, and Layer A score telemetry were enabled.
+- Caller read the identity/repeat script once, then waited for playback before hanging up.
+
+## Caller Script
+
+```text
+This is a Motlie Layer A no-barge-in identity smoke test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker blue starts the measured sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now stop speaking and wait for the repeat playback. Marker blue ends the measured sentence.
+```
+
+## Run Results
+
+### 2026-06-28 14:04 PDT, @codex-541 -- inbound no-barge-in Identity Layer A baseline
+
+Status: completed. Caller hung up normally after repeat playback.
+
+Quantitative summary:
+
+- Calls answered: 1 inbound manual-answer call.
+- ASR backend: kroko-2025 / sherpa-zipformer-en-kroko-2025-08-06.
+- Media: PCMU 8 kHz mono.
+- Caller turns: 2 committed finals.
+- Raw ASR final events: 2.
+- Identity playback: 3 attempted turns/playbacks, 2 completed, 1 canceled by caller hangup, 0 failed.
+- Dropped quality events: 0.
+- Excluded turns without playback: 0 in final call-terminal summary.
+- Inbound transport: 4868 packets, 0 lost, 0 reordered, jitter p50 2 ms, p95 13 ms, max 252 ms.
+- Outbound pacing: 1211 frames, 58 underruns, inter-frame gap p50 20 ms, p95 23 ms, max 1180 ms, queue depth p50 148, p95 255.
+- `conversation.visible_turn_to_first_audio`: n=2, min 884 ms, p50/max 1612 ms.
+- `tts.request_to_first_audio`: n=2, min 884 ms, p50/max 1612 ms.
+- `turn.finalize_to_first_audio`: n=2, min 1765 ms, p50/max 8902 ms.
+- `conversation.final_debounce`: n=2, min 152 ms, max 8018 ms.
+- Strict script WER: 20.59% over 68 reference words (S=7, D=2, I=5).
+- Measured core sentence was recognized exactly, including `hang up`: `The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end.`
+
+Assembled transcript:
+
+```text
+This is a Motley layer, a no bargin identity smote test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Blue starts to measure a sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now not I will now stop speaking and wait for the repeat playback. Marker blue and stemmeasure sentence
+```
+
+Analysis:
+
+- No-barge-in policy behaved as configured: barge-in was off and no barge-in cancellation was expected.
+- The main recognition quality issue was not the core measured sentence; it was domain/marker wording and endpoint segmentation: `Motlie -> Motley`, `barge-in -> bargin`, `smoke -> smote`, `starts the measured sentence -> starts to measure a sentence`, and `ends the measured sentence -> and stemmeasure sentence`.
+- The first ASR final ended at `hang up`; the second final restarted with `near the end` and inserted `I will now not` before the intended `I will now stop`. This created two processor-visible turns and two repeat playbacks for what the script intended as one passage.
+- Playback delivery mostly worked but still shows a pacing problem: final summary recorded 2 completed playbacks and 1 hangup-canceled playback, and outbound pacing reported 58 underruns with one 1180 ms max gap. Treat this as a TTS/media pacing follow-up, not an ASR-only issue.
+- The Layer A score-gating knobs were present in the config snapshot, but cancellation was disabled for this run. This run primarily validates that the no-barge-in baseline still starts and records correctly after Layer A landed.
+
+Next-run tuning / fixes:
+
+- Keep this no-barge-in bounded FIFO profile as the best repeat-reliability baseline for inbound Identity.
+- For the next no-barge-in run, isolate endpoint segmentation by reading the same script as either one shorter measured sentence or by increasing final/merge patience in one controlled change: candidate `final_settle_ms = 650` or `merge_window_ms = 180`, not both.
+- Investigate outbound pacing underruns separately. The next config-only probe can raise `streaming_start_buffer_ms` from 300 to 450 or prebuffer the first two chunks, but that trades first-audio latency for smoother playback.
+- Keep domain biasing deferred; the `Motlie`/`barge-in` errors should be tracked as ASR model/runtime quality, not patched with smoke-test-specific keywords.
+
+[[wer_pass]]
+schema_version = 1
+reference_id = "layera-nobarge-identity-script-v1"
+reference_text = """This is a Motlie Layer A no-barge-in identity smoke test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker blue starts the measured sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now stop speaking and wait for the repeat playback. Marker blue ends the measured sentence."""
+reference_sha256 = "cd78ac929cf98ceb56aa48074a9673186e6acc8da82531a98f9d6cf5376b7588"
+raw_asr_text = """This is a Motley layer, a no bargin identity smote test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Blue starts to measure a sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now not I will now stop speaking and wait for the repeat playback. Marker blue and stemmeasure sentence"""
+scored_hypothesis_text = """This is a Motley layer, a no bargin identity smote test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Blue starts to measure a sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now not I will now stop speaking and wait for the repeat playback. Marker blue and stemmeasure sentence"""
+trim_policy = "strict_full"
+trim_start_marker = "Marker blue starts the measured sentence"
+trim_end_marker = "Marker blue ends the measured sentence"
+normalization_policy = "lowercase; replace hyphen with space; strip punctuation except apostrophes; collapse whitespace; score word tokens"
+wer_tool = "local levenshtein word scorer"
+wer_tool_commit = "336e908738cb887fcfda7065f38b0abb5f004d7e"
+reference_word_count = 68
+hypothesis_word_count = 71
+wer_percent = 20.59
+substitutions = 7
+deletions = 2
+insertions = 5
+alignment = [
+  { op = "sub", reference = "motlie", hypothesis = "motley" },
+  { op = "del", reference = "barge", hypothesis = "" },
+  { op = "sub", reference = "in", hypothesis = "bargin" },
+  { op = "sub", reference = "smoke", hypothesis = "smote" },
+  { op = "ins", reference = "", hypothesis = "to" },
+  { op = "sub", reference = "the", hypothesis = "measure" },
+  { op = "sub", reference = "measured", hypothesis = "a" },
+  { op = "ins", reference = "", hypothesis = "i" },
+  { op = "ins", reference = "", hypothesis = "will" },
+  { op = "ins", reference = "", hypothesis = "now" },
+  { op = "ins", reference = "", hypothesis = "not" },
+  { op = "del", reference = "ends", hypothesis = "" },
+  { op = "sub", reference = "the", hypothesis = "and" },
+  { op = "sub", reference = "measured", hypothesis = "stemmeasure" },
+]
+
+[result_latency]
+schema_version = 1
+source = "quality_jsonl"
+quality_events = 80
+caller_turns = 2
+raw_asr_final_events = 2
+attempted_playbacks = 3
+completed_playbacks = 2
+canceled_playbacks = 1
+failed_playbacks = 0
+dropped_quality_events = 0
+excluded_turns_without_playback = 0
+
+[[result_latency.span]]
+name = "asr.endpoint_wait"
+n = 1
+min_ms = 857
+p50_ms = 857
+p95_ms = 857
+max_ms = 857
+
+[[result_latency.span]]
+name = "tts.request_to_first_audio"
+n = 2
+min_ms = 884
+p50_ms = 1612
+p95_ms = 1612
+max_ms = 1612
+
+[[result_latency.span]]
+name = "conversation.visible_turn_to_first_audio"
+n = 2
+min_ms = 884
+p50_ms = 1612
+p95_ms = 1612
+max_ms = 1612
+
+[[result_latency.span]]
+name = "conversation.final_debounce"
+n = 2
+min_ms = 152
+p50_ms = 8018
+p95_ms = 8018
+max_ms = 8018
+
+[[result_latency.span]]
+name = "turn.finalize_to_first_audio"
+n = 2
+min_ms = 1765
+p50_ms = 8902
+p95_ms = 8902
+max_ms = 8902
+
+[result_transport.inbound]
+codec = "PCMU"
+sample_rate_hz = 8000
+packets_total = 4868
+lost_packets = 0
+reordered_frames = 0
+jitter_ms_p50 = 2
+jitter_ms_p95 = 13
+jitter_ms_max = 252
+
+[result_transport.outbound]
+frames_sent = 1211
+underrun_count = 58
+inter_frame_gap_ms_p50 = 20
+inter_frame_gap_ms_p95 = 23
+inter_frame_gap_ms_max = 1180
+queue_depth_p50 = 148
+queue_depth_p95 = 255
+pre_audio_wait_ms_estimate = 3680
+append_starvation_ms_estimate = 0
+post_mark_wait_ms_estimate = 260
