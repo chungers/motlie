@@ -632,7 +632,7 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             quality.speech.onset_min_silence_ms
         )),
         Line::from(format!(
-            "barge-in: enabled={} onset={} playback={} partial={} final={} min={}/{} p-conf={} p-stab={} f-conf={} f-stab={} clear={}ms",
+            "barge-in: enabled={} onset={} playback={} partial={} final={} min={}/{} missing={} p-conf={} p-stab={} f-conf={} f-stab={} clear={}ms",
             quality.barge_in.enabled,
             quality.barge_in.speech_onset_cancel_enabled,
             quality.barge_in.onset_during_playback.label(),
@@ -640,6 +640,7 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             quality.barge_in.final_asr_cancel_enabled,
             quality.barge_in.transcript_min_chars,
             quality.barge_in.transcript_min_words,
+            quality.barge_in.missing_signal_policy.label(),
             quality
                 .barge_in
                 .partial_min_confidence

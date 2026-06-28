@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::early_response::MissingSignalPolicy;
 use crate::quality::{
     BargeInQualityConfig, ConversationPolicyConfig, ConversationPolicyMode, PendingOutputOrder,
 };
@@ -286,21 +287,35 @@ fn transcript_evidence_allows_barge_in(
             BargeInTrigger::SpeechOnset => true,
         };
         return legacy_length_allowed
-            && transcript_scores_allow_barge_in(barge_in, trigger, evidence);
+            && legacy_transcript_scores_allow_barge_in(barge_in, trigger, evidence);
     }
 
-    let short_interrupt_allowed = match trigger {
-        BargeInTrigger::Partial => word_count == 1 && char_count >= 3,
-        BargeInTrigger::Final => word_count == 1 && char_count >= 2,
-        BargeInTrigger::SpeechOnset => true,
-    };
-    if !short_interrupt_allowed
-        && (char_count < barge_in.transcript_min_chars
-            || word_count < barge_in.transcript_min_words)
-    {
+    if !has_normalized_transcript_content(evidence.text) {
         return false;
     }
     transcript_scores_allow_barge_in(barge_in, trigger, evidence)
+}
+
+fn has_normalized_transcript_content(text: &str) -> bool {
+    text.chars().any(|ch| ch.is_alphanumeric())
+}
+
+fn legacy_transcript_scores_allow_barge_in(
+    barge_in: &BargeInQualityConfig,
+    trigger: BargeInTrigger,
+    evidence: BargeInTranscriptEvidence<'_>,
+) -> bool {
+    match trigger {
+        BargeInTrigger::Partial => {
+            legacy_score_meets_threshold(evidence.confidence, barge_in.partial_min_confidence)
+                && legacy_score_meets_threshold(evidence.stability, barge_in.partial_min_stability)
+        }
+        BargeInTrigger::Final => {
+            legacy_score_meets_threshold(evidence.confidence, barge_in.final_min_confidence)
+                && legacy_score_meets_threshold(evidence.stability, barge_in.final_min_stability)
+        }
+        BargeInTrigger::SpeechOnset => true,
+    }
 }
 
 fn transcript_scores_allow_barge_in(
@@ -310,22 +325,65 @@ fn transcript_scores_allow_barge_in(
 ) -> bool {
     match trigger {
         BargeInTrigger::Partial => {
-            score_meets_threshold(evidence.confidence, barge_in.partial_min_confidence)
-                && score_meets_threshold(evidence.stability, barge_in.partial_min_stability)
+            required_score_meets_threshold(
+                evidence.confidence,
+                barge_in.partial_min_confidence,
+                barge_in.missing_signal_policy,
+            ) && required_score_meets_threshold(
+                evidence.stability,
+                barge_in.partial_min_stability,
+                barge_in.missing_signal_policy,
+            )
         }
         BargeInTrigger::Final => {
-            score_meets_threshold(evidence.confidence, barge_in.final_min_confidence)
-                && score_meets_threshold(evidence.stability, barge_in.final_min_stability)
+            required_score_meets_threshold(
+                evidence.confidence,
+                barge_in.final_min_confidence,
+                barge_in.missing_signal_policy,
+            ) && optional_score_meets_threshold(
+                evidence.stability,
+                barge_in.final_min_stability,
+                barge_in.missing_signal_policy,
+            )
         }
         BargeInTrigger::SpeechOnset => true,
     }
 }
 
-fn score_meets_threshold(score: Option<f32>, threshold: Option<f32>) -> bool {
+fn legacy_score_meets_threshold(score: Option<f32>, threshold: Option<f32>) -> bool {
     match threshold {
         Some(threshold) => score.is_some_and(|score| score >= threshold),
         None => true,
     }
+}
+
+fn required_score_meets_threshold(
+    score: Option<f32>,
+    threshold: Option<f32>,
+    policy: MissingSignalPolicy,
+) -> bool {
+    match (score, threshold, policy) {
+        (Some(score), Some(threshold), _) => {
+            valid_score(score) && valid_score(threshold) && score >= threshold
+        }
+        (None, Some(_), MissingSignalPolicy::Conservative)
+        | (_, None, MissingSignalPolicy::Conservative) => false,
+    }
+}
+
+fn optional_score_meets_threshold(
+    score: Option<f32>,
+    threshold: Option<f32>,
+    policy: MissingSignalPolicy,
+) -> bool {
+    match threshold {
+        Some(threshold) => required_score_meets_threshold(score, Some(threshold), policy),
+        None => true,
+    }
+}
+
+fn valid_score(score: f32) -> bool {
+    score.is_finite() && (0.0..=1.0).contains(&score)
 }
 
 #[derive(Clone, Debug)]
@@ -535,6 +593,214 @@ mod tests {
 
         assert!(decision.cancels_playback());
         assert!(decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn non_compat_score_missing_partial_fails_closed() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let barge_in = BargeInQualityConfig {
+            partial_min_confidence: Some(0.50),
+            partial_min_stability: Some(0.50),
+            ..BargeInQualityConfig::default()
+        };
+
+        for evidence in [
+            BargeInTranscriptEvidence {
+                text: "stop",
+                active_playback: true,
+                confidence: None,
+                stability: Some(0.91),
+            },
+            BargeInTranscriptEvidence {
+                text: "stop",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: None,
+            },
+        ] {
+            let decision =
+                policy.decide_transcript_barge_in(&barge_in, BargeInTrigger::Partial, evidence);
+            assert!(!decision.cancels_playback());
+            assert!(!decision.forwards_caller_transcript());
+        }
+    }
+
+    #[test]
+    fn non_compat_score_missing_final_fails_closed() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let barge_in = BargeInQualityConfig {
+            final_min_confidence: Some(0.70),
+            ..BargeInQualityConfig::default()
+        };
+        let decision = policy.decide_transcript_barge_in(
+            &barge_in,
+            BargeInTrigger::Final,
+            BargeInTranscriptEvidence {
+                text: "stop",
+                active_playback: true,
+                confidence: None,
+                stability: None,
+            },
+        );
+
+        assert!(!decision.cancels_playback());
+        assert!(!decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn non_compat_unconfigured_scores_fail_closed() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+
+        for (trigger, text) in [
+            (BargeInTrigger::Partial, "stop"),
+            (BargeInTrigger::Final, "stop"),
+            (BargeInTrigger::Partial, "uh"),
+            (BargeInTrigger::Final, "uh"),
+        ] {
+            let decision = policy.decide_transcript_barge_in(
+                &BargeInQualityConfig::default(),
+                trigger,
+                BargeInTranscriptEvidence {
+                    text,
+                    active_playback: true,
+                    confidence: Some(0.91),
+                    stability: Some(0.91),
+                },
+            );
+            assert!(!decision.cancels_playback());
+            assert!(!decision.forwards_caller_transcript());
+        }
+    }
+
+    #[test]
+    fn non_compat_one_word_interrupts_cancel_with_required_scores() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let partial_barge_in = BargeInQualityConfig {
+            partial_min_confidence: Some(0.50),
+            partial_min_stability: Some(0.50),
+            ..BargeInQualityConfig::default()
+        };
+        let partial = policy.decide_transcript_barge_in(
+            &partial_barge_in,
+            BargeInTrigger::Partial,
+            BargeInTranscriptEvidence {
+                text: "stop",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: Some(0.91),
+            },
+        );
+        assert!(partial.cancels_playback());
+        assert!(partial.forwards_caller_transcript());
+
+        let final_barge_in = BargeInQualityConfig {
+            final_min_confidence: Some(0.70),
+            ..BargeInQualityConfig::default()
+        };
+        let final_decision = policy.decide_transcript_barge_in(
+            &final_barge_in,
+            BargeInTrigger::Final,
+            BargeInTranscriptEvidence {
+                text: "no",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: None,
+            },
+        );
+        assert!(final_decision.cancels_playback());
+        assert!(final_decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn non_compat_rejects_empty_whitespace_and_punctuation_only_text() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let barge_in = BargeInQualityConfig {
+            partial_min_confidence: Some(0.50),
+            partial_min_stability: Some(0.50),
+            final_min_confidence: Some(0.70),
+            ..BargeInQualityConfig::default()
+        };
+
+        for (trigger, text) in [
+            (BargeInTrigger::Partial, ""),
+            (BargeInTrigger::Partial, "   "),
+            (BargeInTrigger::Partial, "...?!"),
+            (BargeInTrigger::Final, "...?!"),
+        ] {
+            let decision = policy.decide_transcript_barge_in(
+                &barge_in,
+                trigger,
+                BargeInTranscriptEvidence {
+                    text,
+                    active_playback: true,
+                    confidence: Some(0.91),
+                    stability: Some(0.91),
+                },
+            );
+            assert!(!decision.cancels_playback());
+            assert!(!decision.forwards_caller_transcript());
+        }
+    }
+
+    #[test]
+    fn non_compat_revision_churn_waits_for_score_stable_partial() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let barge_in = BargeInQualityConfig {
+            partial_min_confidence: Some(0.50),
+            partial_min_stability: Some(0.80),
+            ..BargeInQualityConfig::default()
+        };
+
+        for evidence in [
+            BargeInTranscriptEvidence {
+                text: "s",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: None,
+            },
+            BargeInTranscriptEvidence {
+                text: "stop",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: Some(0.40),
+            },
+        ] {
+            let decision =
+                policy.decide_transcript_barge_in(&barge_in, BargeInTrigger::Partial, evidence);
+            assert!(!decision.cancels_playback());
+            assert!(!decision.forwards_caller_transcript());
+        }
+
+        let stable = policy.decide_transcript_barge_in(
+            &barge_in,
+            BargeInTrigger::Partial,
+            BargeInTranscriptEvidence {
+                text: "stop",
+                active_playback: true,
+                confidence: Some(0.91),
+                stability: Some(0.91),
+            },
+        );
+        assert!(stable.cancels_playback());
+        assert!(stable.forwards_caller_transcript());
     }
 
     #[test]

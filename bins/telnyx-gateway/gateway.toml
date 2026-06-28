@@ -195,10 +195,12 @@ onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 # Cancel on final ASR overlap.
 final_asr_cancel_enabled = true
-# Minimum non-whitespace transcript characters before partial/final ASR may cancel active playback.
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on length.
 transcript_min_chars = 6
-# Minimum transcript words before partial/final ASR may cancel active playback.
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on word count.
 transcript_min_words = 2
+# Missing configured ASR score signals fail closed for non-compat barge-in cancellation.
+missing_signal_policy = "conservative"
 # Minimum partial-ASR confidence for active-playback cancellation.
 partial_min_confidence = 0.50
 # Minimum partial-ASR stability for active-playback cancellation.

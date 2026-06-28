@@ -257,6 +257,8 @@ Only `enabled`, `boundary`, and `start_timing` are currently exposed as live com
 | `quality barge-in onset-during-playback <defer-to-partial|trust>` | enum | `defer_to_partial` | next ASR session | Echo guard vs immediate interruption during active playback. |
 | `quality barge-in partial-asr on|off` | bool | `true` | next ASR session | Partial-ASR cancellation. |
 | `quality barge-in final-asr on|off` | bool | `true` | next ASR session | Final-ASR cancellation. |
+| `barge_in.missing_signal_policy` | `conservative` | `conservative` | new turn | TOML-only; missing or unconfigured required ASR score signals fail closed for non-compat cancellation. |
+| `barge_in.transcript_min_chars`, `barge_in.transcript_min_words` | count | `6`, `2` | new turn | TOML-only telemetry fields for ASR switch drift; non-compat cancellation does not gate on these counts. |
 | `quality barge-in clear-timeout-ms <ms>` | `100..10000` | `1000` | new cancel request | Clear/terminal wait timeout. |
 | `quality echo-suppression on|off` | bool | `true` | next ASR session | Text-domain assistant echo suppression. |
 | `quality echo-suppression min-text-chars <n>` | `1..500` | `10` | next ASR session | Minimum transcript length for echo matching. |

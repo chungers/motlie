@@ -9,6 +9,7 @@
 | 2026-06-24 PDT | @codex-541 | Cross-linked the conversation policy design to the user-facing global TOML config guide. |
 | 2026-06-24 PDT | @codex-541 | Added active-playback transcript eligibility gates after live barge-in testing showed a one-word echo fragment could cancel and replace the intended response. |
 | 2026-06-25 PDT | @codex-541 | Extended active-playback transcript gates to final ASR after live testing showed low-confidence short finals could still self-cancel replacement playback. |
+| 2026-06-28 PDT | @codex-541 | Locked Layer A transcript-triggered barge-in policy: non-compat modes use normalized text plus conservative ASR score evidence; transcript word/char floors are telemetry only, and VAD/onset anchoring moves to Layer B pending AEC. |
 
 ## Problem
 
@@ -64,8 +65,9 @@ Config sketch:
 
 ```toml
 [voice_quality.barge_in]
-transcript_min_chars = 6
-transcript_min_words = 2
+transcript_min_chars = 6 # telemetry only for ASR drift comparisons
+transcript_min_words = 2 # telemetry only for ASR drift comparisons
+missing_signal_policy = "conservative"
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
 final_min_confidence = 0.70
@@ -103,7 +105,11 @@ Implemented decisions:
 6. `barge_in_cancel_only`: makes today's cancel behavior explicit through the policy boundary: cancel active playback, preserve ASR, reset turn batching, and do not replay stale assistant output automatically.
 7. `barge_in_coalesce_after_silence`: cancels active playback, preserves ASR, and coalesces post-barge-in finals until `post_barge_in_silence_ms` before processor dispatch.
 
-Media still owns frame-level speech onset and echo-guard classification. When echo guard classifies onset as likely assistant echo, media defers cancellation to partial/final ASR as before. Once a trigger is valid, the policy decides whether cancellation/coalescing proceeds. For transcript-triggered barge-in during active playback, the policy also checks `barge_in.transcript_min_chars`, `barge_in.transcript_min_words`, partial confidence/stability gates, and final confidence/stability gates. Ineligible transcript evidence is ignored during active playback so it cannot cancel or queue a replacement assistant output. Current live tuning sets `final_min_confidence = 0.70` and leaves `final_min_stability` unset because final ASR stability is not consistently available.
+Media still owns frame-level speech onset and echo-guard classification. When echo guard classifies onset as likely assistant echo, media defers cancellation to partial/final ASR as before. Once a trigger is valid, the policy decides whether cancellation/coalescing proceeds.
+
+Layer A, implemented in PR #565, reduces ASR-tokenization fragility for non-`current_compat` transcript-triggered barge-in. The cancel decision uses a normalization floor (reject empty, whitespace-only, and punctuation-only text), echo-suppressed upstream transcript eligibility, and conservative ASR score evidence. `barge_in.transcript_min_chars` and `barge_in.transcript_min_words` remain in config for telemetry and ASR-runtime-switch drift comparison only; they are not correctness gates for non-compat modes. Missing or unconfigured required ASR score signals fail closed under `barge_in.missing_signal_policy = "conservative"`. Partial ASR cancellation requires configured and present confidence plus stability. Final ASR cancellation requires configured and present confidence; `final_min_stability` remains optional because current final ASR does not consistently report stability. `current_compat` keeps the legacy short partial/final behavior for compatibility.
+
+Layer B is the intended long-term boundary for caller interruption: VAD/onset-anchored barge-in with echo-robust audio evidence. That is deferred to follow-up issue #586 pending AEC/echo-robust onset work so this PR does not claim ASR independence before the media layer can support it.
 
 ## Global TOML Surface
 

@@ -3253,9 +3253,7 @@ fn early_response_boundary_label(value: BoundaryRequirement) -> &'static str {
 }
 
 fn early_response_missing_signal_label(value: MissingSignalPolicy) -> &'static str {
-    match value {
-        MissingSignalPolicy::Conservative => "conservative",
-    }
+    value.label()
 }
 
 fn early_response_start_timing_label(value: EarlyResponseStartTiming) -> &'static str {
@@ -3477,7 +3475,7 @@ async fn quality_barge_in_command(
             let guard = context.state.read().await;
             let barge_in = &guard.quality.config.barge_in;
             Ok(CommandOutput::text(format!(
-                "enabled={}\nspeech_onset_cancel_enabled={}\nonset_during_playback={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\ntranscript_min_chars={}\ntranscript_min_words={}\npartial_min_confidence={}\npartial_min_stability={}\nfinal_min_confidence={}\nfinal_min_stability={}\nclear_timeout_ms={}",
+                "enabled={}\nspeech_onset_cancel_enabled={}\nonset_during_playback={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\ntranscript_min_chars={}\ntranscript_min_words={}\nmissing_signal_policy={}\npartial_min_confidence={}\npartial_min_stability={}\nfinal_min_confidence={}\nfinal_min_stability={}\nclear_timeout_ms={}",
                 barge_in.enabled,
                 barge_in.speech_onset_cancel_enabled,
                 barge_in.onset_during_playback.label(),
@@ -3485,6 +3483,7 @@ async fn quality_barge_in_command(
                 barge_in.final_asr_cancel_enabled,
                 barge_in.transcript_min_chars,
                 barge_in.transcript_min_words,
+                barge_in.missing_signal_policy.label(),
                 optional_score_label(barge_in.partial_min_confidence),
                 optional_score_label(barge_in.partial_min_stability),
                 optional_score_label(barge_in.final_min_confidence),
@@ -3945,8 +3944,9 @@ fn quality_help() -> String {
         "quality barge-in onset-during-playback defer-to-partial|trust default=defer_to_partial applies=next_asr_session",
         "quality barge-in partial-asr on|off            bool default=true applies=next_asr_session",
         "quality barge-in final-asr on|off              bool default=true applies=next_asr_session",
-        "quality barge-in transcript_min_chars          TOML-only range=0..200 default=6 applies=new_turn",
-        "quality barge-in transcript_min_words          TOML-only range=0..50 default=2 applies=new_turn",
+        "quality barge-in transcript_min_chars          TOML-only telemetry range=0..200 default=6 applies=new_turn",
+        "quality barge-in transcript_min_words          TOML-only telemetry range=0..50 default=2 applies=new_turn",
+        "quality barge-in missing_signal_policy         TOML-only conservative default=conservative applies=new_turn",
         "quality barge-in partial_min_confidence        TOML-only range=0.0..1.0 default=none applies=new_turn",
         "quality barge-in partial_min_stability         TOML-only range=0.0..1.0 default=none applies=new_turn",
         "quality barge-in final_min_confidence          TOML-only range=0.0..1.0 default=none applies=new_turn",

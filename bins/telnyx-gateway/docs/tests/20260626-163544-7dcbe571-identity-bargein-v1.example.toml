@@ -199,9 +199,11 @@ onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 # Cancel on final ASR overlap.
 final_asr_cancel_enabled = true
-# Minimum transcript content before ASR-triggered barge-in can fire.
+# Telemetry-only transcript drift fields for ASR switch comparisons; non-compat cancel policy does not gate on length.
 transcript_min_chars = 6
 transcript_min_words = 2
+# Missing configured ASR score signals fail closed for non-compat barge-in cancellation.
+missing_signal_policy = "conservative"
 # Confidence/stability guards for barge-in transcript triggers.
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
@@ -320,6 +322,7 @@ barge_in_partial_asr_cancel_enabled = true
 barge_in_final_asr_cancel_enabled = true
 barge_in_transcript_min_chars = 6
 barge_in_transcript_min_words = 2
+barge_in_missing_signal_policy = "conservative"
 barge_in_partial_min_confidence = 0.50
 barge_in_partial_min_stability = 0.50
 barge_in_final_min_confidence = 0.70

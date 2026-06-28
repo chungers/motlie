@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::early_response::{BoundaryRequirement, EarlyResponsePolicy, EarlyResponseStartTiming};
+use crate::early_response::{
+    BoundaryRequirement, EarlyResponsePolicy, EarlyResponseStartTiming, MissingSignalPolicy,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -457,11 +459,17 @@ pub struct BargeInQualityConfig {
     pub final_asr_cancel_enabled: bool,
     pub transcript_min_chars: usize,
     pub transcript_min_words: usize,
+    #[serde(default = "default_missing_signal_policy")]
+    pub missing_signal_policy: MissingSignalPolicy,
     pub partial_min_confidence: Option<f32>,
     pub partial_min_stability: Option<f32>,
     pub final_min_confidence: Option<f32>,
     pub final_min_stability: Option<f32>,
     pub clear_timeout_ms: u64,
+}
+
+fn default_missing_signal_policy() -> MissingSignalPolicy {
+    MissingSignalPolicy::Conservative
 }
 
 impl Default for BargeInQualityConfig {
@@ -474,6 +482,7 @@ impl Default for BargeInQualityConfig {
             final_asr_cancel_enabled: true,
             transcript_min_chars: 6,
             transcript_min_words: 2,
+            missing_signal_policy: MissingSignalPolicy::Conservative,
             partial_min_confidence: None,
             partial_min_stability: None,
             final_min_confidence: None,
@@ -1269,6 +1278,9 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = barge_in.transcript_min_words {
                 self.set_barge_in_transcript_min_words(value);
+            }
+            if let Some(value) = barge_in.missing_signal_policy {
+                self.barge_in.missing_signal_policy = value;
             }
             if let Some(value) = barge_in.partial_min_confidence {
                 self.set_barge_in_partial_min_confidence(value)?;
@@ -2455,6 +2467,7 @@ pub struct BargeInQualityConfigPatch {
     pub final_asr_cancel_enabled: Option<bool>,
     pub transcript_min_chars: Option<usize>,
     pub transcript_min_words: Option<usize>,
+    pub missing_signal_policy: Option<MissingSignalPolicy>,
     pub partial_min_confidence: Option<f32>,
     pub partial_min_stability: Option<f32>,
     pub final_min_confidence: Option<f32>,
@@ -2670,6 +2683,7 @@ mod tests {
             [voice_quality.barge_in]
             transcript_min_chars = 8
             transcript_min_words = 2
+            missing_signal_policy = "conservative"
             partial_min_confidence = 0.50
             partial_min_stability = 0.55
             final_min_confidence = 0.70
@@ -2680,6 +2694,10 @@ mod tests {
 
         assert_eq!(config.barge_in.transcript_min_chars, 8);
         assert_eq!(config.barge_in.transcript_min_words, 2);
+        assert_eq!(
+            config.barge_in.missing_signal_policy,
+            MissingSignalPolicy::Conservative
+        );
         assert_eq!(config.barge_in.partial_min_confidence, Some(0.50));
         assert_eq!(config.barge_in.partial_min_stability, Some(0.55));
         assert_eq!(config.barge_in.final_min_confidence, Some(0.70));

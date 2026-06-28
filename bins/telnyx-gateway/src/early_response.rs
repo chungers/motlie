@@ -53,6 +53,14 @@ pub enum MissingSignalPolicy {
     Conservative,
 }
 
+impl MissingSignalPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EarlyResponseStartTiming {

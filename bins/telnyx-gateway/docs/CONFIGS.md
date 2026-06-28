@@ -207,11 +207,12 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | `onset_during_playback` | `"defer_to_partial"` | `"defer_to_partial"` or `"trust"` | Echo-guard behavior during active playback. |
 | `partial_asr_cancel_enabled` | `false` | `true` | Allows meaningful partial ASR cancel. |
 | `final_asr_cancel_enabled` | `false` | `true` | Allows final ASR cancel. |
-| `transcript_min_chars` | `6` | `6` | Minimum non-whitespace transcript characters before partial/final ASR may cancel active playback. |
-| `transcript_min_words` | `2` | `2` | Minimum transcript words before partial/final ASR may cancel active playback. |
-| `partial_min_confidence` | `0.50` | `0.50` | Minimum partial-ASR confidence during active playback; omit in ad-hoc configs to disable this gate. |
-| `partial_min_stability` | `0.50` | `0.50` | Minimum partial-ASR stability during active playback; omit in ad-hoc configs to disable this gate. |
-| `final_min_confidence` | `0.70` (ignored when disabled) | `0.70` | Minimum final-ASR confidence during active playback; suppresses low-confidence short finals that can self-cancel playback. |
+| `transcript_min_chars` | `6` | `6` | Telemetry-only ASR drift field; non-compat cancellation does not gate on character count. |
+| `transcript_min_words` | `2` | `2` | Telemetry-only ASR drift field; non-compat cancellation does not gate on word count. |
+| `missing_signal_policy` | `"conservative"` | `"conservative"` | Missing or unconfigured required ASR score signals fail closed for non-compat cancellation. |
+| `partial_min_confidence` | `0.50` | `0.50` | Required partial-ASR confidence during active playback for non-compat cancellation. |
+| `partial_min_stability` | `0.50` | `0.50` | Required partial-ASR stability during active playback for non-compat cancellation. |
+| `final_min_confidence` | `0.70` (ignored when disabled) | `0.70` | Required final-ASR confidence during active playback for non-compat cancellation. |
 | `final_min_stability` | unset | unset | Optional final-ASR stability floor; leave unset until the backend reports stability on finals. |
 | `clear_timeout_ms` | `1000` | `1000` | Media clear/terminal wait budget. |
 
@@ -340,6 +341,7 @@ partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
 transcript_min_chars = 6
 transcript_min_words = 2
+missing_signal_policy = "conservative"
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
 final_min_confidence = 0.70

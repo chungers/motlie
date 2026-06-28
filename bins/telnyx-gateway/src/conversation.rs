@@ -3588,10 +3588,12 @@ second"
             let mut guard = state.write().await;
             guard.quality.config.conversation_policy.mode =
                 ConversationPolicyMode::BargeInCancelOnly;
+            guard.quality.config.barge_in.partial_min_confidence = Some(0.50);
+            guard.quality.config.barge_in.partial_min_stability = Some(0.50);
             guard.quality.config_id = guard.quality.config.config_id();
         }
 
-        handle_transcript_event(
+        handle_transcript_event_with_metadata(
             &state,
             &media_registry,
             &runtime,
@@ -3601,6 +3603,11 @@ second"
                 update: motlie_model::TranscriptionUpdate::default(),
             },
             None,
+            ConversationTranscriptMetadata {
+                confidence: Some(0.91),
+                stability: Some(0.91),
+                ..ConversationTranscriptMetadata::default()
+            },
         )
         .await
         .expect("barge-in cancel policy should cancel active speech");
@@ -3641,6 +3648,7 @@ second"
             guard.quality.config.set_endpoint_merge_window_ms(0);
             guard.quality.config.conversation_policy.mode =
                 ConversationPolicyMode::BargeInCoalesceAfterSilence;
+            guard.quality.config.barge_in.final_min_confidence = Some(0.70);
             guard
                 .quality
                 .config
@@ -3649,7 +3657,7 @@ second"
             guard.quality.config_id = guard.quality.config.config_id();
         }
 
-        handle_transcript_event(
+        handle_transcript_event_with_metadata(
             &state,
             &media_registry,
             &runtime,
@@ -3659,6 +3667,10 @@ second"
                 update: motlie_model::TranscriptionUpdate::default(),
             },
             None,
+            ConversationTranscriptMetadata {
+                confidence: Some(0.91),
+                ..ConversationTranscriptMetadata::default()
+            },
         )
         .await
         .expect("first final should cancel active playback and enter coalesce window");
@@ -3724,6 +3736,8 @@ second"
             guard.quality.config.set_endpoint_merge_window_ms(0);
             guard.quality.config.conversation_policy.mode =
                 ConversationPolicyMode::BargeInCoalesceAfterSilence;
+            guard.quality.config.barge_in.partial_min_confidence = Some(0.50);
+            guard.quality.config.barge_in.partial_min_stability = Some(0.50);
             guard
                 .quality
                 .config
@@ -3732,7 +3746,7 @@ second"
             guard.quality.config_id = guard.quality.config.config_id();
         }
 
-        handle_transcript_event(
+        handle_transcript_event_with_metadata(
             &state,
             &media_registry,
             &runtime,
@@ -3742,6 +3756,11 @@ second"
                 update: motlie_model::TranscriptionUpdate::default(),
             },
             None,
+            ConversationTranscriptMetadata {
+                confidence: Some(0.91),
+                stability: Some(0.91),
+                ..ConversationTranscriptMetadata::default()
+            },
         )
         .await
         .expect("partial should cancel active playback and open coalesce window");

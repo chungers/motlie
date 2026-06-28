@@ -1046,11 +1046,12 @@ Prompt requirements:
 | `barge_in.onset_during_playback` | `OnsetDuringPlaybackPolicy` enum | `defer_to_partial`, `trust` | `defer_to_partial` | reject unknown | next ASR session | Distinguishes audible assistant echo from real caller interruption. The default keeps the live-tuned echo guard but still allows onset cancellation when active playback is not yet audible or has no echo signature. |
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
 | `barge_in.final_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Final ASR cancel path. |
-| `barge_in.transcript_min_chars` | `Count` | `0..200` | `6` | clamp to range | new turn | Minimum non-whitespace transcript characters before partial/final ASR may cancel active playback. |
-| `barge_in.transcript_min_words` | `Count` | `0..50` | `2` | clamp to range | new turn | Minimum transcript words before partial/final ASR may cancel active playback. |
-| `barge_in.partial_min_confidence` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Optional partial-ASR confidence floor before active-playback cancellation. |
-| `barge_in.partial_min_stability` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Optional partial-ASR stability floor before active-playback cancellation. |
-| `barge_in.final_min_confidence` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Optional final-ASR confidence floor before active-playback cancellation. |
+| `barge_in.transcript_min_chars` | `Count` | `0..200` | `6` | clamp to range | new turn | Telemetry-only ASR drift field; non-compat cancellation does not gate on character count. |
+| `barge_in.transcript_min_words` | `Count` | `0..50` | `2` | clamp to range | new turn | Telemetry-only ASR drift field; non-compat cancellation does not gate on word count. |
+| `barge_in.missing_signal_policy` | enum | `conservative` | `conservative` | reject unknown | new turn | Missing/unconfigured required ASR score signals fail closed for non-compat cancellation. |
+| `barge_in.partial_min_confidence` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Required partial-ASR confidence floor before non-compat active-playback cancellation. |
+| `barge_in.partial_min_stability` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Required partial-ASR stability floor before non-compat active-playback cancellation. |
+| `barge_in.final_min_confidence` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Required final-ASR confidence floor before non-compat active-playback cancellation. |
 | `barge_in.final_min_stability` | `Score` | `0.0..1.0` | unset | reject out of range | new turn | Optional final-ASR stability floor before active-playback cancellation; leave unset when the backend does not emit final stability. |
 | `barge_in.clear_timeout_ms` | `DurationMs` | `100..10000` | `1000` | clamp to range | new cancel request | Clear/terminal wait. |
 | `conversation_policy.mode` | enum | `current_compat,no_barge_in_bounded_pending,barge_in_cancel_only,barge_in_coalesce_after_silence` | `current_compat` | reject unknown | new policy decision | Selects the conversation arbitration policy for no-barge-in output overlap and valid barge-in cancellation/coalescing triggers. |
@@ -1153,6 +1154,7 @@ partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
 transcript_min_chars = 6
 transcript_min_words = 2
+missing_signal_policy = "conservative"
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
 final_min_confidence = 0.70

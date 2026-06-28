@@ -353,6 +353,7 @@ partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
 transcript_min_chars = 6
 transcript_min_words = 2
+missing_signal_policy = "conservative"
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
 final_min_confidence = 0.70
@@ -413,6 +414,7 @@ partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
 transcript_min_chars = 6
 transcript_min_words = 2
+missing_signal_policy = "conservative"
 partial_min_confidence = 0.50
 partial_min_stability = 0.50
 final_min_confidence = 0.70
@@ -460,10 +462,12 @@ Next barge-in Identity run:
 - Avoid the phrase `barge in` in the caller-spoken replacement line; use a
   phonetically cleaner trigger such as `Stop now. Please repeat this replacement
   sentence.` Domain/hotword biasing remains deferred.
-- Keep `voice_quality.barge_in.final_min_confidence = 0.70` and leave
-  `final_min_stability` unset until final ASR emits stability. This preserves
-  high-confidence final interruption while suppressing low-confidence short
-  finals captured from assistant echo or coordination speech.
+- Keep `voice_quality.barge_in.missing_signal_policy = "conservative"`,
+  `partial_min_confidence = 0.50`, `partial_min_stability = 0.50`, and
+  `final_min_confidence = 0.70`; leave `final_min_stability` unset until final
+  ASR emits stability. This preserves high-confidence interruption while
+  suppressing score-missing or low-confidence fragments captured from assistant
+  echo or coordination speech.
 - After the replacement playback completes, hang up or run
   `conversation smoke-test off` before collecting qualitative feedback. Feedback
   spoken while Identity is attached is part of the call and will be repeated.
