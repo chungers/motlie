@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs to the live-test protocol; the next barge-in run should verify one clean replacement turn before #586 AEC/VAD work. |
 | 2026-06-28 PDT | @codex-541 | Recorded the failed barge-in Identity 450 ms run: post-playback ASR fragments escaped as new turns, so the next barge-in step is a code fix rather than knob-only tuning. |
 | 2026-06-28 PDT | @codex-541 | Promoted `streaming_start_buffer_ms = 450` for the no-barge-in Identity TTS pacing baseline and recorded that barge-in plus turn-batching N=2 still require separate validation. |
 | 2026-06-28 PDT | @codex-541 | Reaffirmed the current best inbound Identity no-barge-in live-test knobs after Layer A score-gated barge-in landed: bounded FIFO pending output, streaming Kokoro first-chunk/tail padding, clause early response, and conservative score telemetry. |
@@ -256,6 +257,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Observed on 2026-06-21 by @codex-535: this profile capped the old serial
@@ -318,6 +322,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 3
 pending_output_order = "fifo"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Success criteria:
@@ -407,6 +414,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Use `barge_in_coalesce_after_silence` when validating interruption followed by
@@ -468,6 +478,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Success criteria:
@@ -552,6 +565,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 3
 pending_output_order = "fifo"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Next hypotheses, one per run:

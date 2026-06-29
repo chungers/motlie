@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard design notes: guarded finals are evaluated before cancellation and processor dispatch; #586 remains the AEC/VAD boundary. |
 | 2026-06-28 PDT | @codex-541 | Marked `barge_in_coalesce_after_silence` experimental and not live-validated pending the post-playback dispatch guard tracked in #587. |
 | 2026-06-22 PDT | @codex-535 | Started issue #545 design for a unified conversation policy that covers barge-in and no-barge-in playback overlap, with an initial PR #558 implementation slice for bounded pending repeats. |
 | 2026-06-22 PDT | @codex-535 | Expanded the design to shipped behavior: enum-backed policy decisions now cover no-barge-in pending output, cancel-only barge-in, and post-barge-in silence coalescing through global TOML config. |
@@ -81,6 +82,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 For identity/repeat reliability tests:
@@ -105,8 +109,7 @@ Implemented decisions:
 4. `current_compat`: preserves existing latest-only no-barge-in deferral and existing barge-in cancel semantics.
 5. `no_barge_in_bounded_pending`: retains a bounded pending output queue and drains one assistant output at a time after playback clears.
 6. `barge_in_cancel_only`: makes today's cancel behavior explicit through the policy boundary: cancel active playback, preserve ASR, reset turn batching, and do not replay stale assistant output automatically.
-7. `barge_in_coalesce_after_silence`: EXPERIMENTAL — not yet live-validated. The barge-in modes failed a live quality sample (post-playback echo/fragment finals escaping as new turns); a general post-playback dispatch-guard code fix is required before production use — see #587. The validated default path is current_compat / no-barge-in.
-   When used for testing, it cancels active playback, preserves ASR, and coalesces post-barge-in finals until `post_barge_in_silence_ms` before processor dispatch.
+7. `barge_in_coalesce_after_silence`: cancels active playback, preserves ASR, and coalesces post-barge-in finals until `post_barge_in_silence_ms` before processor dispatch. #587 adds a post-barge-in dispatch guard that evaluates later active/recent-playback finals before they can cancel replacement playback or reach the processor. Short/low-content guarded finals, score-absent guarded finals, and guarded finals that match the assistant echo signature are suppressed. Keep this mode in live validation until #586 adds the AEC/VAD boundary; `current_compat` / no-barge-in remains the validated default path.
 
 Media still owns frame-level speech onset and echo-guard classification. When echo guard classifies onset as likely assistant echo, media defers cancellation to partial/final ASR as before. Once a trigger is valid, the policy decides whether cancellation/coalescing proceeds.
 
@@ -125,6 +128,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 The broader user-facing config reference, including conversation, endpoint,
@@ -146,12 +152,14 @@ Barge-in coalescing tests should use:
 
 ```toml
 [voice_quality.conversation_policy]
-# EXPERIMENTAL — not yet live-validated. The barge-in modes failed a live quality sample (post-playback echo/fragment finals escaping as new turns); a general post-playback dispatch-guard code fix is required before production use — see #587. The validated default path is current_compat / no-barge-in.
 mode = "barge_in_coalesce_after_silence"
 active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 ## Testing
@@ -164,7 +172,8 @@ Unit coverage must verify:
 - bounded pending FIFO queues multiple no-barge-in outputs behind active playback and drains them in order;
 - pending output is bounded and does not grow without limit;
 - `barge_in_cancel_only` preserves current cancellation behavior through policy decisions;
-- `barge_in_coalesce_after_silence` merges multiple post-interruption finals before dispatch.
+- `barge_in_coalesce_after_silence` merges multiple post-interruption finals before dispatch;
+- post-barge-in dispatch guard suppresses short, weak-signal, or assistant-echo finals during active/recent replacement playback before they can cancel playback or reach the processor.
 
 Live validation should compare repeat reliability before and after enabling `no_barge_in_bounded_pending`, while keeping barge-in off and using the same identity/repeat script protocol in `TESTING.md`.
 

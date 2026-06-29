@@ -542,6 +542,12 @@ pub struct ConversationPolicyConfig {
     pub pending_output_order: PendingOutputOrder,
     #[serde(default = "default_conversation_policy_post_barge_in_silence_ms")]
     pub post_barge_in_silence_ms: u64,
+    #[serde(default = "default_conversation_policy_post_barge_in_echo_guard_ms")]
+    pub post_barge_in_echo_guard_ms: u64,
+    #[serde(default = "default_conversation_policy_post_barge_in_fragment_max_chars")]
+    pub post_barge_in_fragment_max_chars: usize,
+    #[serde(default = "default_conversation_policy_post_barge_in_fragment_max_words")]
+    pub post_barge_in_fragment_max_words: usize,
 }
 
 fn default_conversation_policy_active_playback_hold_ms() -> u64 {
@@ -556,6 +562,18 @@ fn default_conversation_policy_post_barge_in_silence_ms() -> u64 {
     ConversationPolicyConfig::default().post_barge_in_silence_ms
 }
 
+fn default_conversation_policy_post_barge_in_echo_guard_ms() -> u64 {
+    ConversationPolicyConfig::default().post_barge_in_echo_guard_ms
+}
+
+fn default_conversation_policy_post_barge_in_fragment_max_chars() -> usize {
+    ConversationPolicyConfig::default().post_barge_in_fragment_max_chars
+}
+
+fn default_conversation_policy_post_barge_in_fragment_max_words() -> usize {
+    ConversationPolicyConfig::default().post_barge_in_fragment_max_words
+}
+
 impl Default for ConversationPolicyConfig {
     fn default() -> Self {
         Self {
@@ -564,6 +582,9 @@ impl Default for ConversationPolicyConfig {
             max_pending_outputs: 1,
             pending_output_order: PendingOutputOrder::LatestOnly,
             post_barge_in_silence_ms: 1_200,
+            post_barge_in_echo_guard_ms: 2_000,
+            post_barge_in_fragment_max_chars: 12,
+            post_barge_in_fragment_max_words: 2,
         }
     }
 }
@@ -1008,6 +1029,24 @@ impl VoiceQualityConfig {
             0,
             30_000,
         )?;
+        ensure_u64(
+            "conversation_policy.post_barge_in_echo_guard_ms",
+            self.conversation_policy.post_barge_in_echo_guard_ms,
+            0,
+            30_000,
+        )?;
+        ensure_usize(
+            "conversation_policy.post_barge_in_fragment_max_chars",
+            self.conversation_policy.post_barge_in_fragment_max_chars,
+            0,
+            200,
+        )?;
+        ensure_usize(
+            "conversation_policy.post_barge_in_fragment_max_words",
+            self.conversation_policy.post_barge_in_fragment_max_words,
+            0,
+            50,
+        )?;
         ensure_usize(
             "echo_suppression.min_text_chars",
             self.echo_suppression.min_text_chars,
@@ -1313,6 +1352,15 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = policy.post_barge_in_silence_ms {
                 self.set_conversation_policy_post_barge_in_silence_ms(value);
+            }
+            if let Some(value) = policy.post_barge_in_echo_guard_ms {
+                self.set_conversation_policy_post_barge_in_echo_guard_ms(value);
+            }
+            if let Some(value) = policy.post_barge_in_fragment_max_chars {
+                self.set_conversation_policy_post_barge_in_fragment_max_chars(value);
+            }
+            if let Some(value) = policy.post_barge_in_fragment_max_words {
+                self.set_conversation_policy_post_barge_in_fragment_max_words(value);
             }
         }
         if let Some(echo) = patch.echo_suppression {
@@ -2018,6 +2066,48 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_conversation_policy_post_barge_in_echo_guard_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 30_000);
+        self.conversation_policy.post_barge_in_echo_guard_ms = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_echo_guard_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_fragment_max_chars(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 200);
+        self.conversation_policy.post_barge_in_fragment_max_chars = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_fragment_max_chars",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_fragment_max_words(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 50);
+        self.conversation_policy.post_barge_in_fragment_max_words = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_fragment_max_words",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
     pub fn set_echo_suppression_enabled(&mut self, value: bool) -> QualityMutationOutcome {
         self.echo_suppression.enabled = value;
         self.outcome(
@@ -2483,6 +2573,9 @@ pub struct ConversationPolicyConfigPatch {
     pub max_pending_outputs: Option<usize>,
     pub pending_output_order: Option<PendingOutputOrder>,
     pub post_barge_in_silence_ms: Option<u64>,
+    pub post_barge_in_echo_guard_ms: Option<u64>,
+    pub post_barge_in_fragment_max_chars: Option<usize>,
+    pub post_barge_in_fragment_max_words: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2801,6 +2894,18 @@ mod tests {
             PendingOutputOrder::LatestOnly
         );
         assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 1_200);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            2_000
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            12
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            2
+        );
     }
 
     #[test]
@@ -2813,6 +2918,9 @@ mod tests {
             max_pending_outputs = 3
             pending_output_order = "fifo"
             post_barge_in_silence_ms = 1200
+            post_barge_in_echo_guard_ms = 1800
+            post_barge_in_fragment_max_chars = 10
+            post_barge_in_fragment_max_words = 2
             "#,
         )
         .expect("conversation policy config parses");
@@ -2827,6 +2935,19 @@ mod tests {
             config.conversation_policy.pending_output_order,
             PendingOutputOrder::Fifo
         );
+        assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 1_200);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            1_800
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            10
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            2
+        );
     }
 
     #[test]
@@ -2837,6 +2958,9 @@ mod tests {
             active_playback_hold_ms = 999999
             max_pending_outputs = 0
             post_barge_in_silence_ms = 999999
+            post_barge_in_echo_guard_ms = 999999
+            post_barge_in_fragment_max_chars = 999999
+            post_barge_in_fragment_max_words = 999999
             "#,
         )
         .expect("conversation policy numeric knobs clamp");
@@ -2844,6 +2968,18 @@ mod tests {
         assert_eq!(config.conversation_policy.active_playback_hold_ms, 180_000);
         assert_eq!(config.conversation_policy.max_pending_outputs, 1);
         assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 30_000);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            30_000
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            200
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            50
+        );
     }
 
     #[test]
