@@ -10,6 +10,7 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-06-28 | @claude-vfs-fuse | Initial draft. Scope: (1) embedded static layer-backing in the overlay, populated at build time via `include_dir!`; (2) synchronous access-logging observer hook. Decisions locked with David: new static layer-backing (not seeded MemOverlay); `include_dir!` whole-dir tooling; extend `motlie-vfs` (no new crate). |
+| 2026-06-28 | @claude-vfs-fuse | Add §4.6 Runtime ownership: file uid/gid discovered at runtime (`geteuid/getegid`, default `Owner::CurrentUser`), never baked; maps onto existing mount owner-override; omit `AllowOther` for single-user local mount. Resolves the owner part of §6.2. |
 
 ---
 
@@ -103,7 +104,8 @@ enum LayerSource {
 struct StaticLayer {
     dir: &'static include_dir::Dir<'static>,
     tag: String,           // which mount tag this tree serves
-    attrs: OverlayAttrs,   // default mode/uid/gid for embedded entries (RO)
+    attrs: OverlayAttrs,   // baked mode bits only (e.g. 0o444/0o555); uid/gid
+                           // left 0 and set at runtime via mount owner-override (§4.6)
     // mtime policy: fixed epoch or build timestamp (TBD §8)
 }
 ```
@@ -175,13 +177,42 @@ EmbeddedFs::builder()
     .embedded("skills", 50, &SKILLS)         // static layer (one Dir)
     .embedded("docs",   40, &DOCS)           // another static layer (another Dir)
     .mem_layer("runtime", 100)               // optional writable top
+    .owner(Owner::CurrentUser)               // default: runtime geteuid/getegid (§4.6)
     .observer(tracing_sink())
     .mount("/mnt/skills")?;                   // -> LocalMount
 // Composition is fully programmatic: add disk / embedded / mem layers in any
 // number; priority (desc) sets shadowing. Embedded > disk; mem > embedded.
 ```
 
-### 4.6 Data flow
+### 4.6 Runtime ownership (no bake)
+For the user-space case (mstream), file ownership is **discovered at runtime**,
+never baked. The daemon runs as the invoking user, so its own euid/egid are that
+user:
+
+```rust
+enum Owner { CurrentUser, Fixed(u32, u32), Root }   // default: CurrentUser
+fn resolve(o: Owner) -> Option<(u32, u32)> {
+    match o {
+        Owner::CurrentUser => Some(unsafe { (libc::geteuid(), libc::getegid()) }),
+        Owner::Fixed(u, g) => Some((u, g)),
+        Owner::Root        => Some((0, 0)),
+    }
+}
+```
+
+This maps onto the **existing** mount owner-override: `FsServerBuilder::mount_as
+(tag, path, ro, Some((uid, gid)))`. vfs already rewrites the returned `FileAttr`
+through `apply_owner_override` at all 7 attr-returning sites (server.rs:106, 933,
+1017, 1187, 1467, 1598, 1894), **independent of entry kind** — so embedded/static
+entries inherit the discovered uid/gid for free. Embedded layers therefore bake
+only mode bits; uid/gid stay 0 in the binary.
+
+Mount option note: for the single-user local case we **omit `AllowOther`** (vfs's
+`v1_mount_options` sets it for the root-managed VM service). Only the mounting
+user sees the mount — the desired default, and it avoids the
+`/etc/fuse.conf user_allow_other` requirement.
+
+### 4.7 Data flow
 ```
 read("/SKILL.md")
   └ FUSE -> FuseClient closure -> FsServer::handle_op(tag, Read)
@@ -205,9 +236,11 @@ read("/SKILL.md")
 - **Read-only vs writable mount.** Embedded layer is RO. Is the *mount* RO
   (writes denied, EROFS) or writable-scratch (writes land in a mem layer above)?
   Affects whether `mem_layer` is default-on and whiteout semantics.
-- **Embedded entry attrs.** Default mode (0o444/0o555?), owner (mount owner
-  override vs build-time), and **mtime policy** (fixed epoch for reproducible
-  builds vs build timestamp; `include_dir` `metadata` feature can carry mtime).
+- **Embedded entry attrs.** ~~owner~~ **RESOLVED (§4.6):** owner is discovered at
+  runtime via `geteuid/getegid` (default `Owner::CurrentUser`), never baked.
+  Still open: default mode (0o444/0o555?) and **mtime policy** (fixed epoch for
+  reproducible builds vs build timestamp; `include_dir` `metadata` feature can
+  carry mtime).
 - **Tag binding of a static layer.** Bound to one tag (simplest) vs tag-agnostic
   serving its tree under any tag.
 - **Observer vs broadcast.** Confirm we add the sync observer (recommended) and
