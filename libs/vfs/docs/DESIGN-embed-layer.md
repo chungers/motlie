@@ -12,6 +12,7 @@
 | 2026-06-28 | @claude-vfs-fuse | Initial draft. Scope: (1) embedded static layer-backing in the overlay, populated at build time via `include_dir!`; (2) synchronous access-logging observer hook. Decisions locked with David: new static layer-backing (not seeded MemOverlay); `include_dir!` whole-dir tooling; extend `motlie-vfs` (no new crate). |
 | 2026-06-28 | @claude-vfs-fuse | Add §4.6 Runtime ownership: file uid/gid discovered at runtime (`geteuid/getegid`, default `Owner::CurrentUser`), never baked; maps onto existing mount owner-override; omit `AllowOther` for single-user local mount. Resolves the owner part of §6.2. |
 | 2026-06-29 | @claude-vfs-fuse | Expand §4.1 with the concrete code shape for the static layer: `LayerSource` enum, `StaticLayer` resolution, `Layer` accessor dispatch, `put_static_layer` constructor, and `mem_entries_mut` RO gating. Server unchanged (only overlay method bodies change). Records the A-vs-B + copy-up analysis: seeding gives mutate-in-place, not COW; true COW needs a separate `do_write` copy-up change (server.rs:1343) orthogonal to layer choice. |
+| 2026-06-29 | @claude-vfs-fuse | Add §4.8 Consumer walkthrough (mstream): build-time asset designation via `include_dir!` in the binary crate, runtime composition into layers, and the asset → layer → tag → mountpoint mapping (with table). Path mapping is identity (whole-dir); multiple trees/disk compose by priority; multiple mounts = multiple builders. |
 
 ---
 
@@ -324,6 +325,72 @@ read("/SKILL.md")
        ├ FsResult::Data{bytes}
        └ observer.on_access({Read, path:/SKILL.md, bytes, errno:None, latency})
 ```
+
+### 4.8 Consumer walkthrough: asset → mount mapping (mstream)
+End-to-end, a consumer does three things: **designate assets at build time**,
+**compose them into layers under a tag**, and **mount that tag at a path**.
+
+**(1) Build-time — designate the assets** (in the consuming binary crate):
+```toml
+# bins/mstream/Cargo.toml
+[dependencies]
+motlie-vfs  = { path = "../../libs/vfs", features = ["client", "embed"] }
+include_dir = "0.7"
+```
+```rust
+// bins/mstream/src/skills.rs  — the include_dir! macro must live in the binary,
+// since the baked path + bytes are binary-specific. This *is* the designation.
+use include_dir::{include_dir, Dir};
+pub static SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/.agents/skills/project");
+```
+
+**(2)+(3) Runtime — map assets → layers → tag → mountpoint:**
+```rust
+use motlie_vfs::embed::{EmbeddedFs, Owner};
+use motlie_vfs::client::local::LocalMount;
+
+fn serve_skills(mountpoint: &std::path::Path) -> anyhow::Result<LocalMount> {
+    EmbeddedFs::builder()
+        .tag("skills")                       // the mount namespace
+        .embedded("skill-files", 50, &crate::skills::SKILLS) // asset Dir -> RO static layer
+        // .mem_layer("scratch", 100)        // optional writable upper (off in v1; see §6 copy-up)
+        .read_only(true)
+        .owner(Owner::CurrentUser)           // geteuid/getegid at runtime (§4.6)
+        .observer(TracingObserver::new())    // logs every read/write access
+        .mount(mountpoint)                   // -> LocalMount (unmounts on drop)
+}
+
+// startup
+let mp = cli.mount_path.unwrap_or(std::env::current_dir()?);   // default: cwd
+let _skills = serve_skills(&mp)?;            // held in a guard for the process lifetime
+// ... run mstream; on exit/signal, drop(_skills) unmounts.
+```
+
+**The mapping chain:**
+
+| Stage | Artifact | API |
+|------|----------|-----|
+| designate | `static SKILLS: Dir = include_dir!(…)` | (binary crate) |
+| → layer | RO static layer `"skill-files"`, priority 50, bound to tag `skills` | `.embedded(name, prio, &DIR)` |
+| → tag | `skills` = composed namespace (this + any mem/disk layers) | `.tag("skills")` |
+| → mount | one FUSE mount at `mountpoint` | `.mount(path) -> LocalMount` |
+
+**Path mapping is identity (whole-dir):** a file at `<DIR>/a/b.md` is served at
+`<mountpoint>/a/b.md`. A directory `<DIR>/sub` lists under `<mountpoint>/sub`.
+
+**Multiple asset trees / a disk base** compose into the same tag by priority —
+embedded shadows disk; a higher-priority embedded layer shadows a lower one:
+```rust
+EmbeddedFs::builder()
+    .tag("agent")
+    .embedded("skills", 50, &SKILLS)         // SKILLS shadows DOCS shadows disk
+    .embedded("docs",   40, &DOCS)
+    .disk_base("/work", /*ro*/ false)        // real fs at the bottom
+    .owner(Owner::CurrentUser)
+    .mount("/mnt/agent")?;
+```
+**Several independent mounts** = several builders (each its own tag + mountpoint +
+`LocalMount`); each returns a handle the app holds and drops to unmount.
 
 ## 5. System design / components to test
 - **StaticLayer resolution** (overlay): file/dir lookup, readdir enumeration,
