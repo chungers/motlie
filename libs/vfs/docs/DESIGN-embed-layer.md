@@ -11,6 +11,7 @@
 |------|-----|---------|
 | 2026-06-28 | @claude-vfs-fuse | Initial draft. Scope: (1) embedded static layer-backing in the overlay, populated at build time via `include_dir!`; (2) synchronous access-logging observer hook. Decisions locked with David: new static layer-backing (not seeded MemOverlay); `include_dir!` whole-dir tooling; extend `motlie-vfs` (no new crate). |
 | 2026-06-28 | @claude-vfs-fuse | Add §4.6 Runtime ownership: file uid/gid discovered at runtime (`geteuid/getegid`, default `Owner::CurrentUser`), never baked; maps onto existing mount owner-override; omit `AllowOther` for single-user local mount. Resolves the owner part of §6.2. |
+| 2026-06-29 | @claude-vfs-fuse | Expand §4.1 with the concrete code shape for the static layer: `LayerSource` enum, `StaticLayer` resolution, `Layer` accessor dispatch, `put_static_layer` constructor, and `mem_entries_mut` RO gating. Server unchanged (only overlay method bodies change). Records the A-vs-B + copy-up analysis: seeding gives mutate-in-place, not COW; true COW needs a separate `do_write` copy-up change (server.rs:1343) orthogonal to layer choice. |
 
 ---
 
@@ -93,32 +94,134 @@ distributes both working code and skill files. Access to those files is logged.
 
 ### 4.1 Layer source abstraction (overlay.rs)
 Today a `Layer` owns `entries: HashMap<(tag,path), OverlayNode>`. We introduce a
-backing enum so a layer is either the existing in-mem map or a static tree:
+backing enum so a layer is either the existing in-mem map or a static tree, then
+push the Mem-vs-Static difference behind a few `Layer` accessors so the existing
+resolution call sites barely change.
 
+**Core types:**
 ```rust
 enum LayerSource {
-    Mem(HashMap<(String, String), OverlayNode>),   // existing behavior
+    Mem(HashMap<(String, String), OverlayNode>),    // existing behavior
     Static(StaticLayer),                            // new: embedded
 }
 
 struct StaticLayer {
     dir: &'static include_dir::Dir<'static>,
-    tag: String,           // which mount tag this tree serves
-    attrs: OverlayAttrs,   // baked mode bits only (e.g. 0o444/0o555); uid/gid
-                           // left 0 and set at runtime via mount owner-override (§4.6)
-    // mtime policy: fixed epoch or build timestamp (TBD §8)
+    tag: String,          // single-tag binding
+    mode_file: u32,       // baked, e.g. 0o444   (uid/gid set at runtime via §4.6)
+    mode_dir:  u32,       // baked, e.g. 0o555
+    mtime: SystemTime,    // §8 policy (fixed epoch or build time)
+}
+
+struct Layer {
+    name: String,
+    priority: u32,
+    source: LayerSource,  // was: entries: HashMap<...>
 }
 ```
 
-Resolution functions gain a match on `LayerSource`:
-- `resolve(tag, path)` → `Static`: `dir.get_file(rel)` → `Content(Bytes::from_static(..))`;
-  `dir.get_dir(rel)` → `SyntheticDir`. Path normalized: overlay `/a/b` → include_dir `a/b`.
-- `readdir_children(tag, path)` → `Static`: enumerate `dir`'s entries at that path.
-- Mutations (`put`/`whiteout`/`remove`/`set_xattr`) on a `Static` layer → error.
+**Static resolution (the new logic):**
+```rust
+impl StaticLayer {
+    fn lookup(&self, tag: &str, path: &str) -> Option<OverlayEntryKind> {
+        if tag != self.tag { return None; }
+        let rel = path.trim_start_matches('/');                 // "/a/b" -> "a/b"
+        if rel.is_empty() { return Some(OverlayEntryKind::SyntheticDir); }   // root
+        if let Some(f) = self.dir.get_file(rel) {
+            return Some(OverlayEntryKind::Content(Bytes::from_static(f.contents()))); // zero-copy
+        }
+        self.dir.get_dir(rel).map(|_| OverlayEntryKind::SyntheticDir)
+    }
 
-The server's `do_readdir` / `do_lookup` / `do_read` are unchanged — they call the
-overlay's resolve/readdir which now transparently include static layers. This
-keeps the merge/shadow logic in one place.
+    fn children(&self, tag: &str, dir_path: &str) -> Vec<(String, OverlayEntryKind)> {
+        if tag != self.tag { return vec![]; }
+        let rel = dir_path.trim_start_matches('/');
+        let dir = if rel.is_empty() { self.dir }
+                  else { match self.dir.get_dir(rel) { Some(d) => d, None => return vec![] } };
+        dir.entries().iter().map(|e| {
+            let name = e.path().file_name().unwrap().to_string_lossy().into_owned();
+            match e {
+                include_dir::DirEntry::Dir(_)  => (name, OverlayEntryKind::SyntheticDir),
+                include_dir::DirEntry::File(f) => (name, OverlayEntryKind::Content(Bytes::from_static(f.contents()))),
+            }
+        }).collect()
+    }
+}
+```
+
+**Dispatch — `Layer` accessors (so call sites don't branch):**
+```rust
+impl Layer {
+    fn lookup(&self, tag: &str, path: &str) -> Option<OverlayEntryKind> {
+        match &self.source {
+            LayerSource::Mem(m)    => m.get(&(tag.into(), path.into())).map(|n| n.kind.clone()),
+            LayerSource::Static(s) => s.lookup(tag, path),
+        }
+    }
+    fn children(&self, tag: &str, dir: &str) -> Vec<(String, OverlayEntryKind)> {
+        match &self.source {
+            LayerSource::Mem(_)    => self.mem_children(tag, dir),  // existing is_direct_child logic
+            LayerSource::Static(s) => s.children(tag, dir),
+        }
+    }
+    fn attrs(&self, tag: &str, path: &str) -> Option<OverlayAttrs> { /* same shape */ }
+}
+```
+
+Existing public methods shrink to dispatch, e.g.:
+```rust
+pub fn resolve(&self, tag: &str, path: &str) -> Option<(String, OverlayEntryKind)> {
+    let snap = self.load_snapshot(tag);
+    for layer in &snap.layers {                       // priority desc, unchanged
+        if let Some(kind) = layer.lookup(tag, path) { return Some((layer.name.clone(), kind)); }
+    }
+    None
+}
+```
+`readdir_children` and `resolve_attrs` change the same way: `layer.entries.get(...)`
+→ `layer.lookup/children/attrs(...)`.
+
+**Constructor + read-only gating:**
+```rust
+impl MemOverlay {
+    pub fn put_static_layer(&self, name: &str, priority: u32, tag: &str,
+                            dir: &'static include_dir::Dir<'static>, attrs: OverlayAttrs) -> Result<()> {
+        let mut layers = self.layers.lock();
+        layers.insert(name.into(), Arc::new(Layer {
+            name: name.into(), priority,
+            source: LayerSource::Static(StaticLayer { dir, tag: tag.into(),
+                mode_file: attrs.mode, mode_dir: 0o555, mtime: attrs.mtime }),
+        }));
+        self.republish_all_tags(&layers);
+        Ok(())
+    }
+}
+
+// every mutation path routes through this — Static rejects:
+fn mem_entries_mut<'a>(arc: &'a mut Arc<Layer>, name: &str)
+    -> Result<&'a mut HashMap<(String,String), OverlayNode>> {
+    match &mut Arc::make_mut(arc).source {
+        LayerSource::Mem(m)    => Ok(m),
+        LayerSource::Static(_) => bail!("layer {name} is read-only (embedded)"),
+    }
+}
+```
+`apply_batch`, `set_xattr`, `remove_xattr`, `create_dir` swap `get_layer_mut` →
+`mem_entries_mut`, so embedded writes fail cleanly (EROFS upstream). xattr getters
+on a `Static` layer return `ENODATA`.
+
+**Blast radius / notes:**
+- **Server (server.rs): zero change** — it already calls `overlay.resolve` /
+  `readdir_children` / `resolve_attrs`; only their bodies change. So
+  `do_readdir` / `do_lookup` / `do_read` transparently include static layers and
+  the merge/shadow logic stays in one place.
+- **Snapshots unchanged** — `TagSnapshot { layers: Vec<Arc<Layer>> }`; a Static
+  layer Arc-clones for free (just the `&'static` ref).
+- **`Bytes::from_static` requires `'static`** — holds because the consuming binary
+  declares `static SKILLS: Dir = include_dir!(…)`.
+- **Feature gating:** the `embed` feature pulls `include_dir`; gate the `Static`
+  variant + match arms with `#[cfg(feature = "embed")]`, or keep `include_dir` as
+  a light always-on dep to avoid cfg'd enum arms (decide in PLAN).
 
 ### 4.2 Build-time tooling
 The consuming binary owns the bake; the macro path is binary-relative:
@@ -236,6 +339,14 @@ read("/SKILL.md")
 - **Read-only vs writable mount.** Embedded layer is RO. Is the *mount* RO
   (writes denied, EROFS) or writable-scratch (writes land in a mem layer above)?
   Affects whether `mem_layer` is default-on and whiteout semantics.
+  - **Copy-up note:** vfs has **no copy-up today**. `do_write` (server.rs:1343)
+    resolves the *winning* layer and writes back into that same layer
+    (mutate-in-place); with a Static lower layer the write fails (EROFS), with a
+    seeded mem layer it would corrupt the embedded original. True overlayfs-style
+    COW (write to lower-only file → copy content up into the writable layer,
+    leave lower intact) is a **separate `do_write`/`do_setattr` change**,
+    orthogonal to the A/B layer choice. v1 default: RO → EROFS; copy-up is a
+    future feature if writable embedded files are needed.
 - **Embedded entry attrs.** ~~owner~~ **RESOLVED (§4.6):** owner is discovered at
   runtime via `geteuid/getegid` (default `Owner::CurrentUser`), never baked.
   Still open: default mode (0o444/0o555?) and **mtime policy** (fixed epoch for
