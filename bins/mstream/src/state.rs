@@ -62,6 +62,10 @@ const OUTPUT_AUDIT_CHANNEL_CAPACITY: usize = 4_096;
 const SESSION_RECONCILE_TIMEOUT_MS: u64 = 1_500;
 const BOOT_EXIT_CHECK_DELAY_MS: u64 = 750;
 const BOOT_EXIT_CAPTURE_LINES: i32 = -120;
+/// Scrollback for spawned agent sessions. tmux defaults to 2000 lines, far too
+/// small for verbose LLM-agent transcripts — operators can't scroll back far
+/// enough to read the agent. 50k gives deep scrollback at modest memory cost.
+const AGENT_SESSION_HISTORY_LIMIT: u32 = 50_000;
 
 pub struct DaemonState {
     fleet: Fleet,
@@ -1403,6 +1407,7 @@ impl DaemonState {
         let env = session_environment(&request.workstream, &request.role)?;
         let opts = CreateSessionOptions {
             command: None,
+            history_limit: Some(AGENT_SESSION_HISTORY_LIMIT),
             initial_environment: env,
             ..Default::default()
         };
