@@ -1,5 +1,6 @@
 # DESIGN — Embedded Layer + Access Logging for motlie-vfs
 
+> Tracking issue: [#590](https://github.com/chungers/motlie/issues/590).
 > Extension to `motlie-vfs`. First consumer: `bins/mstream` distributes its
 > `.agents/skills/project/` skill tree baked into the binary and mounts it over
 > FUSE on startup.
