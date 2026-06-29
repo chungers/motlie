@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::echo_match::match_assistant_echo_signature;
+
 use crate::early_response::MissingSignalPolicy;
 use crate::quality::{
     BargeInQualityConfig, ConversationPolicyConfig, ConversationPolicyMode,
@@ -367,6 +369,8 @@ impl ConversationPolicyConfig {
                 FinalTranscriptDispatchReason::AssistantEcho,
             );
         }
+        // ASR confidence can be high on post-playback echo fragments; length remains the
+        // echo-biased guardrail during this narrow replacement-playback window.
         if is_post_playback_fragment(evidence.text, self) {
             return FinalTranscriptDispatchDecision::suppress(
                 FinalTranscriptDispatchReason::ShortFragment,
@@ -429,78 +433,11 @@ fn post_playback_echo_match(
     config: &EchoSuppressionQualityConfig,
     evidence: FinalTranscriptDispatchEvidence<'_>,
 ) -> bool {
-    if !config.enabled {
-        return false;
-    }
     let Some(assistant_echo_signature) = evidence.assistant_echo_signature else {
         return false;
     };
-    if assistant_echo_signature.is_empty() {
-        return false;
-    }
-    let candidate_tokens = normalized_tokens(evidence.text);
-    if candidate_tokens.iter().map(String::len).sum::<usize>() < config.min_text_chars {
-        return false;
-    }
-    let assistant_tokens = assistant_echo_signature
-        .split_whitespace()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if candidate_tokens.len() < 2 || assistant_tokens.len() < 2 {
-        return false;
-    }
-    let matching_tokens = candidate_tokens
-        .iter()
-        .filter(|token| assistant_tokens.iter().any(|assistant| assistant == *token))
-        .count();
-    let token_coverage_percent = ((matching_tokens * 100) / candidate_tokens.len().max(1)) as u64;
-    let longest_token_run = longest_common_token_run(&candidate_tokens, &assistant_tokens);
-    if candidate_tokens.len() < config.long_min_tokens {
-        matching_tokens >= 2
-            && token_coverage_percent >= config.short_token_coverage_percent
-            && longest_token_run >= config.short_longest_token_run
-    } else {
-        let contiguous_run_echo = longest_token_run
-            >= config
-                .long_longest_token_run
-                .saturating_mul(2)
-                .max(config.long_longest_token_run);
-        matching_tokens >= config.long_longest_token_run
-            && longest_token_run >= config.long_longest_token_run
-            && (token_coverage_percent >= config.long_token_coverage_percent || contiguous_run_echo)
-    }
-}
 
-fn normalized_tokens(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    for ch in text.chars() {
-        if ch.is_alphanumeric() || ch == '\'' {
-            token.extend(ch.to_lowercase());
-        } else if !token.is_empty() {
-            tokens.push(std::mem::take(&mut token));
-        }
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-    tokens
-}
-
-fn longest_common_token_run(left: &[String], right: &[String]) -> usize {
-    let mut previous = vec![0usize; right.len() + 1];
-    let mut longest = 0usize;
-    for left_token in left {
-        let mut current = vec![0usize; right.len() + 1];
-        for (index, right_token) in right.iter().enumerate() {
-            if left_token == right_token {
-                current[index + 1] = previous[index] + 1;
-                longest = longest.max(current[index + 1]);
-            }
-        }
-        previous = current;
-    }
-    longest
+    match_assistant_echo_signature(config, evidence.text, assistant_echo_signature).is_some()
 }
 
 fn legacy_transcript_scores_allow_barge_in(
@@ -855,6 +792,25 @@ mod tests {
             decision.action,
             FinalTranscriptDispatchAction::SuppressPostPlaybackEcho
         );
+        assert_eq!(
+            decision.reason,
+            FinalTranscriptDispatchReason::ShortFragment
+        );
+    }
+
+    #[test]
+    fn cancel_only_dispatch_guard_suppresses_short_final_fragments() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            post_barge_in_echo_guard_ms: 2_000,
+            ..ConversationPolicyConfig::default()
+        };
+        let decision = policy.decide_final_transcript_dispatch(
+            &scored_final_barge_in(),
+            &EchoSuppressionQualityConfig::default(),
+            guarded_final_evidence("up now", None),
+        );
+
         assert_eq!(
             decision.reason,
             FinalTranscriptDispatchReason::ShortFragment

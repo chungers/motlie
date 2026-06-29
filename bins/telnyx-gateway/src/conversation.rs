@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context};
-use chrono::Utc;
 use motlie_agent::voice::turn_batching::{
     Accumulating, Prompt, TurnBatchCompletionReason, TurnBatchReset,
 };
@@ -24,8 +23,7 @@ use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::{SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
     CallStatus, ConversationMode, LogLevel, QualityConversationProcessorVisibleTurn,
-    QualityPlaybackMetadata, QualitySpanEmission, SharedState, TtsPlaybackStatus,
-    TurnBatchActiveState,
+    QualityPlaybackMetadata, QualitySpanEmission, SharedState, TurnBatchActiveState,
 };
 pub use crate::processors::{
     ConversationCommittedTurn, ConversationProcessorInput, ConversationProcessorKind,
@@ -52,6 +50,7 @@ pub struct ConversationRuntime {
     deferred_policy_outputs:
         Arc<Mutex<HashMap<String, ConversationPolicyQueue<PendingConversationSay>>>>,
     barge_in_coalesce_windows: Arc<Mutex<HashMap<String, BargeInCoalesceWindow>>>,
+    post_barge_in_replacement_guard_intents: Arc<Mutex<HashMap<String, Instant>>>,
     post_barge_in_dispatch_guards: Arc<Mutex<HashMap<String, PostBargeInDispatchGuard>>>,
     processor_generations: Arc<Mutex<HashMap<String, u64>>>,
     processor_hosts: Arc<Mutex<HashMap<String, ConversationProcessorHost>>>,
@@ -175,6 +174,7 @@ impl ConversationRuntime {
             deferred_say_generations: Arc::new(Mutex::new(HashMap::new())),
             deferred_policy_outputs: Arc::new(Mutex::new(HashMap::new())),
             barge_in_coalesce_windows: Arc::new(Mutex::new(HashMap::new())),
+            post_barge_in_replacement_guard_intents: Arc::new(Mutex::new(HashMap::new())),
             post_barge_in_dispatch_guards: Arc::new(Mutex::new(HashMap::new())),
             processor_generations: Arc::new(Mutex::new(HashMap::new())),
             processor_hosts: Arc::new(Mutex::new(HashMap::new())),
@@ -632,19 +632,19 @@ pub async fn handle_transcript_event_with_metadata(
 
     let final_transcript_at = Instant::now();
 
-    let active_or_recent_playback = active_playback || snapshot.tts_playback_active_or_recent;
+    let post_barge_in_guard_active = post_barge_in_dispatch_guard_active(
+        runtime,
+        media_registry,
+        gateway_call_id,
+        &snapshot.quality_config.conversation_policy,
+        active_playback_id.as_deref(),
+        snapshot.tts_playback_id.as_deref(),
+    )
+    .await;
     let dispatch_evidence = FinalTranscriptDispatchEvidence {
         text: &transcript_text,
-        post_barge_in_guard_active: post_barge_in_dispatch_guard_active(
-            runtime,
-            gateway_call_id,
-            &snapshot.quality_config.conversation_policy,
-            active_or_recent_playback,
-            active_playback_id.as_deref(),
-            snapshot.tts_playback_id.as_deref(),
-        )
-        .await,
-        active_or_recent_playback,
+        post_barge_in_guard_active,
+        active_or_recent_playback: active_playback || post_barge_in_guard_active,
         confidence: transcript_confidence,
         stability: metadata.stability,
         assistant_echo_signature: snapshot.assistant_echo_signature.as_deref(),
@@ -745,6 +745,12 @@ pub async fn handle_transcript_event_with_metadata(
         return Ok(());
     }
     if snapshot.endpoint_merge_window_ms == 0 || !runtime.final_coalescing_enabled() {
+        let post_barge_in_dispatch_guard = take_post_barge_in_replacement_guard_intent(
+            runtime,
+            gateway_call_id,
+            &quality_config.conversation_policy,
+        )
+        .await;
         return dispatch_final_transcript_to_processor(
             state,
             media_registry,
@@ -771,7 +777,7 @@ pub async fn handle_transcript_event_with_metadata(
                     .map(<[String]>::to_vec)
                     .unwrap_or_default(),
                 metadata: QualityPlaybackMetadata::default(),
-                post_barge_in_dispatch_guard: false,
+                post_barge_in_dispatch_guard,
             },
         )
         .await;
@@ -858,6 +864,62 @@ async fn clear_barge_in_policy_window(
         .is_some()
 }
 
+const STALE_REPLACEMENT_GUARD_INTENT_MS: u64 = 30_000;
+
+fn conversation_policy_uses_post_barge_in_dispatch_guard(
+    policy: &ConversationPolicyConfig,
+) -> bool {
+    matches!(
+        policy.mode,
+        ConversationPolicyMode::BargeInCancelOnly
+            | ConversationPolicyMode::BargeInCoalesceAfterSilence
+    ) && policy.post_barge_in_echo_guard_ms > 0
+}
+
+fn conversation_policy_mode_can_arm_post_barge_in_dispatch_guard(
+    mode: ConversationPolicyMode,
+) -> bool {
+    matches!(
+        mode,
+        ConversationPolicyMode::BargeInCancelOnly
+            | ConversationPolicyMode::BargeInCoalesceAfterSilence
+    )
+}
+
+async fn record_post_barge_in_replacement_guard_intent(
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    mode: ConversationPolicyMode,
+) {
+    if !conversation_policy_mode_can_arm_post_barge_in_dispatch_guard(mode) {
+        return;
+    }
+    runtime
+        .post_barge_in_replacement_guard_intents
+        .lock()
+        .await
+        .insert(gateway_call_id.to_string(), Instant::now());
+}
+
+async fn take_post_barge_in_replacement_guard_intent(
+    runtime: &ConversationRuntime,
+    gateway_call_id: &str,
+    policy: &ConversationPolicyConfig,
+) -> bool {
+    if !conversation_policy_uses_post_barge_in_dispatch_guard(policy) {
+        return false;
+    }
+    let Some(armed_at) = runtime
+        .post_barge_in_replacement_guard_intents
+        .lock()
+        .await
+        .remove(gateway_call_id)
+    else {
+        return false;
+    };
+    armed_at.elapsed() <= Duration::from_millis(STALE_REPLACEMENT_GUARD_INTENT_MS)
+}
+
 async fn arm_post_barge_in_dispatch_guard(
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
@@ -874,38 +936,55 @@ async fn arm_post_barge_in_dispatch_guard(
 
 async fn post_barge_in_dispatch_guard_active(
     runtime: &ConversationRuntime,
+    media_registry: &SharedMediaRegistry,
     gateway_call_id: &str,
     policy: &ConversationPolicyConfig,
-    active_or_recent_playback: bool,
     active_playback_id: Option<&str>,
     tts_playback_id: Option<&str>,
 ) -> bool {
+    // Backstop for leaked guards; normal lifetime is bounded by the configured echo window
+    // and the guarded playback ID remaining active or recently terminal in the media registry.
     const STALE_GUARD_MAX_MS: u64 = 300_000;
-    if !matches!(
-        policy.mode,
-        ConversationPolicyMode::BargeInCoalesceAfterSilence
-    ) || policy.post_barge_in_echo_guard_ms == 0
-    {
+    if !conversation_policy_uses_post_barge_in_dispatch_guard(policy) {
         return false;
     }
-    let mut guards = runtime.post_barge_in_dispatch_guards.lock().await;
-    if !active_or_recent_playback {
-        guards.remove(gateway_call_id);
-        return false;
-    }
-    let Some(guard) = guards.get(gateway_call_id) else {
+
+    let Some(guard) = ({
+        let mut guards = runtime.post_barge_in_dispatch_guards.lock().await;
+        let Some(guard) = guards.get(gateway_call_id).cloned() else {
+            return false;
+        };
+        if guard.armed_at.elapsed() > Duration::from_millis(STALE_GUARD_MAX_MS) {
+            guards.remove(gateway_call_id);
+            return false;
+        }
+        Some(guard)
+    }) else {
         return false;
     };
-    if guard.armed_at.elapsed() > Duration::from_millis(STALE_GUARD_MAX_MS) {
-        guards.remove(gateway_call_id);
+
+    let guarded_playback = guard.playback_id.as_str();
+    let different_active_playback =
+        active_playback_id.is_some_and(|playback_id| playback_id != guarded_playback);
+    let different_tts_playback =
+        tts_playback_id.is_some_and(|playback_id| playback_id != guarded_playback);
+    if different_active_playback || different_tts_playback {
+        clear_post_barge_in_dispatch_guard(runtime, gateway_call_id).await;
         return false;
     }
-    let matches_guarded_playback = active_playback_id == Some(guard.playback_id.as_str())
-        || tts_playback_id == Some(guard.playback_id.as_str());
-    if matches_guarded_playback {
+
+    if media_registry
+        .speech_playback_active_or_recent(
+            gateway_call_id,
+            guarded_playback,
+            Duration::from_millis(policy.post_barge_in_echo_guard_ms),
+        )
+        .await
+    {
         return true;
     }
-    guards.remove(gateway_call_id);
+
+    clear_post_barge_in_dispatch_guard(runtime, gateway_call_id).await;
     false
 }
 
@@ -1065,13 +1144,18 @@ async fn schedule_conversation_final(
             else {
                 return;
             };
-            let post_barge_in_dispatch_guard =
-                clear_barge_in_policy_window(&runtime, &gateway_call_id).await
-                    && pending
-                        .quality_config
-                        .conversation_policy
-                        .post_barge_in_echo_guard_ms
-                        > 0;
+            let had_barge_in_policy_window =
+                clear_barge_in_policy_window(&runtime, &gateway_call_id).await;
+            let post_barge_in_dispatch_guard = take_post_barge_in_replacement_guard_intent(
+                &runtime,
+                &gateway_call_id,
+                &pending.quality_config.conversation_policy,
+            )
+            .await
+                || (had_barge_in_policy_window
+                    && conversation_policy_uses_post_barge_in_dispatch_guard(
+                        &pending.quality_config.conversation_policy,
+                    ));
             emit_conversation_final_debounce_span(&state, &gateway_call_id, &pending, debounce)
                 .await;
             if let Err(error) = dispatch_final_transcript_to_processor(
@@ -1827,6 +1911,7 @@ async fn cancel_active_speech_for_barge_in(
         reset_turn_batch_for_barge_in(state, runtime, gateway_call_id).await;
     }
     record_barge_in_policy_window(runtime, gateway_call_id, decision).await;
+    record_post_barge_in_replacement_guard_intent(runtime, gateway_call_id, decision.mode).await;
     state
         .write()
         .await
@@ -2085,7 +2170,6 @@ struct ConversationSnapshot {
     endpoint_merge_window_ms: u64,
     assistant_echo_signature: Option<String>,
     tts_playback_id: Option<String>,
-    tts_playback_active_or_recent: bool,
     quality_config: VoiceQualityConfig,
 }
 
@@ -2117,13 +2201,6 @@ async fn conversation_snapshot(
         .map(|tts| tts.echo_signature.clone())
         .filter(|signature| !signature.is_empty());
     let tts_playback_id = call.tts.as_ref().map(|tts| tts.playback_id.clone());
-    let tts_playback_active_or_recent = call.tts.as_ref().is_some_and(|tts| {
-        tts_playback_active_or_recent(
-            tts.status,
-            tts.updated_at,
-            &effective_quality.conversation_policy,
-        )
-    });
     Some(ConversationSnapshot {
         attached: call.conversation.attached,
         mode: call.conversation.mode,
@@ -2135,29 +2212,8 @@ async fn conversation_snapshot(
         endpoint_merge_window_ms,
         assistant_echo_signature,
         tts_playback_id,
-        tts_playback_active_or_recent,
         quality_config: effective_quality,
     })
-}
-
-fn tts_playback_active_or_recent(
-    status: TtsPlaybackStatus,
-    updated_at: chrono::DateTime<Utc>,
-    policy: &ConversationPolicyConfig,
-) -> bool {
-    match status {
-        TtsPlaybackStatus::Queued
-        | TtsPlaybackStatus::Playing
-        | TtsPlaybackStatus::MarkSent
-        | TtsPlaybackStatus::Canceling => true,
-        TtsPlaybackStatus::Completed | TtsPlaybackStatus::Canceled => {
-            let age_ms = Utc::now()
-                .signed_duration_since(updated_at)
-                .num_milliseconds();
-            (0..=policy.post_barge_in_echo_guard_ms as i64).contains(&age_ms)
-        }
-        TtsPlaybackStatus::Failed => false,
-    }
 }
 
 #[cfg(test)]
@@ -4014,7 +4070,36 @@ second"
     }
 
     #[tokio::test]
-    async fn post_barge_in_dispatch_guard_suppresses_playback_fragments() {
+    async fn coalesce_post_barge_in_dispatch_guard_suppresses_playback_fragments() {
+        assert_post_barge_in_dispatch_guard_suppresses_playback_fragments(
+            ConversationPolicyMode::BargeInCoalesceAfterSilence,
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancel_only_post_barge_in_dispatch_guard_suppresses_playback_fragments() {
+        assert_post_barge_in_dispatch_guard_suppresses_playback_fragments(
+            ConversationPolicyMode::BargeInCancelOnly,
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn post_barge_in_dispatch_guard_suppresses_recently_finished_playback_fragments() {
+        assert_post_barge_in_dispatch_guard_suppresses_playback_fragments(
+            ConversationPolicyMode::BargeInCancelOnly,
+            true,
+        )
+        .await;
+    }
+
+    async fn assert_post_barge_in_dispatch_guard_suppresses_playback_fragments(
+        policy_mode: ConversationPolicyMode,
+        finish_replacement_before_fragment: bool,
+    ) {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_conversation_call(&state, ConversationMode::Auto).await;
         state.write().await.record_conversation_speaking(
@@ -4036,8 +4121,7 @@ second"
         {
             let mut guard = state.write().await;
             guard.quality.config.set_endpoint_merge_window_ms(0);
-            guard.quality.config.conversation_policy.mode =
-                ConversationPolicyMode::BargeInCoalesceAfterSilence;
+            guard.quality.config.conversation_policy.mode = policy_mode;
             guard.quality.config.barge_in.final_min_confidence = Some(0.70);
             guard
                 .quality
@@ -4073,18 +4157,23 @@ second"
             },
         )
         .await
-        .expect("replacement final should cancel active playback and enter coalesce window");
+        .expect("replacement final should cancel active playback and queue replacement");
         assert!(cancel.is_canceled());
 
         let replacement_playback_id = match timeout(Duration::from_secs(2), rx.recv())
             .await
-            .expect("replacement response should queue after silence window")
+            .expect("replacement response should queue")
             .expect("replacement response should emit a media command")
         {
             crate::media::OutboundMediaCommand::Frame(frame) => frame.playback_id,
             other => panic!("expected replacement frame, got {other:?}"),
         };
         assert_ne!(replacement_playback_id, "tts_test");
+        if finish_replacement_before_fragment {
+            media_registry
+                .finish_speech(&gateway_call_id, &replacement_playback_id)
+                .await;
+        }
 
         handle_transcript_event_with_metadata(
             &state,
@@ -4104,13 +4193,17 @@ second"
         .await
         .expect("post-playback fragment should be suppressed");
 
-        assert_eq!(
-            media_registry
-                .active_speech_playback_id(&gateway_call_id)
-                .await
-                .as_deref(),
-            Some(replacement_playback_id.as_str())
-        );
+        let active_playback_after_fragment = media_registry
+            .active_speech_playback_id(&gateway_call_id)
+            .await;
+        if finish_replacement_before_fragment {
+            assert!(active_playback_after_fragment.is_none());
+        } else {
+            assert_eq!(
+                active_playback_after_fragment.as_deref(),
+                Some(replacement_playback_id.as_str())
+            );
+        }
         let no_new_playback = timeout(Duration::from_millis(120), async {
             while let Some(command) = rx.recv().await {
                 if let crate::media::OutboundMediaCommand::Frame(frame) = command {

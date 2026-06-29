@@ -32,10 +32,10 @@ use crate::early_response::{
     EarlyResponseCommitMember, EarlyResponseInput, EarlyResponsePartial,
     EarlyResponsePipelineHandle, EarlyResponsePipelineServices,
 };
+use crate::echo_match::{match_assistant_echo_signature, AssistantEchoMatch};
 use crate::operator::state::{
-    speech_echo_signature, CallSession, CallStatus, GatewayState, LogLevel, MediaMetadata,
-    QualitySpanEmission, SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState,
-    TtsPlaybackStatus,
+    CallSession, CallStatus, GatewayState, LogLevel, MediaMetadata, QualitySpanEmission,
+    SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
 };
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
@@ -255,16 +255,35 @@ struct ActiveSpeechJob {
     cancel: SpeechCancelToken,
 }
 
+#[derive(Clone, Debug)]
+struct RecentSpeechPlayback {
+    playback_id: String,
+    terminal_at: Instant,
+}
+
 #[derive(Clone)]
 struct MediaRegistryEntry {
     tx: mpsc::Sender<OutboundMediaCommand>,
     active_speech: Option<ActiveSpeechJob>,
     pending_clears: VecDeque<PendingClear>,
+    recent_speech: VecDeque<RecentSpeechPlayback>,
 }
 
 #[derive(Clone, Default)]
 pub struct SharedMediaRegistry {
     inner: Arc<Mutex<HashMap<String, MediaRegistryEntry>>>,
+}
+
+const RECENT_SPEECH_PLAYBACK_LIMIT: usize = 8;
+
+fn record_recent_speech(entry: &mut MediaRegistryEntry, playback_id: String) {
+    entry.recent_speech.push_back(RecentSpeechPlayback {
+        playback_id,
+        terminal_at: Instant::now(),
+    });
+    while entry.recent_speech.len() > RECENT_SPEECH_PLAYBACK_LIMIT {
+        entry.recent_speech.pop_front();
+    }
 }
 
 impl SharedMediaRegistry {
@@ -279,6 +298,7 @@ impl SharedMediaRegistry {
                 tx,
                 active_speech: None,
                 pending_clears: VecDeque::new(),
+                recent_speech: VecDeque::new(),
             },
         );
     }
@@ -330,6 +350,7 @@ impl SharedMediaRegistry {
                 requested_at: Instant::now(),
                 reason: SpeechClearReason::CancelAndReplace,
             });
+            record_recent_speech(entry, active.playback_id.clone());
             active.playback_id
         });
         entry.active_speech = Some(ActiveSpeechJob {
@@ -363,6 +384,7 @@ impl SharedMediaRegistry {
             .take()
             .with_context(|| format!("no active speech job for call {gateway_call_id}"))?;
         active.cancel.cancel();
+        record_recent_speech(entry, active.playback_id.clone());
         entry.pending_clears.push_back(PendingClear {
             playback_id: active.playback_id.clone(),
             requested_at: Instant::now(),
@@ -391,6 +413,7 @@ impl SharedMediaRegistry {
             return Ok(false);
         };
         active.cancel.cancel();
+        record_recent_speech(entry, active.playback_id.clone());
         entry.pending_clears.push_back(PendingClear {
             playback_id: active.playback_id,
             requested_at: Instant::now(),
@@ -418,6 +441,28 @@ impl SharedMediaRegistry {
             .map(|active| active.playback_id.clone())
     }
 
+    pub async fn speech_playback_active_or_recent(
+        &self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        recent_window: Duration,
+    ) -> bool {
+        let guard = self.inner.lock().await;
+        let Some(entry) = guard.get(gateway_call_id) else {
+            return false;
+        };
+        if entry
+            .active_speech
+            .as_ref()
+            .is_some_and(|active| active.playback_id == playback_id)
+        {
+            return true;
+        }
+        entry.recent_speech.iter().rev().any(|recent| {
+            recent.playback_id == playback_id && recent.terminal_at.elapsed() <= recent_window
+        })
+    }
+
     pub async fn finish_speech(&self, gateway_call_id: &str, playback_id: &str) {
         if let Some(entry) = self.inner.lock().await.get_mut(gateway_call_id) {
             if entry
@@ -425,7 +470,10 @@ impl SharedMediaRegistry {
                 .as_ref()
                 .is_some_and(|active| active.playback_id == playback_id)
             {
-                entry.active_speech = None;
+                let Some(active) = entry.active_speech.take() else {
+                    return;
+                };
+                record_recent_speech(entry, active.playback_id);
             }
         }
     }
@@ -3550,12 +3598,6 @@ fn new_local_turn_id() -> String {
     format!("turn_{}", uuid::Uuid::new_v4().simple())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AssistantEchoMatch {
-    token_coverage_percent: u64,
-    longest_token_run: usize,
-}
-
 fn tts_matches_asr_source(
     tts: &TtsPlaybackState,
     quality_session: Option<&ActiveAsrQualitySession>,
@@ -3578,53 +3620,15 @@ fn assistant_echo_match(
     transcript_text: &str,
     quality_session: Option<&ActiveAsrQualitySession>,
 ) -> Option<AssistantEchoMatch> {
-    if !config.enabled {
-        return None;
-    }
     let tts = call.tts.as_ref()?;
     if tts_matches_asr_source(tts, quality_session) {
         return None;
     }
-    if !tts_in_echo_window(tts, config.tail_window_ms as i64) || tts.echo_signature.is_empty() {
+    if !tts_in_echo_window(tts, config.tail_window_ms as i64) {
         return None;
     }
 
-    let candidate = speech_echo_signature(transcript_text);
-    if candidate.chars().count() < config.min_text_chars {
-        return None;
-    }
-    if tts.echo_signature.contains(&candidate) {
-        return Some(AssistantEchoMatch {
-            token_coverage_percent: 100,
-            longest_token_run: candidate.split_whitespace().count(),
-        });
-    }
-
-    let candidate_tokens = candidate.split_whitespace().collect::<Vec<_>>();
-    let assistant_tokens = tts.echo_signature.split_whitespace().collect::<Vec<_>>();
-    if candidate_tokens.len() < 2 || assistant_tokens.len() < 2 {
-        return None;
-    }
-
-    let assistant_token_set = assistant_tokens.iter().copied().collect::<HashSet<_>>();
-    let matching_tokens = candidate_tokens
-        .iter()
-        .filter(|token| assistant_token_set.contains(**token))
-        .count();
-    let token_coverage_percent = ((matching_tokens * 100) / candidate_tokens.len().max(1)) as u64;
-    let longest_token_run = longest_common_token_run(&candidate_tokens, &assistant_tokens);
-    let is_short_echo = candidate_tokens.len() < config.long_min_tokens
-        && matching_tokens >= 2
-        && token_coverage_percent >= config.short_token_coverage_percent
-        && longest_token_run >= config.short_longest_token_run;
-    let is_long_echo = candidate_tokens.len() >= config.long_min_tokens
-        && matching_tokens >= config.long_longest_token_run
-        && token_coverage_percent >= config.long_token_coverage_percent
-        && longest_token_run >= config.long_longest_token_run;
-    (is_short_echo || is_long_echo).then_some(AssistantEchoMatch {
-        token_coverage_percent,
-        longest_token_run,
-    })
+    match_assistant_echo_signature(config, transcript_text, &tts.echo_signature)
 }
 
 fn trim_quarantined_echo_prefix(text: &str, prefix: &str) -> Option<String> {
@@ -3827,22 +3831,6 @@ fn tts_in_echo_window(tts: &TtsPlaybackState, tail_window_ms: i64) -> bool {
         }
         TtsPlaybackStatus::Failed => false,
     }
-}
-
-fn longest_common_token_run(left: &[&str], right: &[&str]) -> usize {
-    let mut previous = vec![0usize; right.len() + 1];
-    let mut longest = 0usize;
-    for left_token in left {
-        let mut current = vec![0usize; right.len() + 1];
-        for (index, right_token) in right.iter().enumerate() {
-            if left_token == right_token {
-                current[index + 1] = previous[index] + 1;
-                longest = longest.max(current[index + 1]);
-            }
-        }
-        previous = current;
-    }
-    longest
 }
 
 async fn record_transcript_events(
