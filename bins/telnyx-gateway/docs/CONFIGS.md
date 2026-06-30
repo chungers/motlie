@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-29 PDT | @codex-541 | Added opt-in #586 `echo_characterization` diagnostic knobs for measuring inbound/outbound echo correlation before the AEC/VAD follow-up. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs for suppressing active/recent-playback echo fragments before they cancel or reach the processor. |
 | 2026-06-28 PDT | @codex-541 | Marked `barge_in_coalesce_after_silence` experimental and not live-validated pending the post-playback dispatch guard tracked in #587. |
 | 2026-06-28 PDT | @codex-541 | Marked the barge-in Identity profile as not yet validated under the 450 ms TTS pacing baseline after post-playback fragments escaped as new turns. |
@@ -401,6 +402,26 @@ will capture and repeat the feedback as more caller turns.
 | `long_min_tokens` | `4` | Token count where long thresholds apply. |
 | `long_token_coverage_percent` | `60` | Long-candidate token coverage threshold. |
 | `long_longest_token_run` | `3` | Long-candidate contiguous token-run threshold. |
+
+### Echo Characterization
+
+`[voice_quality.echo_characterization]` is an opt-in, measurement-only #586
+instrumentation surface. It does not change ASR, barge-in, cancellation, or
+conversation policy decisions. When enabled, the media layer keeps a short
+rolling outbound TTS reference and emits `media.echo_characterization` quality
+spans while that playback is active or recently completed.
+
+| Key | Typical value | Purpose |
+| --- | --- | --- |
+| `enabled` | `false` normally; `true` for #586 live probes | Enables the diagnostic span. |
+| `window_ms` | `240` | Outbound reference window compared with inbound media. |
+| `max_delay_ms` | `160` | Maximum delayed-playback alignment searched for echo correlation. |
+| `emit_interval_ms` | `500` | Minimum interval between diagnostic spans on a media stream. |
+
+Use this only in per-run configs when characterizing barge-in false onsets or
+post-playback leakage. Post-merge #586 follow-up should analyze correlation
+peak, estimated delay, and echo return level across live barge-in samples before
+choosing the AEC path or an echo-aware onset gate.
 
 ### Quality Logging And Judge
 

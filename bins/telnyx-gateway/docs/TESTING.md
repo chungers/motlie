@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-06-29 PDT | @codex-541 | Added #586 echo-characterization live-run protocol: enable the diagnostic per run, record `media.echo_characterization` metrics, and leave AEC/VAD behavior changes to follow-up after PR #588. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs to the live-test protocol; the next barge-in run should verify one clean replacement turn before #586 AEC/VAD work. |
 | 2026-06-28 PDT | @codex-541 | Recorded the failed barge-in Identity 450 ms run: post-playback ASR fragments escaped as new turns, so the next barge-in step is a code fix rather than knob-only tuning. |
 | 2026-06-28 PDT | @codex-541 | Promoted `streaming_start_buffer_ms = 450` for the no-barge-in Identity TTS pacing baseline and recorded that barge-in plus turn-batching N=2 still require separate validation. |
@@ -77,7 +78,7 @@ Create the run config from a committed redacted example. Use the generic templat
 The global TOML surface and tuning knobs are documented in
 [`CONFIGS.md`](CONFIGS.md). Use that guide as the canonical user-facing
 reference for conversation, endpoint, TTS, early response, barge-in,
-conversation policy, and quality logging knobs.
+conversation policy, echo characterization, and quality logging knobs.
 
 ```sh
 RUN_ID="$(date +%Y%m%d-%H%M%S)-clause-coalesce-v1"
@@ -1104,6 +1105,22 @@ PY
 Redact phone numbers, live public hosts, connection IDs, call IDs, and unrelated
 personal data before copying logs into issues or PR comments.
 
+For #586 echo-characterization probes, enable this block in the per-run config:
+
+```toml
+[voice_quality.echo_characterization]
+enabled = true
+window_ms = 240
+max_delay_ms = 160
+emit_interval_ms = 500
+```
+
+During analysis, extract `media.echo_characterization` quality spans and record
+at least event count, max/p95 `correlation_peak`, observed `estimated_delay_ms`
+range, `echo_return_db` range, and whether spans occurred during `active` or
+`recent` playback. These spans are diagnostic only in PR #588; post-merge #586
+work uses them to choose AEC insertion vs. echo-aware onset gating.
+
 Append the structured WER and latency/quality blocks, quantitative metrics,
 qualitative caller feedback, bugs/gaps, and proposed tuning changes to the same
 per-run TOML file below the closing `+++` delimiter. That file is the run record;
@@ -1129,6 +1146,9 @@ Quantitative:
   dropped or canceled audio.
 - Echo suppression: whether playback leakage created false ASR partials or
   finals.
+- Echo characterization when enabled: `media.echo_characterization` event count,
+  correlation peak distribution, estimated delay range, echo return level, and
+  active-vs-recent playback state.
 - Quality events: malformed events, missing timestamps, or gaps that prevent
   measurement.
 - Layer 3 turn batching: accumulation count matches k of N, `batch_id` and

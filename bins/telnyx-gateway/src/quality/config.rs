@@ -616,6 +616,25 @@ impl Default for EchoSuppressionQualityConfig {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EchoCharacterizationQualityConfig {
+    pub enabled: bool,
+    pub window_ms: u64,
+    pub max_delay_ms: u64,
+    pub emit_interval_ms: u64,
+}
+
+impl Default for EchoCharacterizationQualityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_ms: 240,
+            max_delay_ms: 160,
+            emit_interval_ms: 500,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LoggingQualityConfig {
     pub enabled: bool,
@@ -702,6 +721,8 @@ pub struct VoiceQualityConfig {
     pub conversation_policy: ConversationPolicyConfig,
     #[serde(default)]
     pub echo_suppression: EchoSuppressionQualityConfig,
+    #[serde(default)]
+    pub echo_characterization: EchoCharacterizationQualityConfig,
     pub logging: LoggingQualityConfig,
     pub quality_judge: QualityJudgeConfig,
     pub targets: QualityTargetsConfig,
@@ -735,6 +756,7 @@ impl VoiceQualityConfig {
             barge_in: BargeInQualityConfig::default(),
             conversation_policy: ConversationPolicyConfig::default(),
             echo_suppression: EchoSuppressionQualityConfig::default(),
+            echo_characterization: EchoCharacterizationQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
             quality_judge: QualityJudgeConfig::default(),
             targets: QualityTargetsConfig::default(),
@@ -1089,6 +1111,24 @@ impl VoiceQualityConfig {
             1,
             64,
         )?;
+        ensure_u64(
+            "echo_characterization.window_ms",
+            self.echo_characterization.window_ms,
+            20,
+            2_000,
+        )?;
+        ensure_u64(
+            "echo_characterization.max_delay_ms",
+            self.echo_characterization.max_delay_ms,
+            0,
+            1_000,
+        )?;
+        ensure_u64(
+            "echo_characterization.emit_interval_ms",
+            self.echo_characterization.emit_interval_ms,
+            20,
+            60_000,
+        )?;
         ensure_usize(
             "logging.queue_capacity",
             self.logging.queue_capacity,
@@ -1387,6 +1427,20 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = echo.long_longest_token_run {
                 self.set_echo_suppression_long_longest_token_run(value);
+            }
+        }
+        if let Some(echo) = patch.echo_characterization {
+            if let Some(value) = echo.enabled {
+                self.set_echo_characterization_enabled(value);
+            }
+            if let Some(value) = echo.window_ms {
+                self.set_echo_characterization_window_ms(value);
+            }
+            if let Some(value) = echo.max_delay_ms {
+                self.set_echo_characterization_max_delay_ms(value);
+            }
+            if let Some(value) = echo.emit_interval_ms {
+                self.set_echo_characterization_emit_interval_ms(value);
             }
         }
         if let Some(logging) = patch.logging {
@@ -2207,6 +2261,52 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_echo_characterization_enabled(&mut self, value: bool) -> QualityMutationOutcome {
+        self.echo_characterization.enabled = value;
+        self.outcome(
+            "echo_characterization.enabled",
+            value,
+            ApplyBoundary::Immediate,
+            false,
+        )
+    }
+
+    pub fn set_echo_characterization_window_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 20, 2_000);
+        self.echo_characterization.window_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.window_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_characterization_max_delay_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 1_000);
+        self.echo_characterization.max_delay_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.max_delay_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_characterization_emit_interval_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 20, 60_000);
+        self.echo_characterization.emit_interval_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.emit_interval_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
+            clamped.clamped,
+        )
+    }
+
     pub fn set_logging_enabled(&mut self, value: bool) -> QualityMutationOutcome {
         self.logging.enabled = value;
         self.outcome("logging.enabled", value, ApplyBoundary::Immediate, false)
@@ -2479,6 +2579,8 @@ pub struct QualityConfigPatch {
     #[serde(default)]
     pub echo_suppression: Option<EchoSuppressionQualityConfigPatch>,
     #[serde(default)]
+    pub echo_characterization: Option<EchoCharacterizationQualityConfigPatch>,
+    #[serde(default)]
     pub logging: Option<LoggingQualityConfigPatch>,
     #[serde(default)]
     pub quality_judge: Option<QualityJudgeConfigPatch>,
@@ -2589,6 +2691,15 @@ pub struct EchoSuppressionQualityConfigPatch {
     pub long_min_tokens: Option<usize>,
     pub long_token_coverage_percent: Option<u64>,
     pub long_longest_token_run: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EchoCharacterizationQualityConfigPatch {
+    pub enabled: Option<bool>,
+    pub window_ms: Option<u64>,
+    pub max_delay_ms: Option<u64>,
+    pub emit_interval_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2837,6 +2948,10 @@ mod tests {
             [voice_quality.conversation_policy]
             max_pending_output = 3
             "#,
+            r#"
+            [voice_quality.echo_characterization]
+            emit_intervals_ms = 500
+            "#,
         ] {
             let error = VoiceQualityConfig::from_toml_str(raw)
                 .expect_err("unknown voice_quality keys should fail closed");
@@ -2980,6 +3095,42 @@ mod tests {
             config.conversation_policy.post_barge_in_fragment_max_words,
             50
         );
+    }
+
+    #[test]
+    fn toml_accepts_echo_characterization_config() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.echo_characterization]
+            enabled = true
+            window_ms = 320
+            max_delay_ms = 180
+            emit_interval_ms = 250
+            "#,
+        )
+        .expect("echo characterization config parses");
+
+        assert!(config.echo_characterization.enabled);
+        assert_eq!(config.echo_characterization.window_ms, 320);
+        assert_eq!(config.echo_characterization.max_delay_ms, 180);
+        assert_eq!(config.echo_characterization.emit_interval_ms, 250);
+    }
+
+    #[test]
+    fn echo_characterization_numeric_toml_knobs_clamp() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.echo_characterization]
+            window_ms = 1
+            max_delay_ms = 999999
+            emit_interval_ms = 1
+            "#,
+        )
+        .expect("echo characterization numeric knobs clamp");
+
+        assert_eq!(config.echo_characterization.window_ms, 20);
+        assert_eq!(config.echo_characterization.max_delay_ms, 1_000);
+        assert_eq!(config.echo_characterization.emit_interval_ms, 20);
     }
 
     #[test]

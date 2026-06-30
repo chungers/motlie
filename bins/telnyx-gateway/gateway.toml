@@ -250,6 +250,16 @@ long_token_coverage_percent = 60
 # Longest common token run threshold for long echo candidates.
 long_longest_token_run = 3
 
+[voice_quality.echo_characterization]
+# Optional #586 measurement-only diagnostic; emits `media.echo_characterization` quality spans.
+enabled = false
+# Outbound TTS reference window to compare against inbound caller audio.
+window_ms = 240
+# Maximum inbound echo delay to scan when estimating playback leakage.
+max_delay_ms = 160
+# Minimum interval between emitted diagnostic spans per media stream.
+emit_interval_ms = 500
+
 [voice_quality.logging]
 # Enables JSONL quality events at `[quality_logging].path`.
 enabled = true
