@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
 
-use crate::attach::{self, AttachCommand, AttachOptions};
+use crate::attach::{self, AttachCommand, AttachMode, AttachOptions};
 use crate::capture;
 use crate::control;
 use crate::discovery;
@@ -483,6 +483,12 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// Return tmux session inventory, preserving no-server as a named state.
+    pub async fn session_inventory(&self) -> Result<SessionInventory> {
+        let prefix = self.inner.tmux_prefix().await;
+        discovery::session_inventory_with_prefix(&self.inner.transport, &prefix).await
+    }
+
     /// Return the hostname reported by the host's tmux server.
     ///
     /// This uses `start-server ; display-message -p '#{host}'` through the
@@ -680,16 +686,8 @@ impl HostHandle {
     /// `CreateSessionOptions::default()` preserves pre-DC22 behavior.
     pub async fn create_session(&self, name: &str, opts: &CreateSessionOptions) -> Result<Target> {
         let prefix = self.inner.tmux_prefix().await;
-        control::create_session_with_prefix(&self.inner.transport, &prefix, name, opts).await?;
-
-        // Query the created session to get full info
-        let sessions = self.list_sessions().await?;
-        let info = sessions
-            .into_iter()
-            .find(|s| s.name == name)
-            .ok_or_else(|| {
-                Error::State(format!("session '{}' created but not found in list", name))
-            })?;
+        let info =
+            control::create_session_with_prefix(&self.inner.transport, &prefix, name, opts).await?;
 
         Ok(Target {
             inner: self.inner.clone(),
@@ -751,9 +749,9 @@ impl HostHandle {
 
         match (spec.window_selector(), spec.pane_index()) {
             (None, Some(_)) => Err(Error::Parse(format!(
-                    "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
-                    spec.session_name()
-                ))),
+                "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
+                spec.session_name()
+            ))),
             (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(session_info),
@@ -2479,6 +2477,41 @@ impl Target {
             .await
     }
 
+    /// Set pane-level remain-on-exit for the active pane resolved by this target.
+    pub async fn set_pane_remain_on_exit(&self, enabled: bool) -> Result<()> {
+        let prefix = self.inner.tmux_prefix().await;
+        control::set_pane_remain_on_exit_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &self.target_string(),
+            enabled,
+        )
+        .await
+    }
+
+    /// Respawn the active pane resolved by this target with a command.
+    pub async fn respawn_pane(&self, command: &str) -> Result<()> {
+        let prefix = self.inner.tmux_prefix().await;
+        control::respawn_pane_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &self.target_string(),
+            command,
+        )
+        .await
+    }
+
+    /// Query process/death status for the active pane resolved by this target.
+    pub async fn pane_process_status(&self) -> Result<PaneProcessStatus> {
+        let prefix = self.inner.tmux_prefix().await;
+        control::pane_process_status_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &self.target_string(),
+        )
+        .await
+    }
+
     /// Capture visible pane content.
     ///
     /// At **session or window level**, this captures the **active pane only**
@@ -2671,6 +2704,60 @@ impl Target {
         }
     }
 
+    /// Build the command that would attach to this tmux session using the
+    /// requested transport attach mode.
+    pub async fn attach_command(&self, mode: AttachMode) -> Result<AttachCommand> {
+        self.attach_command_with_options(mode, &AttachOptions::default())
+            .await
+    }
+
+    /// Build the command that would attach to this tmux session using the
+    /// requested transport attach mode and explicit attach options.
+    pub async fn attach_command_with_options(
+        &self,
+        mode: AttachMode,
+        options: &AttachOptions,
+    ) -> Result<AttachCommand> {
+        let session = match &self.address {
+            TargetAddress::Session(session) => session,
+            TargetAddress::Window(_) => {
+                return Err(Error::UnsupportedTarget {
+                    operation: "attach_command",
+                    level: TargetLevel::Window,
+                });
+            }
+            TargetAddress::Pane(_) => {
+                return Err(Error::UnsupportedTarget {
+                    operation: "attach_command",
+                    level: TargetLevel::Pane,
+                });
+            }
+        };
+        let target = session.id.as_str();
+        let tmux_bin = self.inner.resolve_tmux_bin().await;
+
+        match (&self.inner.transport, mode) {
+            (TransportKind::Local(_), AttachMode::PtyHandoff) => Ok(attach::local_attach_command(
+                &tmux_bin,
+                self.inner.socket.as_ref(),
+                target,
+            )),
+            (TransportKind::Local(_), AttachMode::WindowInjection) => Ok(
+                attach::local_nested_attach_command(&tmux_bin, self.inner.socket.as_ref(), target),
+            ),
+            (TransportKind::Ssh(ssh), _) => Ok(attach::ssh_attach_command_with_options(
+                ssh.config(),
+                &tmux_bin,
+                self.inner.socket.as_ref(),
+                target,
+                options,
+            )),
+            (TransportKind::Mock(_), _) => Err(Error::State(
+                "attach_command is not supported for mock transports".to_string(),
+            )),
+        }
+    }
+
     /// Attach the current process PTY to this tmux session.
     pub async fn attach_current_pty(&self) -> Result<crate::AttachExit> {
         self.attach_current_pty_with_options(&AttachOptions::default())
@@ -2683,50 +2770,14 @@ impl Target {
         &self,
         options: &AttachOptions,
     ) -> Result<crate::AttachExit> {
-        let command = self.attach_command_with_options(options).await?;
+        let command = self
+            .attach_command_with_options(AttachMode::PtyHandoff, options)
+            .await?;
         let options = *options;
         tokio::task::spawn_blocking(move || {
             attach::run_attach_command_with_options(command, options)
         })
         .await?
-    }
-
-    async fn attach_command_with_options(&self, options: &AttachOptions) -> Result<AttachCommand> {
-        let session = match &self.address {
-            TargetAddress::Session(session) => session,
-            TargetAddress::Window(_) => {
-                return Err(Error::UnsupportedTarget {
-                    operation: "attach_current_pty",
-                    level: TargetLevel::Window,
-                });
-            }
-            TargetAddress::Pane(_) => {
-                return Err(Error::UnsupportedTarget {
-                    operation: "attach_current_pty",
-                    level: TargetLevel::Pane,
-                });
-            }
-        };
-        let target = session.id.as_str();
-        let tmux_bin = self.inner.resolve_tmux_bin().await;
-
-        match &self.inner.transport {
-            TransportKind::Local(_) => Ok(attach::local_attach_command(
-                &tmux_bin,
-                self.inner.socket.as_ref(),
-                target,
-            )),
-            TransportKind::Ssh(ssh) => Ok(attach::ssh_attach_command_with_options(
-                ssh.config(),
-                &tmux_bin,
-                self.inner.socket.as_ref(),
-                target,
-                options,
-            )),
-            TransportKind::Mock(_) => Err(Error::State(
-                "attach_current_pty is not supported for mock transports".to_string(),
-            )),
-        }
     }
 
     /// Rename this entity and return a new `Target` with the updated address.
@@ -3221,6 +3272,11 @@ fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
 
 #[cfg(test)]
 impl HostHandle {
+    fn set_tmux_bin_for_test(&self, tmux_bin: &str) {
+        let mut cached = self.inner.tmux_bin.lock().expect("tmux_bin lock poisoned");
+        *cached = Some(tmux_bin.to_string());
+    }
+
     /// Create a Target for testing without querying tmux.
     pub fn create_target_for_test(&self, session_name: &str) -> Target {
         Target {
@@ -3241,10 +3297,100 @@ impl HostHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::MockTransport;
+    use crate::transport::{LocalTransport, MockTransport, SshConfig, SshTransport};
 
     fn mock_host(mock: MockTransport) -> HostHandle {
         HostHandle::new(TransportKind::Mock(mock), None)
+    }
+
+    fn attach_test_target(host: &HostHandle) -> Target {
+        host.target_for_session_info(SessionInfo {
+            name: "worker".to_string(),
+            id: SessionId::for_test("$203"),
+            created: 0,
+            attached_count: 0,
+            window_count: 1,
+            group: None,
+            activity: 0,
+        })
+    }
+
+    fn attach_program(command: &AttachCommand) -> String {
+        command.program().to_string_lossy().into_owned()
+    }
+
+    fn attach_args(command: &AttachCommand) -> Vec<String> {
+        command
+            .args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn attach_command_mode_matrix_local_and_remote() {
+        let local = HostHandle::with_alias(
+            TransportKind::Local(LocalTransport::new()),
+            Some(TmuxSocket::Name("mstream-test".into())),
+            "local",
+        );
+        local.set_tmux_bin_for_test("tmux");
+        let target = attach_test_target(&local);
+
+        let pty = target.attach_command(AttachMode::PtyHandoff).await.unwrap();
+        assert_eq!(attach_program(&pty), "tmux");
+        assert_eq!(
+            attach_args(&pty),
+            ["-L", "mstream-test", "attach-session", "-t", "$203"]
+        );
+
+        let nested = target
+            .attach_command(AttachMode::WindowInjection)
+            .await
+            .unwrap();
+        assert_eq!(attach_program(&nested), "env");
+        assert_eq!(
+            attach_args(&nested),
+            [
+                "-u",
+                "TMUX",
+                "tmux",
+                "-L",
+                "mstream-test",
+                "attach-session",
+                "-t",
+                "$203",
+            ]
+        );
+
+        let remote = HostHandle::with_alias(
+            TransportKind::Ssh(SshTransport::for_test(SshConfig::new(
+                "remote.example",
+                "dchung",
+            ))),
+            Some(TmuxSocket::Path("/tmp/tmux.sock".into())),
+            "remote",
+        );
+        remote.set_tmux_bin_for_test("tmux");
+        let target = attach_test_target(&remote);
+
+        let pty = target.attach_command(AttachMode::PtyHandoff).await.unwrap();
+        assert_eq!(attach_program(&pty), "ssh");
+        assert_eq!(
+            attach_args(&pty),
+            [
+                "-t",
+                "dchung@remote.example",
+                "'tmux' -S '/tmp/tmux.sock' attach-session -t '$203'",
+            ]
+        );
+
+        let nested = target
+            .attach_command(AttachMode::WindowInjection)
+            .await
+            .unwrap();
+        assert_eq!(attach_program(&nested), "ssh");
+        assert_eq!(attach_args(&nested), attach_args(&pty));
     }
 
     #[tokio::test]
@@ -3396,10 +3542,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_returns_target() {
-        let mock = MockTransport::new().with_default("").with_response(
-            "list-sessions",
-            "__MOTLIE_S__ test $0 1700000000 0 1  1700000005\n",
-        );
+        let mock = MockTransport::new().with_default("$0 test 1700000000 0 1  1700000005");
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())

@@ -17,8 +17,11 @@
 /// - Provides observability metrics for debugging
 /// - Not intended for performance regression testing
 mod common;
+#[path = "common/concurrent_writer.rs"]
+mod concurrent_writer;
 
-use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
+use common::concurrent_test_utils::{Metrics, TestContext};
+use concurrent_writer::writer_task;
 use motlie_db::graph::query::NodeById;
 use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{create_reader_with_storage, spawn_query_consumer, ReaderConfig};

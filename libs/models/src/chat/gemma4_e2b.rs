@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
-    StartOptions,
+    QuantizationScheme, StartOptions,
 };
 use motlie_model_mistral::{
     MistralMultimodalBundle, MistralMultimodalHandle, MistralMultimodalSpec,
@@ -35,15 +35,11 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact("config.json"),
             ArtifactRule::Exact("generation_config.json"),
             ArtifactRule::Exact("tokenizer.json"),
-            ArtifactRule::Exact("tokenizer.model"),
             ArtifactRule::Exact("tokenizer_config.json"),
-            ArtifactRule::Exact("special_tokens_map.json"),
-            ArtifactRule::Exact("preprocessor_config.json"),
             ArtifactRule::Exact("processor_config.json"),
             ArtifactRule::Suffix(".safetensors"),
-            ArtifactRule::Suffix(".safetensors.index.json"),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Bf16),
     }
 }
 
@@ -66,6 +62,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "gemma4_e2b",
             &checkpoint,
+            crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
         )),
     }
 }
@@ -144,7 +141,7 @@ mod tests {
             .expect("descriptor should expose curated artifact control");
         assert_eq!(artifacts.control_name, "gemma4_e2b");
         assert!(artifacts.includes("chat_template.jinja"));
-        assert!(artifacts.includes("preprocessor_config.json"));
+        assert!(artifacts.includes("processor_config.json"));
         assert!(artifacts.includes("model-00001-of-00002.safetensors"));
     }
 

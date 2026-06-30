@@ -1,0 +1,1082 @@
+[
+  {
+    "bundle_id": "embeddinggemma_300m",
+    "quant": "fp32",
+    "capability": "embeddings",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "upstream_no_gpu_forwarding"
+  },
+  {
+    "bundle_id": "embeddinggemma_300m",
+    "quant": "fp32",
+    "capability": "embeddings",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "embeddinggemma_300m",
+    "quant": "fp32",
+    "capability": "embeddings",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "embeddinggemma_300m",
+    "quant": "fp32",
+    "capability": "embeddings",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_qat_gguf",
+    "quant": "gguf_q4_0",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_qat_gguf",
+    "quant": "gguf_q4_0",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_qat_gguf",
+    "quant": "gguf_q4_0",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_qat_gguf",
+    "quant": "gguf_q4_0",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_qat_gguf",
+    "quant": "gguf_q4_0",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_qat_gguf",
+    "quant": "gguf_q4_0",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_qat_gguf",
+    "quant": "gguf_q4_0",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_12b_qat_gguf",
+    "quant": "gguf_q4_0",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "upstream_no_gpu_forwarding"
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "upstream_no_gpu_forwarding"
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "isq_q4",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "isq_q4",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b",
+    "quant": "isq_q8",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e2b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "upstream_no_gpu_forwarding"
+  },
+  {
+    "bundle_id": "gemma4_e4b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "upstream_no_gpu_forwarding"
+  },
+  {
+    "bundle_id": "gemma4_e4b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "gemma4_e4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "kokoro_82m",
+    "quant": "onnx_int8",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "kokoro_82m",
+    "quant": "onnx_int8",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "kokoro_82m",
+    "quant": "onnx_int8",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "kokoro_82m",
+    "quant": "onnx_int8",
+    "capability": "tts",
+    "speech_mode": "streaming",
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "kokoro_82m",
+    "quant": "onnx_int8",
+    "capability": "tts",
+    "speech_mode": "streaming",
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "kokoro_82m",
+    "quant": "onnx_int8",
+    "capability": "tts",
+    "speech_mode": "streaming",
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "moonshine_streaming_en",
+    "quant": "fp32",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "no_execution_provider_for_accelerator"
+  },
+  {
+    "bundle_id": "moonshine_streaming_en",
+    "quant": "fp32",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "moonshine_streaming_en",
+    "quant": "fp32",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "moonshine_streaming_en",
+    "quant": "fp32",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "piper_en_us_ljspeech_medium",
+    "quant": "fp32",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "no_execution_provider_for_accelerator"
+  },
+  {
+    "bundle_id": "piper_en_us_ljspeech_medium",
+    "quant": "fp32",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "piper_en_us_ljspeech_medium",
+    "quant": "fp32",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "piper_en_us_ljspeech_medium",
+    "quant": "fp32",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "upstream_no_gpu_forwarding"
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "bf16",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "upstream_no_gpu_forwarding"
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "bf16",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "isq_q4",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b",
+    "quant": "isq_q8",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_4b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "tool_use",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_6_27b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_6_27b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_6_27b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_6_27b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_embedding_06b",
+    "quant": "bf16",
+    "capability": "embeddings",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "upstream_no_gpu_forwarding"
+  },
+  {
+    "bundle_id": "qwen3_embedding_06b",
+    "quant": "bf16",
+    "capability": "embeddings",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_embedding_06b",
+    "quant": "bf16",
+    "capability": "embeddings",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_embedding_06b",
+    "quant": "bf16",
+    "capability": "embeddings",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_tts_cpp_0_6b",
+    "quant": "gguf_q8_0",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_tts_cpp_0_6b",
+    "quant": "gguf_q8_0",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_tts_cpp_0_6b",
+    "quant": "gguf_q8_0",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "qwen3_tts_cpp_0_6b",
+    "quant": "gguf_q8_0",
+    "capability": "tts",
+    "speech_mode": "buffered",
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "sherpa_onnx_streaming_zipformer_en",
+    "quant": "onnx_int8",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "not_applicable",
+    "reason": "no_execution_provider_for_accelerator"
+  },
+  {
+    "bundle_id": "sherpa_onnx_streaming_zipformer_en",
+    "quant": "onnx_int8",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "sherpa_onnx_streaming_zipformer_en",
+    "quant": "onnx_int8",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "sherpa_onnx_streaming_zipformer_en",
+    "quant": "onnx_int8",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "sherpa_onnx_streaming_zipformer_en_kroko_2025",
+    "quant": "fp32",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "whisper_base_en",
+    "quant": "fp16",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "apple-metal",
+    "accelerator": "metal",
+    "state": "build_gap",
+    "reason": null
+  },
+  {
+    "bundle_id": "whisper_base_en",
+    "quant": "fp16",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "whisper_base_en",
+    "quant": "fp16",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "whisper_base_en",
+    "quant": "fp16",
+    "capability": "asr",
+    "speech_mode": null,
+    "profile": "local-cpu-x86_64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  }
+]

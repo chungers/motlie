@@ -135,7 +135,9 @@ pub(crate) enum ModalState {
         session: SelectedSession,
         ui: SessionKeyValueModalUi,
     },
-    Help,
+    Help {
+        scroll: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +195,7 @@ impl ModalView {
     pub(crate) fn body_text(&self) -> String {
         match &self.body {
             ModalBody::Text(text) => text.clone(),
+            ModalBody::Help { header, keys, .. } => format!("{header}\n\n{keys}"),
             ModalBody::NewSession {
                 input,
                 host_label,
@@ -252,6 +255,11 @@ impl ModalView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModalBody {
     Text(String),
+    Help {
+        header: String,
+        keys: String,
+        scroll: usize,
+    },
     NewSession {
         input: String,
         input_cursor: usize,
@@ -792,7 +800,9 @@ pub(crate) struct SessionListState {
 pub(crate) enum SessionSortMode {
     #[default]
     Activity,
+    Name,
     TagGroup,
+    HostGroup,
 }
 
 impl SessionListState {
@@ -812,8 +822,15 @@ impl SessionListState {
     pub(crate) fn set_rows_sorted(&mut self, rows: Vec<SessionRow>, fleet: &HostFleet) {
         match self.sort_mode {
             SessionSortMode::Activity => self.set_rows_sorted_by_activity(rows),
+            SessionSortMode::Name => self.set_rows_sorted_by_name(rows),
             SessionSortMode::TagGroup => self.set_rows_grouped_by_tag(rows, fleet),
+            SessionSortMode::HostGroup => self.set_rows_grouped_by_host(rows, fleet),
         }
+    }
+
+    pub(crate) fn set_rows_sorted_by_name(&mut self, mut rows: Vec<SessionRow>) {
+        sort_rows_by_name(&mut rows);
+        self.rows = rows;
     }
 
     pub(crate) fn set_rows_grouped_by_tag(&mut self, mut rows: Vec<SessionRow>, fleet: &HostFleet) {
@@ -821,10 +838,41 @@ impl SessionListState {
         self.rows = rows;
     }
 
-    pub(crate) fn toggle_sort_mode(&mut self) -> SessionSortMode {
+    pub(crate) fn set_rows_grouped_by_host(
+        &mut self,
+        mut rows: Vec<SessionRow>,
+        fleet: &HostFleet,
+    ) {
+        sort_rows_by_host_group(&mut rows, fleet);
+        self.rows = rows;
+    }
+
+    pub(crate) fn toggle_tag_group_sort(&mut self) -> SessionSortMode {
         self.sort_mode = match self.sort_mode {
             SessionSortMode::Activity => SessionSortMode::TagGroup,
+            SessionSortMode::Name => SessionSortMode::TagGroup,
             SessionSortMode::TagGroup => SessionSortMode::Activity,
+            SessionSortMode::HostGroup => SessionSortMode::TagGroup,
+        };
+        self.sort_mode
+    }
+
+    pub(crate) fn toggle_name_sort(&mut self) -> SessionSortMode {
+        self.sort_mode = match self.sort_mode {
+            SessionSortMode::Activity => SessionSortMode::Name,
+            SessionSortMode::Name => SessionSortMode::Activity,
+            SessionSortMode::TagGroup => SessionSortMode::Name,
+            SessionSortMode::HostGroup => SessionSortMode::Name,
+        };
+        self.sort_mode
+    }
+
+    pub(crate) fn toggle_host_group_sort(&mut self) -> SessionSortMode {
+        self.sort_mode = match self.sort_mode {
+            SessionSortMode::Activity => SessionSortMode::HostGroup,
+            SessionSortMode::Name => SessionSortMode::HostGroup,
+            SessionSortMode::TagGroup => SessionSortMode::HostGroup,
+            SessionSortMode::HostGroup => SessionSortMode::Activity,
         };
         self.sort_mode
     }
@@ -879,10 +927,36 @@ impl SessionListState {
         self.selected = next;
         old != next
     }
+
+    pub(crate) fn select_first_name_match(&mut self, query: &str) -> Option<bool> {
+        if query.is_empty() {
+            return None;
+        }
+        let query = query.to_lowercase();
+        let index = self
+            .rows
+            .iter()
+            .position(|row| row.session.name.to_lowercase().contains(&query))?;
+        let changed = self.selected != index;
+        self.selected = index;
+        Some(changed)
+    }
 }
 
 fn sort_rows_by_activity(rows: &mut [SessionRow]) {
     rows.sort_by(activity_sort_order);
+}
+
+fn sort_rows_by_name(rows: &mut [SessionRow]) {
+    rows.sort_by(name_sort_order);
+}
+
+fn name_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
+    left.session
+        .name
+        .cmp(&right.session.name)
+        .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
+        .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
 }
 
 fn activity_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
@@ -907,6 +981,17 @@ fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
             .then_with(|| left.session.name.cmp(&right.session.name))
             .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
             .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
+    });
+}
+
+fn sort_rows_by_host_group(rows: &mut [SessionRow], fleet: &HostFleet) {
+    rows.sort_by(|left, right| {
+        fleet
+            .host_sort_index(&left.host_id)
+            .cmp(&fleet.host_sort_index(&right.host_id))
+            .then_with(|| left.host_label.cmp(&right.host_label))
+            .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
+            .then_with(|| activity_sort_order(left, right))
     });
 }
 
@@ -1056,6 +1141,7 @@ pub(crate) struct AppState {
     pub(crate) modal: Option<ModalState>,
     pub(crate) activity_tracker: ActivityTracker,
     pub(crate) pending_list_shortcut: Option<PendingListShortcut>,
+    pub(crate) session_search: Option<String>,
 }
 
 impl AppState {
@@ -1079,6 +1165,7 @@ impl AppState {
             modal: None,
             activity_tracker: ActivityTracker::default(),
             pending_list_shortcut: None,
+            session_search: None,
         }
     }
 

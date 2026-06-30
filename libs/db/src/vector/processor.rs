@@ -22,7 +22,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::{Context, Result};
+#[cfg(any(test, feature = "benchmark"))]
+use anyhow::Context;
+use anyhow::Result;
 use dashmap::DashMap;
 
 use super::cache::{BinaryCodeCache, NavigationCache};
@@ -176,21 +178,6 @@ impl Processor {
         )
     }
 
-    /// Create a Processor with custom RaBitQ configuration.
-    pub fn with_rabitq_config(
-        storage: Arc<Storage>,
-        registry: Arc<EmbeddingRegistry>,
-        rabitq_config: RaBitQConfig,
-    ) -> Self {
-        Self::with_rabitq_config_and_batch_threshold(
-            storage,
-            registry,
-            rabitq_config,
-            DEFAULT_BATCH_THRESHOLD,
-            Arc::new(NavigationCache::new()),
-        )
-    }
-
     /// Create a Processor with full configuration options.
     ///
     /// This is the canonical constructor that all other constructors delegate to.
@@ -278,18 +265,8 @@ impl Processor {
         &self.storage
     }
 
-    /// Get access to the Arc-wrapped storage.
-    pub fn storage_arc(&self) -> &Arc<Storage> {
-        &self.storage
-    }
-
     /// Get access to the embedding registry.
     pub fn registry(&self) -> &EmbeddingRegistry {
-        &self.registry
-    }
-
-    /// Get access to the Arc-wrapped registry.
-    pub fn registry_arc(&self) -> &Arc<EmbeddingRegistry> {
         &self.registry
     }
 
@@ -313,12 +290,8 @@ impl Processor {
         })
     }
 
-    /// Check if an allocator exists for the given embedding space.
-    pub fn has_allocator(&self, embedding: EmbeddingCode) -> bool {
-        self.id_allocators.contains_key(&embedding)
-    }
-
     /// Get the number of registered embedding spaces with allocators.
+    #[cfg(test)]
     pub fn allocator_count(&self) -> usize {
         self.id_allocators.len()
     }
@@ -381,21 +354,6 @@ impl Processor {
         Some(encoder)
     }
 
-    /// Check if RaBitQ is enabled.
-    pub fn rabitq_enabled(&self) -> bool {
-        self.rabitq_config.enabled
-    }
-
-    /// Get the RaBitQ configuration.
-    pub fn rabitq_config(&self) -> &RaBitQConfig {
-        &self.rabitq_config
-    }
-
-    /// Get the number of cached RaBitQ encoders.
-    pub fn encoder_count(&self) -> usize {
-        self.rabitq_encoders.len()
-    }
-
     // ========================================================================
     // HNSW Index Management
     // ========================================================================
@@ -442,18 +400,6 @@ impl Processor {
         &self.code_cache
     }
 
-    /// Get the HNSW batch threshold.
-    ///
-    /// This is a runtime performance knob that doesn't affect index structure.
-    pub fn batch_threshold(&self) -> usize {
-        self.batch_threshold
-    }
-
-    /// Get the number of cached HNSW indices.
-    pub fn index_count(&self) -> usize {
-        self.hnsw_indices.len()
-    }
-
     // ========================================================================
     // Vector Operations
     // ========================================================================
@@ -486,6 +432,7 @@ impl Processor {
     ///     true,  // build HNSW index
     /// )?;
     /// ```
+    #[cfg(test)]
     pub fn insert_vector(
         &self,
         embedding: &Embedding,
@@ -559,6 +506,7 @@ impl Processor {
     ///     true,  // build HNSW index
     /// )?;
     /// ```
+    #[cfg(any(test, feature = "benchmark"))]
     pub fn insert_batch(
         &self,
         embedding: &Embedding,
@@ -639,6 +587,7 @@ impl Processor {
     /// }
     /// ```
     ///
+    #[cfg(test)]
     pub(crate) fn delete_vector(
         &self,
         embedding: &Embedding,
@@ -661,44 +610,6 @@ impl Processor {
 
         // Return the vec_id if deletion occurred
         Ok(result.vec_id())
-    }
-
-    // =========================================================================
-    // ID Mapping Lookup Helpers
-    // =========================================================================
-
-    /// Look up internal vec_id for an external key.
-    ///
-    /// This is a low-level helper that performs a direct IdForward lookup.
-    /// Prefer using the query API (`GetInternalId`) for channel-based access.
-    ///
-    /// # Returns
-    /// - `Ok(Some(vec_id))` - External key is mapped to this internal ID
-    /// - `Ok(None)` - External key not found (not inserted or deleted)
-    /// - `Err(...)` - Storage error
-    pub fn vec_id_for_external(
-        &self,
-        embedding: &Embedding,
-        external_key: &ExternalKey,
-    ) -> Result<Option<VecId>> {
-        super::ops::read::get_internal_id(&self.storage, embedding.code(), external_key)
-    }
-
-    /// Look up external key for an internal vec_id.
-    ///
-    /// This is a low-level helper that performs a direct IdReverse lookup.
-    /// Prefer using the query API (`GetExternalId`) for channel-based access.
-    ///
-    /// # Returns
-    /// - `Ok(Some(external_key))` - Vec_id maps to this external key
-    /// - `Ok(None)` - Vec_id not found (not allocated or recycled)
-    /// - `Err(...)` - Storage error
-    pub fn external_for_vec_id(
-        &self,
-        embedding: &Embedding,
-        vec_id: VecId,
-    ) -> Result<Option<ExternalKey>> {
-        super::ops::read::get_external_id(&self.storage, embedding.code(), vec_id)
     }
 
     /// Search for nearest neighbors in an embedding space.
@@ -919,7 +830,7 @@ mod tests {
 
         // Allocate some IDs
         {
-            let mut allocator = allocators.get_mut(&1).unwrap();
+            let allocator = allocators.get_mut(&1).unwrap();
             let id1 = allocator.allocate_local();
             let id2 = allocator.allocate_local();
             assert_eq!(id1, 0);
@@ -964,7 +875,6 @@ mod tests {
 
         // Create registry with an embedding spec
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
@@ -1016,12 +926,10 @@ mod tests {
 
         // Create registry with 64-dim embedding
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
 
@@ -1053,12 +961,10 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
 
@@ -1142,12 +1048,10 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
 
@@ -1173,7 +1077,6 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
@@ -1241,7 +1144,6 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
@@ -1303,7 +1205,6 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
@@ -1368,12 +1269,10 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
 
@@ -1401,7 +1300,6 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
             .register(builder)
@@ -1434,7 +1332,6 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         // Use L2 distance - will get Exact strategy (not RaBitQ)
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
@@ -1504,7 +1401,6 @@ mod tests {
         let storage = Arc::new(storage);
 
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         // Use Cosine distance - will get RaBitQ strategy
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::Cosine);
         let embedding = registry
@@ -1764,7 +1660,6 @@ mod tests {
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
-        let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
         let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
@@ -1812,7 +1707,6 @@ mod tests {
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
-        let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
         let embedding = registry.register(builder).expect("register");
 
@@ -1885,10 +1779,8 @@ mod tests {
         let storage = Arc::new(storage);
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
-        let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
         let embedding = registry.register(builder).expect("register");
-        let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
 
@@ -1914,10 +1806,8 @@ mod tests {
         let storage = Arc::new(storage);
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
-        let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
         let embedding = registry.register(builder).expect("register");
-        let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
 
@@ -1951,10 +1841,8 @@ mod tests {
         let storage = Arc::new(storage);
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
-        let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
         let embedding = registry.register(builder).expect("register");
-        let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
 
@@ -1989,10 +1877,8 @@ mod tests {
         let storage = Arc::new(storage);
         let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
-        let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
         let embedding = registry.register(builder).expect("register");
-        let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
 

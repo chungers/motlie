@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::chat::ChatMessage;
 use crate::tool::{ToolCall, ToolChoice, ToolSpec};
 
@@ -85,6 +87,64 @@ pub struct GenerationUsage {
     pub total_tokens: Option<u32>,
 }
 
+/// Request-local generation timing reported by a backend, when available.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenerationTiming {
+    pub request_at: Instant,
+    pub first_token_at: Option<Instant>,
+    pub first_answer_token_at: Option<Instant>,
+    pub last_token_at: Option<Instant>,
+    pub generated_tokens: u32,
+    /// Number of generated tokens emitted before the first answer token — i.e.
+    /// the reasoning/`<think>` token count up to the same think→answer boundary
+    /// that sets `first_answer_token_at`. A passthrough measurement (like the
+    /// TTFT timestamps), not a synthesized score. `None` when the backend does
+    /// not report per-token boundary data, or when no answer token was reached.
+    pub tokens_before_answer: Option<u32>,
+}
+
+impl GenerationTiming {
+    pub fn time_to_first_token(&self) -> Option<Duration> {
+        elapsed_since(self.request_at, self.first_token_at)
+    }
+
+    pub fn time_to_first_answer_token(&self) -> Option<Duration> {
+        elapsed_since(self.request_at, self.first_answer_token_at)
+    }
+
+    pub fn decode_duration(&self) -> Option<Duration> {
+        let first_token_at = self.first_token_at?;
+        let last_token_at = self.last_token_at?;
+        last_token_at.checked_duration_since(first_token_at)
+    }
+
+    pub fn total_duration(&self) -> Option<Duration> {
+        let last_token_at = self.last_token_at?;
+        last_token_at.checked_duration_since(self.request_at)
+    }
+
+    pub fn decode_tokens_per_second(&self) -> Option<f64> {
+        tokens_per_second(self.generated_tokens, self.decode_duration()?)
+    }
+
+    pub fn total_tokens_per_second(&self) -> Option<f64> {
+        tokens_per_second(self.generated_tokens, self.total_duration()?)
+    }
+}
+
+fn tokens_per_second(generated_tokens: u32, duration: Duration) -> Option<f64> {
+    let seconds = duration.as_secs_f64();
+    if generated_tokens == 0 || seconds <= 0.0 {
+        return None;
+    }
+
+    Some(f64::from(generated_tokens) / seconds)
+}
+
+fn elapsed_since(started_at: Instant, ended_at: Option<Instant>) -> Option<Duration> {
+    ended_at?.checked_duration_since(started_at)
+}
+
 /// Response from a chat-style generation call.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChatResponse {
@@ -93,6 +153,7 @@ pub struct ChatResponse {
     pub finish_reason: Option<ChatFinishReason>,
     pub reasoning: Option<String>,
     pub usage: Option<GenerationUsage>,
+    pub timing: Option<GenerationTiming>,
 }
 
 impl ChatResponse {
@@ -202,6 +263,38 @@ mod tests {
         assert_eq!(response.finish_reason, None);
         assert_eq!(response.reasoning, None);
         assert_eq!(response.usage, None);
+        assert_eq!(response.timing, None);
+    }
+
+    #[test]
+    fn generation_timing_reports_monotonic_durations() {
+        let request_at = Instant::now();
+        let first_token_at = request_at.checked_add(Duration::from_millis(10)).unwrap();
+        let first_answer_token_at = request_at.checked_add(Duration::from_millis(30)).unwrap();
+        let last_token_at = request_at.checked_add(Duration::from_millis(110)).unwrap();
+        let timing = GenerationTiming {
+            request_at,
+            first_token_at: Some(first_token_at),
+            first_answer_token_at: Some(first_answer_token_at),
+            last_token_at: Some(last_token_at),
+            generated_tokens: 4,
+            tokens_before_answer: Some(2),
+        };
+
+        assert_eq!(
+            timing.time_to_first_token(),
+            Some(Duration::from_millis(10))
+        );
+        assert_eq!(
+            timing.time_to_first_answer_token(),
+            Some(Duration::from_millis(30))
+        );
+        assert_eq!(timing.decode_duration(), Some(Duration::from_millis(100)));
+        assert_eq!(timing.total_duration(), Some(Duration::from_millis(110)));
+        assert_eq!(timing.decode_tokens_per_second(), Some(40.0));
+        assert!(timing
+            .decode_tokens_per_second()
+            .is_some_and(|decode| decode > timing.total_tokens_per_second().unwrap()));
     }
 }
 

@@ -53,17 +53,27 @@ use motlie_db::graph::mutation::{AddEdge, AddNode};
 use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{NodeById, OutgoingEdges};
 use motlie_db::reader::Runnable as QueryRunnable;
-use motlie_db::graph::reader::{create_query_reader, spawn_query_consumer, ReaderConfig};
+use motlie_db::graph::reader::{create_reader_with_storage, spawn_query_consumer, ReaderConfig};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::Storage as GraphStorage;
 use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
 use motlie_db::vector::schema::ExternalKey;
 use motlie_db::{Id, TimestampMilli};
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
 // For serialization benchmarks
 extern crate lz4;
 extern crate rmp_serde;
+
+type OutgoingEdgeRow = (
+    Option<motlie_db::graph::schema::EdgeWeight>,
+    motlie_db::graph::schema::SrcId,
+    motlie_db::graph::schema::DstId,
+    motlie_db::graph::schema::EdgeName,
+    motlie_db::graph::schema::Version,
+);
 
 /// Helper to create a test database with specified characteristics
 async fn create_test_db(
@@ -122,6 +132,18 @@ async fn create_test_db(
     node_ids
 }
 
+fn create_benchmark_query_reader(
+    temp_dir: &TempDir,
+    reader_config: ReaderConfig,
+) -> (
+    motlie_db::graph::reader::Reader,
+    flume::Receiver<motlie_db::graph::reader::QueryRequest>,
+) {
+    let mut storage = GraphStorage::readonly(temp_dir.path());
+    storage.ready().expect("Failed to initialize graph reader storage");
+    create_reader_with_storage(Arc::new(storage), reader_config)
+}
+
 /// Benchmark 1: Write operations at various scales
 fn bench_writes(c: &mut Criterion) {
     let mut group = c.benchmark_group("writes");
@@ -156,7 +178,7 @@ fn bench_point_lookups(c: &mut Criterion) {
     let reader_config = ReaderConfig {
         channel_buffer_size: 1000,
     };
-    let (reader, query_receiver) = create_query_reader(reader_config.clone());
+    let (reader, query_receiver) = create_benchmark_query_reader(&temp_dir, reader_config.clone());
     let _guard = rt.enter();
     let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
@@ -215,7 +237,7 @@ fn bench_prefix_scans_by_position(c: &mut Criterion) {
         let reader_config = ReaderConfig {
             channel_buffer_size: 1000,
         };
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let (reader, query_receiver) = create_benchmark_query_reader(&temp_dir, reader_config.clone());
         let _guard = rt.enter();
         let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
@@ -266,7 +288,7 @@ fn bench_prefix_scans_by_degree(c: &mut Criterion) {
         let reader_config = ReaderConfig {
             channel_buffer_size: 1000,
         };
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let (reader, query_receiver) = create_benchmark_query_reader(&temp_dir, reader_config.clone());
         let _guard = rt.enter();
         let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
@@ -306,7 +328,7 @@ fn bench_scan_position_independence(c: &mut Criterion) {
     let reader_config = ReaderConfig {
         channel_buffer_size: 1000,
     };
-    let (reader, query_receiver) = create_query_reader(reader_config.clone());
+    let (reader, query_receiver) = create_benchmark_query_reader(&temp_dir, reader_config.clone());
     let _guard = rt.enter();
     let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
@@ -437,7 +459,7 @@ fn bench_value_size_impact(c: &mut Criterion) {
         let reader_config = ReaderConfig {
             channel_buffer_size: 1000,
         };
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let (reader, query_receiver) = create_benchmark_query_reader(&temp_dir, reader_config.clone());
         let _guard = rt.enter();
         let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
@@ -600,7 +622,7 @@ fn bench_transaction_vs_channel(c: &mut Criterion) {
     let reader_config = ReaderConfig {
         channel_buffer_size: 1000,
     };
-    let (reader, query_receiver) = create_query_reader(reader_config.clone());
+    let (reader, query_receiver) = create_benchmark_query_reader(&temp_dir, reader_config.clone());
     let _guard = rt.enter();
     let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
@@ -677,7 +699,7 @@ fn bench_batch_scan_throughput(c: &mut Criterion) {
         let reader_config = ReaderConfig {
             channel_buffer_size: 1000,
         };
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let (reader, query_receiver) = create_benchmark_query_reader(&temp_dir, reader_config.clone());
         let _guard = rt.enter();
         let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
@@ -694,7 +716,7 @@ fn bench_batch_scan_throughput(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| async {
                     let mut total_edges = 0;
                     for &target_id in &scan_targets {
-                        let edges = OutgoingEdges::new(target_id, None)
+                        let edges: Vec<OutgoingEdgeRow> = OutgoingEdges::new(target_id, None)
                             .run(&reader, Duration::from_secs(5))
                             .await
                             .unwrap();
@@ -745,9 +767,8 @@ fn bench_external_key_roundtrip_1m(c: &mut Criterion) {
     group.bench_function("external_key_roundtrip_1m", |b| {
         b.iter_custom(|_| {
             let start = std::time::Instant::now();
-            let mut bytes = Vec::new();
             for _ in 0..1_000_000 {
-                bytes = key.to_bytes();
+                let bytes = key.to_bytes();
                 let parsed = ExternalKey::from_bytes(black_box(&bytes)).unwrap();
                 black_box(parsed);
             }

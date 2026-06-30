@@ -1,0 +1,24 @@
+   Compiling ring v0.17.14
+   Compiling motlie-model v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/eval-run/libs/model)
+   Compiling motlie-models v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/eval-run/libs/models)
+   Compiling motlie-voice v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/eval-run/libs/voice)
+   Compiling motlie-eval-tools v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/eval-run/libs/eval-tools)
+   Compiling rustls v0.23.38
+   Compiling rustls-webpki v0.103.11
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.6.2
+   Compiling ureq v2.12.1
+   Compiling ureq v3.3.0
+   Compiling hyper-rustls v0.27.8
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.2
+   Compiling mistralrs-mcp v0.8.1
+   Compiling hf-hub v0.4.3
+   Compiling hf-hub v0.5.0
+   Compiling mistralrs-quant v0.8.1
+   Compiling openai-harmony v0.0.8
+   Compiling mistralrs-core v0.8.1
+   Compiling mistralrs v0.8.1
+   Compiling motlie-model-mistral v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/eval-run/libs/model/backends/mistral)
+   Compiling evals v0.1.0 (/Users/dchung/sessions/issue-399-eval-suite/fable5-399-rv/eval-run/bins/evals)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.90s

@@ -1,0 +1,41 @@
+schema_version = 1
+id = "embeddings_similarity"
+capability = "embeddings"
+summary = "Embed one input and compare a similar pair against a dissimilar pair."
+
+[bundle_filter]
+capability = "embeddings"
+backend = ["MistralRs"]
+
+[input]
+custom_text = "motlie curated model bundle"
+similar_a = "A small orange cat is sleeping on the couch."
+similar_b = "An orange kitten is napping on a sofa."
+dissimilar_a = "A small orange cat is sleeping on the couch."
+dissimilar_b = "Quarterly revenue increased by twelve percent year over year."
+
+[assertions]
+min_embedding_dimensions = 1
+similarity_order = "similar_gt_dissimilar"
+min_similarity_gap = 0.05
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+capture_embedding_dimensions = true
+capture_vectors_per_second = true
+capture_peak_rss = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.local-cpu-aarch64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.apple-metal]
+
+[profiles.dgx-spark.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.cuda-workstation.gates]
+max_process_swap_delta_bytes = 4294967296

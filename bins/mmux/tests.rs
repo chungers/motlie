@@ -586,10 +586,13 @@ fn sessions_title_only_includes_count() {
 }
 
 #[test]
-fn session_list_line_hides_stable_id() {
-    let line = session_list_line(&make_row(session("dev", "$42")), true, None, 0, 16);
-    assert!(line.starts_with(">  dev"));
-    assert!(!line.contains("$42"));
+fn session_list_line_shows_stable_id() {
+    let row = make_row_at(session_with_times("dev", "$42", 10, 100), 120);
+    let line = session_list_line(&row, true, None, 0, 36);
+
+    assert!(line.starts_with(">  dev"), "{line:?}");
+    assert!(line.contains("dev [$42]"), "{line:?}");
+    assert!(!line.contains("dev  [$42]"), "{line:?}");
 }
 
 #[test]
@@ -607,6 +610,7 @@ fn session_list_line_right_justifies_selected_tag_value() {
     let activity_start = line.find(activity).unwrap();
 
     assert!(line.contains("dev"), "{line:?}");
+    assert!(line.contains("[$42]"), "{line:?}");
     assert!(line.contains("platform"), "{line:?}");
     assert!(!line.contains("dev platform"), "{line:?}");
     assert_eq!(
@@ -856,6 +860,25 @@ fn activity_sort_is_stable_within_visible_recency_bucket() {
 }
 
 #[test]
+fn session_list_sorts_by_session_name() {
+    let mut app = AppState::new(LayoutMode::Normal);
+
+    app.session_list.set_rows_sorted_by_name(vec![
+        make_row_at(session_with_times("zeta", "$1", 10, 300), 1_000),
+        make_row_at(session_with_times("alpha", "$2", 20, 100), 1_000),
+        make_row_at(session_with_times("beta", "$3", 30, 200), 1_000),
+    ]);
+
+    let names = app
+        .session_list
+        .rows
+        .iter()
+        .map(|row| row.session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["alpha", "beta", "zeta"]);
+}
+
+#[test]
 fn session_list_tag_group_orders_groups_by_recent_activity() {
     let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
@@ -942,6 +965,53 @@ fn session_list_tag_group_orders_groups_by_recent_activity() {
             "no-tag-old"
         ]
     );
+}
+
+#[test]
+fn session_list_host_group_sorts_by_host_then_activity() {
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
+        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
+    ]);
+    let mut app = AppState::new(LayoutMode::Normal);
+
+    app.session_list.set_rows_grouped_by_host(
+        vec![
+            make_row_for_host_at(
+                session_with_times("b-fresh", "$1", 10, 950),
+                ssh_host_id("ssh://b"),
+                "beta",
+                1_000,
+            ),
+            make_row_for_host_at(
+                session_with_times("a-old", "$2", 10, 100),
+                ssh_host_id("ssh://a"),
+                "alpha",
+                1_000,
+            ),
+            make_row_for_host_at(
+                session_with_times("b-old", "$3", 10, 200),
+                ssh_host_id("ssh://b"),
+                "beta",
+                1_000,
+            ),
+            make_row_for_host_at(
+                session_with_times("a-fresh", "$4", 10, 900),
+                ssh_host_id("ssh://a"),
+                "alpha",
+                1_000,
+            ),
+        ],
+        &fleet,
+    );
+
+    let names = app
+        .session_list
+        .rows
+        .iter()
+        .map(|row| row.session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["a-fresh", "a-old", "b-fresh", "b-old"]);
 }
 
 #[test]
@@ -1044,6 +1114,400 @@ async fn g_toggles_tag_grouping_from_list_focus_and_selects_top_row() {
             .map(|session| session.name().to_string()),
         Some("other".to_string())
     );
+}
+
+#[tokio::test]
+async fn s_toggles_name_sort_from_list_focus_and_selects_top_row() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.session_list.rows = vec![
+        make_row_at(session_with_times("zeta", "$1", 10, 300), 1_000),
+        make_row_at(session_with_times("alpha", "$2", 20, 100), 1_000),
+        make_row_at(session_with_times("beta", "$3", 30, 200), 1_000),
+    ];
+    app.session_list.selected = 0;
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta", "alpha", "beta"]
+    );
+
+    app.layout.focus = Focus::List;
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Name);
+    assert_eq!(app.status.text(), "sort: name");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta", "zeta"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("alpha".to_string())
+    );
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.status.text(), "sort: activity");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta", "beta", "alpha"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("zeta".to_string())
+    );
+}
+
+#[tokio::test]
+async fn m_toggles_host_sort_from_list_focus_and_selects_top_row() {
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
+        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
+    ]);
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = vec![
+        make_row_for_host_at(
+            session_with_times("b-fresh", "$1", 10, 950),
+            ssh_host_id("ssh://b"),
+            "beta",
+            1_000,
+        ),
+        make_row_for_host_at(
+            session_with_times("a-old", "$2", 10, 100),
+            ssh_host_id("ssh://a"),
+            "alpha",
+            1_000,
+        ),
+        make_row_for_host_at(
+            session_with_times("b-old", "$3", 10, 200),
+            ssh_host_id("ssh://b"),
+            "beta",
+            1_000,
+        ),
+        make_row_for_host_at(
+            session_with_times("a-fresh", "$4", 10, 900),
+            ssh_host_id("ssh://a"),
+            "alpha",
+            1_000,
+        ),
+    ];
+    app.session_list.selected = 0;
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b-fresh", "a-old", "b-old", "a-fresh"]
+    );
+
+    app.layout.focus = Focus::List;
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::HostGroup);
+    assert_eq!(app.status.text(), "sort: host");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-fresh", "a-old", "b-fresh", "b-old"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("a-fresh".to_string())
+    );
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.status.text(), "sort: activity");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b-fresh", "a-fresh", "b-old", "a-old"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("b-fresh".to_string())
+    );
+}
+
+#[tokio::test]
+async fn slash_search_selects_first_name_match_in_current_order() {
+    let listing = "__MOTLIE_S__ bar $1 10 0 1  100\n\
+                   __MOTLIE_S__ foo $2 10 0 1  100\n\
+                   __MOTLIE_S__ food $3 10 0 1  100\n";
+    let mock = MockTransport::new()
+        .with_response("list-sessions", listing)
+        .with_response("capture-pane -ep", "foo screen\n");
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![
+        session("bar", "$1"),
+        session("foo", "$2"),
+        session("food", "$3"),
+    ]);
+    app.layout.focus = Focus::List;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.session_search.as_deref(), Some("fo"));
+    assert_eq!(app.selected_session().unwrap().name(), "foo");
+    assert_eq!(app.status.text(), "search: /fo");
+    assert_eq!(app.detail.lines, vec!["foo screen".to_string()]);
+}
+
+#[tokio::test]
+async fn slash_search_treats_m_as_query_character() {
+    let fleet = local_fleet();
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![session("alpha", "$1"), session("machine", "$2")]);
+    app.layout.focus = Focus::List;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.session_search.as_deref(), Some("m"));
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.selected_session().unwrap().name(), "machine");
+    assert_eq!(app.status.text(), "search: /m");
+}
+
+#[tokio::test]
+async fn slash_search_uses_existing_sort_order_for_best_match() {
+    let listing = "__MOTLIE_S__ food $1 10 0 1  100\n\
+                   __MOTLIE_S__ foo $2 10 0 1  100\n";
+    let mock = MockTransport::new()
+        .with_response("list-sessions", listing)
+        .with_response("capture-pane -ep", "food screen\n");
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![session("food", "$1"), session("foo", "$2")]);
+    app.session_list.selected = 1;
+    app.layout.focus = Focus::List;
+
+    for ch in ['/', 'f', 'o', 'o'] {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(app.selected_session().unwrap().name(), "food");
+    assert_eq!(app.status.text(), "search: /foo");
+}
+
+#[tokio::test]
+async fn slash_search_cancels_on_arrow_without_moving_highlight() {
+    let listing = "__MOTLIE_S__ alpha $1 10 0 1  100\n\
+                   __MOTLIE_S__ beta $2 10 0 1  100\n";
+    let mock = MockTransport::new()
+        .with_response("list-sessions", listing)
+        .with_response("capture-pane -ep", "alpha screen\n");
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![session("alpha", "$1"), session("beta", "$2")]);
+    app.session_list.selected = 1;
+    app.layout.focus = Focus::List;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.selected_session().unwrap().name(), "alpha");
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.session_search, None);
+    assert_eq!(app.selected_session().unwrap().name(), "alpha");
+    assert_eq!(app.status.text(), "search canceled");
+}
+
+#[tokio::test]
+async fn slash_search_cancels_on_second_slash() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::List;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_search.as_deref(), Some(""));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.session_search, None);
+    assert_eq!(app.selected_session().unwrap().name(), "dev");
+}
+
+#[tokio::test]
+async fn slash_search_ignores_detail_focus() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.session_search, None);
+}
+
+#[tokio::test]
+async fn slash_search_treats_q_as_query_character() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::List;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, KeyOutcome::Continue));
+    assert_eq!(app.session_search.as_deref(), Some("q"));
+    assert_eq!(app.status.text(), "search: /q (no match)");
 }
 
 #[tokio::test]
@@ -1762,30 +2226,52 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
-    assert!(matches!(app.modal.as_ref(), Some(ModalState::Help)));
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 0 })
+    ));
     let view = modal_content(app.modal.as_ref().unwrap());
     assert_eq!(view.title, " Help ");
     assert_eq!(view.active_button, Some(Button::Ok));
     assert_eq!(view.buttons, "[Ok]");
+    assert!(matches!(&view.body, ModalBody::Help { scroll: 0, .. }));
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
-    assert!(body.contains("↑ (u) / ↓ (b) select session or scroll detail"));
-    assert!(body.contains("Enter refresh highlighted session preview (list pane)"));
+    assert!(body.contains("Sessions/List:"));
+    assert!(body.contains("↑/↓ or u/b select session"));
+    assert!(body.contains("/ then chars: search names; case-insensitive substring"));
+    assert!(body.contains("  jumps to first match in current sort order"));
+    assert!(body.contains("  another /, ↑, or ↓ cancels search"));
+    assert!(body.contains("Enter refresh highlighted session preview"));
     assert!(!body.contains("monitor highlighted session"));
-    assert!(body.contains("  $0..$9 send digit to highlight"));
-    assert!(body.contains("  $! send Escape to highlight"));
-    assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
-    assert!(body.contains("  $$ suffix same delayed Enter"));
-    assert!(body.contains("  ↑ (u) / ↓ (b) move env row"));
-    assert!(body.contains("  m modify env row"));
-    assert!(body.contains("  x unset env row"));
-    assert!(body.contains("  ↑ (u) / ↓ (b) move focused tag"));
-    assert!(body.contains("  m modify focused tag"));
-    assert!(body.contains("  x unset focused tag"));
-    assert!(body.contains("  c toggle sort tag"));
-    assert!(!body.contains("PgUp/PgDn page current pane"));
-    assert!(!body.contains("Home/End jump current pane"));
+    assert!(body.contains("$0..$9 send digit to highlighted session"));
+    assert!(body.contains("$! send Escape to highlighted session"));
+    assert!(body.contains("Ctrl-Enter send keys, wait, Enter"));
+    assert!(body.contains("$$ suffix sends same delayed Enter"));
+    assert!(body.contains("New Session:"));
+    assert!(body.contains("↑/↓ or u/b move env row"));
+    assert!(body.contains("m modify env row"));
+    assert!(body.contains("x unset env row"));
+    assert!(body.contains("Session Tags:"));
+    assert!(body.contains("↑/↓ or u/b move focused tag"));
+    assert!(body.contains("m modify focused tag"));
+    assert!(body.contains("x unset focused tag"));
+    assert!(body.contains("c choose displayed tag"));
+    assert!(body.contains("s toggle name sort <-> activity recency"));
+    assert!(body.contains("g toggle tag sort <-> activity recency"));
+    assert!(body.contains("m toggle host sort; recency within host <-> activity recency"));
+    assert!(body.contains("PgUp/PgDn page sessions"));
+    assert!(body.contains("Home/End first/last session"));
+    assert!(body.contains("PgUp/PgDn page detail"));
+    assert!(body.contains("Home/End top/bottom detail"));
+    assert!(body.contains("Text Fields:"));
+    assert!(body.contains("Tab/Shift-Tab cycle focus"));
+    assert!(body.contains("Left/Right move cursor or choose Cancel/Ok"));
+    assert!(body.contains("Backspace/Delete edit text"));
+    assert!(body.contains("Help:"));
+    assert!(body.contains("↑/↓ or j/k scroll key list"));
+    assert!(body.contains("PgUp/PgDn page key list"));
     assert!(body.contains(&format!("Version: {}", env!("CARGO_PKG_VERSION"))));
     assert!(body.contains(BUILD_DATE));
     assert!(body.contains(&format!("Git SHA: {}", short_build_git_sha())));
@@ -1802,6 +2288,73 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(version_pos < build_date_pos);
     assert!(build_date_pos < git_sha_pos);
     assert!(git_sha_pos < keys_pos);
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 1 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 2 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 1 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 0 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 10 })
+    ));
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::Help { scroll: 0 })
+    ));
 
     let outcome = handle_key(
         &fleet,
@@ -1831,10 +2384,28 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(app.modal.is_none());
 }
 
+#[test]
+fn help_modal_scrolls_key_list_below_fixed_header() {
+    let mut app = app_with_session();
+    app.modal = Some(ModalState::Help { scroll: 0 });
+
+    let unscrolled = render_to_string(&mut app, 80, 24);
+    assert!(unscrolled.contains("Version:"), "{unscrolled}");
+    assert!(unscrolled.contains("Sessions/List:"), "{unscrolled}");
+    assert!(!unscrolled.contains("Session Tags:"), "{unscrolled}");
+
+    app.modal = Some(ModalState::Help { scroll: 34 });
+    let scrolled = render_to_string(&mut app, 80, 24);
+    assert!(scrolled.contains("Version:"), "{scrolled}");
+    assert!(scrolled.contains("Session Tags:"), "{scrolled}");
+    assert!(!scrolled.contains("Sessions/List:"), "{scrolled}");
+}
+
 #[tokio::test]
 async fn m_no_longer_starts_monitoring() {
     let fleet = local_fleet();
     let mut app = app_with_session();
+    app.layout.focus = Focus::Detail;
 
     let outcome = handle_key(
         &fleet,
@@ -1845,6 +2416,7 @@ async fn m_no_longer_starts_monitoring() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
     assert!(app.modal.is_none());
     assert!(app.detail.lines.is_empty());
     assert_eq!(app.status.text(), "loading sessions");
@@ -2455,7 +3027,7 @@ async fn new_session_modal_creates_on_selected_multi_host() {
     let beta = HostHandle::new(
         TransportKind::Mock(
             MockTransport::new()
-                .with_response("new-session -d -s 'build'", "")
+                .with_response("new-session -d -P", "$9 build 10 0 1  100")
                 .with_response("list-sessions", "__MOTLIE_S__ build $9 10 0 1  100\n")
                 .with_response(
                     "display-message -p '__MOTLIE_TAGS__ $9'",
@@ -3413,10 +3985,7 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
 #[tokio::test]
 async fn new_session_modal_applies_staged_initial_environment() {
     let mock = MockTransport::new()
-        .with_response(
-            "new-session -d -s 'build' -e 'BUILD_ID=42' -e 'MOTLIE=enabled'",
-            "",
-        )
+        .with_response("new-session -d -P", "$9 build 10 0 1  100")
         .with_response("list-sessions", "__MOTLIE_S__ build $9 10 0 1  100\n")
         .with_response(
             "display-message -p '__MOTLIE_TAGS__ $9'",

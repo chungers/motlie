@@ -37,14 +37,14 @@ Required before scoring:
 ## Command
 
 ```sh
-cargo run -p motlie-telnyx-gateway --features sherpa --   --no-asr-download   replay-corpus bins/telnyx-gateway/corpus/asr-golden.json   --backend sherpa-zipformer-2023   --backend sherpa-zipformer-kroko-2025   --chunk-ms 20
+cargo run -p motlie-telnyx-gateway --features sherpa --    replay-corpus bins/telnyx-gateway/corpus/asr-golden.json   --backend sherpa-zipformer-2023   --backend sherpa-zipformer-kroko-2025   --chunk-ms 20
 ```
 
 Expected report fields per corpus entry and artifact: raw transcript, WER, substitutions, deletions, insertions, token errors, chunk/audio metadata, and latency (`audio_ms`, ingest total/avg/max, finish, wall).
 
 ## Results
 
-No WER or latency comparison is available yet because the golden WAV/reference artifacts are absent on this host. The replay command fails until the external corpus files are populated.
+No WER or latency comparison is available yet because the golden WAV/reference artifacts are absent on this host. Model artifacts must also be preloaded; the gateway command does not download them. The replay command fails until the external corpus files are populated.
 
 Observed command result on 2026-06-02 PDT:
 

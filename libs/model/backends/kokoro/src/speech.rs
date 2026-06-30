@@ -5,17 +5,22 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use motlie_model::typed::{
-    AudioBuf, BufferedSpeechChunkStream, BufferedSpeechSynthesizer, Mono, SpeechSynthesizer,
-    SynthesisRequest,
+    AudioBuf, BufferedSpeechChunkStream, BufferedSpeechSynthesizer, IncrementalSpeechChunk,
+    IncrementalSpeechControls, IncrementalSpeechStream, IncrementalSpeechSummary,
+    IncrementalSpeechSynthesizer, Mono, SpeechSynthesizer, SynthesisRequest,
 };
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, SpeechParams,
-    StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, SpeechParams, StartOptions, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_espeak_ng::text_to_phonemes;
-use motlie_model_ort::{build_session_with_target, OrtExecutionTarget};
+use motlie_model_ort::{
+    build_session_with_target, resolved_execution_target, OrtExecutionTarget,
+    OrtResolvedExecutionTarget,
+};
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
@@ -25,6 +30,7 @@ use crate::common::{
     configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
     resolve_onnx_artifacts, KokoroArtifactPaths, KokoroArtifactSpec, RuntimeMetricState,
 };
+use crate::incremental::{self, KokoroIncrementalRuntime, KokoroIncrementalSpeechStream};
 
 const KOKORO_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
 const OUTPUT_CHUNK_DURATION_MS: u32 = 40;
@@ -39,6 +45,7 @@ pub struct KokoroSpeechSpec {
     pub id: BundleId,
     pub display_name: &'static str,
     pub(crate) artifact: KokoroArtifactSpec<'static>,
+    pub(crate) incremental_artifact: incremental::KokoroIncrementalArtifactSpec<'static>,
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
 }
@@ -53,7 +60,8 @@ impl KokoroSpeechSpec {
                 tokenizer_json: "tokenizer.json",
                 voice: "voices/af_bella.bin",
             },
-            capabilities: Capabilities::speech_buffered_only(),
+            incremental_artifact: incremental::KokoroIncrementalArtifactSpec::kokoro_82m(),
+            capabilities: Capabilities::speech_buffered_and_streaming(),
             quantization: QuantizationSupport::none(),
         }
     }
@@ -100,10 +108,18 @@ impl BackendAdapter for KokoroSpeechAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.artifact)?;
+        let incremental_artifacts = incremental::try_resolve_incremental_artifacts(
+            checkpoint,
+            self.spec.incremental_artifact,
+        )?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
+        let incremental_runtime = incremental_artifacts
+            .map(|artifacts| KokoroIncrementalRuntime::load(&artifacts))
+            .transpose()?
+            .map(Arc::new);
 
         Ok(new_speech_handle(
             identity.id.clone(),
@@ -111,6 +127,7 @@ impl BackendAdapter for KokoroSpeechAdapter {
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
+            incremental_runtime,
         ))
     }
 }
@@ -137,19 +154,24 @@ impl KokoroSpeechBundle {
     pub async fn start_typed(&self, options: StartOptions) -> Result<KokoroHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
-        let artifacts = if let Some(policy) = options.artifact_policy {
-            configure_artifact_policy(self.spec.artifact, policy)?
-        } else {
-            configure_artifact_policy(
-                self.spec.artifact,
-                motlie_model::ArtifactPolicy::LocalOnly {
+        let artifact_policy =
+            options
+                .artifact_policy
+                .unwrap_or_else(|| motlie_model::ArtifactPolicy::LocalOnly {
                     root: PathBuf::from("."),
-                },
-            )?
-        };
+                });
+        let artifacts = configure_artifact_policy(self.spec.artifact, artifact_policy.clone())?;
+        let incremental_artifacts = incremental::try_configure_incremental_artifact_policy(
+            self.spec.incremental_artifact,
+            artifact_policy,
+        )?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
+        let incremental_runtime = incremental_artifacts
+            .map(|artifacts| KokoroIncrementalRuntime::load(&artifacts))
+            .transpose()?
+            .map(Arc::new);
 
         Ok(new_speech_handle(
             self.metadata.id.clone(),
@@ -157,6 +179,7 @@ impl KokoroSpeechBundle {
             self.metadata.capabilities.clone(),
             self.metadata.quantization.clone(),
             runtime,
+            incremental_runtime,
         ))
     }
 }
@@ -185,6 +208,7 @@ impl ModelBundle for KokoroSpeechBundle {
 pub struct KokoroHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Arc<KokoroRuntime>,
+    incremental_runtime: Option<Arc<KokoroIncrementalRuntime>>,
     metrics: Arc<Mutex<SpeechMetrics>>,
 }
 
@@ -251,6 +275,21 @@ impl BundleHandle for KokoroHandle {
         })
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        match self.runtime.execution_target {
+            OrtResolvedExecutionTarget::Cuda => Some(RuntimeAcceleratorObservation {
+                backend_mode: "kokoro:cuda".to_owned(),
+                offload: Some("cuda_execution_provider=on;target=auto".to_owned()),
+                selected_device: Some("0".to_owned()),
+            }),
+            OrtResolvedExecutionTarget::Cpu => Some(RuntimeAcceleratorObservation {
+                backend_mode: "kokoro:cpu".to_owned(),
+                offload: Some(kokoro_cpu_offload_reason()),
+                selected_device: None,
+            }),
+        }
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
@@ -278,6 +317,7 @@ fn new_speech_handle(
     capabilities: Capabilities,
     quantization: QuantizationSupport,
     runtime: Arc<KokoroRuntime>,
+    incremental_runtime: Option<Arc<KokoroIncrementalRuntime>>,
 ) -> KokoroHandle {
     let metrics = Arc::new(Mutex::new(SpeechMetrics::default()));
     {
@@ -294,6 +334,7 @@ fn new_speech_handle(
             resolved_quantization: None,
         },
         runtime,
+        incremental_runtime,
         metrics,
     }
 }
@@ -302,6 +343,7 @@ struct KokoroRuntime {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
     voice: VoiceStyle,
+    execution_target: OrtResolvedExecutionTarget,
 }
 
 impl KokoroRuntime {
@@ -352,6 +394,52 @@ impl SpeechSynthesizer for KokoroHandle {
     }
 }
 
+impl IncrementalSpeechSynthesizer for KokoroHandle {
+    type Request = SynthesisRequest;
+    type Stream = KokoroMeteredIncrementalSpeechStream;
+
+    async fn synthesize_incremental(
+        &self,
+        request: Self::Request,
+        controls: IncrementalSpeechControls,
+    ) -> Result<Self::Stream, ModelError> {
+        let runtime = self.incremental_runtime.as_ref().ok_or_else(|| {
+            ModelError::InvalidConfiguration(
+                "Kokoro incremental TTS artifacts are not installed; install model.onnx, voices.bin, tokens.txt, and espeak-ng-data for streaming generation".into(),
+            )
+        })?;
+        let started_at = Instant::now();
+        let inner = runtime
+            .clone()
+            .synthesize_incremental(request, controls)
+            .await?;
+        Ok(KokoroMeteredIncrementalSpeechStream {
+            inner,
+            metrics: Arc::clone(&self.metrics),
+            started_at,
+        })
+    }
+}
+
+pub struct KokoroMeteredIncrementalSpeechStream {
+    inner: KokoroIncrementalSpeechStream,
+    metrics: Arc<Mutex<SpeechMetrics>>,
+    started_at: Instant,
+}
+
+impl IncrementalSpeechStream for KokoroMeteredIncrementalSpeechStream {
+    async fn next_audio_chunk(&mut self) -> Result<Option<IncrementalSpeechChunk>, ModelError> {
+        self.inner.next_audio_chunk().await
+    }
+
+    async fn finish(self) -> Result<IncrementalSpeechSummary, ModelError> {
+        let result = self.inner.finish().await;
+        let mut state = lock_metrics(&self.metrics, "kokoro-incremental-finish");
+        observe_latency(&mut state.runtime, self.started_at.elapsed());
+        result
+    }
+}
+
 #[derive(Clone, Debug)]
 struct VoiceStyle {
     rows: Vec<f32>,
@@ -399,15 +487,18 @@ impl VoiceStyle {
 fn load_runtime(artifacts: &KokoroArtifactPaths) -> Result<KokoroRuntime, ModelError> {
     let tokenizer = load_tokenizer(&artifacts.tokenizer_json)?;
     let voice = VoiceStyle::from_path(&artifacts.voice)?;
+    let target = kokoro_ort_target();
+    let execution_target = resolved_execution_target(target);
 
     Ok(KokoroRuntime {
         session: Mutex::new(build_session_with_target(
             "kokoro",
             &artifacts.model,
-            kokoro_ort_target(),
+            target,
         )?),
         tokenizer,
         voice,
+        execution_target,
     })
 }
 
@@ -456,9 +547,28 @@ fn load_tokenizer_without_post_processor(
 }
 
 fn kokoro_ort_target() -> OrtExecutionTarget {
-    match std::env::var("MOTLIE_KOKORO_ALLOW_CUDA") {
-        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => OrtExecutionTarget::Auto,
-        _ => OrtExecutionTarget::CpuOnly,
+    #[cfg(feature = "cuda")]
+    {
+        OrtExecutionTarget::Auto
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        OrtExecutionTarget::CpuOnly
+    }
+}
+
+fn kokoro_cpu_offload_reason() -> String {
+    if motlie_model::metrics_runtime::should_force_cpu() {
+        "cuda_execution_provider=off;force_cpu=true".to_owned()
+    } else if !cfg!(feature = "cuda") {
+        "accelerator_feature=none".to_owned()
+    } else if !motlie_model_ort::cuda_ep_available() {
+        "cuda_execution_provider=unavailable;ort_build=cpu_only".to_owned()
+    } else if matches!(kokoro_ort_target(), OrtExecutionTarget::CpuOnly) {
+        "cuda_execution_provider=off;target=cpu_only".to_owned()
+    } else {
+        "cuda_execution_provider=off".to_owned()
     }
 }
 

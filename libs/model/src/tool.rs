@@ -431,15 +431,10 @@ mod tests {
             "Add two integers."
         }
 
-        fn call(
-            &self,
-            args: Self::Args,
-        ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
-            async move {
-                Ok(AddOutput {
-                    value: args.left + args.right,
-                })
-            }
+        async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+            Ok(AddOutput {
+                value: args.left + args.right,
+            })
         }
     }
 

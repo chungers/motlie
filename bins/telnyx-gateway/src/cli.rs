@@ -1,71 +1,35 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
-
-use crate::quality::QualityProfile;
 use crate::replay::DEFAULT_TRAILING_SILENCE_PAD_MS;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Clone, Debug, Parser)]
 #[command(author, version, about = "Operator-driven Telnyx voice gateway")]
 pub struct Cli {
-    #[arg(long, default_value = "127.0.0.1:8080")]
-    pub bind: SocketAddr,
+    /// One-file gateway startup config/state TOML.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 
+    /// Override the configured bind address for this process.
+    #[arg(long)]
+    pub bind: Option<SocketAddr>,
+
+    /// Enable the local operator TUI for this process.
     #[arg(long)]
     pub tui: bool,
 
+    /// Override the configured Unix-domain operator socket path for this process.
     #[arg(long)]
     pub socket: Option<PathBuf>,
 
-    #[arg(long)]
-    pub load: Option<PathBuf>,
+    /// Override the configured preloaded model artifact root for this process.
+    #[arg(long = "artifact-root")]
+    pub artifact_root: Option<PathBuf>,
 
-    #[arg(long, default_value = "https://api.telnyx.com/v2")]
-    pub telnyx_api_base: String,
-
-    #[arg(long, default_value = "TELNYX_API_KEY")]
-    pub telnyx_api_key_env: String,
-
-    #[arg(long)]
-    pub dry_run_telnyx: bool,
-
-    /// Enable the M3 smoke-test echo conversation handler.
-    #[arg(long)]
-    pub conversation_smoke_test: bool,
-
-    #[arg(long)]
-    pub asr_artifact_root: Option<PathBuf>,
-
-    #[arg(long)]
-    pub no_asr_download: bool,
-
+    /// Override the configured log file for this process.
     #[arg(long)]
     pub log_file: Option<PathBuf>,
-
-    #[arg(long)]
-    pub capture_dir: Option<PathBuf>,
-
-    #[arg(long)]
-    pub quality_config: Option<PathBuf>,
-
-    #[arg(long)]
-    pub quality_profile: Option<QualityProfile>,
-
-    #[arg(long)]
-    pub endpoint_trailing_silence_ms: Option<u64>,
-
-    #[arg(long)]
-    pub speech_rms_threshold: Option<f32>,
-
-    #[arg(long)]
-    pub speech_peak_threshold: Option<i32>,
-
-    #[arg(long)]
-    pub speech_onset_min_silence_ms: Option<u64>,
-
-    #[arg(long)]
-    pub turn_log_jsonl: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<CliCommand>,

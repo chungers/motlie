@@ -10,18 +10,22 @@ use motlie_model::typed::{
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, SpeechParams,
-    StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, SpeechParams, StartOptions, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_espeak_ng::text_to_phonemes;
-use motlie_model_ort::{OrtExecutionTarget, build_session_with_target};
+use motlie_model_ort::{
+    build_session_with_target, resolved_execution_target, OrtExecutionTarget,
+    OrtResolvedExecutionTarget,
+};
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    PiperArtifactPaths, PiperConfig, RuntimeMetricState, configure_artifact_policy, lock_metrics,
-    observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, PiperArtifactPaths, PiperConfig, RuntimeMetricState,
 };
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -92,7 +96,7 @@ impl BackendAdapter for PiperSpeechAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.model_filename)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -152,7 +156,7 @@ impl PiperSpeechBundle {
     pub async fn start_typed(&self, options: StartOptions) -> Result<PiperHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.spec.model_filename, policy)?
@@ -248,6 +252,21 @@ impl BundleHandle for PiperHandle {
         })
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        match self.runtime.execution_target {
+            OrtResolvedExecutionTarget::Cuda => Some(RuntimeAcceleratorObservation {
+                backend_mode: "piper:cuda".to_owned(),
+                offload: Some("cuda_execution_provider=on;target=auto".to_owned()),
+                selected_device: Some("0".to_owned()),
+            }),
+            OrtResolvedExecutionTarget::Cpu => Some(RuntimeAcceleratorObservation {
+                backend_mode: "piper:cpu".to_owned(),
+                offload: Some(piper_cpu_offload_reason()),
+                selected_device: None,
+            }),
+        }
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
@@ -300,6 +319,7 @@ struct PiperRuntime {
     // so shared bundle handles must serialize access around the loaded session.
     session: Mutex<Session>,
     config: PiperConfig,
+    execution_target: OrtResolvedExecutionTarget,
 }
 
 impl PiperRuntime {
@@ -390,9 +410,31 @@ struct PiperSynthesisScales {
 }
 
 fn piper_ort_target() -> OrtExecutionTarget {
-    match std::env::var("MOTLIE_PIPER_ALLOW_CUDA") {
-        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => OrtExecutionTarget::Auto,
-        _ => OrtExecutionTarget::CpuOnly,
+    #[cfg(feature = "cuda")]
+    {
+        OrtExecutionTarget::Auto
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        OrtExecutionTarget::CpuOnly
+    }
+}
+
+fn piper_cpu_offload_reason() -> String {
+    if motlie_model::metrics_runtime::should_force_cpu() {
+        "cuda_execution_provider=off;force_cpu=true".to_owned()
+    } else if !cfg!(feature = "cuda") {
+        "accelerator_feature=none".to_owned()
+    } else if !motlie_model_ort::cuda_ep_available() {
+        // The `cuda` Cargo feature is on, but the ONNX Runtime this binary
+        // linked against has no CUDA execution provider compiled in (e.g. the
+        // static linux-aarch64 archives are CPU-only; see issue #497).
+        "cuda_execution_provider=unavailable;ort_build=cpu_only".to_owned()
+    } else if matches!(piper_ort_target(), OrtExecutionTarget::CpuOnly) {
+        "cuda_execution_provider=off;target=cpu_only".to_owned()
+    } else {
+        "cuda_execution_provider=off".to_owned()
     }
 }
 
@@ -405,17 +447,18 @@ fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelErr
         )));
     }
 
+    let target = piper_ort_target();
+    let execution_target = resolved_execution_target(target);
     Ok(PiperRuntime {
-        // @codex-tts 2026-04-27 -- Piper exits with glibc heap corruption on this host when
-        // the ONNX Runtime CUDA execution provider is enabled during teardown. Default to CPU
-        // for Piper as a stability workaround, but allow explicit opt-in probing with
-        // MOTLIE_PIPER_ALLOW_CUDA=1 on hosts that may not reproduce the crash. See issue #230.
+        // Target selection is feature-driven and resolved once so runtime telemetry
+        // exactly matches the ORT execution provider used by the session.
         session: Mutex::new(build_session_with_target(
             "piper",
             &artifacts.model,
-            piper_ort_target(),
+            target,
         )?),
         config,
+        execution_target,
     })
 }
 
@@ -536,8 +579,8 @@ fn ort_tensor_error(err: ort::Error) -> ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::SpeechParams;
     use motlie_model::typed::SpeechStream as _;
+    use motlie_model::SpeechParams;
 
     #[tokio::test]
     async fn stream_emits_chunks_and_finishes_once() {
@@ -550,13 +593,11 @@ mod tests {
         }
 
         assert_eq!(total, 10_000);
-        assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("stream should stay exhausted")
-                .is_none()
-        );
+        assert!(stream
+            .next_chunk()
+            .await
+            .expect("stream should stay exhausted")
+            .is_none());
     }
 
     #[test]

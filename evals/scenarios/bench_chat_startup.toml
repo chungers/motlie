@@ -1,0 +1,36 @@
+schema_version = 1
+id = "bench_chat_startup"
+capability = "perf"
+summary = "Comparable chat startup and steady-state request latency benchmark."
+
+[bundle_filter]
+capability = "chat"
+backend = ["MistralRs", "LlamaCpp"]
+
+[input]
+workload = "chat_generation"
+dataset = "datasets/chat/baseline_chat_500.txt"
+iterations = 3
+warmup_iterations = 1
+
+[assertions]
+min_successful_iterations = 3
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+capture_peak_rss = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.local-cpu-aarch64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.apple-metal]
+
+[profiles.dgx-spark.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.cuda-workstation.gates]
+max_process_swap_delta_bytes = 4294967296

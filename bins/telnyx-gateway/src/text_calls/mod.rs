@@ -64,11 +64,17 @@ async fn run_inbound_text_call_flow_inner(
             offers::send_inbound_offer(&client, &subscription, call.clone(), callback_timeout)
                 .await;
         match attempt.decision {
-            CallbackDecision::Accept { call_url } => {
+            CallbackDecision::Accept {
+                call_url,
+                emit_partials,
+                emit_early_turns,
+            } => {
                 let setup = websocket::TextCallSetup {
                     gateway_call_id: trigger.gateway_call_id.clone(),
                     call_url,
                     direction: TextCallDirection::Inbound,
+                    emit_partials,
+                    emit_early_turns,
                 };
                 if let Err(error) =
                     websocket::connect_application_stream(services.clone(), setup).await

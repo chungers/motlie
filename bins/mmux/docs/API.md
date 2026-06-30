@@ -10,6 +10,10 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-24 | @codex-562-impl | Documented issue #567: `SessionSortMode::HostGroup` and list-pane `m` toggle host/machine grouped recency sorting. |
+| 2026-06-22 | @codex-562-impl | Updated live-test follow-ups: single-space stable-id rows, `s`/`g` toggles back to activity recency, and Help key-list scrolling below the fixed logo. |
+| 2026-06-22 | @codex-562-impl | Documented issue #562 reality: session rows render stable tmux ids and list-focused `/` search uses case-insensitive substring matching in current sort order. |
+| 2026-06-11 | @mstream453-impl | Added `SessionSortMode::Name` for list-pane `s` sorting and Help shortcut coverage. |
 | 2026-05-20 | @codex | Added `Cli.alias` and host-label override behavior so mmux can display operator-provided labels without changing host routing identity. |
 | 2026-05-16 | @codex-tmux-tl | Added insertion-point cursor state for mmux modal text fields so focused Left/Right edit inside the field, with single-line and wrapped Send Keys rendering keeping the terminal cursor aligned. |
 | 2026-05-03 | @codex | Added `SendKeys` modal state and documented the `s` send-keys flow through `Target::send_keys`. |
@@ -251,7 +255,7 @@ enum ModalState {
     RenameSession { session: SelectedSession, input: String, button: Button },
     SendKeys { session: SelectedSession, ui: SendKeysModalUi },
     SessionKeyValues { session: SelectedSession, ui: SessionKeyValueModalUi },
-    Help,
+    Help { scroll: usize },
 }
 
 struct SelectedSession {
@@ -322,7 +326,9 @@ right-justified.
 The Sessions pane title is derived only from the live session list length:
 `Sessions [n]`. List rows show the display name, attached marker, optional
 multi-host color-square column, and right-aligned `<active> / <age>` recency
-text with a small right margin; stable session ids stay internal for dispatch.
+text with a small right margin. Rows also show the stable tmux session id as
+`[$id]` next to the display name with exactly one space as `<name> [$id]`
+while retaining the same id for dispatch.
 The attached marker is `*` when `SessionInfo::is_attached()` is true.
 The list is sorted by
 `activity_observed_at_local` descending — operator-side wall clock at the
@@ -333,15 +339,33 @@ values before rows without a displayed tag. Tag groups are ordered by the most
 recent activity in each group, and rows within a group then sort by activity
 time, host order, and session name. Empty checked-tag values sort with rows that
 have no displayed tag. The `g` toggle selects the first row in the new order;
-pressing `g` again restores `SessionSortMode::Activity`. `preserve_selection()` re-finds
-the highlighted row by stable session id after refreshes. A single quiet
-one-second `list_sessions()` refresh keeps the active ordering current and
-notices structural session changes. Recency text is observer-relative
+pressing `g` again restores `SessionSortMode::Activity`. Pressing `s` with the
+list focused toggles `SessionSortMode::Name`: the first press sorts by session
+name and selects the first row in name order, and the next press restores
+`SessionSortMode::Activity`. Pressing `m` with the list focused toggles
+`SessionSortMode::HostGroup`: the first press groups rows by host/machine using
+configured host order and sorts rows within each host by activity recency; the
+next press restores `SessionSortMode::Activity`. `preserve_selection()`
+re-finds the highlighted row by stable session id after refreshes. A single
+quiet one-second
+`list_sessions()` refresh keeps the active ordering current and notices
+structural session changes. Recency text is observer-relative
 for the activity column (`local_now − activity_observed_at_local`) and
 `local_now − session.created` for the age column under an NTP-synced
 clock assumption — see `DESIGN.md` §Clock Handling for the rationale.
 Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
+
+When the session list has focus, `/` starts quick search. `AppState` stores the
+transient search query, printable characters extend it, and
+`SessionListState` selects the first row whose session display name contains
+the query, case-insensitively, in the current row order. Another `/`, Up, or
+Down cancels search mode without moving the highlight; non-text command keys
+first leave search mode before normal handling.
+This is substring (`contains`) matching, not prefix matching, following the
+vi/vim/less `/` convention: search is unanchored/match-anywhere, while prefix
+matching is a typeahead/completion idiom. Iterating matches with `n`/`N` is a
+possible future follow-up and is out of scope for #562.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
 the bottom status start with `tab ↑/↓`, then `help`, `prompt`, `attach`,
@@ -436,8 +460,10 @@ with Rust filesystem APIs. It sets `MMUX_BUILD_DATE` from an explicit
 environment override or from `SystemTime` converted to a UTC `YYYY-MM-DD` date
 in Rust. The Help modal opened by `h` renders the build date and only the last
 8 characters of the git SHA below the built-in motlie logo and above the
-key-function reference. Modal content is padded inside the outer border, and
-the button bar is separated from the main content by a horizontal rule.
+key-function reference. The logo/build metadata are fixed at the top of the
+modal; the key-function reference below them scrolls with Up/Down, PgUp/PgDn,
+or `j`/`k`. Modal content is padded inside the outer border, and the button bar
+is separated from the main content by a horizontal rule.
 New Session renders its session-name input in a bordered field. In multi-host
 mode, it also renders a Host dropdown above the session-name field and carries
 the selected host id through `Ok` so create dispatches to that host.

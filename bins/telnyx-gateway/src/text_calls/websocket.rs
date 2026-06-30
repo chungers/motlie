@@ -5,12 +5,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::call_control::TelnyxClient;
+use crate::early_response::{AppendOrReplace, EarlyResponseCancelReason, EarlyResponseEvent};
 use crate::media::SharedMediaRegistry;
 use crate::operator::state::{CallStatus, LogLevel, SharedState, TtsPlaybackStatus};
 use crate::quality::TextCallQualityConfig;
@@ -19,7 +22,9 @@ use crate::tts::{SharedTtsRegistry, StreamingSpeechTextPacker};
 
 use super::offers::validate_call_url;
 use super::turns::{
-    AgentTextFrame, GatewayTextFrame, PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_PROTOCOL,
+    AgentTextFrame, CallerSpeechState, DebugTextStreamFrame, GatewayTextFrame,
+    PlaybackFinishedStatus, TextCallDirection, TEXT_CALL_EARLY_TURNS_EXTENSION,
+    TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 
 const OUTBOUND_TEXT_FRAME_CAPACITY: usize = 64;
@@ -236,20 +241,61 @@ impl TextCallTurnTracker {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SharedTextCallRegistry {
-    inner: Arc<Mutex<BTreeMap<String, TextCallSessionHandle>>>,
+    inner: Arc<Mutex<BTreeMap<String, TextCallRegistryEntry>>>,
+    next_owner: Arc<AtomicU64>,
+}
+
+impl Default for SharedTextCallRegistry {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(BTreeMap::new())),
+            next_owner: Arc::new(AtomicU64::new(1)),
+        }
+    }
 }
 
 impl SharedTextCallRegistry {
-    async fn insert(&self, gateway_call_id: String, handle: TextCallSessionHandle) {
-        self.inner.lock().await.insert(gateway_call_id, handle);
+    async fn claim(
+        &self,
+        gateway_call_id: String,
+        handle: TextCallSessionHandle,
+    ) -> anyhow::Result<TextCallSessionOwner> {
+        let mut guard = self.inner.lock().await;
+        if guard.contains_key(&gateway_call_id) {
+            anyhow::bail!("text-call stream already attached for {gateway_call_id}");
+        }
+        let owner = TextCallSessionOwner(self.next_owner.fetch_add(1, Ordering::SeqCst));
+        guard.insert(gateway_call_id, TextCallRegistryEntry { owner, handle });
+        Ok(owner)
     }
 
     #[cfg(test)]
     pub(crate) async fn insert_test_session(
         &self,
         gateway_call_id: impl Into<String>,
+    ) -> mpsc::Receiver<GatewayTextFrame> {
+        self.insert_test_session_with_partials(gateway_call_id, false)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_test_session_with_partials(
+        &self,
+        gateway_call_id: impl Into<String>,
+        emit_partials: bool,
+    ) -> mpsc::Receiver<GatewayTextFrame> {
+        self.insert_test_session_with_options(gateway_call_id, emit_partials, false)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_test_session_with_options(
+        &self,
+        gateway_call_id: impl Into<String>,
+        emit_partials: bool,
+        emit_early_turns: bool,
     ) -> mpsc::Receiver<GatewayTextFrame> {
         let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let handle = TextCallSessionHandle {
@@ -258,17 +304,188 @@ impl SharedTextCallRegistry {
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
+            emit_partials,
+            emit_early_turns,
         };
-        self.insert(gateway_call_id.into(), handle).await;
+        self.claim(gateway_call_id.into(), handle)
+            .await
+            .expect("test session should claim text-call registry slot");
         rx
     }
 
-    pub async fn remove(&self, gateway_call_id: &str) {
-        self.inner.lock().await.remove(gateway_call_id);
+    async fn remove_owner(&self, gateway_call_id: &str, owner: TextCallSessionOwner) -> bool {
+        let mut guard = self.inner.lock().await;
+        let Some(entry) = guard.get(gateway_call_id) else {
+            return false;
+        };
+        if entry.owner != owner {
+            return false;
+        }
+        guard.remove(gateway_call_id);
+        true
     }
 
     pub async fn contains(&self, gateway_call_id: &str) -> bool {
         self.inner.lock().await.contains_key(gateway_call_id)
+    }
+
+    pub async fn send_caller_partial(
+        &self,
+        gateway_call_id: &str,
+        utterance_id: String,
+        text: String,
+        confidence: Option<f32>,
+        stability: Option<f32>,
+        speech_state: CallerSpeechState,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        if !handle.emit_partials {
+            return Ok(false);
+        }
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Ok(false);
+        }
+        handle.try_send(GatewayTextFrame::CallerPartial {
+            utterance_id,
+            sequence: handle.next_sequence(),
+            text,
+            confidence: Self::normalized_score(confidence),
+            stability: Self::normalized_score(stability),
+            speech_state,
+            reply_allowed: false,
+        })?;
+        Ok(true)
+    }
+
+    pub async fn send_early_response_event(
+        &self,
+        gateway_call_id: &str,
+        event: EarlyResponseEvent,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        if !handle.emit_early_turns {
+            return Ok(false);
+        }
+        match event {
+            EarlyResponseEvent::Started {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                text,
+                confidence,
+                stability,
+                speech_state,
+                ..
+            } => handle.try_send(GatewayTextFrame::CallerTurnProvisional {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                sequence: handle.next_sequence(),
+                text,
+                confidence: Self::normalized_score(confidence),
+                stability: Self::normalized_score(stability),
+                speech_state,
+                reply_allowed: true,
+            })?,
+            EarlyResponseEvent::Updated {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                text,
+                append_or_replace,
+                ..
+            } => handle.try_send(GatewayTextFrame::CallerTurnProvisionalUpdate {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                sequence: handle.next_sequence(),
+                text,
+                append_or_replace: append_or_replace_label(append_or_replace).to_string(),
+            })?,
+            EarlyResponseEvent::Canceled {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                reason,
+                ..
+            } => handle.try_send(GatewayTextFrame::CallerTurnProvisionalCancel {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                sequence: handle.next_sequence(),
+                reason: early_cancel_reason_label(reason).to_string(),
+            })?,
+            EarlyResponseEvent::Committed {
+                provisional_turn_id,
+                utterance_id,
+                generation,
+                turn_id,
+                coalesced_utterance_ids,
+                final_text,
+                ..
+            } => handle.try_send(GatewayTextFrame::CallerTurnProvisionalCommit {
+                provisional_turn_id,
+                turn_id,
+                utterance_id,
+                coalesced_utterance_ids,
+                generation,
+                sequence: handle.next_sequence(),
+                final_text,
+            })?,
+        }
+        Ok(true)
+    }
+
+    pub async fn send_early_response_playback_started(
+        &self,
+        gateway_call_id: &str,
+        provisional_turn_id: String,
+        generation: u64,
+        playback_id: String,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        if !handle.emit_early_turns {
+            return Ok(false);
+        }
+        handle.try_send(GatewayTextFrame::ProvisionalPlaybackStarted {
+            provisional_turn_id,
+            generation,
+            playback_id,
+            sequence: handle.next_sequence(),
+        })?;
+        Ok(true)
+    }
+
+    fn normalized_score(score: Option<f32>) -> Option<f32> {
+        score.filter(|score| score.is_finite() && *score >= 0.0 && *score <= 1.0)
     }
 
     pub async fn send_caller_turn(
@@ -277,7 +494,24 @@ impl SharedTextCallRegistry {
         text: String,
         finalized_at: Instant,
     ) -> anyhow::Result<Option<String>> {
-        let handle = { self.inner.lock().await.get(gateway_call_id).cloned() };
+        self.send_caller_turn_with_utterance(gateway_call_id, text, finalized_at, None)
+            .await
+    }
+
+    pub async fn send_caller_turn_with_utterance(
+        &self,
+        gateway_call_id: &str,
+        text: String,
+        finalized_at: Instant,
+        utterance_id: Option<String>,
+    ) -> anyhow::Result<Option<String>> {
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
         let Some(handle) = handle else {
             return Ok(None);
         };
@@ -295,6 +529,7 @@ impl SharedTextCallRegistry {
         }
         handle.try_send(GatewayTextFrame::CallerTurn {
             turn_id: turn_id.clone(),
+            utterance_id,
             sequence: handle.next_sequence(),
             text,
         })?;
@@ -308,7 +543,13 @@ impl SharedTextCallRegistry {
         playback_id: &str,
         status: PlaybackFinishedStatus,
     ) -> bool {
-        let handle = { self.inner.lock().await.get(gateway_call_id).cloned() };
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
         let Some(handle) = handle else {
             return false;
         };
@@ -322,7 +563,13 @@ impl SharedTextCallRegistry {
     }
 
     pub async fn send_session_end(&self, gateway_call_id: &str, reason: impl Into<String>) {
-        let handle = { self.inner.lock().await.get(gateway_call_id).cloned() };
+        let handle = {
+            self.inner
+                .lock()
+                .await
+                .get(gateway_call_id)
+                .map(|entry| entry.handle.clone())
+        };
         if let Some(handle) = handle {
             let _ = handle
                 .send(GatewayTextFrame::SessionEnd {
@@ -334,6 +581,15 @@ impl SharedTextCallRegistry {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TextCallSessionOwner(u64);
+
+#[derive(Clone)]
+struct TextCallRegistryEntry {
+    owner: TextCallSessionOwner,
+    handle: TextCallSessionHandle,
+}
+
 #[derive(Clone)]
 struct TextCallSessionHandle {
     tx: mpsc::Sender<GatewayTextFrame>,
@@ -341,6 +597,8 @@ struct TextCallSessionHandle {
     turns: Arc<Mutex<TextCallTurnTracker>>,
     append_turns: Arc<Mutex<BTreeMap<String, AgentAppendTurn>>>,
     config: TextCallSessionConfig,
+    emit_partials: bool,
+    emit_early_turns: bool,
 }
 
 impl TextCallSessionHandle {
@@ -381,6 +639,36 @@ pub struct TextCallSetup {
     pub gateway_call_id: String,
     pub call_url: String,
     pub direction: TextCallDirection,
+    pub emit_partials: bool,
+    pub emit_early_turns: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DebugTextCallSetup {
+    pub gateway_call_id: String,
+    pub direction: TextCallDirection,
+    pub emit_partials: bool,
+    pub emit_early_turns: bool,
+}
+
+fn text_call_session_handle(
+    session_config: TextCallSessionConfig,
+    emit_partials: bool,
+    emit_early_turns: bool,
+) -> (TextCallSessionHandle, mpsc::Receiver<GatewayTextFrame>) {
+    let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+    let handle = TextCallSessionHandle {
+        tx,
+        sequence: Arc::new(AtomicU64::new(1)),
+        turns: Arc::new(Mutex::new(TextCallTurnTracker::new(
+            session_config.max_active_turns,
+        ))),
+        append_turns: Arc::new(Mutex::new(BTreeMap::new())),
+        config: session_config,
+        emit_partials,
+        emit_early_turns,
+    };
+    (handle, rx)
 }
 
 pub async fn connect_application_stream(
@@ -398,30 +686,29 @@ pub async fn connect_application_stream(
         call_id: setup.gateway_call_id.clone(),
         direction: setup.direction,
     };
-    send_json_frame(&mut write, &start).await?;
-
     let session_config = {
         let guard = services.state.read().await;
         TextCallSessionConfig::from(&guard.quality.config.text_call)
     };
-    let (tx, rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
-    let handle = TextCallSessionHandle {
-        tx,
-        sequence: Arc::new(AtomicU64::new(1)),
-        turns: Arc::new(Mutex::new(TextCallTurnTracker::new(
-            session_config.max_active_turns,
-        ))),
-        append_turns: Arc::new(Mutex::new(BTreeMap::new())),
-        config: session_config,
-    };
-    services
+    let (handle, rx) =
+        text_call_session_handle(session_config, setup.emit_partials, setup.emit_early_turns);
+    let owner = services
         .registry
-        .insert(setup.gateway_call_id.clone(), handle.clone())
-        .await;
+        .claim(setup.gateway_call_id.clone(), handle.clone())
+        .await?;
+
+    if let Err(error) = send_json_frame(&mut write, &start).await {
+        services
+            .registry
+            .remove_owner(&setup.gateway_call_id, owner)
+            .await;
+        return Err(error);
+    }
 
     tokio::spawn(run_text_call_session(
         services,
         setup.gateway_call_id,
+        owner,
         handle,
         read,
         write,
@@ -430,9 +717,173 @@ pub async fn connect_application_stream(
     Ok(())
 }
 
+pub async fn run_debug_text_stream<R, W>(
+    services: TextCallStreamServices,
+    setup: DebugTextCallSetup,
+    read: R,
+    write: W,
+) -> anyhow::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let session_config = {
+        let guard = services.state.read().await;
+        TextCallSessionConfig::from(&guard.quality.config.text_call)
+    };
+    let (handle, rx) =
+        text_call_session_handle(session_config, setup.emit_partials, setup.emit_early_turns);
+    let owner = services
+        .registry
+        .claim(setup.gateway_call_id.clone(), handle.clone())
+        .await?;
+
+    let result = run_debug_text_call_session(
+        services.clone(),
+        setup.gateway_call_id.clone(),
+        setup.direction,
+        handle.clone(),
+        read,
+        write,
+        rx,
+    )
+    .await;
+
+    handle.append_turns.lock().await.clear();
+    handle.turns.lock().await.clear();
+    services
+        .registry
+        .remove_owner(&setup.gateway_call_id, owner)
+        .await;
+    result
+}
+
+async fn run_debug_text_call_session<R, W>(
+    services: TextCallStreamServices,
+    gateway_call_id: String,
+    direction: TextCallDirection,
+    handle: TextCallSessionHandle,
+    mut read: R,
+    mut write: W,
+    mut rx: mpsc::Receiver<GatewayTextFrame>,
+) -> anyhow::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    write_json_line(
+        &mut write,
+        &DebugTextStreamFrame::attached_with_extensions(
+            gateway_call_id.clone(),
+            handle
+                .emit_partials
+                .then(|| TEXT_CALL_PARTIALS_EXTENSION.to_string())
+                .into_iter()
+                .chain(
+                    handle
+                        .emit_early_turns
+                        .then(|| TEXT_CALL_EARLY_TURNS_EXTENSION.to_string()),
+                )
+                .collect(),
+        ),
+    )
+    .await?;
+    write_json_line(
+        &mut write,
+        &GatewayTextFrame::SessionStart {
+            protocol: TEXT_CALL_PROTOCOL.to_string(),
+            call_id: gateway_call_id.clone(),
+            direction,
+        },
+    )
+    .await?;
+
+    let mut line = String::new();
+    loop {
+        tokio::select! {
+            frame = rx.recv() => {
+                let Some(frame) = frame else {
+                    break;
+                };
+                let gateway_closed = matches!(frame, GatewayTextFrame::SessionEnd { .. });
+                write_json_line(&mut write, &frame).await?;
+                if gateway_closed {
+                    break;
+                }
+            }
+            read = read.read_line(&mut line) => {
+                let read = read?;
+                if read == 0 {
+                    break;
+                }
+                let message = line.trim();
+                if message.is_empty() {
+                    line.clear();
+                    continue;
+                }
+                if let Ok(debug) = serde_json::from_str::<DebugTextStreamFrame>(message) {
+                    match debug {
+                        DebugTextStreamFrame::Detach { reason } => {
+                            write_json_line(
+                                &mut write,
+                                &DebugTextStreamFrame::detached(
+                                    reason.unwrap_or_else(|| "debug.detach".to_string()),
+                                ),
+                            )
+                            .await?;
+                            break;
+                        }
+                        DebugTextStreamFrame::Attach { .. } => {
+                            write_json_line(
+                                &mut write,
+                                &DebugTextStreamFrame::error(
+                                    "already_attached",
+                                    "debug stream is already attached",
+                                ),
+                            )
+                            .await?;
+                        }
+                        DebugTextStreamFrame::Attached { .. }
+                        | DebugTextStreamFrame::Detached { .. }
+                        | DebugTextStreamFrame::Error { .. } => {
+                            write_json_line(
+                                &mut write,
+                                &DebugTextStreamFrame::error(
+                                    "invalid_debug_frame",
+                                    "client debug stream frame is not valid in stream mode",
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
+                    line.clear();
+                    continue;
+                }
+
+                if let Err(error) =
+                    handle_agent_message(&services, &gateway_call_id, &handle, message).await
+                {
+                    log_text_call_error(&services.state, &gateway_call_id, error).await;
+                    write_json_line(
+                        &mut write,
+                        &DebugTextStreamFrame::error(
+                            "protocol_error",
+                            "invalid text-call agent frame",
+                        ),
+                    )
+                    .await?;
+                }
+                line.clear();
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_text_call_session<W, R>(
     services: TextCallStreamServices,
     gateway_call_id: String,
+    owner: TextCallSessionOwner,
     handle: TextCallSessionHandle,
     mut read: R,
     mut write: W,
@@ -495,7 +946,10 @@ async fn run_text_call_session<W, R>(
 
     handle.append_turns.lock().await.clear();
     handle.turns.lock().await.clear();
-    services.registry.remove(&gateway_call_id).await;
+    services
+        .registry
+        .remove_owner(&gateway_call_id, owner)
+        .await;
     if !gateway_closed {
         let _ =
             hangup_gateway_call(&services, &gateway_call_id, "text-call websocket closed").await;
@@ -621,6 +1075,15 @@ async fn handle_agent_message(
                 handle.clone(),
                 queued.playback_id.clone(),
             );
+        }
+        AgentTextFrame::AgentTurnProvisionalPartial { .. }
+        | AgentTextFrame::AgentTurnProvisional { .. } => {
+            send_error_frame(
+                handle,
+                "unsupported_provisional_agent_turn",
+                "agent provisional turn frames are reserved for early-response processors",
+            )
+            .await?;
         }
         AgentTextFrame::AgentClose { reason } => {
             handle
@@ -896,7 +1359,12 @@ async fn queue_append_agent_speech_with_media_wait(
                 source_label: "text-call agent.turn.partial".to_string(),
                 conflict_policy,
                 turn_finalized_at,
+                latest_turn_finalized_at: turn_finalized_at,
                 turn_id: turn_id.clone(),
+                coalesced_turn_ids: turn_id.iter().cloned().collect(),
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
+                prebuffer_chunks_override: None,
             },
             initial_chunks.clone(),
         )
@@ -952,7 +1420,12 @@ async fn queue_agent_speech_with_media_wait(
                 source_label: "text-call agent.turn".to_string(),
                 conflict_policy,
                 turn_finalized_at,
+                latest_turn_finalized_at: turn_finalized_at,
                 turn_id: turn_id.clone(),
+                coalesced_turn_ids: turn_id.iter().cloned().collect(),
+                source_asr_session_ids: Vec::new(),
+                source_utterance_ids: Vec::new(),
+                prebuffer_chunks_override: None,
             },
         )
         .await
@@ -1081,7 +1554,32 @@ fn playback_finished_status(status: TtsPlaybackStatus) -> Option<PlaybackFinishe
     }
 }
 
-pub async fn hangup_gateway_call(
+pub fn append_or_replace_label(value: AppendOrReplace) -> &'static str {
+    match value {
+        AppendOrReplace::Append => "append",
+        AppendOrReplace::Replace => "replace",
+    }
+}
+
+fn early_cancel_reason_label(reason: EarlyResponseCancelReason) -> &'static str {
+    match reason {
+        EarlyResponseCancelReason::AsrCorrection => "asr_correction",
+        EarlyResponseCancelReason::FinalTranscriptMismatch => "final_transcript_mismatch",
+        EarlyResponseCancelReason::SupersededByNewGeneration => "superseded_by_new_generation",
+        EarlyResponseCancelReason::PolicyDisabled => "policy_disabled",
+        EarlyResponseCancelReason::PolicyNoLongerSatisfied => "policy_no_longer_satisfied",
+        EarlyResponseCancelReason::MaxUpdatesExceeded => "max_updates_exceeded",
+        EarlyResponseCancelReason::CallerBargeIn => "caller_barge_in",
+        EarlyResponseCancelReason::ProcessorRejected => "processor_rejected",
+        EarlyResponseCancelReason::TtsCanceled => "tts_canceled",
+        EarlyResponseCancelReason::StaleGeneration => "stale_generation",
+        EarlyResponseCancelReason::CoalescedIntoFinalTurn => "coalesced_into_final_turn",
+        EarlyResponseCancelReason::SessionEnded => "session_ended",
+        EarlyResponseCancelReason::Hangup => "hangup",
+    }
+}
+
+pub(crate) async fn hangup_gateway_call(
     services: &TextCallStreamServices,
     gateway_call_id: &str,
     reason: &str,
@@ -1102,6 +1600,7 @@ pub async fn hangup_gateway_call(
         call.status = CallStatus::Ended;
         call.push_timeline(reason.to_string());
     }
+    guard.emit_quality_report_summary(gateway_call_id, "call_terminal");
     Ok(())
 }
 
@@ -1115,6 +1614,18 @@ where
         .send(Message::Text(encoded.into()))
         .await
         .context("send text-call websocket frame")
+}
+
+async fn write_json_line<W, T>(write: &mut W, frame: &T) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let encoded = serde_json::to_string(frame).context("encode text-call JSONL frame")?;
+    write.write_all(encoded.as_bytes()).await?;
+    write.write_all(b"\n").await?;
+    write.flush().await?;
+    Ok(())
 }
 
 async fn log_text_call_error(state: &SharedState, gateway_call_id: &str, error: anyhow::Error) {
@@ -1147,13 +1658,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_duplicate_attach_and_stale_debug_detach_do_not_remove_app_session() {
+        let registry = SharedTextCallRegistry::default();
+        let (debug_tx, mut debug_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let debug_handle = test_handle(debug_tx);
+        let (app_tx, mut app_rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let app_handle = test_handle(app_tx);
+
+        let debug_owner = registry
+            .claim("call-test".to_string(), debug_handle)
+            .await
+            .expect("debug attach should claim first");
+        let duplicate_error = registry
+            .claim("call-test".to_string(), app_handle.clone())
+            .await
+            .expect_err("app attach must not replace active debug owner");
+        assert!(format!("{duplicate_error:#}").contains("already attached"));
+        assert!(registry.contains("call-test").await);
+
+        assert!(registry.remove_owner("call-test", debug_owner).await);
+        let app_owner = registry
+            .claim("call-test".to_string(), app_handle)
+            .await
+            .expect("app attach should claim after debug detaches");
+        assert!(!registry.remove_owner("call-test", debug_owner).await);
+        assert!(registry.contains("call-test").await);
+
+        let turn_id = registry
+            .send_caller_turn("call-test", "hello app".to_string(), Instant::now())
+            .await
+            .expect("app-owned session should accept caller turn")
+            .expect("app-owned session should receive caller turn");
+        assert!(matches!(
+            app_rx.recv().await,
+            Some(GatewayTextFrame::CallerTurn { turn_id: id, text, .. })
+                if id == turn_id && text == "hello app"
+        ));
+        assert!(debug_rx.try_recv().is_err());
+        assert!(registry.remove_owner("call-test", app_owner).await);
+        assert!(!registry.contains("call-test").await);
+    }
+
+    #[tokio::test]
+    async fn caller_partial_requires_opted_in_session() {
+        let registry = SharedTextCallRegistry::default();
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let handle = test_handle(tx);
+        registry
+            .claim("call-default".to_string(), handle)
+            .await
+            .expect("default session should attach");
+
+        let emitted = registry
+            .send_caller_partial(
+                "call-default",
+                "utt-default".to_string(),
+                "hello wor".to_string(),
+                None,
+                None,
+                CallerSpeechState::Speaking,
+            )
+            .await
+            .expect("default partial send should not fail");
+        assert!(!emitted);
+        assert!(rx.try_recv().is_err());
+
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.emit_partials = true;
+        registry
+            .claim("call-partials".to_string(), handle)
+            .await
+            .expect("partial session should attach");
+
+        let emitted = registry
+            .send_caller_partial(
+                "call-partials",
+                "utt-partial".to_string(),
+                "hello wor".to_string(),
+                Some(0.84),
+                Some(0.61),
+                CallerSpeechState::Speaking,
+            )
+            .await
+            .expect("partial send should succeed");
+        assert!(emitted);
+        assert!(matches!(
+            rx.recv().await,
+            Some(GatewayTextFrame::CallerPartial {
+                utterance_id,
+                text,
+                confidence: Some(confidence),
+                stability: Some(stability),
+                speech_state: CallerSpeechState::Speaking,
+                reply_allowed: false,
+                ..
+            }) if utterance_id == "utt-partial"
+                && text == "hello wor"
+                && (confidence - 0.84).abs() < f32::EPSILON
+                && (stability - 0.61).abs() < f32::EPSILON
+        ));
+    }
+
+    #[tokio::test]
+    async fn early_response_events_require_opted_in_session() {
+        let registry = SharedTextCallRegistry::default();
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let handle = test_handle(tx);
+        registry
+            .claim("call-default".to_string(), handle)
+            .await
+            .expect("default session should attach");
+        let event = EarlyResponseEvent::Started {
+            provisional_turn_id: "pt-1".to_string(),
+            call_id: "call-default".to_string(),
+            utterance_id: "utt-1".to_string(),
+            generation: 1,
+            text: "I need a tow truck.".to_string(),
+            confidence: Some(0.91),
+            stability: Some(0.86),
+            speech_state: CallerSpeechState::EndpointCandidate,
+        };
+        let emitted = registry
+            .send_early_response_event("call-default", event.clone())
+            .await
+            .expect("default early response send should not fail");
+        assert!(!emitted);
+        assert!(rx.try_recv().is_err());
+
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
+        let mut handle = test_handle(tx);
+        handle.emit_early_turns = true;
+        registry
+            .claim("call-early".to_string(), handle)
+            .await
+            .expect("early-turn session should attach");
+        let emitted = registry
+            .send_early_response_event("call-early", event)
+            .await
+            .expect("early response send should succeed");
+        assert!(emitted);
+        assert!(matches!(
+            rx.recv().await,
+            Some(GatewayTextFrame::CallerTurnProvisional {
+                provisional_turn_id,
+                utterance_id,
+                generation: 1,
+                text,
+                speech_state: CallerSpeechState::EndpointCandidate,
+                ..
+            }) if provisional_turn_id == "pt-1"
+                && utterance_id == "utt-1"
+                && text == "I need a tow truck."
+        ));
+    }
+
+    #[tokio::test]
     async fn caller_turn_allows_multiple_outstanding_turns() {
         let registry = SharedTextCallRegistry::default();
         let (tx, mut rx) = mpsc::channel(OUTBOUND_TEXT_FRAME_CAPACITY);
         let handle = test_handle(tx);
         registry
-            .insert("call-test".to_string(), handle.clone())
-            .await;
+            .claim("call-test".to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
 
         let first = registry
             .send_caller_turn("call-test", "first".to_string(), Instant::now())
@@ -1200,8 +1868,9 @@ mod tests {
             }
         }
         registry
-            .insert("call-test".to_string(), handle.clone())
-            .await;
+            .claim("call-test".to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
 
         let error = registry
             .send_caller_turn("call-test", "overflow".to_string(), Instant::now())
@@ -1321,8 +1990,9 @@ mod tests {
         let handle = test_handle(tx);
         services
             .registry
-            .insert(call_id.to_string(), handle.clone())
-            .await;
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
         handle
             .turns
             .lock()
@@ -1396,8 +2066,9 @@ mod tests {
         let handle = test_handle(tx);
         services
             .registry
-            .insert(call_id.to_string(), handle.clone())
-            .await;
+            .claim(call_id.to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
         handle
             .turns
             .lock()
@@ -1470,8 +2141,9 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let handle = test_handle(tx);
         registry
-            .insert("call-test".to_string(), handle.clone())
-            .await;
+            .claim("call-test".to_string(), handle.clone())
+            .await
+            .expect("test session should claim registry slot");
 
         registry
             .send_caller_turn("call-test", "first".to_string(), Instant::now())
@@ -1601,6 +2273,8 @@ mod tests {
             turns: Arc::new(Mutex::new(TextCallTurnTracker::default())),
             append_turns: Arc::new(Mutex::new(BTreeMap::new())),
             config: TextCallSessionConfig::from(&TextCallQualityConfig::default()),
+            emit_partials: false,
+            emit_early_turns: false,
         }
     }
 }

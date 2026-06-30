@@ -1,0 +1,41 @@
+# Failure Excerpts
+
+- run_id: `curated-v2-smoke-1781131781834-3412429-0b8e8e5e-spark-2f6e-aarch64-cuda`
+- git_sha: `0b8e8e5ecb53c5256037b8970041446a1637515b`
+- profile: `dgx-spark`
+- build_profile: `None`
+- non_pass_records: `33`
+
+- [embeddinggemma_300m__embeddings_similarity__smoke__hf_default](01_embeddinggemma_300m__embeddings_similarity__smoke__hf_default.md) — `blocked` / `artifact_unauthorized`
+- [qwen3_embedding_06b__embeddings_similarity__smoke__hf_default](02_qwen3_embedding_06b__embeddings_similarity__smoke__hf_default.md) — `blocked` / `artifact_unauthorized`
+- [qwen3_4b__chat_smoke__smoke__hf_safetensors_default](03_qwen3_4b__chat_smoke__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default](04_qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default](05_qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [gemma4_e2b__chat_smoke__smoke__hf_safetensors_default](06_gemma4_e2b__chat_smoke__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default](07_gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default](08_gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [gemma4_e4b__chat_smoke__smoke__hf_safetensors_default](09_gemma4_e4b__chat_smoke__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default](10_gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default](11_gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default.md) — `blocked` / `artifact_unauthorized`
+- [qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m](12_qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](13_qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m](14_qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m](15_qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) — `failed` / `behavior_assertion_failed`
+- [qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](16_qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m](17_gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](18_gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m](19_gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m](20_gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) — `failed` / `behavior_assertion_failed`
+- [gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](21_gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m](22_gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m](23_gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) — `failed` / `behavior_assertion_failed`
+- [gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](24_gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m](25_gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m.md) — `blocked` / `resource_gate_failed`
+- [gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0](26_gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0.md) — `failed` / `behavior_assertion_failed`
+- [gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0](27_gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0.md) — `blocked` / `resource_gate_failed`
+- [gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0](28_gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0.md) — `blocked` / `resource_gate_failed`
+- [whisper_base_en__asr_short_transcription__smoke__ggml_default](29_whisper_base_en__asr_short_transcription__smoke__ggml_default.md) — `blocked` / `resource_gate_failed`
+- [moonshine_streaming_en__asr_short_transcription__smoke__hf_default](30_moonshine_streaming_en__asr_short_transcription__smoke__hf_default.md) — `blocked` / `child_run_failed`
+- [sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default](31_sherpa_onnx_streaming_zipformer_en__asr_short_transcription__smoke__hf_default.md) — `blocked` / `feature_build_failed`
+- [piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default](32_piper_en_us_ljspeech_medium__tts_synthesis_smoke__smoke__onnx_default.md) — `blocked` / `feature_build_failed`
+- [qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0](33_qwen3_tts_cpp_0_6b__tts_synthesis_smoke__smoke__gguf_q8_0.md) — `blocked` / `artifact_missing`

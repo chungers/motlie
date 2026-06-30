@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, QuantizationScheme,
+    StartOptions,
 };
 use motlie_model_whisper_cpp::{
     WhisperCppHandle, WhisperCppTranscriptionBundle, WhisperCppTranscriptionSpec,
@@ -42,7 +43,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             repo: "ggerganov/whisper.cpp",
         },
         include: vec![ArtifactRule::Exact("ggml-base.en.bin")],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Fp16),
     }
 }
 
@@ -64,6 +65,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "whisper_base_en",
             &checkpoint,
+            crate::ArtifactProvenance::new("mit", crate::ArtifactGating::Public),
         )),
     }
 }

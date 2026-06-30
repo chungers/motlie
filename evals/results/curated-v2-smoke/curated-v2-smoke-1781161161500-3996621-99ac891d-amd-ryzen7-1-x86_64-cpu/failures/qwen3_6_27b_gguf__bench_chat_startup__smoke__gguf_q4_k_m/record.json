@@ -1,0 +1,166 @@
+{
+  "schema_version": 3,
+  "identity": {
+    "run_id": "curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu",
+    "git_sha": "99ac891d8a2adabe823cce61b2a9fec0aa5dbde3",
+    "git_branch": null,
+    "command_line": [
+      "/tmp/motlie-final-99ac891d-target/release/evals",
+      "matrix",
+      "--snapshot",
+      "evals/snapshots/curated-v2-smoke.toml",
+      "--profile",
+      "local-cpu-x86_64",
+      "--artifact-root",
+      "/home/dchung/sessions/issue-399-eval-suite/codex-399-amd-rv/motlie-final-99ac891d-20260610-2343/artifacts/models/hf-cache",
+      "--results-root",
+      "evals/results"
+    ],
+    "host_id": "amd-ryzen7-1",
+    "host_slug": "amd-ryzen7-1"
+  },
+  "coverage": {
+    "snapshot_id": "curated-v2-smoke",
+    "cell_id": "qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m",
+    "depth": "smoke",
+    "capability": "perf",
+    "scenario_id": "bench_chat_startup",
+    "bundle_id": "qwen3_6_27b_gguf",
+    "model_family": "qwen3",
+    "checkpoint_format": "gguf",
+    "quantization": "q4_k_m",
+    "backend": "llama_cpp",
+    "profile": "local-cpu-x86_64",
+    "host_id": "amd-ryzen7-1",
+    "host_slug": "amd-ryzen7-1",
+    "arch": "x86_64",
+    "requested_accelerator": "cpu",
+    "resolved_accelerator": "cpu",
+    "applicability": "blocked_pre_run",
+    "terminal_outcome": "blocked",
+    "reason": "runtime_budget_exceeded",
+    "grouping_keys": {
+      "backend": "llama_cpp",
+      "bundle": "qwen3_6_27b_gguf",
+      "capability": "perf",
+      "checkpoint_format": "gguf",
+      "depth": "smoke",
+      "profile": "local-cpu-x86_64",
+      "quantization": "q4_k_m"
+    }
+  },
+  "selection": {
+    "bundle_id": "qwen3_6_27b_gguf",
+    "selector": null,
+    "backend": "llama_cpp",
+    "checkpoint_format": "gguf",
+    "artifact_quantization": "q4_k_m",
+    "artifact_snapshot": "17c8304e",
+    "artifact_patterns": [
+      "Qwen3.6-27B-Q4_K_M.gguf"
+    ],
+    "artifact_files": [],
+    "scenario": "bench_chat_startup",
+    "capability": "perf"
+  },
+  "profile": {
+    "name": "local-cpu-x86_64"
+  },
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64",
+    "target_triple": null,
+    "hostname": "amd-ryzen7-1",
+    "host_id": "amd-ryzen7-1",
+    "host_slug": "amd-ryzen7-1",
+    "total_memory_bytes": 30376046592,
+    "available_memory_bytes": 28221820928,
+    "total_swap_bytes": 8589930496,
+    "free_swap_bytes": 7407685632,
+    "gpu_backend": "unavailable",
+    "gpus": [],
+    "accelerator_metadata": {},
+    "unavailable": [
+      "kernel_version",
+      "libc",
+      "gpu_inventory",
+      "profile:local-cpu-x86_64:accelerator_metadata"
+    ]
+  },
+  "accelerator": {
+    "requested_class": "cpu",
+    "resolved_class": "cpu",
+    "selected_devices": [],
+    "backend_mode": "cpu",
+    "offload": null,
+    "driver_versions": {},
+    "fallback_reason": null,
+    "use_proof_source": "profile:cpu"
+  },
+  "runtime": {
+    "cargo_features": [
+      "model-qwen3-6-27b-gguf"
+    ],
+    "build_profile": "release",
+    "quantization": "q4_k_m",
+    "runtime_precision": "q4",
+    "artifact_root": "",
+    "download_artifacts": false,
+    "context_length": null,
+    "gpu_layers": null,
+    "child_build": {
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "evals",
+        "--no-default-features",
+        "--features",
+        "model-qwen3-6-27b-gguf"
+      ],
+      "status": 0,
+      "duration_ms": 1197,
+      "log_path": "evals/results/curated-v2-smoke/curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu/logs/qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.log"
+    },
+    "budgets": {
+      "max_wall_time_secs": "1200"
+    },
+    "env": {
+      "HF_TOKEN_PRESENT": "true"
+    }
+  },
+  "performance": {
+    "startup_ms": null,
+    "warmup_ms": null,
+    "request_latencies_ms": [],
+    "unavailable": [],
+    "capability_metrics": {
+      "capability": "not_measured"
+    }
+  },
+  "resources": {
+    "rss_start_bytes": null,
+    "rss_peak_bytes": null,
+    "rss_final_bytes": null,
+    "process_swap_start_bytes": null,
+    "process_swap_peak_bytes": null,
+    "process_swap_final_bytes": null,
+    "process_swap_delta_peak_bytes": null,
+    "gpu_memory_peak_bytes": null,
+    "gpu_utilization_peak_percent": null,
+    "memory_peaks": [],
+    "unavailable": [],
+    "unavailable_metrics": []
+  },
+  "acceptance": {
+    "behavior_status": "blocked",
+    "performance_status": "not_measured",
+    "resource_status": "not_measured",
+    "accelerator_status": "pass",
+    "overall_status": "blocked",
+    "failure_reason": "child eval invocation failed; see evals/results/curated-v2-smoke/curated-v2-smoke-1781161161500-3996621-99ac891d-amd-ryzen7-1-x86_64-cpu/logs/qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.log",
+    "assertions": [],
+    "gates": []
+  }
+}

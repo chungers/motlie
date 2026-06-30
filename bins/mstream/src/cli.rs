@@ -7,11 +7,11 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::build_info;
 use crate::protocol::{
-    AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
-    HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
-    NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
-    SessionMarkRequest, SessionRetagRequest, SnapshotRequest, SummaryInputRequest,
-    TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
+    AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, DoctorRequest,
+    EventsRequest, HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest,
+    LeaveRequest, NewRequest, OpenRequest, PasteMode, RecruitRequest, RetireRequest, SendRequest,
+    SessionListRequest, SessionMarkRequest, SessionRetagRequest, SnapshotRequest,
+    SummaryInputRequest, TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
     DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_SUBMIT_RETRIES, DEFAULT_SUBMIT_RETRY_DELAY_MS,
     DEFAULT_SUBMIT_SETTLE_MS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
     DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
@@ -68,6 +68,7 @@ pub enum Command {
     Reclaim {
         target: String,
     },
+    Attach(AttachArgs),
     Send(SendArgs),
     Interrupt(InterruptArgs),
     Broadcast(BroadcastArgs),
@@ -79,6 +80,7 @@ pub enum Command {
     #[command(subcommand)]
     Timer(TimerCommand),
     Status(StatusArgs),
+    Doctor(DoctorArgs),
     #[command(about = "Read durable workstream audit events and call-log entries")]
     Events(EventsArgs),
     Snapshot(SnapshotArgs),
@@ -147,6 +149,7 @@ impl Command {
                 target: args.target,
             })),
             Command::Reclaim { target } => Ok(ClientRequest::Reclaim { target }),
+            Command::Attach(_) => bail!("attach is handled before client request conversion"),
             Command::Send(args) => Ok(ClientRequest::Send(args.into_request()?)),
             Command::Interrupt(args) => Ok(ClientRequest::Interrupt(InterruptRequest {
                 target: args.target,
@@ -154,7 +157,10 @@ impl Command {
             })),
             Command::Broadcast(args) => Ok(ClientRequest::Broadcast(args.into_request()?)),
             Command::Rename(args) => Ok(ClientRequest::SessionRetag(args.into_request()?)),
-            Command::Session(SessionCommand::List) => Ok(ClientRequest::SessionList),
+            Command::Session(SessionCommand::List(args)) => {
+                Ok(ClientRequest::SessionList(args.into_request()))
+            }
+            Command::Doctor(args) => Ok(ClientRequest::Doctor(args.into_request())),
             Command::Session(SessionCommand::Mark(args)) => {
                 Ok(ClientRequest::SessionMark(args.into_request()?))
             }
@@ -339,6 +345,26 @@ pub struct RetireArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct AttachArgs {
+    pub target: Option<String>,
+    #[arg(
+        long,
+        help = "Inject a tagged attach window into the caller tmux session; also selected automatically when $TMUX is set."
+    )]
+    pub here: bool,
+    #[arg(
+        long,
+        help = "Reap inactive @mstream/attach windows in the caller tmux session before resolving or attaching."
+    )]
+    pub sweep: bool,
+    #[arg(
+        long,
+        help = "Print the daemon-resolved attach command instead of running it."
+    )]
+    pub print: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct SendArgs {
     pub workstream: String,
     pub target: String,
@@ -502,9 +528,53 @@ impl RenameArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
-    List,
+    List(SessionListArgs),
     Mark(SessionMarkArgs),
     Retag(SessionRetagArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SessionListArgs {
+    #[arg(long)]
+    pub cached: bool,
+    #[arg(long = "no-reconcile")]
+    pub no_reconcile: bool,
+}
+
+impl SessionListArgs {
+    fn into_request(self) -> SessionListRequest {
+        SessionListRequest {
+            cached: self.cached || self.no_reconcile,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    #[arg(long)]
+    pub cached: bool,
+    #[arg(long = "no-reconcile")]
+    pub no_reconcile: bool,
+    #[arg(
+        long,
+        help = "Move confirmed-dead sessions to the #401 quarantined lifecycle state; never acts on unreachable rows"
+    )]
+    pub quarantine_dead: bool,
+    #[arg(
+        long,
+        help = "Remove already-quarantined confirmed-dead session records; never acts on unreachable rows"
+    )]
+    pub prune_quarantined: bool,
+}
+
+impl DoctorArgs {
+    fn into_request(self) -> DoctorRequest {
+        DoctorRequest {
+            cached: self.cached || self.no_reconcile,
+            quarantine_dead: self.quarantine_dead,
+            prune_quarantined: self.prune_quarantined,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -1197,6 +1267,25 @@ mod tests {
     }
 
     #[test]
+    fn doctor_cleanup_flags_build_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "doctor",
+            "--quarantine-dead",
+            "--prune-quarantined",
+        ])
+        .expect("doctor command parses");
+
+        let request = cli.command.into_request().expect("doctor request");
+        let ClientRequest::Doctor(request) = request else {
+            panic!("expected doctor request");
+        };
+        assert!(!request.cached);
+        assert!(request.quarantine_dead);
+        assert!(request.prune_quarantined);
+    }
+
+    #[test]
     fn retire_command_builds_request() {
         let cli = Cli::try_parse_from(["mstream", "retire", "issue-401", "local::$1"])
             .expect("retire command parses");
@@ -1219,6 +1308,18 @@ mod tests {
             panic!("expected reclaim request");
         };
         assert_eq!(target, "local::$1");
+    }
+
+    #[test]
+    fn attach_sweep_can_parse_without_target() {
+        let cli = Cli::try_parse_from(["mstream", "attach", "--sweep"])
+            .expect("attach sweep command parses");
+
+        let Command::Attach(args) = cli.command else {
+            panic!("expected attach command");
+        };
+        assert_eq!(args.target, None);
+        assert!(args.sweep);
     }
 
     #[test]

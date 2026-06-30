@@ -1,0 +1,36 @@
+# Failure Excerpts
+
+- run_id: `curated-v2-smoke-postfix-1781146615-167f5d89-spark-2f6e-aarch64-cuda-release-regression`
+- git_sha: `167f5d898bab823ae39ca3acf0c7f798328c3ee9`
+- profile: `dgx-spark`
+- child_build_profile: `release`
+- non_pass_records: `28`
+
+- [embeddinggemma_300m__embeddings_similarity__smoke__hf_default](01_embeddinggemma_300m__embeddings_similarity__smoke__hf_default.md) - `blocked` / `feature_build_failed`
+- [qwen3_embedding_06b__embeddings_similarity__smoke__hf_default](02_qwen3_embedding_06b__embeddings_similarity__smoke__hf_default.md) - `blocked` / `feature_build_failed`
+- [qwen3_4b__chat_smoke__smoke__hf_safetensors_default](03_qwen3_4b__chat_smoke__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default](04_qwen3_4b__bench_chat_startup__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default](05_qwen3_4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [gemma4_e2b__chat_smoke__smoke__hf_safetensors_default](06_gemma4_e2b__chat_smoke__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default](07_gemma4_e2b__bench_chat_startup__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default](08_gemma4_e2b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [gemma4_e4b__chat_smoke__smoke__hf_safetensors_default](09_gemma4_e4b__chat_smoke__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default](10_gemma4_e4b__bench_chat_startup__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default](11_gemma4_e4b__tool_use_weather_cel_smoke__smoke__hf_safetensors_default.md) - `blocked` / `feature_build_failed`
+- [qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m](12_qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](13_qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m](14_qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m](15_qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) - `failed` / `behavior_assertion_failed`
+- [qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](16_qwen3_6_27b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m](17_gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](18_gemma4_e2b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m](19_gemma4_e2b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m](20_gemma4_e4b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](21_gemma4_e4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m](22_gemma4_e4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m](23_gemma4_12b_gguf__chat_smoke__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m](24_gemma4_12b_gguf__bench_chat_startup__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m](25_gemma4_12b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m.md) - `blocked` / `resource_gate_failed`
+- [gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0](26_gemma4_12b_qat_q4_0_gguf__chat_smoke__smoke__gguf_q4_0.md) - `blocked` / `resource_gate_failed`
+- [gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0](27_gemma4_12b_qat_q4_0_gguf__bench_chat_startup__smoke__gguf_q4_0.md) - `blocked` / `resource_gate_failed`
+- [gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0](28_gemma4_12b_qat_q4_0_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_0.md) - `blocked` / `resource_gate_failed`

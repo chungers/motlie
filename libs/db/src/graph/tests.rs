@@ -1,6 +1,7 @@
 use crate::graph::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Processor, Storage};
+use crate::graph::reader::QueryExecutor;
 use crate::graph::mutation::{
-    AddEdge, AddNode, AddNodeFragment, UpdateEdge, UpdateNode,
+    AddEdge, AddNode, AddNodeFragment, ExecOptions, UpdateEdge, UpdateNode,
 };
 use crate::writer::Runnable as MutRunnable;
 use crate::reader::Runnable;
@@ -3272,7 +3273,7 @@ mod versioning_tests {
 
         // Query current version (should be v3)
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&processor).await;
+        let result = current_query.execute(&processor).await;
         assert!(result.is_ok(), "Current query should succeed");
         let (_, summary, _version) = result.unwrap();
         assert!(
@@ -3282,7 +3283,7 @@ mod versioning_tests {
 
         // Query at time_after_v1 (should be v1)
         let v1_query = NodeById::as_of(node_id, time_after_v1, None);
-        let result = v1_query.execute_on(&processor).await;
+        let result = v1_query.execute(&processor).await;
         assert!(result.is_ok(), "Point-in-time query at v1 should succeed");
         let (_, summary, _version) = result.unwrap();
         assert!(
@@ -3292,7 +3293,7 @@ mod versioning_tests {
 
         // Query at time_after_v2 (should be v2)
         let v2_query = NodeById::as_of(node_id, time_after_v2, None);
-        let result = v2_query.execute_on(&processor).await;
+        let result = v2_query.execute(&processor).await;
         assert!(result.is_ok(), "Point-in-time query at v2 should succeed");
         let (_, summary, _version) = result.unwrap();
         assert!(
@@ -3302,7 +3303,7 @@ mod versioning_tests {
 
         // Query before node existed (should fail)
         let before_query = NodeById::as_of(node_id, time_before_create, None);
-        let result = before_query.execute_on(&processor).await;
+        let result = before_query.execute(&processor).await;
         assert!(result.is_err(), "Query before node existed should fail");
     }
 
@@ -3351,7 +3352,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(1500)),
             as_of: None,
         };
-        let result = within_period.execute_on(&processor).await;
+        let result = within_period.execute(&processor).await;
         assert!(result.is_ok(), "Query within active period should succeed");
 
         // Query at time before the active period (should fail)
@@ -3360,7 +3361,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(500)),
             as_of: None,
         };
-        let result = before_period.execute_on(&processor).await;
+        let result = before_period.execute(&processor).await;
         assert!(result.is_err(), "Query before active period should fail");
 
         // Query at time after the active period (should fail)
@@ -3369,7 +3370,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(2500)),
             as_of: None,
         };
-        let result = after_period.execute_on(&processor).await;
+        let result = after_period.execute(&processor).await;
         assert!(result.is_err(), "Query after active period should fail");
 
         // Query at exact start boundary (should succeed)
@@ -3378,7 +3379,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(1000)),
             as_of: None,
         };
-        let result = at_start.execute_on(&processor).await;
+        let result = at_start.execute(&processor).await;
         assert!(result.is_ok(), "Query at start of active period should succeed");
 
         // Query at exact end boundary (should fail - exclusive)
@@ -3387,7 +3388,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(2000)),
             as_of: None,
         };
-        let result = at_end.execute_on(&processor).await;
+        let result = at_end.execute(&processor).await;
         assert!(result.is_err(), "Query at end of active period should fail (exclusive)");
     }
 
@@ -3444,7 +3445,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(1500)),
             as_of: Some(time_after_v1),
         };
-        let result = bitemporal_v1_valid.execute_on(&processor).await;
+        let result = bitemporal_v1_valid.execute(&processor).await;
         assert!(result.is_ok(), "Bitemporal query (v1, within period) should succeed");
         let (_, summary, _version) = result.unwrap();
         assert!(
@@ -3458,7 +3459,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(500)),
             as_of: Some(time_after_v1),
         };
-        let result = bitemporal_v1_invalid.execute_on(&processor).await;
+        let result = bitemporal_v1_invalid.execute(&processor).await;
         assert!(result.is_err(), "Bitemporal query (v1, before period) should fail");
     }
 
@@ -3525,7 +3526,7 @@ mod versioning_tests {
 
         // Query edge at current time
         let current_query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let result = current_query.execute_on(&processor).await;
+        let result = current_query.execute(&processor).await;
         assert!(result.is_ok(), "Current edge query should succeed");
         let (summary, weight, _version) = result.unwrap();
         assert!(summary.decode_string().unwrap().contains("Edge V1"));
@@ -3536,7 +3537,7 @@ mod versioning_tests {
             src_id, dst_id, edge_name.clone(),
             time_after_edge, None
         );
-        let result = after_query.execute_on(&processor).await;
+        let result = after_query.execute(&processor).await;
         assert!(result.is_ok(), "Edge query after creation should succeed");
 
         // Query edge before it existed
@@ -3544,7 +3545,7 @@ mod versioning_tests {
             src_id, dst_id, edge_name.clone(),
             time_before_edge, None
         );
-        let result = before_query.execute_on(&processor).await;
+        let result = before_query.execute(&processor).await;
         assert!(result.is_err(), "Edge query before creation should fail");
     }
 
@@ -3594,7 +3595,7 @@ mod versioning_tests {
 
         // Current query should fail (node is deleted)
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&processor).await;
+        let result = current_query.execute(&processor).await;
         assert!(result.is_err(), "Current query for deleted node should fail");
         assert!(
             result.unwrap_err().to_string().contains("deleted"),
@@ -3603,7 +3604,7 @@ mod versioning_tests {
 
         // Query at time when node existed should succeed
         let past_query = NodeById::as_of(node_id, time_when_existed, None);
-        let result = past_query.execute_on(&processor).await;
+        let result = past_query.execute(&processor).await;
         assert!(result.is_ok(), "Time-travel query to when node existed should succeed");
         let (name, summary, _version) = result.unwrap();
         assert_eq!(name, "deletable_node");
@@ -3672,22 +3673,22 @@ mod versioning_tests {
 
         // Current query should return V3
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&processor).await.unwrap();
+        let result = current_query.execute(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Version 3"));
 
         // Query at time_v1 should return V1
         let v1_query = NodeById::as_of(node_id, time_v1, None);
-        let result = v1_query.execute_on(&processor).await.unwrap();
+        let result = v1_query.execute(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Version 1"));
 
         // Query at time_v2 should return V2
         let v2_query = NodeById::as_of(node_id, time_v2, None);
-        let result = v2_query.execute_on(&processor).await.unwrap();
+        let result = v2_query.execute(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Version 2"));
 
         // Query at time_v3 should return V3
         let v3_query = NodeById::as_of(node_id, time_v3, None);
-        let result = v3_query.execute_on(&processor).await.unwrap();
+        let result = v3_query.execute(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Version 3"));
     }
 
@@ -3735,12 +3736,12 @@ mod versioning_tests {
 
         // Current shows unwanted change
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&processor).await.unwrap();
+        let result = current_query.execute(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Unwanted change"));
 
         // Rollback: Read old version and write it as new version
         let old_query = NodeById::as_of(node_id, time_original, None);
-        let (_name, old_summary, _version) = old_query.execute_on(&processor).await.unwrap();
+        let (_name, old_summary, _version) = old_query.execute(&processor).await.unwrap();
 
         // Drop processor and storage to release lock
         drop(processor);
@@ -3769,7 +3770,7 @@ mod versioning_tests {
 
         // Current should now show original content (rolled back)
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&processor).await.unwrap();
+        let result = current_query.execute(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Original content"));
     }
 
@@ -3842,12 +3843,12 @@ mod versioning_tests {
 
         // Current query should return V2
         let current_query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let result = current_query.execute_on(&processor).await.unwrap();
+        let result = current_query.execute(&processor).await.unwrap();
         assert!(result.0.decode_string().unwrap().contains("Edge V2"));
 
         // Query at time_v1 should return V1
         let v1_query = EdgeSummaryBySrcDstName::as_of(src_id, dst_id, edge_name.clone(), time_v1, None);
-        let result = v1_query.execute_on(&processor).await.unwrap();
+        let result = v1_query.execute(&processor).await.unwrap();
         assert!(result.0.decode_string().unwrap().contains("Edge V1"));
     }
 
@@ -3915,7 +3916,7 @@ mod versioning_tests {
 
         // Current query should fail (edge is deleted)
         let current_query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let result = current_query.execute_on(&processor).await;
+        let result = current_query.execute(&processor).await;
         assert!(result.is_err(), "Current query for deleted edge should fail");
 
         // Query at time when edge existed should succeed
@@ -3923,7 +3924,7 @@ mod versioning_tests {
             src_id, dst_id, edge_name.clone(),
             time_when_existed, None
         );
-        let result = past_query.execute_on(&processor).await;
+        let result = past_query.execute(&processor).await;
         assert!(result.is_ok(), "Time-travel query to when edge existed should succeed");
         let (summary, _weight, _version) = result.unwrap();
         assert!(summary.decode_string().unwrap().contains("Edge content"));
@@ -3989,7 +3990,7 @@ mod versioning_tests {
         let processor = Processor::new(Arc::new(storage));
 
         let incoming = IncomingEdges::new(dst_id, None);
-        let result = incoming.execute_on(&processor).await.unwrap();
+        let result = incoming.execute(&processor).await.unwrap();
 
         // Should have exactly one incoming edge from src_id
         // IncomingEdges returns Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)> = (weight, dst_id, src_id, name, version)
@@ -4057,14 +4058,14 @@ mod versioning_tests {
         // Check forward direction (OutgoingEdges)
         // OutgoingEdges returns Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)> = (weight, src_id, dst_id, name, version)
         let outgoing = OutgoingEdges::new(src_id, None);
-        let out_result = outgoing.execute_on(&processor).await.unwrap();
+        let out_result = outgoing.execute(&processor).await.unwrap();
         assert_eq!(out_result.len(), 1, "Should have 1 outgoing edge");
         assert_eq!(out_result[0].2, dst_id, "Outgoing edge target should match");
 
         // Check reverse direction (IncomingEdges)
         // IncomingEdges returns Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)> = (weight, dst_id, src_id, name, version)
         let incoming = IncomingEdges::new(dst_id, None);
-        let in_result = incoming.execute_on(&processor).await.unwrap();
+        let in_result = incoming.execute(&processor).await.unwrap();
         assert_eq!(in_result.len(), 1, "Should have 1 incoming edge");
         assert_eq!(in_result[0].2, src_id, "Incoming edge source should match");
 
@@ -4087,7 +4088,7 @@ mod versioning_tests {
 
         let missing_id = Id::new();
         let query = NodeById::new(missing_id, None);
-        let result = query.execute_on(&processor).await;
+        let result = query.execute(&processor).await;
 
         // Should return an error for missing node
         assert!(result.is_err(), "Query for missing node should return error");
@@ -4141,7 +4142,7 @@ mod versioning_tests {
 
         // Query for edge that doesn't exist
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "nonexistent".to_string(), None);
-        let result = query.execute_on(&processor).await;
+        let result = query.execute(&processor).await;
 
         assert!(result.is_err(), "Query for missing edge should return error");
     }
@@ -4221,7 +4222,7 @@ mod versioning_tests {
             (Bound::Unbounded, Bound::Unbounded),
             None,
         );
-        let result = query.execute_on(&processor).await.unwrap();
+        let result = query.execute(&processor).await.unwrap();
 
         // Should have at least 3 fragments (original fragments preserved)
         assert!(result.len() >= 3, "Should have at least 3 fragments, got {}", result.len());
@@ -4287,7 +4288,7 @@ mod versioning_tests {
 
         // Query current version
         let query = NodeById::new(node_id, None);
-        let (_, current_summary, _version) = query.execute_on(&processor).await.unwrap();
+        let (_, current_summary, _version) = query.execute(&processor).await.unwrap();
         assert!(
             current_summary.decode_string().unwrap().contains("Version 2"),
             "Current version should be Version 2"
@@ -4385,7 +4386,7 @@ mod versioning_tests {
         let processor = Processor::new(storage.clone());
 
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let (summary, _, _version) = query.execute_on(&processor).await.unwrap();
+        let (summary, _, _version) = query.execute(&processor).await.unwrap();
         assert!(
             summary.decode_string().unwrap().contains("Edge V2"),
             "Current edge should be V2"
@@ -4484,7 +4485,7 @@ mod versioning_tests {
 
         // Current weight should be 5.0
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let (_, weight, _version) = query.execute_on(&processor).await.unwrap();
+        let (_, weight, _version) = query.execute(&processor).await.unwrap();
         assert!((weight.unwrap() - 5.0).abs() < 0.001, "Current weight should be 5.0");
 
         // Time-travel query should show old weight of 1.0
@@ -4492,7 +4493,7 @@ mod versioning_tests {
             src_id, dst_id, edge_name.clone(),
             time_with_weight_1, None
         );
-        let result = past_query.execute_on(&processor).await;
+        let result = past_query.execute(&processor).await;
 
         // Note: Weight history may not be directly queryable via time-travel in current design
         // This test validates that weight updates don't corrupt the edge
@@ -4543,12 +4544,12 @@ mod versioning_tests {
 
         // Current query should fail (node deleted)
         let query = NodeById::new(node_id, None);
-        let result = query.execute_on(&processor).await;
+        let result = query.execute(&processor).await;
         assert!(result.is_err(), "Deleted node should not be found in current view");
 
         // Time-travel query should succeed
         let past_query = NodeById::as_of(node_id, time_before_delete, None);
-        let result = past_query.execute_on(&processor).await;
+        let result = past_query.execute(&processor).await;
         assert!(result.is_ok(), "Time-travel to before delete should succeed");
     }
 
@@ -4599,7 +4600,7 @@ mod versioning_tests {
 
         // Query all nodes with this hash
         let query = NodesBySummaryHash::current(hash);
-        let result = query.execute_on(&processor).await.unwrap();
+        let result = query.execute(&processor).await.unwrap();
 
         assert_eq!(result.len(), 3, "Should find all 3 nodes with same summary hash");
 
@@ -4772,7 +4773,7 @@ mod versioning_tests {
         let processor = Processor::new(Arc::new(storage));
 
         let query = NodeById::new(node_id, None);
-        let result = query.execute_on(&processor).await;
+        let result = query.execute(&processor).await;
         assert!(result.is_ok(), "Node should still be queryable after concurrent writes");
 
         // Verify fragments were all written
@@ -4784,7 +4785,7 @@ mod versioning_tests {
             (Bound::Unbounded, Bound::Unbounded),
             None,
         );
-        let fragments = frag_query.execute_on(&processor).await.unwrap();
+        let fragments = frag_query.execute(&processor).await.unwrap();
 
         // Should have at least some fragments from concurrent writers
         // The exact number may vary due to timing, but we expect most to succeed
@@ -4835,7 +4836,7 @@ mod versioning_tests {
         let processor = Processor::new(Arc::new(storage));
 
         let query = NodeById::new(node_id, None);
-        let result = query.execute_on(&processor).await;
+        let result = query.execute(&processor).await;
         assert!(result.is_ok(), "Node should be queryable after replay");
 
         let (name, summary, _version) = result.unwrap();
@@ -5005,7 +5006,7 @@ mod versioning_tests {
             }),
         ];
 
-        let result = processor.process_mutations(&mutations);
+        let result = processor.process_mutations_with_options(&mutations, ExecOptions::default());
         assert!(result.is_ok(), "Processor should successfully process mutations");
     }
 
@@ -5055,7 +5056,7 @@ mod versioning_tests {
 
         // Verify committed data is visible outside transaction
         let query = NodeById::new(node_id, None);
-        let result = query.execute_on(&processor).await;
+        let result = query.execute(&processor).await;
         assert!(result.is_ok(), "Committed data should be visible");
     }
 }

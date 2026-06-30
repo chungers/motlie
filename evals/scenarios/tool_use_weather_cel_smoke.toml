@@ -1,0 +1,49 @@
+schema_version = 1
+id = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+summary = "First-class tool-use smoke with deterministic weather and CEL handlers."
+depth = "smoke"
+
+[bundle_filter]
+capability = "tool_use"
+required_capabilities = ["chat", "tool_use"]
+backend = ["MistralRs", "LlamaCpp"]
+
+[input]
+system_prompt = "Use the provided tools when they are relevant. Make one tool call per assistant turn, then answer concisely after the tool result is available."
+prompt = "Use get_weather for Seattle with fahrenheit units, then answer with the weather summary for Seattle. If you need arithmetic, use evaluate_cel_expression instead of calculating mentally."
+tools = ["get_weather", "evaluate_cel_expression"]
+expected_tool = "get_weather"
+expected_argument_key = "city"
+expected_argument_value = "Seattle"
+max_rounds = 3
+max_tokens = 192
+temperature = 0.2
+
+[assertions]
+min_tool_calls = 1
+required_tools = ["get_weather"]
+required_final_substrings = ["Seattle"]
+
+[[assertions.cel]]
+name = "weather_round_trip"
+expression = "tool_called('get_weather') && argument_equals('get_weather','city','Seattle') && round_trip_success() && tool_precision() >= 0.5"
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+capture_peak_rss = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.local-cpu-aarch64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.apple-metal]
+
+[profiles.dgx-spark.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.cuda-workstation.gates]
+max_process_swap_delta_bytes = 4294967296

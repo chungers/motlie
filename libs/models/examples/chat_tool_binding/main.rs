@@ -5,7 +5,10 @@ use motlie_model::{
 use motlie_models::{tool_list, ToolDispatch, ToolList};
 
 #[allow(dead_code)]
-#[path = "../tool_demo_support.rs"]
+#[path = "../support/feature_matrix.rs"]
+mod feature_matrix;
+#[allow(dead_code)]
+#[path = "../support/tool_demo.rs"]
 mod tool_demo_support;
 
 #[tokio::main]

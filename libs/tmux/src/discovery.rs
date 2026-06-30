@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::transport::{shell_escape_arg, TransportKind};
 use crate::types::{
     ClientInfo, GeometrySnapshot, PaneAddress, PaneGeometry, PaneInfo, SessionId, SessionInfo,
-    WindowInfo,
+    SessionInventory, WindowInfo,
 };
 
 /// Parse a line of tmux `q:`-escaped fields separated by spaces.
@@ -47,8 +47,7 @@ pub const LIST_CLIENTS_FMT: &str = "#{q:client_width} #{q:client_height} #{q:cli
 pub const PANE_GEOMETRY_FMT: &str =
     "#{q:pane_width} #{q:pane_height} #{q:history_size} #{q:history_limit}";
 
-pub const LIST_SESSIONS_FMT: &str =
-    "#{q:session_name} #{q:session_id} #{q:session_created} #{q:session_attached} #{q:session_windows} #{q:session_group} #{q:session_activity}";
+pub const LIST_SESSIONS_FMT: &str = "#{q:session_name} #{q:session_id} #{q:session_created} #{q:session_attached} #{q:session_windows} #{q:session_group} #{q:session_activity}";
 
 /// Sentinels prepended to each row of the merged `list-sessions \;
 /// list-windows -a` output so the parser can dispatch unambiguously.
@@ -67,31 +66,43 @@ pub const LIST_SESSIONS_FMT: &str =
 const SESSION_LISTING_S_PREFIX: &str = "__MOTLIE_S__";
 const SESSION_LISTING_WIN_PREFIX: &str = "__MOTLIE_WIN__";
 
-pub const LIST_WINDOWS_FMT: &str =
-    "#{q:session_id} #{q:session_name} #{q:window_index} #{q:window_name} #{q:window_active} #{q:window_panes} #{q:window_layout}";
+pub const LIST_WINDOWS_FMT: &str = "#{q:session_id} #{q:session_name} #{q:window_index} #{q:window_name} #{q:window_active} #{q:window_panes} #{q:window_layout}";
 
-pub const LIST_PANES_FMT: &str =
-    "#{q:pane_id} #{q:session_id} #{q:session_name} #{q:window_index} #{q:pane_index} #{q:pane_title} #{q:pane_current_command} #{q:pane_pid} #{q:pane_width} #{q:pane_height} #{q:pane_active}";
+pub const LIST_PANES_FMT: &str = "#{q:pane_id} #{q:session_id} #{q:session_name} #{q:window_index} #{q:pane_index} #{q:pane_title} #{q:pane_current_command} #{q:pane_pid} #{q:pane_width} #{q:pane_height} #{q:pane_active}";
 
-/// List all tmux sessions using a caller-provided prefix (resolved binary + socket).
-pub(crate) async fn list_sessions_with_prefix(
+/// Return tmux session inventory using a caller-provided prefix (resolved binary + socket).
+pub(crate) async fn session_inventory_with_prefix(
     transport: &TransportKind,
     prefix: &str,
-) -> Result<Vec<SessionInfo>> {
+) -> Result<SessionInventory> {
     let cmd = list_sessions_with_windows_command(prefix);
 
     let output = match transport.exec(&cmd).await {
         Ok(o) => o,
         Err(e) => {
             let msg = e.to_string();
-            if is_tmux_empty_state_error(&msg, &cmd, &["no server running", "no sessions"]) {
-                return Ok(Vec::new());
+            if is_tmux_empty_state_error(&msg, &cmd, &["no server running"]) {
+                return Ok(SessionInventory::NoTmuxServer { reason: msg });
+            }
+            if is_tmux_empty_state_error(&msg, &cmd, &["no sessions"]) {
+                return Ok(SessionInventory::Available(Vec::new()));
             }
             return Err(e);
         }
     };
 
-    parse_session_block(&output)
+    parse_session_block(&output).map(SessionInventory::Available)
+}
+
+/// List all tmux sessions using a caller-provided prefix (resolved binary + socket).
+pub(crate) async fn list_sessions_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+) -> Result<Vec<SessionInfo>> {
+    match session_inventory_with_prefix(transport, prefix).await? {
+        SessionInventory::Available(sessions) => Ok(sessions),
+        SessionInventory::NoTmuxServer { .. } => Ok(Vec::new()),
+    }
 }
 
 /// List windows in a session using a caller-provided prefix.
@@ -773,6 +784,48 @@ mod tests {
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
         assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_inventory_reports_no_tmux_server() {
+        let cmd = list_sessions_with_windows_command("tmux");
+        let mock = MockTransport::new().with_error(
+            "list-sessions",
+            format!(
+                "command failed (exit 1): {}\nstderr: no server running on /tmp/tmux-1000/default",
+                cmd
+            )
+            .as_str(),
+        );
+        let transport = TransportKind::Mock(mock);
+        let inventory = session_inventory_with_prefix(&transport, "tmux")
+            .await
+            .unwrap();
+
+        match inventory {
+            SessionInventory::NoTmuxServer { reason } => {
+                assert!(reason.contains("no server running"));
+            }
+            SessionInventory::Available(_) => panic!("expected no tmux server inventory"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_inventory_reports_available_empty_for_no_sessions() {
+        let cmd = list_sessions_with_windows_command("tmux");
+        let mock = MockTransport::new().with_error(
+            "list-sessions",
+            format!("command failed (exit 1): {}\nstderr: no sessions", cmd).as_str(),
+        );
+        let transport = TransportKind::Mock(mock);
+        let inventory = session_inventory_with_prefix(&transport, "tmux")
+            .await
+            .unwrap();
+
+        match inventory {
+            SessionInventory::Available(sessions) => assert!(sessions.is_empty()),
+            SessionInventory::NoTmuxServer { .. } => panic!("expected available empty inventory"),
+        }
     }
 
     #[tokio::test]

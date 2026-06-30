@@ -15,19 +15,20 @@ use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatFinishReason, ChatModel, ChatRequest, ChatResponse, ChatRole,
     CheckpointFormat, CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
-    GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
-    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    ToolChoice, ToolSpec, UnsupportedEmbeddings,
+    GenerationTiming, GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError,
+    ModelIdentity, ModelMetricSnapshot, QuantizationScheme, QuantizationSupport,
+    ResolvedCheckpoint, RuntimeAcceleratorObservation, StartOptions, ToolChoice, ToolSpec,
+    UnsupportedEmbeddings,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::common::{
-    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
-    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
+    TextMetricState,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
-const DEFAULT_MAX_TOKENS: u32 = 512;
 const DEFAULT_TEMPERATURE: f32 = 0.7;
 
 /// Architecture discriminant selecting the correct chat template and model behavior.
@@ -45,7 +46,7 @@ pub enum GgufFileLayout {
     ExactQ4_0(&'static str),
 }
 
-/// Maps `QuantizationBits` to the curated GGUF filename for a given model.
+/// Maps `QuantizationScheme` to the curated GGUF filename for a given model.
 ///
 /// llama.cpp uses pre-quantized GGUF files (unlike mistral.rs which applies
 /// ISQ at load time from safetensors). Each precision level maps to a specific
@@ -53,7 +54,7 @@ pub enum GgufFileLayout {
 fn gguf_filename(
     model_prefix: &str,
     layout: GgufFileLayout,
-    bits: Option<QuantizationBits>,
+    bits: Option<QuantizationScheme>,
 ) -> String {
     // INVARIANT: `bits` must already be resolved through the spec's
     // `QuantizationSupport`; this mapper only names the curated GGUF artifact.
@@ -63,13 +64,14 @@ fn gguf_filename(
     }
 }
 
-fn gguf_quant_suffix(bits: Option<QuantizationBits>) -> &'static str {
+fn gguf_quant_suffix(bits: Option<QuantizationScheme>) -> &'static str {
     match bits {
-        Some(QuantizationBits::Four) => "-Q4_K_M.gguf",
-        Some(QuantizationBits::Five) => "-Q5_K_M.gguf",
-        Some(QuantizationBits::Eight) => "-Q8_0.gguf",
-        Some(QuantizationBits::FloatEight) => "-FP8.gguf",
-        None => "-f16.gguf",
+        Some(QuantizationScheme::GgufQ4_K_M) => "-Q4_K_M.gguf",
+        Some(QuantizationScheme::GgufQ4_0) => "-q4_0.gguf",
+        Some(QuantizationScheme::GgufQ5_K_M) => "-Q5_K_M.gguf",
+        Some(QuantizationScheme::GgufQ8_0) => "-Q8_0.gguf",
+        Some(QuantizationScheme::Fp16) | None => "-f16.gguf",
+        Some(other) => panic!("unsupported GGUF quantization scheme: {other}"),
     }
 }
 
@@ -131,7 +133,7 @@ impl LlamaCppTextSpec {
             arch: LlamaCppTextArch::Gemma4,
             thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
-            quantization: curated_q4_q8_support_with_recommended(QuantizationBits::Eight),
+            quantization: curated_q4_q8_support_with_recommended(QuantizationScheme::GgufQ8_0),
             default_context_length: 32768,
             recommended_generation_params: GenerationParams {
                 temperature: Some(1.0),
@@ -165,10 +167,10 @@ impl LlamaCppTextSpec {
         }
     }
 
-    pub fn gemma4_12b_qat_q4_0() -> Self {
+    pub fn gemma4_12b_qat() -> Self {
         Self {
-            id: BundleId::new("gemma4_12b_qat_q4_0_gguf"),
-            display_name: "Gemma 4 12B-it QAT Q4_0 (GGUF)",
+            id: BundleId::new("gemma4_12b_qat_gguf"),
+            display_name: "Gemma 4 12B-it QAT (GGUF)",
             model_prefix: "gemma-4-12b-it-qat-q4_0",
             file_layout: GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
             arch: LlamaCppTextArch::Gemma4,
@@ -177,7 +179,7 @@ impl LlamaCppTextSpec {
             // @gemma4-cdx 2026-06-05 17:45 PDT: Google publishes the QAT
             // checkpoint as a single GGUF Q4_0 artifact, so expose only Q4
             // here rather than falling back to the standard Q4_K_M/Q8 suffixes.
-            quantization: curated_q4_only_support(),
+            quantization: curated_q4_0_only_support(),
             default_context_length: 32768,
             recommended_generation_params: GenerationParams {
                 temperature: Some(1.0),
@@ -278,7 +280,7 @@ impl BackendAdapter for LlamaCppTextAdapter {
     ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
         let model_path = resolve_checkpoint_model_path(checkpoint, resolved_quantization)?;
         let built = load_llama_model(model_path)?;
 
@@ -300,30 +302,36 @@ impl BackendAdapter for LlamaCppTextAdapter {
 
 /// Q4 recommended, Q8 supported. Inputs are compile-time constants.
 /// On the unreachable error path, degrades to no-recommended rather than panicking.
-fn curated_q4_q8_support_with_recommended(recommended: QuantizationBits) -> QuantizationSupport {
+fn curated_q4_q8_support_with_recommended(recommended: QuantizationScheme) -> QuantizationSupport {
     QuantizationSupport::with_recommended(
-        [QuantizationBits::Four, QuantizationBits::Eight],
+        [QuantizationScheme::GgufQ4_K_M, QuantizationScheme::GgufQ8_0],
         recommended,
     )
     .unwrap_or_else(|e| {
         tracing::error!("curated quantization construction failed (this is a bug): {e}");
-        QuantizationSupport::without_recommended([QuantizationBits::Four, QuantizationBits::Eight])
+        QuantizationSupport::without_recommended([
+            QuantizationScheme::GgufQ4_K_M,
+            QuantizationScheme::GgufQ8_0,
+        ])
     })
 }
 
 /// Q4 recommended, Q8 supported.
 fn curated_q4_q8_support() -> QuantizationSupport {
-    curated_q4_q8_support_with_recommended(QuantizationBits::Four)
+    curated_q4_q8_support_with_recommended(QuantizationScheme::GgufQ4_K_M)
 }
 
 /// @gemma4-cdx 2026-06-05 17:45 PDT: Q4-only support for single-file QAT
 /// GGUF checkpoints.
-fn curated_q4_only_support() -> QuantizationSupport {
-    QuantizationSupport::with_recommended([QuantizationBits::Four], QuantizationBits::Four)
-        .unwrap_or_else(|e| {
-            tracing::error!("curated quantization construction failed (this is a bug): {e}");
-            QuantizationSupport::without_recommended([QuantizationBits::Four])
-        })
+fn curated_q4_0_only_support() -> QuantizationSupport {
+    QuantizationSupport::with_recommended(
+        [QuantizationScheme::GgufQ4_0],
+        QuantizationScheme::GgufQ4_0,
+    )
+    .unwrap_or_else(|e| {
+        tracing::error!("curated quantization construction failed (this is a bug): {e}");
+        QuantizationSupport::without_recommended([QuantizationScheme::GgufQ4_0])
+    })
 }
 
 /// Qwen3.6 currently has validated GGUF Q4/Q5/Q8 artifacts in the curated repo.
@@ -331,18 +339,18 @@ fn curated_q4_only_support() -> QuantizationSupport {
 fn curated_qwen36_gguf_support() -> QuantizationSupport {
     QuantizationSupport::with_recommended(
         [
-            QuantizationBits::Four,
-            QuantizationBits::Five,
-            QuantizationBits::Eight,
+            QuantizationScheme::GgufQ4_K_M,
+            QuantizationScheme::GgufQ5_K_M,
+            QuantizationScheme::GgufQ8_0,
         ],
-        QuantizationBits::Five,
+        QuantizationScheme::GgufQ5_K_M,
     )
     .unwrap_or_else(|e| {
         tracing::error!("curated quantization construction failed (this is a bug): {e}");
         QuantizationSupport::without_recommended([
-            QuantizationBits::Four,
-            QuantizationBits::Five,
-            QuantizationBits::Eight,
+            QuantizationScheme::GgufQ4_K_M,
+            QuantizationScheme::GgufQ5_K_M,
+            QuantizationScheme::GgufQ8_0,
         ])
     })
 }
@@ -388,7 +396,7 @@ impl ModelBundle for LlamaCppTextBundle {
         let resolved_quantization = self
             .metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let built = build_llama_model(&self.spec, resolved_quantization, options)?;
 
@@ -531,7 +539,14 @@ impl LlamaCppRuntime {
         let generated = self
             .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new())
             .await?;
-        Ok(ChatResponse::text(generated.text))
+        let timing =
+            timing_for_visible_content(generated.timing, &generated.text, &generated.token_timings);
+        Ok(ChatResponse {
+            content: generated.text,
+            usage: Some(generated.usage),
+            timing: Some(timing),
+            ..ChatResponse::default()
+        })
     }
 
     async fn generate_rendered_chat(
@@ -555,7 +570,21 @@ impl LlamaCppRuntime {
                 message: err.to_string(),
             })?;
 
-        openai_response_json_to_chat_response(message_json, generated.usage)
+        let mut response = openai_response_json_to_chat_response(
+            message_json,
+            generated.usage,
+            Some(generated.timing),
+        )?;
+        if let Some(timing) = response.timing.take() {
+            response.timing = Some(timing_for_openai_response(
+                timing,
+                &template,
+                &generated.text,
+                &generated.token_timings,
+                &response.content,
+            ));
+        }
+        Ok(response)
     }
 
     async fn generate_text_inner(
@@ -566,7 +595,12 @@ impl LlamaCppRuntime {
     ) -> Result<GeneratedText, ModelError> {
         let backend = Arc::clone(&self.backend);
         let model = Arc::clone(&self.model);
-        let max_tokens: u32 = params.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        // `None` means "no caller cap": generation runs to the model's natural
+        // EOS (#492). We deliberately do NOT substitute a guessed constant here
+        // — that would re-introduce the same class of a-priori cap the issue
+        // ruled out. The effective bound for the `None` case is resolved below
+        // from the model's own context window once the prompt is tokenized.
+        let requested_max_tokens: Option<u32> = params.max_tokens;
         let temperature: f32 = params.temperature.unwrap_or(DEFAULT_TEMPERATURE);
         let top_p: Option<f32> = params.top_p;
         let mut stop_sequences = params.stop_sequences;
@@ -576,7 +610,7 @@ impl LlamaCppRuntime {
 
         // Run inference on a blocking thread — llama.cpp is synchronous.
         tokio::task::spawn_blocking(move || {
-            let started_at = Instant::now();
+            let request_at = Instant::now();
 
             let ctx_params =
                 LlamaContextParams::default().with_n_ctx(std::num::NonZeroU32::new(context_length));
@@ -607,6 +641,18 @@ impl LlamaCppRuntime {
 
             let prompt_token_count = token_count_to_u32(tokens.len());
 
+            // Resolve the generation bound. A caller-supplied `max_tokens` is an
+            // explicit cap and is honored as-is. `None` (#492 uncapped path)
+            // runs to natural EOS, bounded only by the remaining context
+            // window — a hard physical limit, not a guessed a-priori cap. In
+            // normal operation the model emits EOS / a stop sequence well before
+            // this; the sole opt-in runaway guard is `--max-wall-time-secs`.
+            let max_tokens: u32 = effective_generation_bound(
+                requested_max_tokens,
+                context_length,
+                prompt_token_count,
+            );
+
             let mut batch = LlamaBatch::new(context_length as usize, 1);
             let last_idx = tokens.len() - 1;
             for (i, token) in tokens.iter().enumerate() {
@@ -634,6 +680,10 @@ impl LlamaCppRuntime {
 
             let mut generated_token_count: u32 = 0;
             let mut generated_text = String::new();
+            let mut first_token_at = None;
+            let mut first_answer_token_at = None;
+            let mut last_token_at = None;
+            let mut token_timings = Vec::new();
             let prompt_position_start =
                 i32::try_from(tokens.len()).map_err(|_| ModelError::BackendExecution {
                     backend: "llama-cpp",
@@ -658,10 +708,26 @@ impl LlamaCppRuntime {
                         message: e.to_string(),
                     })?;
 
+                let token_at = Instant::now();
+                if first_token_at.is_none() {
+                    first_token_at = Some(token_at);
+                }
+                last_token_at = Some(token_at);
                 generated_text.push_str(&piece);
                 generated_token_count += 1;
 
-                if truncate_on_stop_sequence(&mut generated_text, &stop_sequences) {
+                let stop_triggered =
+                    truncate_on_stop_sequence(&mut generated_text, &stop_sequences);
+                token_timings.push(GeneratedTokenTiming {
+                    end_byte: generated_text.len(),
+                    at: token_at,
+                });
+                if first_answer_token_at.is_none()
+                    && has_visible_answer_text_for_timing(&generated_text)
+                {
+                    first_answer_token_at = Some(token_at);
+                }
+                if stop_triggered {
                     break;
                 }
 
@@ -696,7 +762,7 @@ impl LlamaCppRuntime {
                     })?;
             }
 
-            let elapsed = started_at.elapsed();
+            let elapsed = request_at.elapsed();
 
             {
                 let mut m = lock_metrics(&metrics, "llama-cpp-text-generate");
@@ -716,6 +782,18 @@ impl LlamaCppRuntime {
                     completion_tokens: Some(generated_token_count),
                     total_tokens: Some(prompt_token_count.saturating_add(generated_token_count)),
                 },
+                timing: GenerationTiming {
+                    request_at,
+                    first_token_at,
+                    first_answer_token_at,
+                    last_token_at,
+                    generated_tokens: generated_token_count,
+                    tokens_before_answer: tokens_before_boundary(
+                        first_answer_token_at,
+                        &token_timings,
+                    ),
+                },
+                token_timings,
             })
         })
         .await
@@ -736,10 +814,125 @@ struct RenderedChatPrompt {
 struct GeneratedText {
     text: String,
     usage: GenerationUsage,
+    timing: GenerationTiming,
+    token_timings: Vec<GeneratedTokenTiming>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GeneratedTokenTiming {
+    end_byte: usize,
+    at: Instant,
 }
 
 fn token_count_to_u32(count: usize) -> u32 {
     count.min(u32::MAX as usize) as u32
+}
+
+/// Resolve the generation token bound.
+///
+/// A caller-supplied `max_tokens` is an explicit cap, honored as-is. `None`
+/// (the #492 uncapped path) runs to the model's natural EOS, bounded only by
+/// the remaining context window (`context_length - prompt_token_count`) — a
+/// hard physical limit, never a guessed a-priori constant. The result is at
+/// least 1 so there is always room to sample the EOS/first token.
+fn effective_generation_bound(
+    requested_max_tokens: Option<u32>,
+    context_length: u32,
+    prompt_token_count: u32,
+) -> u32 {
+    match requested_max_tokens {
+        Some(limit) => limit,
+        None => context_length.saturating_sub(prompt_token_count).max(1),
+    }
+}
+
+fn has_visible_answer_text_for_timing(generated_text: &str) -> bool {
+    !strip_leading_reasoning_for_timing(generated_text)
+        .trim()
+        .is_empty()
+}
+
+fn strip_leading_reasoning_for_timing(generated_text: &str) -> &str {
+    let generated_text = generated_text.trim_start_matches([' ', '\n', '\r', '\t']);
+    if let Some(rest) = generated_text.strip_prefix("<think>") {
+        return rest
+            .find("</think>")
+            .map(|end| &rest[end + "</think>".len()..])
+            .unwrap_or_default();
+    }
+    if let Some(rest) = generated_text.strip_prefix("</think>") {
+        return rest;
+    }
+    strip_empty_gemma4_channel_prefix(generated_text)
+}
+
+/// Count generated tokens emitted strictly before the think→answer boundary.
+///
+/// The boundary token (the first answer token, at `boundary`) is excluded, so
+/// the result is the number of reasoning/`<think>` tokens that preceded it.
+/// `None` when no boundary was reached or there is no per-token timing to count
+/// against.
+fn tokens_before_boundary(
+    boundary: Option<Instant>,
+    token_timings: &[GeneratedTokenTiming],
+) -> Option<u32> {
+    let boundary = boundary?;
+    let count = token_timings
+        .iter()
+        .filter(|token| token.at < boundary)
+        .count();
+    Some(token_count_to_u32(count))
+}
+
+fn timing_for_visible_content(
+    mut timing: GenerationTiming,
+    content: &str,
+    token_timings: &[GeneratedTokenTiming],
+) -> GenerationTiming {
+    if content.trim().is_empty() {
+        timing.first_answer_token_at = None;
+    } else if timing.first_answer_token_at.is_none() {
+        timing.first_answer_token_at = timing.first_token_at;
+    }
+    timing.tokens_before_answer =
+        tokens_before_boundary(timing.first_answer_token_at, token_timings);
+    timing
+}
+
+fn timing_for_openai_response(
+    mut timing: GenerationTiming,
+    template: &ChatTemplateResult,
+    generated_text: &str,
+    token_timings: &[GeneratedTokenTiming],
+    final_content: &str,
+) -> GenerationTiming {
+    if final_content.trim().is_empty() {
+        timing.first_answer_token_at = None;
+        timing.tokens_before_answer = None;
+        return timing;
+    }
+
+    timing.first_answer_token_at =
+        first_parsed_content_token_at(template, generated_text, token_timings)
+            .or(timing.last_token_at)
+            .or(timing.first_token_at);
+    timing.tokens_before_answer =
+        tokens_before_boundary(timing.first_answer_token_at, token_timings);
+    timing
+}
+
+fn first_parsed_content_token_at(
+    template: &ChatTemplateResult,
+    generated_text: &str,
+    token_timings: &[GeneratedTokenTiming],
+) -> Option<Instant> {
+    token_timings.iter().find_map(|token| {
+        let prefix = generated_text.get(..token.end_byte)?;
+        let message_json = template.parse_response_oaicompat(prefix, false).ok()?;
+        let value: Value = serde_json::from_str(&message_json).ok()?;
+        let content = openai_response_content(&value);
+        (!content.trim().is_empty()).then_some(token.at)
+    })
 }
 
 fn truncate_on_stop_sequence(generated_text: &mut String, stop_sequences: &[String]) -> bool {
@@ -954,6 +1147,7 @@ fn build_sampler(
 fn openai_response_json_to_chat_response(
     message_json: String,
     usage: GenerationUsage,
+    timing: Option<GenerationTiming>,
 ) -> Result<ChatResponse, ModelError> {
     let value: Value =
         serde_json::from_str(&message_json).map_err(|err| ModelError::BackendExecution {
@@ -961,12 +1155,7 @@ fn openai_response_json_to_chat_response(
             operation: "parse_openai_response_json",
             message: err.to_string(),
         })?;
-    let content = value
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let content = strip_empty_gemma4_channel_prefix(&content).to_string();
+    let content = openai_response_content(&value);
     let reasoning = value
         .get("reasoning_content")
         .or_else(|| value.get("reasoning"))
@@ -996,7 +1185,16 @@ fn openai_response_json_to_chat_response(
         finish_reason,
         reasoning,
         usage: Some(usage),
+        timing,
     })
+}
+
+fn openai_response_content(value: &Value) -> String {
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    strip_empty_gemma4_channel_prefix(content).to_string()
 }
 
 fn strip_empty_gemma4_channel_prefix(content: &str) -> &str {
@@ -1164,6 +1362,31 @@ impl BundleHandle for LlamaCppTextHandle {
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        let gpu_layers = resolve_gpu_layers();
+        if gpu_layers == 0 {
+            return Some(RuntimeAcceleratorObservation {
+                backend_mode: "llama_cpp:cpu".to_owned(),
+                offload: Some("gpu_layers=0".to_owned()),
+                selected_device: None,
+            });
+        }
+
+        let (backend_mode, selected_device) = if cfg!(feature = "cuda") {
+            ("llama_cpp:cuda".to_owned(), Some("0".to_owned()))
+        } else if cfg!(target_os = "macos") {
+            ("llama_cpp:metal".to_owned(), Some("0".to_owned()))
+        } else {
+            ("llama_cpp:cpu".to_owned(), None)
+        };
+
+        Some(RuntimeAcceleratorObservation {
+            backend_mode,
+            offload: Some(format!("gpu_layers={gpu_layers}")),
+            selected_device,
+        })
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Ok(self)
     }
@@ -1208,7 +1431,7 @@ struct TextHandleConfig {
     display_name: String,
     capabilities: Capabilities,
     quantization: QuantizationSupport,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
     arch: LlamaCppTextArch,
     thinking: ThinkingMode,
     context_length: u32,
@@ -1263,12 +1486,12 @@ struct BuiltModel {
 
 fn build_llama_model(
     spec: &LlamaCppTextSpec,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
     options: StartOptions,
 ) -> Result<BuiltModel, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization: _, // already resolved by caller
+        quantization_scheme: _, // already resolved by caller
         unpack_root,
         max_concurrency: _,
     } = options;
@@ -1315,7 +1538,7 @@ fn load_llama_model(model_path: PathBuf) -> Result<BuiltModel, ModelError> {
 
 fn resolve_checkpoint_model_path(
     checkpoint: &ResolvedCheckpoint,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
 ) -> Result<PathBuf, ModelError> {
     if checkpoint.checkpoint.format != CheckpointFormat::Gguf {
         return Err(ModelError::InvalidConfiguration(format!(
@@ -1383,7 +1606,7 @@ fn resolve_checkpoint_model_path(
 mod tests {
     use super::*;
     use motlie_model::{
-        BackendAdapter, BackendKind, ChatMessage, ModelCheckpoint, QuantizationBits, StartOptions,
+        BackendAdapter, BackendKind, ChatMessage, ModelCheckpoint, QuantizationScheme, StartOptions,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1423,7 +1646,7 @@ mod tests {
         assert_eq!(spec.thinking, ThinkingMode::Disabled);
         assert_eq!(
             spec.quantization.recommended(),
-            Some(QuantizationBits::Eight)
+            Some(QuantizationScheme::GgufQ8_0)
         );
         assert_eq!(spec.default_context_length, 32768);
         assert_eq!(spec.recommended_generation_params.temperature, Some(1.0));
@@ -1441,7 +1664,7 @@ mod tests {
     fn gemma4_12b_specs_default_to_answer_first_chat() {
         for spec in [
             LlamaCppTextSpec::gemma4_12b(),
-            LlamaCppTextSpec::gemma4_12b_qat_q4_0(),
+            LlamaCppTextSpec::gemma4_12b_qat(),
         ] {
             assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
             assert_eq!(spec.thinking, ThinkingMode::Disabled);
@@ -1459,12 +1682,12 @@ mod tests {
         assert_eq!(spec.thinking, ThinkingMode::Auto);
         assert_eq!(
             spec.quantization.recommended(),
-            Some(QuantizationBits::Five)
+            Some(QuantizationScheme::GgufQ5_K_M)
         );
-        assert!(spec.quantization.supports(QuantizationBits::Four));
-        assert!(spec.quantization.supports(QuantizationBits::Five));
-        assert!(spec.quantization.supports(QuantizationBits::Eight));
-        assert!(!spec.quantization.supports(QuantizationBits::FloatEight));
+        assert!(spec.quantization.supports(QuantizationScheme::GgufQ4_K_M));
+        assert!(spec.quantization.supports(QuantizationScheme::GgufQ5_K_M));
+        assert!(spec.quantization.supports(QuantizationScheme::GgufQ8_0));
+        assert!(!spec.quantization.supports(QuantizationScheme::Fp16));
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
         assert!(!spec.capabilities.supports(CapabilityKind::Vision));
@@ -1482,7 +1705,7 @@ mod tests {
         );
         assert_eq!(
             adapter.quantization().recommended(),
-            Some(QuantizationBits::Four)
+            Some(QuantizationScheme::GgufQ4_K_M)
         );
     }
 
@@ -1492,7 +1715,7 @@ mod tests {
             gguf_filename(
                 "qwen3-4b",
                 GgufFileLayout::QuantizedSuffix,
-                Some(QuantizationBits::Four)
+                Some(QuantizationScheme::GgufQ4_K_M)
             ),
             "qwen3-4b-Q4_K_M.gguf"
         );
@@ -1500,7 +1723,7 @@ mod tests {
             gguf_filename(
                 "qwen3-4b",
                 GgufFileLayout::QuantizedSuffix,
-                Some(QuantizationBits::Eight)
+                Some(QuantizationScheme::GgufQ8_0)
             ),
             "qwen3-4b-Q8_0.gguf"
         );
@@ -1508,7 +1731,7 @@ mod tests {
             gguf_filename(
                 "qwen3-4b",
                 GgufFileLayout::QuantizedSuffix,
-                Some(QuantizationBits::Five)
+                Some(QuantizationScheme::GgufQ5_K_M)
             ),
             "qwen3-4b-Q5_K_M.gguf"
         );
@@ -1516,9 +1739,9 @@ mod tests {
             gguf_filename(
                 "qwen3-4b",
                 GgufFileLayout::QuantizedSuffix,
-                Some(QuantizationBits::FloatEight)
+                Some(QuantizationScheme::Fp16)
             ),
-            "qwen3-4b-FP8.gguf"
+            "qwen3-4b-f16.gguf"
         );
         assert_eq!(
             gguf_filename("qwen3-4b", GgufFileLayout::QuantizedSuffix, None),
@@ -1528,7 +1751,7 @@ mod tests {
             gguf_filename(
                 "gemma-4-12b-it-qat-q4_0",
                 GgufFileLayout::ExactQ4_0("gemma-4-12b-it-qat-q4_0.gguf"),
-                Some(QuantizationBits::Four)
+                Some(QuantizationScheme::GgufQ4_K_M)
             ),
             "gemma-4-12b-it-qat-q4_0.gguf"
         );
@@ -1633,7 +1856,7 @@ mod tests {
         .expect("schema should be valid");
 
         assert_eq!(
-            openai_tool_choice(Some(&ToolChoice::Required), &[tool.clone()])
+            openai_tool_choice(Some(&ToolChoice::Required), std::slice::from_ref(&tool))
                 .expect("required should map"),
             Some("required".to_string())
         );
@@ -1670,6 +1893,7 @@ mod tests {
                 completion_tokens: Some(4),
                 total_tokens: Some(7),
             },
+            None,
         )
         .expect("response should map");
 
@@ -1695,7 +1919,7 @@ mod tests {
         })
         .to_string();
 
-        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default())
+        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default(), None)
             .expect("response should map");
 
         assert_eq!(response.content, "The answer is 68.0 degrees Fahrenheit.");
@@ -1719,12 +1943,109 @@ mod tests {
         })
         .to_string();
 
-        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default())
+        let response = openai_response_json_to_chat_response(raw, GenerationUsage::default(), None)
             .expect("response should map");
 
         assert_eq!(response.content, "");
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.finish_reason, Some(ChatFinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn timing_answer_visibility_skips_leading_thinking_blocks() {
+        assert!(!has_visible_answer_text_for_timing("<think>reasoning"));
+        assert!(!has_visible_answer_text_for_timing(
+            "<think>reasoning</think>  "
+        ));
+        assert!(has_visible_answer_text_for_timing(
+            "<think>reasoning</think> final answer"
+        ));
+        assert!(has_visible_answer_text_for_timing(
+            "<|channel>thought\n<channel|>The answer is 42"
+        ));
+    }
+
+    #[test]
+    fn visible_content_timing_clears_or_fills_answer_timestamp() {
+        let request_at = Instant::now();
+        let first_token_at = request_at
+            .checked_add(std::time::Duration::from_millis(10))
+            .unwrap();
+        let mut timing = GenerationTiming {
+            request_at,
+            first_token_at: Some(first_token_at),
+            first_answer_token_at: Some(first_token_at),
+            last_token_at: Some(first_token_at),
+            generated_tokens: 1,
+            tokens_before_answer: Some(0),
+        };
+        let token_timings = [GeneratedTokenTiming {
+            end_byte: 1,
+            at: first_token_at,
+        }];
+
+        timing = timing_for_visible_content(timing, "   ", &token_timings);
+        assert_eq!(timing.first_answer_token_at, None);
+        assert_eq!(timing.tokens_before_answer, None);
+
+        timing.first_answer_token_at = None;
+        timing = timing_for_visible_content(timing, "answer", &token_timings);
+        assert_eq!(timing.first_answer_token_at, Some(first_token_at));
+        // Answer begins at the first token, so no reasoning tokens precede it.
+        assert_eq!(timing.tokens_before_answer, Some(0));
+    }
+
+    #[test]
+    fn uncapped_generation_bound_uses_context_window_not_a_guessed_cap() {
+        // #492 F1: `None` must NOT collapse to a hidden 512 cap. With a 32768
+        // context it must allow generation far past 512 (run-to-EOS), bounded
+        // only by the remaining context window.
+        let bound = effective_generation_bound(None, 32_768, 40);
+        assert_eq!(bound, 32_768 - 40);
+        assert!(bound > 512, "uncapped path must exceed the old 512 default");
+
+        // An explicit caller cap is still honored verbatim.
+        assert_eq!(effective_generation_bound(Some(96), 32_768, 40), 96);
+
+        // Degenerate: prompt already fills the context -> still leave room for 1.
+        assert_eq!(effective_generation_bound(None, 100, 100), 1);
+        assert_eq!(effective_generation_bound(None, 100, 200), 1);
+    }
+
+    #[test]
+    fn tokens_before_boundary_counts_reasoning_tokens() {
+        let request_at = Instant::now();
+        let at = |ms: u64| {
+            request_at
+                .checked_add(std::time::Duration::from_millis(ms))
+                .unwrap()
+        };
+        let token_timings = [
+            GeneratedTokenTiming {
+                end_byte: 1,
+                at: at(10),
+            },
+            GeneratedTokenTiming {
+                end_byte: 2,
+                at: at(20),
+            },
+            GeneratedTokenTiming {
+                end_byte: 3,
+                at: at(30),
+            },
+        ];
+        // Boundary at the 3rd token: 2 reasoning tokens precede it.
+        assert_eq!(
+            tokens_before_boundary(Some(at(30)), &token_timings),
+            Some(2)
+        );
+        // No boundary reached -> no count.
+        assert_eq!(tokens_before_boundary(None, &token_timings), None);
+        // Boundary at the first token -> zero reasoning tokens.
+        assert_eq!(
+            tokens_before_boundary(Some(at(10)), &token_timings),
+            Some(0)
+        );
     }
 
     #[tokio::test]
@@ -1735,11 +2056,11 @@ mod tests {
                 display_name: "Qwen3 4B (GGUF)".into(),
                 capabilities: Capabilities::chat_completion_and_tool_use(),
                 quantization: QuantizationSupport::with_recommended(
-                    [QuantizationBits::Four, QuantizationBits::Eight],
-                    QuantizationBits::Four,
+                    [QuantizationScheme::GgufQ4_K_M, QuantizationScheme::GgufQ8_0],
+                    QuantizationScheme::GgufQ4_K_M,
                 )
                 .expect("test quantization support is valid"),
-                resolved_quantization: Some(QuantizationBits::Four),
+                resolved_quantization: Some(QuantizationScheme::GgufQ4_K_M),
             },
             runtime: TextRuntime::Stub(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
@@ -1838,8 +2159,9 @@ mod tests {
             path: root.clone(),
         };
 
-        let resolved = resolve_checkpoint_model_path(&checkpoint, Some(QuantizationBits::Four))
-            .expect("Q4 GGUF should be selected");
+        let resolved =
+            resolve_checkpoint_model_path(&checkpoint, Some(QuantizationScheme::GgufQ4_K_M))
+                .expect("Q4 GGUF should be selected");
         assert_eq!(resolved, gguf);
     }
 
@@ -1861,8 +2183,9 @@ mod tests {
             path: root.clone(),
         };
 
-        let error = resolve_checkpoint_model_path(&checkpoint, Some(QuantizationBits::Four))
-            .expect_err("missing Q4 GGUF should fail");
+        let error =
+            resolve_checkpoint_model_path(&checkpoint, Some(QuantizationScheme::GgufQ4_K_M))
+                .expect_err("missing Q4 GGUF should fail");
         assert!(matches!(
             error,
             ModelError::InvalidConfiguration(message)

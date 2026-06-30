@@ -4,6 +4,11 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 | @codex-570-impl | Refactored attach command construction behind libtmux `AttachMode` while keeping mstream window lifecycle policy separate. |
+| 2026-06-26 | @codex-570-impl | Switched local `--here` visits to `env -u TMUX` attach and kept failed visit-pane diagnostic/reap tests. |
+| 2026-06-25 | @codex-570-impl | Added default `--here` auto-sweep before visit-window creation and documented the at-most-one stale window invariant. |
+| 2026-06-25 | @codex-570-impl | Updated attach phase notes after live dogfood: explicit multi-client switching and visit-pane-exit cleanup. |
+| 2026-06-25 | @codex-570-impl | Added issue #570 attach implementation tasks and validation gates for daemon resolution, PTY handoff, caller-tmux window injection, and reaping. |
 | 2026-06-06 | @codex-401-impl | Added issue #401 implementation notes for `quarantined`, `retire`, gated `reclaim`, and scan registry self-heal. |
 | 2026-05-30 | @codex-360-og | Added and completed issue #360 tasks for id-stable live session rename/retag, mmux refresh, stale-id safety, and test coverage. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 implementation slice for mmux-visible workstream labels, selected-key preservation, hydration, cleanup, and docs/tests. |
@@ -577,6 +582,72 @@ Validation:
 ```sh
 rg -n "mstream connect|daemon restart|summary-input" bins/mstream/docs
 ```
+
+## Phase 12. Issue #570 Attach / Forward Terminal
+
+Design references:
+
+- [Attach / Forward Terminal](./DESIGN.md#attach--forward-terminal)
+- [Binary And Layering](./DESIGN.md#binary-and-layering)
+- [Requirements](./DESIGN.md#requirements)
+
+Tasks:
+
+- [x] 12.1 Expose the existing `motlie-tmux` attach command/runner transport
+  APIs, including `AttachMode`, without moving CLI or window lifecycle policy
+  into `libs/tmux`.
+- [x] 12.2 Add a daemon RPC that resolves `<host>::<session-or-id>` to a fresh
+  session target and returns the libtmux-resolved attach argv for either
+  `AttachMode::PtyHandoff` or `AttachMode::WindowInjection`.
+- [x] 12.3 Add `mstream attach <target> [--here] [--sweep] [--print]` with
+  `--print` command emission and default foreground PTY handoff.
+- [x] 12.4 Implement caller-tmux `--here` behavior, auto-selected when `$TMUX`
+  is set: auto-sweep inactive attach windows before creating a tagged detached
+  window, switch every attached client of the caller session with
+  `switch-client -c <tty>`, and wait for the visit pane to exit or disappear.
+- [x] 12.5 Implement window ownership cleanup: `@mstream/attach` tags,
+  target/spawn metadata, success-only self-kill after nested attach exit, failed
+  pane exit-status/output capture before reap, already-gone kill tolerance,
+  default `--here` auto-sweep, and standalone inactive tagged-window `--sweep`.
+- [x] 12.6 Cover attach command rendering, the libtmux attach-mode matrix,
+  client command reconstruction, release-barrier shell construction, failed
+  visit reap/error reporting, and inactive sweep selection with focused unit
+  tests.
+
+Validation:
+
+```sh
+cargo fmt -p motlie-tmux -p motlie-mstream
+cargo check -p motlie-tmux
+cargo check -p motlie-mstream
+cargo test -p motlie-tmux attach
+cargo test -p motlie-mstream attach
+cargo build -p motlie-tmux -p motlie-mstream
+cargo test -p motlie-tmux
+cargo test -p motlie-mstream
+cargo clippy -p motlie-tmux --all-targets -- -D warnings
+cargo clippy -p motlie-mstream --all-targets -- -D warnings
+```
+
+Manual caller-tmux smoke:
+
+```sh
+mstream attach local::<session> --print
+mstream attach local::<session> --here
+mstream attach local::<session> --sweep
+```
+
+`--here` should sweep any inactive stale `@mstream/attach` window before
+creating the next visit, switch every attached client of the caller session to
+the visit window, and leave no inactive attach window after the injected pane
+exits. Walking away from a visit may leave one inactive stale window while the
+nested attach remains alive; the next `--here` attach must reap it before
+creating another. Local `--here` visits should resolve to `env -u TMUX` local
+attach while non-tmux local PTY handoff keeps bare tmux attach and remote
+`--here` keeps SSH. Failed local attach should report target, exit status, and
+captured pane output, then reap the visit so a later attach is not blocked.
+`--sweep` should kill inactive tagged visit windows and preserve the active
+visit window.
 
 ## End-To-End Validation Plan
 

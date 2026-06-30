@@ -11,7 +11,7 @@ Canonical build prerequisites live in
 ```bash
 cargo run -p motlie-models --example asr_sherpa_onnx \
   --no-default-features --features model-sherpa-onnx-streaming \
-  -- --wav /path/to/audio.wav
+  -- --wav /path/to/audio.wav [--model=zipformer-en|kroko-2025]
 ```
 
 If `--wav` is omitted, the example reads a WAV stream from stdin:
@@ -33,7 +33,8 @@ cat /path/to/audio.wav | cargo run -p motlie-models --example asr_sherpa_onnx \
 
 - The curated sherpa-onnx artifacts must already be downloaded under the
   default HF cache root, or `--artifact-root` may point directly at the
-  resolved artifact directory that contains the ONNX files.
+  resolved artifact directory that contains the ONNX files. The default model is
+  `zipformer-en`; pass `--model=kroko-2025` for the Kroko 2025 bundle.
 - Runtime is provided by the upstream `sherpa-onnx` Rust crate. Its default
   feature statically links a downloaded prebuilt `sherpa-onnx` native archive.
   Do not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`.
@@ -46,7 +47,9 @@ cat /path/to/audio.wav | cargo run -p motlie-models --example asr_sherpa_onnx \
 
 ## Expected Behavior
 
-- The example opens the curated `Sherpa ONNX Streaming Zipformer EN` bundle.
+- The example opens the curated `Sherpa ONNX Streaming Zipformer EN` bundle by
+  default, or `Sherpa ONNX Streaming Zipformer EN Kroko 2025` with
+  `--model=kroko-2025`.
 - Audio is streamed through the shared PCM transcription contract.
 - By default stdout prints one final plain-text transcript line.
 - `--partials` switches stdout to `[partial]` / `[final]` event lines.

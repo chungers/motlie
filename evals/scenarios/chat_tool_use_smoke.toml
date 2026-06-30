@@ -1,0 +1,40 @@
+schema_version = 1
+id = "chat_tool_use_smoke"
+capability = "chat"
+summary = "Tool-call smoke for chat bundles that advertise tool use."
+
+[bundle_filter]
+capability = "chat"
+required_capabilities = ["tool_use"]
+backend = ["MistralRs", "LlamaCpp"]
+
+[input]
+system_prompt = "Use tools when they are available."
+prompt = "Say hello."
+tool_prompt = "Use the get_weather tool to check the weather in Seattle."
+tool_name = "get_weather"
+max_tokens = 128
+temperature = 0.2
+
+[assertions]
+min_response_chars = 1
+min_tool_calls = 1
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+capture_peak_rss = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.local-cpu-aarch64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.apple-metal]
+
+[profiles.dgx-spark.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.cuda-workstation.gates]
+max_process_swap_delta_bytes = 4294967296

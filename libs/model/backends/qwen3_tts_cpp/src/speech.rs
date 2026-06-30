@@ -13,14 +13,14 @@ use motlie_model::typed::{
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint,
-    SpeechParams, StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationScheme, QuantizationSupport,
+    ResolvedCheckpoint, RuntimeAcceleratorObservation, SpeechParams, StartOptions, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    DEFAULT_SAMPLE_RATE_HZ, Qwen3TtsCppArtifactPaths, RuntimeMetricState,
     configure_artifact_policy, lock_metrics, observe_latency, observe_memory, resample_mono,
-    resolve_gguf_artifacts,
+    resolve_gguf_artifacts, Qwen3TtsCppArtifactPaths, RuntimeMetricState, DEFAULT_SAMPLE_RATE_HZ,
 };
 
 const QWEN3_TTS_CPP_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -46,7 +46,17 @@ impl Qwen3TtsCppSpeechSpec {
             display_name: "Qwen3-TTS CPP 0.6B",
             hf_repo: "koboldcpp/tts",
             capabilities: Capabilities::speech_buffered_with_voice_clone(),
-            quantization: QuantizationSupport::without_recommended([QuantizationBits::Eight]),
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationScheme::GgufQ8_0, QuantizationScheme::Fp16],
+                QuantizationScheme::GgufQ8_0,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("curated quantization construction failed (this is a bug): {e}");
+                QuantizationSupport::without_recommended([
+                    QuantizationScheme::GgufQ8_0,
+                    QuantizationScheme::Fp16,
+                ])
+            }),
         }
     }
 }
@@ -92,7 +102,7 @@ impl BackendAdapter for Qwen3TtsCppSpeechAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_gguf_artifacts(checkpoint)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -155,7 +165,7 @@ impl Qwen3TtsCppSpeechBundle {
     ) -> Result<Qwen3TtsCppHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.hf_repo, policy)?
@@ -273,6 +283,28 @@ impl BundleHandle for Qwen3TtsCppHandle {
             text_generation: None,
             embeddings: None,
         })
+    }
+
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        if cfg!(feature = "cuda") {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "qwen3_tts_cpp:cuda".to_owned(),
+                offload: Some("ggml_cuda=on".to_owned()),
+                selected_device: Some("0".to_owned()),
+            })
+        } else if cfg!(target_os = "macos") {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "qwen3_tts_cpp:metal".to_owned(),
+                offload: Some("ggml_metal=on".to_owned()),
+                selected_device: Some("0".to_owned()),
+            })
+        } else {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "qwen3_tts_cpp:cpu".to_owned(),
+                offload: Some("accelerator_feature=none".to_owned()),
+                selected_device: None,
+            })
+        }
     }
 
     fn chat(&self) -> Result<&Self::Chat, ModelError> {

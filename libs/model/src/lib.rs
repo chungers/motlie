@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -25,9 +26,12 @@ pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, Embedd
 pub use eval::EvalTrack;
 pub use generation::{
     ChatFinishReason, ChatRequest, ChatResponse, CompletionRequest, CompletionResponse,
-    GenerationParams, GenerationUsage, ThinkingMode,
+    GenerationParams, GenerationTiming, GenerationUsage, ThinkingMode,
 };
-pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
+pub use metrics::{
+    EmbeddingMetrics, ModelMetricSnapshot, RuntimeAcceleratorObservation, RuntimeMetrics,
+    TextGenerationMetrics,
+};
 pub use speech::SpeechParams;
 pub use tool::{
     Tool, ToolArgumentError, ToolArguments, ToolCall, ToolCallError, ToolCallId, ToolCallIdError,
@@ -37,9 +41,11 @@ pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpd
 pub use typed::{
     stream_speech_into_asr, AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
     BufferedSpeechSynthesizer, BufferedVoiceCloneSynthesizer, CloneReference, Compose,
-    I16MonoResampler, I16ToF32, IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
-    SpeechSynthesizer as TypedSpeechSynthesizer, Stereo, StreamingTranscriber, SynthesisRequest,
-    TranscriptionSession, VoiceCloneSynthesizer,
+    I16MonoResampler, I16ToF32, IdentityTransform, IncrementalSpeechCancelToken,
+    IncrementalSpeechChunk, IncrementalSpeechControls, IncrementalSpeechRequestLabel,
+    IncrementalSpeechStream, IncrementalSpeechSummary, IncrementalSpeechSynthesizer, Mono,
+    SpeechStream as TypedSpeechStream, SpeechSynthesizer as TypedSpeechSynthesizer, Stereo,
+    StreamingTranscriber, SynthesisRequest, TranscriptionSession, VoiceCloneSynthesizer,
 };
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
@@ -101,6 +107,135 @@ pub enum BackendKind {
     WhisperCpp,
 }
 
+/// Hardware accelerator class a backend execution provider can target.
+///
+/// Only the three physical classes live here. The eval runtime carries extra
+/// resolution-only states (`Any`/`Unavailable`); those are an eval concern, not
+/// a model-capability one, so they are deliberately absent.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Accelerator {
+    Cpu,
+    Cuda,
+    Metal,
+}
+
+impl Accelerator {
+    /// Every accelerator class, for exhaustive coverage walks.
+    pub const ALL: [Accelerator; 3] = [Self::Cpu, Self::Cuda, Self::Metal];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Metal => "metal",
+        }
+    }
+}
+
+/// Why a backend has no execution path for an accelerator — a *permanent*,
+/// compile-time truth (independent of whether any given build compiled a path).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Reason {
+    /// The backend's execution provider does not exist for this accelerator at
+    /// all (e.g. ONNX Runtime has no Metal execution provider).
+    NoExecutionProviderForAccelerator,
+    /// The backend runs on the accelerator's host but does not forward
+    /// generation to the accelerator upstream (e.g. mistralrs → CUDA/Metal for
+    /// the non-forwarding bundles).
+    UpstreamNoGpuForwarding,
+    /// Only a CPU static archive is shipped/linkable for this backend today, so
+    /// the accelerated path cannot be built (e.g. the sherpa/ORT static archive,
+    /// #495/#513).
+    CpuOnlyStaticArchive,
+    /// Reaching the accelerated path requires a gated artifact that is not
+    /// freely provisionable.
+    RequiresArtifactGate,
+}
+
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoExecutionProviderForAccelerator => "no_execution_provider_for_accelerator",
+            Self::UpstreamNoGpuForwarding => "upstream_no_gpu_forwarding",
+            Self::CpuOnlyStaticArchive => "cpu_only_static_archive",
+            Self::RequiresArtifactGate => "requires_artifact_gate",
+        }
+    }
+}
+
+/// Declared accelerator support for a backend (the compile-time / model layer of
+/// the coverage ontology, #521). This is the *intrinsic* capability of the
+/// backend's execution provider, declared at curation — never discovered from
+/// eval runs. The eval runtime reconciles this declaration against recorded
+/// results to classify each coverage cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccelSupport {
+    /// The backend can target this accelerator. The native path is compiled only
+    /// when `feature` is active in a build (`None` = always present, e.g. CPU).
+    ///
+    /// `feature` is an advisory hint that corroborates a build's
+    /// `runtime.cargo_features`; the runtime `BuildGap` classification keys on
+    /// recorded native-provider evidence (EP probe / static-archive presence /
+    /// `resolved_accelerator`), not on this string alone.
+    Targetable { feature: Option<&'static str> },
+    /// The backend fundamentally cannot target this accelerator. Permanent.
+    Unsupported(Reason),
+}
+
+impl BackendKind {
+    /// Backend-intrinsic accelerator support, **declared** (not discovered from
+    /// runs). Bundles inherit this through their backend; genuine per-bundle
+    /// deviations are layered on at the registry (motlie-models) level.
+    ///
+    /// Totality: returns a declared `AccelSupport` for every `(backend,
+    /// accelerator)` — there is no undeclared combination.
+    pub fn accel_support(self, accel: Accelerator) -> AccelSupport {
+        use AccelSupport::{Targetable, Unsupported};
+        use Accelerator::{Cpu, Cuda, Metal};
+
+        match (self, accel) {
+            // CPU is always targetable for every local backend; the HTTP backend
+            // is remote and has no local accelerator, so CPU stands in as its
+            // only (host-side) class and GPU classes are not applicable.
+            (_, Cpu) => Targetable { feature: None },
+            (BackendKind::Http, Cuda | Metal) => {
+                Unsupported(Reason::NoExecutionProviderForAccelerator)
+            }
+            // ONNX Runtime (audio): CUDA only when a CUDA-EP archive is linked;
+            // no Metal execution provider exists at all (permanent).
+            (BackendKind::Ort | BackendKind::SherpaOnnx, Cuda) => Targetable {
+                feature: Some("cuda"),
+            },
+            (BackendKind::Ort | BackendKind::SherpaOnnx, Metal) => {
+                Unsupported(Reason::NoExecutionProviderForAccelerator)
+            }
+            // llama.cpp (ggml) forwards to both CUDA and Metal.
+            (BackendKind::LlamaCpp, Cuda) => Targetable {
+                feature: Some("llama-cpp-cuda"),
+            },
+            (BackendKind::LlamaCpp, Metal) => Targetable {
+                feature: Some("metal"),
+            },
+            // mistralrs (candle): CUDA-capable; no Metal forwarding upstream.
+            (BackendKind::MistralRs, Cuda) => Targetable {
+                feature: Some("cuda"),
+            },
+            (BackendKind::MistralRs, Metal) => Unsupported(Reason::UpstreamNoGpuForwarding),
+            // whisper.cpp / qwen3-tts.cpp (ggml): CUDA + Metal.
+            (BackendKind::WhisperCpp, Cuda) => Targetable {
+                feature: Some("whisper-cpp-cuda"),
+            },
+            (BackendKind::Qwen3TtsCpp, Cuda) => Targetable {
+                feature: Some("qwen3-tts-cpp-cuda"),
+            },
+            (BackendKind::WhisperCpp | BackendKind::Qwen3TtsCpp, Metal) => Targetable {
+                feature: Some("metal"),
+            },
+        }
+    }
+}
+
 /// Platform scoping visible to operators and release tooling.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlatformConstraint {
@@ -136,6 +271,7 @@ pub enum ArtifactSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactRule {
     Exact(&'static str),
+    Prefix(&'static str),
     Suffix(&'static str),
 }
 
@@ -143,6 +279,7 @@ impl ArtifactRule {
     pub fn matches(&self, filename: &str) -> bool {
         match self {
             Self::Exact(expected) => filename == *expected,
+            Self::Prefix(prefix) => filename.starts_with(prefix),
             Self::Suffix(suffix) => filename.ends_with(suffix),
         }
     }
@@ -205,7 +342,7 @@ pub struct CapabilityDescriptor {
     pub outputs: Vec<ContentKind>,
     pub interaction: InteractionStyle,
     pub transcription_delivery: Option<TranscriptDelivery>,
-    pub speech_generation: Option<SpeechGeneration>,
+    pub speech_generations: BTreeSet<SpeechGeneration>,
 }
 
 impl CapabilityDescriptor {
@@ -223,7 +360,7 @@ impl CapabilityDescriptor {
             outputs,
             interaction,
             transcription_delivery: None,
-            speech_generation: None,
+            speech_generations: BTreeSet::new(),
         }
     }
 
@@ -346,6 +483,18 @@ impl CapabilityDescriptor {
         .with_speech_generation(SpeechGeneration::Streaming)
     }
 
+    pub fn speech_buffered_and_streaming() -> Self {
+        Self::new(
+            CapabilityKind::Speech,
+            "Speech synthesis supporting both full-output buffered audio and true incremental PCM audio.",
+            vec![ContentKind::Text],
+            vec![ContentKind::Audio],
+            InteractionStyle::Streaming,
+        )
+        .with_speech_generation(SpeechGeneration::Buffered)
+        .with_speech_generation(SpeechGeneration::Streaming)
+    }
+
     pub fn voice_clone() -> Self {
         Self::new(
             CapabilityKind::VoiceClone,
@@ -362,7 +511,7 @@ impl CapabilityDescriptor {
     }
 
     fn with_speech_generation(mut self, generation: SpeechGeneration) -> Self {
-        self.speech_generation = Some(generation);
+        self.speech_generations.insert(generation);
         self
     }
 }
@@ -412,8 +561,19 @@ impl Capabilities {
     }
 
     pub fn speech_generation_for(&self) -> Option<SpeechGeneration> {
+        self.speech_generations_for()
+            .and_then(|generations| generations.iter().next().copied())
+    }
+
+    pub fn speech_generations_for(&self) -> Option<&BTreeSet<SpeechGeneration>> {
         self.descriptor_for(CapabilityKind::Speech)
-            .and_then(|descriptor| descriptor.speech_generation)
+            .map(|descriptor| &descriptor.speech_generations)
+            .filter(|generations| !generations.is_empty())
+    }
+
+    pub fn supports_speech_generation(&self, generation: SpeechGeneration) -> bool {
+        self.speech_generations_for()
+            .is_some_and(|generations| generations.contains(&generation))
     }
 
     pub fn supports(&self, capability: CapabilityKind) -> bool {
@@ -485,6 +645,14 @@ impl Capabilities {
         Self::new(vec![CapabilityDescriptor::speech_buffered()])
     }
 
+    pub fn speech_streaming_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::speech_stream()])
+    }
+
+    pub fn speech_buffered_and_streaming() -> Self {
+        Self::new(vec![CapabilityDescriptor::speech_buffered_and_streaming()])
+    }
+
     pub fn speech_buffered_with_voice_clone() -> Self {
         Self::new(vec![
             CapabilityDescriptor::speech_buffered(),
@@ -524,11 +692,107 @@ pub enum CheckpointFormat {
     Onnx,
 }
 
-/// Checkpoint-native quantization metadata.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CheckpointQuantization {
-    Gguf { label: String },
-    Onnx { bits: u8 },
+/// Canonical quantization and dtype scheme used across checkpoints, runtime
+/// resolution, and eval coverage.
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum QuantizationScheme {
+    GgufQ4_K_M,
+    GgufQ4_0,
+    GgufQ5_K_M,
+    GgufQ8_0,
+    OnnxInt8,
+    /// mistral.rs in-situ quantization; effective/runtime-only.
+    IsqQ4,
+    /// mistral.rs in-situ quantization; effective/runtime-only.
+    IsqQ8,
+    Fp32,
+    Fp16,
+    Bf16,
+}
+
+impl QuantizationScheme {
+    pub const ALL: &'static [QuantizationScheme] = &[
+        Self::GgufQ4_K_M,
+        Self::GgufQ4_0,
+        Self::GgufQ5_K_M,
+        Self::GgufQ8_0,
+        Self::OnnxInt8,
+        Self::IsqQ4,
+        Self::IsqQ8,
+        Self::Fp32,
+        Self::Fp16,
+        Self::Bf16,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GgufQ4_K_M => "gguf_q4_k_m",
+            Self::GgufQ4_0 => "gguf_q4_0",
+            Self::GgufQ5_K_M => "gguf_q5_k_m",
+            Self::GgufQ8_0 => "gguf_q8_0",
+            Self::OnnxInt8 => "onnx_int8",
+            Self::IsqQ4 => "isq_q4",
+            Self::IsqQ8 => "isq_q8",
+            Self::Fp32 => "fp32",
+            Self::Fp16 => "fp16",
+            Self::Bf16 => "bf16",
+        }
+    }
+
+    pub fn approx_bits(self) -> u8 {
+        match self {
+            Self::GgufQ4_K_M | Self::GgufQ4_0 | Self::IsqQ4 => 4,
+            Self::GgufQ5_K_M => 5,
+            Self::GgufQ8_0 | Self::OnnxInt8 | Self::IsqQ8 => 8,
+            Self::Fp16 | Self::Bf16 => 16,
+            Self::Fp32 => 32,
+        }
+    }
+
+    pub fn is_runtime_only(self) -> bool {
+        matches!(self, Self::IsqQ4 | Self::IsqQ8)
+    }
+
+    pub fn is_checkpoint_legal(self) -> bool {
+        !self.is_runtime_only()
+    }
+
+    pub fn is_gguf(self) -> bool {
+        matches!(
+            self,
+            Self::GgufQ4_K_M | Self::GgufQ4_0 | Self::GgufQ5_K_M | Self::GgufQ8_0
+        )
+    }
+}
+
+impl fmt::Display for QuantizationScheme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl FromStr for QuantizationScheme {
+    type Err = ModelError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "gguf_q4_k_m" | "q4_k_m" | "q4-k-m" | "q4_k" => Ok(Self::GgufQ4_K_M),
+            "gguf_q4_0" | "q4_0" | "q4-0" => Ok(Self::GgufQ4_0),
+            "gguf_q5_k_m" | "q5_k_m" | "q5-k-m" | "q5_k" => Ok(Self::GgufQ5_K_M),
+            "gguf_q8_0" | "q8_0" | "q8-0" => Ok(Self::GgufQ8_0),
+            "onnx_int8" | "onnx-i8" | "int8" => Ok(Self::OnnxInt8),
+            "isq_q4" | "isq-q4" => Ok(Self::IsqQ4),
+            "isq_q8" | "isq-q8" => Ok(Self::IsqQ8),
+            "fp32" | "f32" => Ok(Self::Fp32),
+            "fp16" | "f16" => Ok(Self::Fp16),
+            "bf16" => Ok(Self::Bf16),
+            other => Err(ModelError::InvalidConfiguration(format!(
+                "unknown quantization scheme `{other}`"
+            ))),
+        }
+    }
 }
 
 /// Artifact declaration for a concrete checkpoint variant of a model.
@@ -537,12 +801,51 @@ pub struct ModelCheckpoint {
     pub format: CheckpointFormat,
     pub source: ArtifactSource,
     pub include: Vec<ArtifactRule>,
-    pub quantization: Option<CheckpointQuantization>,
+    pub quantization: Option<QuantizationScheme>,
 }
 
 impl ModelCheckpoint {
     pub fn includes(&self, filename: &str) -> bool {
         self.include.iter().any(|rule| rule.matches(filename))
+    }
+
+    pub fn validate_quantization(&self) -> Result<(), ModelError> {
+        let Some(scheme) = self.quantization else {
+            return Ok(());
+        };
+        if !scheme.is_checkpoint_legal() {
+            return Err(ModelError::InvalidConfiguration(format!(
+                "`{scheme}` is an effective runtime quantization scheme and cannot be used as checkpoint metadata"
+            )));
+        }
+        match (self.format, scheme) {
+            (
+                CheckpointFormat::Gguf,
+                QuantizationScheme::GgufQ4_K_M
+                | QuantizationScheme::GgufQ4_0
+                | QuantizationScheme::GgufQ5_K_M
+                | QuantizationScheme::GgufQ8_0
+                | QuantizationScheme::Fp16
+                | QuantizationScheme::Fp32,
+            )
+            | (
+                CheckpointFormat::Onnx,
+                QuantizationScheme::OnnxInt8
+                | QuantizationScheme::Fp32
+                | QuantizationScheme::Fp16
+                | QuantizationScheme::Bf16,
+            )
+            | (
+                CheckpointFormat::Safetensors,
+                QuantizationScheme::Fp32 | QuantizationScheme::Fp16 | QuantizationScheme::Bf16,
+            )
+            | (CheckpointFormat::Ggml, QuantizationScheme::Fp32 | QuantizationScheme::Fp16) => {
+                Ok(())
+            }
+            (format, scheme) => Err(ModelError::InvalidConfiguration(format!(
+                "checkpoint format {format:?} cannot use quantization scheme `{scheme}`"
+            ))),
+        }
     }
 }
 
@@ -560,33 +863,20 @@ pub enum ArtifactPolicy {
     LocalOnly { root: PathBuf },
 }
 
-/// Backend-agnostic quantization precision for model weights.
-///
-/// Backends map this to their native quantization mechanism — ISQ for
-/// mistral.rs, GGUF bit width for llama.cpp, etc. `None` (the default)
-/// means the backend chooses its own default precision.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum QuantizationBits {
-    Four,
-    Five,
-    Eight,
-    FloatEight,
-}
-
-/// Bundle-level declaration of which quantization precisions are supported
-/// and which precision is recommended for default deployments.
+/// Bundle-level declaration of which quantization/dtype schemes are supported
+/// and which scheme is recommended for default deployments.
 ///
 /// Invariant: `recommended` is either `None` or present in `supported`.
 /// Use the constructors (`none`, `with_recommended`, `without_recommended`)
 /// to enforce this.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct QuantizationSupport {
-    supported: BTreeSet<QuantizationBits>,
-    recommended: Option<QuantizationBits>,
+    supported: BTreeSet<QuantizationScheme>,
+    recommended: Option<QuantizationScheme>,
 }
 
 impl QuantizationSupport {
-    /// Bundle does not support any quantization.
+    /// Bundle does not support a selectable quantization scheme.
     pub fn none() -> Self {
         Self {
             supported: BTreeSet::new(),
@@ -594,12 +884,12 @@ impl QuantizationSupport {
         }
     }
 
-    /// Bundle supports the given precisions with a curated default.
+    /// Bundle supports the given schemes with a curated default.
     ///
     /// Returns `InvalidConfiguration` if `recommended` is not in `supported`.
     pub fn with_recommended(
-        supported: impl IntoIterator<Item = QuantizationBits>,
-        recommended: QuantizationBits,
+        supported: impl IntoIterator<Item = QuantizationScheme>,
+        recommended: QuantizationScheme,
     ) -> Result<Self, ModelError> {
         let supported: BTreeSet<_> = supported.into_iter().collect();
         if !supported.contains(&recommended) {
@@ -613,42 +903,44 @@ impl QuantizationSupport {
         })
     }
 
-    /// Bundle supports the given precisions with no curated default (F32 by default).
-    pub fn without_recommended(supported: impl IntoIterator<Item = QuantizationBits>) -> Self {
+    /// Bundle supports the given schemes with no curated default.
+    pub fn without_recommended(supported: impl IntoIterator<Item = QuantizationScheme>) -> Self {
         Self {
             supported: supported.into_iter().collect(),
             recommended: None,
         }
     }
 
-    pub fn supported(&self) -> &BTreeSet<QuantizationBits> {
+    pub fn supported(&self) -> &BTreeSet<QuantizationScheme> {
         &self.supported
     }
 
-    pub fn recommended(&self) -> Option<QuantizationBits> {
+    pub fn recommended(&self) -> Option<QuantizationScheme> {
         self.recommended
     }
 
-    pub fn supports(&self, bits: QuantizationBits) -> bool {
-        self.supported.contains(&bits)
+    pub fn supports(&self, scheme: QuantizationScheme) -> bool {
+        self.supported.contains(&scheme)
     }
 
     /// Resolve the caller's quantization request against this bundle's support.
     ///
-    /// - `Some(bits)` where bits is supported → `Ok(Some(bits))`
-    /// - `Some(bits)` where bits is NOT supported → `Err(InvalidConfiguration)`
-    /// - `None` → `Ok(self.recommended)` (curated default or None for F32)
+    /// - `Some(scheme)` where scheme is supported → `Ok(Some(scheme))`
+    /// - `Some(scheme)` where scheme is NOT supported → `Err(InvalidConfiguration)`
+    /// - `None` → `Ok(self.recommended)`.
     pub fn resolve(
         &self,
-        requested: Option<QuantizationBits>,
+        requested: Option<QuantizationScheme>,
         bundle_id: &BundleId,
-    ) -> Result<Option<QuantizationBits>, ModelError> {
+    ) -> Result<Option<QuantizationScheme>, ModelError> {
         match requested {
-            Some(bits) if !self.supports(bits) => Err(ModelError::InvalidConfiguration(format!(
-                "bundle `{bundle_id}` does not support {bits:?} quantization; supported: {:?}",
-                self.supported
-            ))),
-            Some(bits) => Ok(Some(bits)),
+            Some(scheme) if !self.supports(scheme) => {
+                Err(ModelError::InvalidConfiguration(format!(
+                    "bundle `{bundle_id}` does not support `{scheme}` quantization; supported: {:?}",
+                    self.supported
+                )))
+            }
+            Some(scheme) => Ok(Some(scheme)),
             None => Ok(self.recommended),
         }
     }
@@ -658,7 +950,7 @@ impl QuantizationSupport {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StartOptions {
     pub artifact_policy: Option<ArtifactPolicy>,
-    pub quantization: Option<QuantizationBits>,
+    pub quantization_scheme: Option<QuantizationScheme>,
     pub unpack_root: Option<PathBuf>,
     pub max_concurrency: Option<usize>,
 }
@@ -674,8 +966,8 @@ pub struct LoadedBundleDescriptor {
     pub display_name: String,
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
-    /// The quantization precision actually applied at startup, or `None` for F32.
-    pub resolved_quantization: Option<QuantizationBits>,
+    /// The quantization/dtype scheme actually applied at startup.
+    pub resolved_quantization: Option<QuantizationScheme>,
 }
 
 /// Structured error surface for core bundle operations.
@@ -736,6 +1028,9 @@ pub trait BundleHandle: Send + Sync + Sized {
         self.capabilities().supports(capability)
     }
     fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        None
+    }
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
         None
     }
 
@@ -823,6 +1118,71 @@ impl EmbeddingModel for UnsupportedEmbeddings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accel_support_is_total_over_backend_x_accelerator() {
+        // Every (backend, accelerator) resolves to a declared AccelSupport — no
+        // undeclared combination. This is the compile-time half of the #521
+        // tuple-completeness guarantee.
+        let backends = [
+            BackendKind::Http,
+            BackendKind::LlamaCpp,
+            BackendKind::MistralRs,
+            BackendKind::Ort,
+            BackendKind::Qwen3TtsCpp,
+            BackendKind::SherpaOnnx,
+            BackendKind::WhisperCpp,
+        ];
+        for backend in backends {
+            for accel in Accelerator::ALL {
+                // Declared (the match is exhaustive); CPU is always targetable.
+                let support = backend.accel_support(accel);
+                if accel == Accelerator::Cpu {
+                    assert!(
+                        matches!(support, AccelSupport::Targetable { .. }),
+                        "{backend:?} cpu must be targetable",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ort_has_no_metal_path_permanently() {
+        // The defining permanent-NotApplicable case: ONNX Runtime has no Metal EP.
+        assert_eq!(
+            BackendKind::Ort.accel_support(Accelerator::Metal),
+            AccelSupport::Unsupported(Reason::NoExecutionProviderForAccelerator),
+        );
+        assert_eq!(
+            BackendKind::SherpaOnnx.accel_support(Accelerator::Metal),
+            AccelSupport::Unsupported(Reason::NoExecutionProviderForAccelerator),
+        );
+    }
+
+    #[test]
+    fn llama_cpp_targets_all_three_accelerators() {
+        assert!(matches!(
+            BackendKind::LlamaCpp.accel_support(Accelerator::Cuda),
+            AccelSupport::Targetable { .. }
+        ));
+        assert!(matches!(
+            BackendKind::LlamaCpp.accel_support(Accelerator::Metal),
+            AccelSupport::Targetable { .. }
+        ));
+    }
+
+    #[test]
+    fn mistralrs_targets_cuda_but_not_metal() {
+        assert!(matches!(
+            BackendKind::MistralRs.accel_support(Accelerator::Cuda),
+            AccelSupport::Targetable { .. }
+        ));
+        assert_eq!(
+            BackendKind::MistralRs.accel_support(Accelerator::Metal),
+            AccelSupport::Unsupported(Reason::UpstreamNoGpuForwarding),
+        );
+    }
 
     struct FakeHandle {
         descriptor: LoadedBundleDescriptor,
@@ -996,6 +1356,65 @@ mod tests {
     }
 
     #[test]
+    fn quantization_scheme_has_stable_ids_and_bits() {
+        let expected = [
+            (QuantizationScheme::GgufQ4_K_M, "gguf_q4_k_m", 4),
+            (QuantizationScheme::GgufQ4_0, "gguf_q4_0", 4),
+            (QuantizationScheme::GgufQ5_K_M, "gguf_q5_k_m", 5),
+            (QuantizationScheme::GgufQ8_0, "gguf_q8_0", 8),
+            (QuantizationScheme::OnnxInt8, "onnx_int8", 8),
+            (QuantizationScheme::IsqQ4, "isq_q4", 4),
+            (QuantizationScheme::IsqQ8, "isq_q8", 8),
+            (QuantizationScheme::Fp32, "fp32", 32),
+            (QuantizationScheme::Fp16, "fp16", 16),
+            (QuantizationScheme::Bf16, "bf16", 16),
+        ];
+
+        assert_eq!(QuantizationScheme::ALL.len(), expected.len());
+        for (scheme, id, bits) in expected {
+            assert_eq!(scheme.as_str(), id);
+            assert_eq!(scheme.to_string(), id);
+            assert_eq!(scheme.approx_bits(), bits);
+            assert_eq!(id.parse::<QuantizationScheme>().unwrap(), scheme);
+        }
+    }
+
+    #[test]
+    fn checkpoint_quantization_rejects_illegal_schemes() {
+        let runtime_only = ModelCheckpoint {
+            format: CheckpointFormat::Safetensors,
+            source: ArtifactSource::HuggingFace {
+                repo: "example/model",
+            },
+            include: vec![ArtifactRule::Suffix(".safetensors")],
+            quantization: Some(QuantizationScheme::IsqQ4),
+        };
+
+        let err = runtime_only
+            .validate_quantization()
+            .expect_err("ISQ is runtime-only and cannot describe a checkpoint");
+        assert!(
+            matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("runtime quantization"))
+        );
+
+        let format_mismatch = ModelCheckpoint {
+            format: CheckpointFormat::Gguf,
+            source: ArtifactSource::HuggingFace {
+                repo: "example/model",
+            },
+            include: vec![ArtifactRule::Suffix(".gguf")],
+            quantization: Some(QuantizationScheme::OnnxInt8),
+        };
+
+        let err = format_mismatch
+            .validate_quantization()
+            .expect_err("ONNX INT8 cannot describe a GGUF checkpoint");
+        assert!(
+            matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("cannot use quantization scheme"))
+        );
+    }
+
+    #[test]
     fn artifact_rule_and_checkpoint_match_expected_filenames() {
         let checkpoint = ModelCheckpoint {
             format: CheckpointFormat::Gguf,
@@ -1006,9 +1425,7 @@ mod tests {
                 ArtifactRule::Suffix("-Q4_K_M.gguf"),
                 ArtifactRule::Suffix("-Q8_0.gguf"),
             ],
-            quantization: Some(CheckpointQuantization::Gguf {
-                label: "Q4_K_M".into(),
-            }),
+            quantization: Some(QuantizationScheme::GgufQ4_K_M),
         };
 
         assert!(checkpoint.includes("Qwen3-4B-Q4_K_M.gguf"));
@@ -1041,7 +1458,7 @@ mod tests {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/models"),
             }),
-            quantization: None,
+            quantization_scheme: None,
             unpack_root: None,
             max_concurrency: Some(4),
         };
@@ -1057,18 +1474,18 @@ mod tests {
     #[test]
     fn start_options_carry_quantization_policy() {
         let q4 = StartOptions {
-            quantization: Some(QuantizationBits::Four),
+            quantization_scheme: Some(QuantizationScheme::IsqQ4),
             ..Default::default()
         };
         let q8 = StartOptions {
-            quantization: Some(QuantizationBits::Eight),
+            quantization_scheme: Some(QuantizationScheme::IsqQ8),
             ..Default::default()
         };
         let none = StartOptions::default();
 
-        assert_eq!(q4.quantization, Some(QuantizationBits::Four));
-        assert_eq!(q8.quantization, Some(QuantizationBits::Eight));
-        assert_eq!(none.quantization, None);
+        assert_eq!(q4.quantization_scheme, Some(QuantizationScheme::IsqQ4));
+        assert_eq!(q8.quantization_scheme, Some(QuantizationScheme::IsqQ8));
+        assert_eq!(none.quantization_scheme, None);
     }
 
     #[test]
@@ -1077,48 +1494,48 @@ mod tests {
 
         let no_support = QuantizationSupport::none();
         assert!(no_support
-            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .resolve(Some(QuantizationScheme::IsqQ4), &bundle_id)
             .is_err());
         assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
 
         let q4_q8 = QuantizationSupport::with_recommended(
-            [QuantizationBits::Four, QuantizationBits::Eight],
-            QuantizationBits::Four,
+            [QuantizationScheme::IsqQ4, QuantizationScheme::IsqQ8],
+            QuantizationScheme::IsqQ4,
         )
         .expect("test support is valid");
         assert_eq!(
             q4_q8
-                .resolve(Some(QuantizationBits::Four), &bundle_id)
+                .resolve(Some(QuantizationScheme::IsqQ4), &bundle_id)
                 .unwrap(),
-            Some(QuantizationBits::Four)
+            Some(QuantizationScheme::IsqQ4)
         );
         assert_eq!(
             q4_q8
-                .resolve(Some(QuantizationBits::Eight), &bundle_id)
+                .resolve(Some(QuantizationScheme::IsqQ8), &bundle_id)
                 .unwrap(),
-            Some(QuantizationBits::Eight)
+            Some(QuantizationScheme::IsqQ8)
         );
         assert_eq!(
             q4_q8.resolve(None, &bundle_id).unwrap(),
-            Some(QuantizationBits::Four)
+            Some(QuantizationScheme::IsqQ4)
         );
 
-        let q8_only = QuantizationSupport::without_recommended([QuantizationBits::Eight]);
+        let q8_only = QuantizationSupport::without_recommended([QuantizationScheme::IsqQ8]);
         assert!(q8_only
-            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .resolve(Some(QuantizationScheme::IsqQ4), &bundle_id)
             .is_err());
         assert_eq!(
             q8_only
-                .resolve(Some(QuantizationBits::Eight), &bundle_id)
+                .resolve(Some(QuantizationScheme::IsqQ8), &bundle_id)
                 .unwrap(),
-            Some(QuantizationBits::Eight)
+            Some(QuantizationScheme::IsqQ8)
         );
         assert_eq!(q8_only.resolve(None, &bundle_id).unwrap(), None);
     }
 
     #[test]
     fn quantization_support_rejects_contradictory_recommended() {
-        let err = QuantizationSupport::with_recommended([], QuantizationBits::Four)
+        let err = QuantizationSupport::with_recommended([], QuantizationScheme::IsqQ4)
             .expect_err("contradictory recommended should fail");
 
         assert!(
@@ -1194,10 +1611,10 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::RequestResponse);
-        assert_eq!(
-            descriptor.speech_generation,
-            Some(SpeechGeneration::Buffered)
-        );
+        assert_eq!(descriptor.speech_generations.len(), 1);
+        assert!(descriptor
+            .speech_generations
+            .contains(&SpeechGeneration::Buffered));
     }
 
     #[test]
@@ -1208,10 +1625,24 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
-        assert_eq!(
-            descriptor.speech_generation,
-            Some(SpeechGeneration::Streaming)
-        );
+        assert_eq!(descriptor.speech_generations.len(), 1);
+        assert!(descriptor
+            .speech_generations
+            .contains(&SpeechGeneration::Streaming));
+    }
+
+    #[test]
+    fn speech_buffered_and_streaming_descriptor_supports_both_modes() {
+        let descriptor = CapabilityDescriptor::speech_buffered_and_streaming();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Speech);
+        assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
+        assert!(descriptor
+            .speech_generations
+            .contains(&SpeechGeneration::Buffered));
+        assert!(descriptor
+            .speech_generations
+            .contains(&SpeechGeneration::Streaming));
     }
 
     #[test]
@@ -1312,6 +1743,8 @@ mod tests {
             capabilities.speech_generation_for(),
             Some(SpeechGeneration::Buffered)
         );
+        assert!(capabilities.supports_speech_generation(SpeechGeneration::Buffered));
+        assert!(!capabilities.supports_speech_generation(SpeechGeneration::Streaming));
         assert_eq!(capabilities.transcription_delivery_for(), None);
         assert_eq!(
             capabilities.descriptor_for(CapabilityKind::Transcription),

@@ -46,7 +46,7 @@ jobs:
       - name: Check curated model build prerequisites
         run: ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule
 
-      - name: Check curated model examples
+      - name: Check curated model examples (split feature matrix)
         run: ./scripts/check_curated_model_examples.sh --mode check
 
       # @claude-opus-47 2026-04-27 -- The CUDA feature pulls in cudarc whose build

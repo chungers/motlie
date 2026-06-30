@@ -17,8 +17,25 @@ Related issues:
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-09 | @codex-m6-ds-rv | Resolved #427 pluggability follow-up: separated generic handler dispatch from smoke final coalescing, added `tts.first_chunk_max_chars` for sentence-boundary first-audio ramp experiments, and documented streaming-agent partial/voice-response contract notes. |
-| 2026-06-09 | @codex-m6-ds-rv | Resolved #427 review: smoke-test final coalescing is handler-local and keyed by the ASR-session config snapshot, ASR finish padding is a separate `asr.finish_pad_ms` knob, first-audio critical-path spans include handler/TTS time, and smoke-test mode no longer mutates global barge-in. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Simplified gateway startup around one durable `--config <gateway.toml>` file; `state dump` now emits readable TOML with full `[voice_quality.*]`, while `.repl` scripts are limited to interactive `source <path>` command replay. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Removed the smoke-command committed-final debounce side effect and exposed `early_response.boundary` as a live-safe knob so identity tests can accept stable unpunctuated partials without changing stricter real-agent modes. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Clarified the processor model after consolidation: `ConversationProcessorKind` is per-call static dispatch, currently `identity`; `early_response.enabled` only gates provisional ASR input into the same processor and does not select a separate path. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Consolidated gateway-local smoke handling under the unified `ConversationProcessor` contract: identity/repeat now exercises both committed and provisional paths without adding an `I heard:` prefix; `I heard:` remains only an explicit external harness response policy. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | After live streaming-TTS testing, made committed streaming TTS hold the first tiny text chunk until the second prepared text chunk has audio, changed early-response start timing to `while_speaking` by default, added `quality early-response start-timing`, and documented Kokoro `tokens.txt` preparation by `motlie-models-download`. |
+| 2026-06-14 PDT | @codex-m6-ds-rv | Implemented the remaining #523 report-denominator and playback-linkage records: `quality.turn.playback_linked` joins selected/coalesced turns to playback lifecycle, and `quality.report.summary` snapshots carry attempted/played/canceled/excluded counts. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Added explicit gateway TTS generation-mode selection: `tts.generation_mode=buffered|streaming` is operator-switchable, included in config snapshots/spans, and `warm` probes the selected path. Streaming mode uses the model incremental contract and does not silently fall back to buffered synthesis. |
+| 2026-06-14 PDT | @codex-m6-ds-rv | Addressed issue #523 live-test data/profiling gaps: transcript redaction modes now have concrete JSONL behavior, caller-turn records carry ASR/session/coalescing metadata, first-audio spans expose coalesced-turn attribution, `tts.prebuffer_chunks` defaults to 1 for lowest first-audio latency, and TTS warm runs a tiny probe synthesis. |
+| 2026-06-12 PDT | @codex-366-impl | Resolved #488 generality review: final-settle fragment classifiers and conversation final-coalescing hold policy now live under `VoiceQualityConfig.endpoint` with default-preserving values, and `bins/telnyx-agent` opts into `motlie.telnyx.text.partials.v1` so advisory partials are exercised in live calls. |
+| 2026-06-12 PDT | @codex-366-impl | Added #481/David stability ruling notes: `caller.partial.stability` is gateway-estimated stream convergence/churn only, never confidence/truth/probability/response input, and successful advisory partials emit `text_call.caller_partial.sent` for live-test analysis. |
+| 2026-06-11 PDT | @codex-366-impl | Generalized conversation final debounce from smoke-harness wording: coalescing processors use the 350 ms `endpoint.merge_window_ms`, M4 `caller.turn` stays unmerged, and `tts.first_chunk_max_chars` defaults to 40 for lower first-audio latency. |
+| 2026-06-11 PDT | @codex-366-impl | Calibrated generic `endpoint.final_settle_ms` to an 800 ms default for the media-path endpointing knobs: incomplete final fragments can be held/merged before live `caller.turn` or conversation dispatch, while `endpoint.merge_window_ms` drives processor-local committed-turn coalescing only. |
+| 2026-06-11 PDT | @codex-366-impl | Retuned generic balanced endpointing defaults after live-call last-word truncation: endpoint trailing silence is now 900 ms and ASR finish pad is now 320 ms; both remain live-adjustable for the next ASR session. |
+| 2026-06-11 PDT | @codex-366-impl | Added PR #484 confidence-carrier integration notes: backend-native tail confidence can explain conversation endpoint holds, but it is not a calibrated stability signal for agent protocol timing. |
+| 2026-06-11 PDT | @codex-366-impl | Added live call recovery details: conversation final coalescing now uses the processor-local merge window plus active-playback hold, and outbound pacing rollups separate true underrun, append starvation, post-mark wait, and first-frame idle gaps. |
+| 2026-06-11 PDT | @codex-366-impl | Captured live-call audio stabilization for PR #464: live TTS synthesis is isolated onto blocking threads, chunked TTS made prebuffering configurable, and smoke-test enablement turns barge-in off for deterministic echo validation. |
+| 2026-06-11 | @codex-366-impl | Captured live-call quality fixes: deterministic assistant-echo transcript suppression before `caller.turn`, text-call ownership gating for manual `speak`, and call/TUI diagnostics for first-audio, buffer, underrun, and echo-suppression counters. |
+| 2026-06-09 | @codex-m6-ds-rv | Resolved #427 pluggability follow-up: separated generic processor dispatch from smoke final coalescing, added `tts.first_chunk_max_chars` for sentence-boundary first-audio ramp experiments, and documented streaming-agent partial/voice-response contract notes. |
+| 2026-06-09 | @codex-m6-ds-rv | Resolved #427 review: smoke-test final coalescing is processor-local and keyed by the ASR-session config snapshot, ASR finish padding is a separate `asr.finish_pad_ms` knob, and first-audio critical-path spans include handler/TTS time. |
 | 2026-06-09 | @codex-m6-ds-rv | Updated live-call tuned defaults and TTS chunking guidance after M6 smoke-call trials: 650 ms endpoint tail, stricter speech gate, 90-char sentence-packed TTS chunks, and one-chunk prebuffer. |
 | 2026-06-09 | @codex-367-design | Added M6 gap implementation notes: deferred ASR/TTS/media/barge-in spans, inbound/outbound transport rollups, live call-bound tuning commands, and operator TUI command-history recall through `motlie-driver::HistoryBuffer`. |
 | 2026-06-08 | @codex-367-design | Revised after the first M6 review pass: added call-level config snapshots, monotonic/non-blocking span emission, critical-path latency accounting, pre-turn ASR join keys, privacy defaults, typed config validation, existing line-oriented socket reuse, normalized artifacts, and judge reproducibility requirements. |
@@ -68,7 +85,7 @@ M6 must profile both. Reports must not force barge-in events into a purely reque
 
 ## Future Streaming-Agent Contract Notes
 
-A pluggable streaming `ConversationHandler` is the target real-agent path; the gateway-local smoke harness must not leak coalescing or deterministic echo assumptions into that path. Handler enablement and smoke-test final coalescing are separate controls. David scoped the streaming protocol work to follow-on issue #428, not PR #419.
+A pluggable streaming `ConversationProcessorKind` variant is the target real-agent path; the gateway-local smoke harness must not leak deterministic echo assumptions into that path. Processor kind is per-call state, processor enablement is a separate runtime gate, and committed-turn final coalescing is controlled separately. `early_response.enabled` only enables provisional ASR inputs into the same selected processor. David scoped the external streaming protocol work to follow-on issue #428, not PR #419.
 
 Contract requirements for that future streaming path (#428):
 
@@ -96,9 +113,10 @@ The gateway already emits several useful signals, but M6 requires a coherent lif
 | `media.speech.detected` | Emitted when speech energy first appears after quiet. | Start-of-speech and speech threshold tuning. | Needs an `asr_session_id`/`utterance_id` before `turn_id` exists. |
 | `media.frame.local_endpoint` | Debug-level low-energy tail logging after speech. | Endpoint tail diagnosis. | Needs span boundaries and `config_id` correlation. |
 | `asr.local_endpoint.finalizing` | Local endpoint gate decides to finish the ASR session. | Endpoint decision timing. | Needs link to final transcript and caller turn. |
-| `transcript.partial` | ASR partial transcript. | Partial quality and barge-in analysis. | Not normally sent to M4 app-agent protocol; can be logged only when privacy mode allows text. |
+| `transcript.partial` | ASR partial transcript. | Partial quality and barge-in analysis. | Opt-in text-call partials forward optional `confidence` and `stability`; structured partial events include numeric scores without requiring transcript text. |
 | `transcript.final` | Final ASR transcript. | Best current proxy for caller-turn text. | Does not include the future `turn_id`; needs `asr_session_id` mapping. |
 | `transcript.suppressed_repeated_token` | ASR adapter suppression for repeated-token hallucination. | ASR stability signal. | Suppression thresholds should be config-backed and logged by `config_id`. |
+| `transcript.suppressed_assistant_echo` | Deterministic normalized token/substring match against active or just-finished assistant TTS. | Prevents acoustic assistant echo from becoming transcript history, `caller.turn`, or conversation input without LLM/NLP matching. | Needs live-call false-positive labeling in M6 reports. |
 | `text_call.caller_turn.forward_failed` | Failure to send a caller turn to the app stream. | Reliability. | Successful caller turns need structured events. |
 | `playback.finished.status` | Terminal app-agent playback state. | Completed/canceled/failed/superseded lifecycle. | Needs latency span correlation. |
 | `tts.speak.chunk_queued` | TTS chunk packetization and queueing. | TTS startup and chunking behavior. | Needs turn-level aggregation and outbound pacing rollups. |
@@ -185,21 +203,40 @@ Spans must not inline `config { ... }`. Instead, the gateway emits one `call.con
       "onset_min_silence_ms": 180
     },
     "endpoint": {
-      "trailing_silence_ms": 650,
+      "trailing_silence_ms": 900,
       "min_turn_words": 2,
       "min_turn_chars": 6,
       "merge_window_ms": 350,
+      "final_settle_ms": 800,
       "max_turn_words": 80,
       "max_turn_duration_ms": 12000
     },
     "tts": {
       "chunking_enabled": true,
       "max_text_chunk_chars": 90,
-      "first_chunk_max_chars": 0,
+      "first_chunk_max_chars": 40,
       "prebuffer_chunks": 1
     },
+    "barge_in": {
+      "enabled": true,
+      "speech_onset_cancel_enabled": true,
+      "onset_during_playback": "defer_to_partial",
+      "partial_asr_cancel_enabled": true,
+      "final_asr_cancel_enabled": true,
+      "clear_timeout_ms": 1000
+    },
+    "echo_suppression": {
+      "enabled": true,
+      "min_text_chars": 10,
+      "tail_window_ms": 2000,
+      "short_token_coverage_percent": 66,
+      "short_longest_token_run": 2,
+      "long_min_tokens": 4,
+      "long_token_coverage_percent": 60,
+      "long_longest_token_run": 3
+    },
     "asr": {
-      "finish_pad_ms": 160,
+      "finish_pad_ms": 320,
       "repeated_token_run_threshold": 16,
       "repeated_q_run_threshold": 8
     },
@@ -273,7 +310,7 @@ Privacy requirements:
 - No routing values as IDs or grouping keys.
 - `include_transcript_text` defaults to `false` in live and config examples.
 - Transcript text is an explicit sensitive opt-in and must be stored only in local/operator-controlled artifacts unless a separate upload approval exists.
-- Redacted mode must preserve metrics while dropping, hashing, or redacting raw text.
+- Redacted mode must preserve metrics while dropping, hashing, or redacting raw text. `metrics-only` emits no transcript-derived text fields, `hashed-text` emits only SHA-256 fields, `redacted-text` emits redaction markers, and `sensitive-plaintext` emits raw text only when `include_transcript_text=true`.
 
 ## Non-Blocking Emission Contract
 
@@ -303,7 +340,7 @@ Categories are used in two ways:
 | `asr_generation` | ASR backend work. | Indirect | frame ingest, ASR session finish |
 | `gateway_overhead` | Gateway-local dispatch and state work. | Usually no | transcript to turn, frame serialization, turn correlation |
 | `network_transport` | HTTP/WebSocket transport outside model work. | Indirect | app WebSocket frame send/receive |
-| `model_generation` | LLM/app/agent text generation. | App-owned | real agent response, handler call |
+| `model_generation` | LLM/app/agent text generation. | App-owned | real agent response, processor call |
 | `harness` | Deterministic test harness behavior. | Test-only | echo response construction |
 | `intentional_delay` | Configured deliberate wait. | Yes | tmux quiet-window, trailing Enter delay |
 | `queue_wait` | Resource or ordering wait. | Sometimes | media not ready, active playback conflict |
@@ -330,6 +367,40 @@ Early events often happen before a `turn_id` exists. M6 therefore requires a pre
 }
 ```
 
+When an opted-in advisory partial is successfully forwarded, emit the structured partial record. `bins/telnyx-agent` opts into the extension in its accept response so local live calls exercise this path. This is the live-test analysis hook for comparing `stability` against later partial survival and final text. `confidence` remains model-native when present. `stability` is gateway-estimated stream convergence/churn only: use it for preparation/routing/debounce analysis, never for truth, final response generation, model/ASR confidence, calibrated probability, or averaging/combining with `confidence`. Transcript payload fields follow `logging.redaction_mode`; raw text requires `sensitive-plaintext` plus `logging.include_transcript_text=true`.
+
+```json
+{
+  "event": "text_call.caller_partial.sent",
+  "asr_session_id": "asr_...",
+  "utterance_id": "utt_...",
+  "speech_state": "speaking",
+  "confidence": 0.74,
+  "stability": 0.63,
+  "text_words": 4,
+  "text_chars": 21,
+  "transcript_text_included": false
+}
+```
+
+When a final transcript becomes a caller turn, emit a structured caller-turn record with direct ASR/session join fields and coalescing metadata. `coalesced_turn_ids` records adjacent committed turns that were merged before conversation-processor dispatch; reports can use `turn_id` for the primary turn and inspect `coalesced_turn_count > 1` before attributing first-audio latency. Transcript payload fields follow `logging.redaction_mode`; raw text requires `sensitive-plaintext` plus `logging.include_transcript_text=true`.
+
+```json
+{
+  "event": "text_call.caller_turn.sent",
+  "asr_session_id": "asr_...",
+  "utterance_id": "utt_...",
+  "turn_id": "turn_...",
+  "confidence": 0.81,
+  "transcript_event_count": 1,
+  "coalesced_turn_count": 1,
+  "coalesced_turn_ids": ["turn_..."],
+  "text_words": 7,
+  "text_chars": 38,
+  "transcript_text_included": false
+}
+```
+
 When a final transcript becomes a M4 caller turn, emit the mapping:
 
 ```json
@@ -344,6 +415,26 @@ When a final transcript becomes a M4 caller turn, emit the mapping:
 ```
 
 This mapping is required for endpointing, barge-in, suppressed-token, and transport events to be joined with the eventual `caller.turn`.
+
+When a selected/coalesced caller turn attempts assistant playback, the gateway emits explicit linkage records for the queued, first-audio, and terminal stages. This removes ambiguity between the selected response turn, the source turns that were coalesced into it, and the playback that eventually completed, failed, or was canceled.
+
+```json
+{
+  "event": "quality.turn.playback_linked",
+  "link_stage": "terminal",
+  "turn_id": "turn_selected",
+  "selected_turn_id": "turn_selected",
+  "source_turn_ids": ["turn_a", "turn_b"],
+  "coalesced_turn_ids": ["turn_a", "turn_b"],
+  "coalesced_turn_count": 2,
+  "playback_id": "tts_...",
+  "tts_backend": "piper",
+  "source_label": "conversation",
+  "first_audio_sent": true,
+  "terminal_status": "canceled",
+  "terminal_reason": "canceled_after_call_end"
+}
+```
 
 ## Acoustic, ASR, and Endpointing Spans
 
@@ -362,14 +453,15 @@ Boundary rules:
 - The end is the finalization decision, not the later transcript-to-turn handoff.
 - Hot-reloaded ASR/endpoint config applies only when the next `asr.session.started` event is created.
 - `asr.finish_pad_ms` is separate from endpoint trailing silence. It is a short ASR flush pad after the endpoint decision, not another full endpoint wait.
-- `endpoint.merge_window_ms` may label adjacent turns as likely merge candidates in reports. The gateway-local smoke-test handler may also use it as a handler-local final-fragment debounce before producing its deterministic echo, but it must not merge live M4 `caller.turn` events on the app-agent protocol.
+- `endpoint.merge_window_ms` may label adjacent turns as likely merge candidates in reports and may be used by coalescing conversation processors as a processor-local committed-turn debounce, but it must not merge live M4 `caller.turn` events on the app-agent protocol. Conversation-only continuation holds are governed by `endpoint.conversation_tail_words`, `endpoint.conversation_incomplete_tail_hold_ms`, `endpoint.conversation_low_confidence_threshold_percent`, and `endpoint.conversation_playback_hold_poll_ms`.
+- `endpoint.final_settle_ms` is the live media-path hold window for structurally incomplete final fragments. The holdable-fragment classifier is policy-backed by `endpoint.final_settle_trailing_punctuation`, `endpoint.final_settle_lead_words`, `endpoint.final_settle_tail_words`, and `endpoint.final_settle_dangling_suffixes`. It runs before `caller.turn` / `ConversationProcessor` dispatch, merges a pending fragment with a continuation final when one arrives, and otherwise flushes on timeout or stream end.
 
 ## Text-Call and App-Agent Spans
 
 | Span | Start | End | Category | Critical path? | Purpose |
 |---|---|---|---|---|---|
 | `text_call.send_caller_turn` | caller turn frame serialization begins | WebSocket frame send completes | `network_transport` | yes | M4 outbound text protocol overhead including local serialization. |
-| `app.agent_turn_wait` | `caller.turn` sent | `agent.turn` received | `model_generation` or `harness` | yes | App response latency envelope. Implemented for the M4 WebSocket path by stamping the caller-turn send time and recovering it when the correlated `agent.turn` arrives. Echo handlers must classify deterministic work as `harness`, not model generation. |
+| `app.agent_turn_wait` | `caller.turn` sent | `agent.turn` received | `model_generation` or `harness` | yes | App response latency envelope. Implemented for the M4 WebSocket path by stamping the caller-turn send time and recovering it when the correlated `agent.turn` arrives. Echo processors or handlers must classify deterministic work as `harness`, not model generation. |
 | `app.generation` | app receives turn | app creates response text | `model_generation` or `harness` | concurrent unless app instrumentation provides exact boundary | App-side detail when available. |
 | `text_call.agent_turn_accept` | `agent.turn` received | TTS queue request begins | `gateway_overhead` | yes | Turn correlation and policy work. |
 | `text_call.supersede_stale_turn` | stale valid `agent.turn` received | `playback.finished status=superseded` sent | `gateway_overhead` | concurrent | Validates stale-but-valid behavior without hanging up. |
@@ -382,13 +474,13 @@ The strict M4 protocol remains turn-based. The gateway should not require apps t
 |---|---|---|---|---|---|
 | `tts.media_ready_wait` | queue requested while media is not ready | media becomes ready or timeout | `queue_wait` | yes if it delays the first response audio | Distinguish setup waiting from TTS generation. |
 | `tts.conflict_cancel_replace` | new speech replaces active playback | prior playback terminal `canceled` emitted | `barge_in` | concurrent | Measure latest-response-wins behavior. |
-| `conversation.smoke_final_debounce` | first smoke-test final transcript | handler-local debounce expires or adjacent final merges | `intentional_delay` | yes in `gateway-echo` only | Exposes deterministic harness coalescing instead of hiding it in handler latency. |
+| `conversation.final_debounce` | first final transcript for a coalescing conversation processor | processor-local debounce expires or adjacent final merges | `intentional_delay` | yes when coalescing is enabled | Exposes committed-turn coalescing instead of hiding it in processor latency. |
 | `tts.synthesis_first_chunk` | TTS synthesis starts | first audio chunk available | `tts_generation` | yes | Time to first audio. |
 | `tts.synthesis_full` | TTS synthesis starts | all chunks available | `tts_generation` | concurrent after first chunk | Full generation cost. |
 | `tts.packetize_first_chunk` | first audio chunk available | first media packet queued | `media_packetization` | yes | Resample/packetization overhead. |
 | `media.first_frame_send` | first media packet queued | first outbound media frame sent | `playback_transport` | yes | Queue-to-wire latency. |
 | `tts.request_to_first_audio` | TTS queue request accepted | first outbound media frame sent | `tts_generation` | yes | End-to-end request-to-first-audio envelope, including synthesis, packetization, and prebuffer. |
-| `turn.finalize_to_first_audio` | final transcript/turn boundary captured | first outbound media frame sent | `turn_taking` rollup | yes, but not a category-attribution bucket | Full post-finalize critical-path envelope; includes handler dispatch, deterministic debounce, app-agent round trip, TTS, prebuffer, and first outbound frame. Text-call sessions pass the final transcript `Instant` through the turn tracker into `SpeechQueueRequest` so this fires for real agent calls as well as smoke calls. Reports use child/component spans for percentage attribution. |
+| `turn.finalize_to_first_audio` | final transcript/turn boundary captured | first outbound media frame sent | `turn_taking` rollup | yes, but not a category-attribution bucket | Full post-finalize critical-path envelope; includes processor dispatch, deterministic debounce, app-agent round trip, TTS, prebuffer, and first outbound frame. Payload includes `coalesced_turn_count`, `coalesced_turn_ids`, and latest-turn timing fields when a coalescing processor merged adjacent finals. Text-call sessions pass the final transcript `Instant` through the turn tracker into `SpeechQueueRequest` so this fires for real agent calls as well as smoke calls. Reports use child/component spans for percentage attribution. |
 | `media.playback_terminal` | playback started | mark/clear/failure terminal status | `playback_transport` | concurrent after first frame | Completion/cancel/failure timing. |
 
 ## Barge-In and Full-Duplex Spans
@@ -458,16 +550,16 @@ Outbound pacing rollup:
 
 Reports must surface these fields as confounders and exclusion reasons, for example `excluded_reason = high_inbound_jitter` or `confounder = outbound_underrun`.
 
-## Deterministic `I Heard` Harness
+## Deterministic Repeat Harnesses
 
-The deterministic `I heard: <caller text>` repeat handler is a required M6 profiling harness. Its response generation is predictable, so it isolates infrastructure latency before real LLM/agent generation enters the loop.
+Deterministic repeat harnesses are required for M6 profiling. Their response generation is predictable, so they isolate infrastructure latency before real LLM/agent generation enters the loop. The gateway-local harness uses the unified `ConversationProcessorKind::Identity` exemplar: it repeats accepted caller text exactly and does not add an `I heard:` prefix. External harnesses may still choose an `I heard:` prompt, but that is their explicit response policy, not gateway behavior.
 
 Required harness modes:
 
-| Mode | Handler | What it isolates |
+| Mode | Processor or handler | What it isolates |
 |---|---|---|
-| `gateway-echo` | Gateway-local conversation smoke-test handler. | ASR endpointing + gateway conversation path + TTS + media, with no M4 app WebSocket. |
-| `text-call-echo` | External app immediately returns `I heard: <text>` over the M4 text WebSocket. | M4 text-call protocol overhead plus baseline TTS/media. |
+| `gateway-echo` | Gateway-local `ConversationProcessorKind::Identity` over committed and provisional inputs. | ASR endpointing + gateway conversation path + TTS + media, with no M4 app WebSocket. |
+| `text-call-echo` | External app immediately returns `I heard: <text>` or another declared deterministic response over the M4 text WebSocket. | M4 text-call protocol overhead plus baseline TTS/media. |
 | `agent-tmux-echo` | `bins/telnyx-agent` bridges to a deterministic local tmux echo prompt. | motlie-tmux injection, activity wait, trailing Enter, monitor/history scrape overhead. |
 | `real-agent` | Actual app/agent. | Full app/model/tmux generation latency. |
 
@@ -476,7 +568,7 @@ Comparison rules:
 - Do not subtract whole-call totals from unrelated live calls; live audio, network, and caller behavior make that noisy.
 - Whole-run subtraction is valid only for fixed/replayed audio or a paired harness corpus where the same media input is used.
 - Preferred analysis is per-category deltas: compare endpointing to endpointing, TTS to TTS, network transport to network transport, and app/model generation to deterministic harness spans.
-- The deterministic echo handler must report near-zero `model_generation` unless the implementation intentionally routes through a model.
+- The deterministic repeat processor or handler must report near-zero `model_generation` unless the implementation intentionally routes through a model.
 
 Paired replay formulas:
 
@@ -490,10 +582,10 @@ Harness metadata:
 
 ```json
 {
-  "harness_mode": "text-call-echo",
-  "response_policy": "i_heard_repeat",
+  "harness_mode": "gateway-echo",
+  "response_policy": "identity_repeat",
   "deterministic_response": true,
-  "expected_response_prefix": "I heard:"
+  "expected_response_text": "<accepted caller text>"
 }
 ```
 
@@ -518,7 +610,7 @@ Different teams use "round trip" differently. M6 reports must name the exact bou
 |---|---|---|---|
 | `speech_to_first_audio` | first speech-energy frame | first outbound assistant media frame sent | User-perceived full turn latency. |
 | `low_energy_to_first_audio` | first low-energy frame after speech | first outbound assistant media frame sent | Endpointing plus response stack. |
-| `final_transcript_to_first_audio` | final transcript event | first outbound assistant media frame sent | Excludes caller speech and endpointing wait; implemented by `turn.finalize_to_first_audio` when the handler path has a final transcript boundary. |
+| `final_transcript_to_first_audio` | final transcript event | first outbound assistant media frame sent | Excludes caller speech and endpointing wait; implemented by `turn.finalize_to_first_audio` when the processor path has a final transcript boundary. |
 | `caller_turn_to_playback_started` | `caller.turn` sent | `playback.started` sent | M4 text-call responsiveness. |
 | `agent_turn_to_first_audio` | `agent.turn` received | first outbound assistant media frame sent | TTS/media path. |
 | `barge_in_to_silence` | caller speech onset during playback | prior playback terminal/canceled | Interruption responsiveness. |
@@ -631,7 +723,9 @@ Per-turn deterministic metrics:
 | `agent_turn_to_playback_started_ms` | TTS queue/start time. | Impacts perceived speed. |
 | `finalize_to_first_audio_ms` | Final transcript to first outbound frame. | Confirms whether delay is handler/debounce/TTS/media rather than endpointing. |
 | `playback_finished.status` | Terminal outcome. | High canceled/superseded rates can indicate churn. |
-| `partial_count_before_final` | ASR stability. | High counts with poor final quality can indicate decoder instability. |
+| `partial_count_before_final` | ASR stability proxy. | High counts with poor final quality can indicate decoder instability. |
+| `partial_confidence` / `transcript_confidence` | Backend-native partial/final tail confidence when present. | Advisory only; values are normalized but uncalibrated across backends and must be omitted when absent. |
+| `partial_stability` / `transcript_stability` | Gateway-estimated stream-convergence/churn signal. | Useful for preparation/routing/debounce experiments only; never interpret as truth, final response input, model/ASR confidence, calibrated probability, or a value to average/combine with `partial_confidence` / `transcript_confidence`. |
 | `suppressed_count` | Suppressed hallucination-like output. | Backend/model quality signal. |
 | `transport_confounders` | RTP loss/jitter/underrun rollups. | Exclude or stratify before tuning endpointing/ASR. |
 
@@ -659,7 +753,10 @@ Report-only/advisory analysis knobs:
 |---|---|---|
 | `endpoint.min_turn_words` | Label possible low-information fragments. | None; must not suppress `caller.turn`. |
 | `endpoint.min_turn_chars` | Label tiny text fragments. | None; must not suppress `caller.turn`. |
-| `endpoint.merge_window_ms` | Suggest adjacent-turn merge candidates in reports; handler-local smoke-test debounce for deterministic echo only. | None for M4 app-agent `caller.turn`; smoke-test handler may delay/merge only its local echo input. |
+| `endpoint.merge_window_ms` | Suggest adjacent-turn merge candidates in reports; processor-local committed-turn debounce for coalescing conversation processors. | None for M4 app-agent `caller.turn`; coalescing conversation processors may delay/merge only their local processor input. |
+| `endpoint.final_settle_ms` | Explain bounded live holds for dangling-tail final fragments. | Holds only structurally incomplete finals before `caller.turn`; merges with a continuation final or flushes on timeout/stream end. |
+| `endpoint.final_settle_trailing_punctuation` / `endpoint.final_settle_lead_words` / `endpoint.final_settle_tail_words` / `endpoint.final_settle_dangling_suffixes` | Explain why a final was considered structurally incomplete. | TOML/replay policy only; defaults preserve the live-tuned English fragment classifier. |
+| `endpoint.conversation_tail_words` / `endpoint.conversation_incomplete_tail_hold_ms` / `endpoint.conversation_low_confidence_threshold_percent` / `endpoint.conversation_playback_hold_poll_ms` | Explain processor-local final coalescing holds. | Applies only to coalescing conversation processors; no M4 app-agent `caller.turn` merge. |
 | `endpoint.max_turn_words` | Flag likely overmerged turns. | None; must not split live turns. |
 | `endpoint.max_turn_duration_ms` | Flag long utterance or late endpointing. | None; must not force live endpointing. |
 
@@ -688,6 +785,16 @@ Every aggregate report must include denominators and exclusion counts, for examp
   "turns_total": 120,
   "turns_analyzed": 110,
   "turns_excluded": 10,
+  "caller_turns": 120,
+  "attempted_turns": 118,
+  "attempted_playbacks": 118,
+  "played_turns": 112,
+  "played_playbacks": 112,
+  "completed_playbacks": 104,
+  "canceled_playbacks": 8,
+  "failed_playbacks": 0,
+  "canceled_after_call_end_turns": 2,
+  "excluded_turns_without_playback": 2,
   "exclusions": {
     "missing_final_transcript": 2,
     "high_inbound_jitter": 5,
@@ -695,6 +802,8 @@ Every aggregate report must include denominators and exclusion counts, for examp
   }
 }
 ```
+
+`quality.report.summary` may be emitted more than once per call as first-audio, playback-terminal, media-stop, and call-terminal snapshots arrive. Aggregators should use the highest `event_sequence` snapshot for each `(run_id, gateway_call_id)` when computing run-level denominators.
 
 ## Reference, WER, and Label Schema
 
@@ -860,13 +969,13 @@ Prompt requirements:
 |---|---|---:|---:|---|
 | Speech detection | `SPEECH_RMS_THRESHOLD` | hard-coded | `220.0` | false starts, missed speech |
 | Speech detection | `SPEECH_PEAK_THRESHOLD` | hard-coded | `1100` | noise vs speech distinction |
-| Endpointing | `ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS` | hard-coded live, replay default | `650 ms` | premature vs late endpointing |
+| Endpointing | `ASR_LOCAL_ENDPOINT_TRAILING_SILENCE_MS` | REPL/socket/TUI implemented | `900 ms` | premature vs late endpointing |
 | Barge-in onset | `ASR_SPEECH_ONSET_MIN_SILENCE_MS` | hard-coded | `180 ms` | barge-in sensitivity |
 | Replay ASR | `--chunk-ms` | CLI implemented | `20` | streaming stability |
 | Replay ASR | `--trailing-silence-pad-ms` | CLI implemented | `800` | finalization behavior |
 | ASR backend | `--backend`, `asr use` | CLI/REPL implemented | selected backend | backend comparison |
 | Codec eval | `--codec` in golden A/B | CLI implemented | selected matrix | Telnyx format comparison |
-| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` | interruption realism |
+| Conversation | `conversation barge-in on|off|status` | REPL/socket implemented | `on` for normal conversation; smoke-test enablement sets `off`; coalescing processors use `endpoint.merge_window_ms` plus endpoint conversation hold policy | interruption realism vs deterministic echo validation |
 | Text-call | `quality text-call max-active-turns <n>` | REPL/socket/TUI implemented | `32` | runaway app-agent lag |
 | Text-call | `quality text-call media-ready-timeout-ms <ms>` | REPL/socket/TUI implemented | `20000 ms` | setup reliability |
 | Text-call | `quality text-call playback-wait-timeout-ms <ms>` | REPL/socket/TUI implemented | `180000 ms` | hung playback detection |
@@ -879,10 +988,11 @@ Prompt requirements:
 | Agent bridge | input backoff initial/max | CLI implemented | `250 ms` / `5000 ms` | queued transcription delay |
 | Agent bridge | trailing Enter delay | CLI implemented | `750 ms` | prompt submission reliability |
 | Agent bridge | trailing Enter enabled | CLI implemented | default on | prompt submission reliability |
-| ASR finish pad | `quality asr finish-pad-ms <ms>` | REPL/socket/TUI implemented | `160 ms` | ASR final flush without doubling endpoint tail |
+| ASR finish pad | `quality asr finish-pad-ms <ms>` | REPL/socket/TUI implemented | `320 ms` | ASR final flush without doubling endpoint tail |
 | ASR suppression | `quality asr repeated-token-run-threshold <n>`, `quality asr repeated-q-run-threshold <n>` | REPL/socket/TUI implemented | run `16`, q-run `8` | hallucination suppression |
 | TTS chunking | `quality tts chunking on|off` | REPL/socket/TUI implemented | default on | first-audio latency vs smoothness |
-| TTS first chunk ramp | `quality tts first-chunk-max-chars <n>` | REPL/socket/TUI implemented | `0` disabled | first-audio latency vs sentence-complete audio |
+| TTS first chunk ramp | `quality tts first-chunk-max-chars <n>` | REPL/socket/TUI implemented | `40` | first-audio latency vs sentence-complete audio; `0` disables the ramp |
+| Early-response boundary | `quality early-response boundary <none|clause|sentence>` | REPL/socket/TUI implemented | `clause` | provisional-start latency vs semantic completeness |
 
 ### Gateway-Owned `VoiceQualityConfig` Knobs
 
@@ -894,13 +1004,22 @@ Prompt requirements:
 | `speech.rms_threshold` | `RmsThreshold(f32)` | `0.0..20000.0` | `220.0` | reject NaN, clamp to range with warning | next ASR session | Live speech gate. |
 | `speech.peak_threshold` | `PeakThreshold(i32)` | `0..32767` | `1100` | clamp to range | next ASR session | Live speech gate. |
 | `speech.onset_min_silence_ms` | `DurationMs` | `0..2000` | `180` | clamp to range | next ASR session | Barge-in onset sensitivity. |
-| `endpoint.trailing_silence_ms` | `DurationMs` | `100..5000` | `650` | clamp to range | next ASR session | Live endpointing. |
+| `endpoint.trailing_silence_ms` | `DurationMs` | `100..5000` | `900` | clamp to range | next ASR session | Live endpointing. |
 | `endpoint.min_turn_words` | `ReportOnlyCount` | `0..50` | `2` | clamp to range | report only | Short-turn label threshold only. |
 | `endpoint.min_turn_chars` | `ReportOnlyCount` | `0..200` | `6` | clamp to range | report only | Tiny-turn label threshold only. |
-| `endpoint.merge_window_ms` | `ReportOnlyDurationMs` | `0..5000` | `350` | clamp to range | report only; smoke-test handler reads the ASR-session snapshot | Adjacent-turn recommendation and deterministic smoke-test final-fragment debounce only. |
+| `endpoint.merge_window_ms` | `DurationMs` | `0..5000` | `350` | clamp to range | new conversation turn; no M4 `caller.turn` merge | Adjacent-turn recommendation and processor-local committed final debounce only. |
+| `endpoint.final_settle_ms` | `DurationMs` | `0..5000` | `800` | clamp to range | next ASR session | Bounded media-path hold/merge for structurally incomplete final fragments before live dispatch. |
+| `endpoint.final_settle_trailing_punctuation` | `StringList` | max 8 entries, 32 chars each | `[",", ":", ";"]` | reject oversize | next ASR session | Holdable trailing punctuation policy. |
+| `endpoint.final_settle_lead_words` | `StringList` | max 40 entries, 256 chars each | `although,because,...` | reject oversize | next ASR session | Holdable leading-fragment word policy. |
+| `endpoint.final_settle_tail_words` | `StringList` | max 64 entries, 256 chars each | `a,an,also,...` | reject oversize | next ASR session | Holdable dangling-tail word policy. |
+| `endpoint.final_settle_dangling_suffixes` | `StringList` | max 8 entries, 32 chars each | `["'", "-"]` | reject oversize | next ASR session | Holdable dangling suffix policy. |
+| `endpoint.conversation_tail_words` | `StringList` | max 64 entries, 256 chars each | `a,an,and,...` | reject oversize | new conversation turn | Handler-local incomplete-tail policy. |
+| `endpoint.conversation_incomplete_tail_hold_ms` | `DurationMs` | `0..10000` | `2500` | clamp to range | new conversation turn | Max processor-local hold for incomplete tails or low-confidence non-terminal finals. |
+| `endpoint.conversation_low_confidence_threshold_percent` | `Percent` | `0..100` | `45` | clamp to range | new conversation turn | Backend-native confidence threshold for processor-local non-terminal holds. |
+| `endpoint.conversation_playback_hold_poll_ms` | `DurationMs` | `10..1000` | `100` | clamp to range | new conversation turn | Recheck cadence while a coalescing handler waits for active playback to finish. |
 | `endpoint.max_turn_words` | `ReportOnlyCount` | `1..500` | `80` | clamp to range | report only | Overmerged-turn label threshold only. |
 | `endpoint.max_turn_duration_ms` | `ReportOnlyDurationMs` | `1000..120000` | `12000` | clamp to range | report only | Long-turn label threshold only. |
-| `asr.finish_pad_ms` | `DurationMs` | `0..2000` | `160` | clamp to range | next ASR session | Short final ASR flush pad after endpoint decision; separate from endpoint tail. |
+| `asr.finish_pad_ms` | `DurationMs` | `0..2000` | `320` | clamp to range | next ASR session | Short final ASR flush pad after endpoint decision; separate from endpoint tail. |
 | `asr.repeated_token_run_threshold` | `Count` | `2..128` | `16` | clamp to range | next ASR session | Suppression policy. |
 | `asr.repeated_q_run_threshold` | `Count` | `2..64` | `8` | clamp to range | next ASR session | Suppression policy. |
 | `text_call.max_active_turns` | `Count` | `1..1024` | `32` | reject zero, clamp high | new text-call session or new turn | Backpressure cap. |
@@ -908,15 +1027,28 @@ Prompt requirements:
 | `text_call.playback_wait_timeout_ms` | `DurationMs` | `1000..600000` | `180000` | clamp to range | new playback request | Hung playback detection. |
 | `text_call.latest_response_wins` | `bool` | `true,false` | `true` | reject non-bool | new agent turn | Cancel-and-replace policy. |
 | `text_call.callback_timeout_ms` | `DurationMs` | `100..60000` | `5000` | clamp to range | new callback attempt | Subscriber responsiveness. |
-| `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. |
+| `tts.generation_mode` | enum | `buffered,streaming` | `buffered` | reject unknown | new playback request | Selects the gateway TTS execution path. `buffered` uses existing full/chunk synthesis; `streaming` requires a backend implementing true incremental TTS and fails visibly instead of falling back to buffered synthesis. |
+| `tts.chunking_enabled` | `bool` | `true,false` | `true` | reject non-bool | new playback request | Enables sentence-packed text splitting before TTS; off synthesizes the full response as one chunk. Applies to buffered synthesis and to streaming mode, where the gateway opens incremental TTS requests per prepared text chunk. For committed streaming turns, the gateway holds the first tiny text chunk until the next prepared text chunk has audio to avoid outbound underruns; provisional append playback stays one-frame JIT. |
 | `tts.max_text_chunk_chars` | `Count` | `40..500` | `90` | clamp to range | new playback request | Packs complete sentence segments up to this size before falling back to word splits for oversized segments. |
-| `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `0` | `0` disables, otherwise clamp to range | new playback request | Optional sentence-boundary first-chunk ramp for pipelining streaming LLM output into TTS. |
-| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Number of prepared text chunks required before playback starts. |
+| `tts.first_chunk_max_chars` | `Count` | `0` or `40..500` | `40` | `0` disables, otherwise clamp to range | new playback request | Sentence-boundary first-chunk ramp for lower first-audio latency; `0` restores full-size first-chunk synthesis. |
+| `tts.prebuffer_chunks` | `Count` | `1..64` | `1` | clamp to range | new playback request | Prepared text chunks required before playback starts; the telephony default starts playback as soon as the first prepared chunk is available. Raise this only when a deployment explicitly prefers extra smoothing over first-audio latency. |
+| `early_response.enabled` | `bool` | `true,false` | `false` | reject non-bool | new call | Enables the opt-in provisional ASR-input stage for new calls. It feeds the selected per-call `ConversationProcessorKind`; it does not choose a separate response processor. Use `quality early-response on` before dialing for live identity tests. |
+| `early_response.boundary` | enum | `none,clause,sentence` | `clause` | reject unknown | new call | Minimum text boundary before a partial can start provisional processor work. `none` is useful for identity latency smoke tests with stable unpunctuated ASR partials; `clause` and `sentence` preserve semantic-boundary gating for real agents. |
+| `early_response.start_timing` | enum | `while_speaking,endpoint_candidate_only` | `while_speaking` | reject unknown | new call | Selects whether stable partials may start provisional work while the caller is still speaking or only after the low-energy endpoint-candidate window. `while_speaking` is the live-test default for snappier identity/agent response; `endpoint_candidate_only` preserves the older conservative delay. |
 | `barge_in.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables barge-in path. |
-| `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. |
+| `barge_in.speech_onset_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Speech onset cancel path. During active playback, `barge_in.onset_during_playback` decides whether onset trusts the caller interruption immediately or defers only likely assistant echo to partial/final ASR confirmation. |
+| `barge_in.onset_during_playback` | `OnsetDuringPlaybackPolicy` enum | `defer_to_partial`, `trust` | `defer_to_partial` | reject unknown | next ASR session | Distinguishes audible assistant echo from real caller interruption. The default keeps the live-tuned echo guard but still allows onset cancellation when active playback is not yet audible or has no echo signature. |
 | `barge_in.partial_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Partial ASR cancel path. |
 | `barge_in.final_asr_cancel_enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Final ASR cancel path. |
 | `barge_in.clear_timeout_ms` | `DurationMs` | `100..10000` | `1000` | clamp to range | new cancel request | Clear/terminal wait. |
+| `echo_suppression.enabled` | `bool` | `true,false` | `true` | reject non-bool | next ASR session | Enables the text-domain last line of defense for assistant echo suppression before forwarding transcripts. |
+| `echo_suppression.min_text_chars` | `Count` | `1..500` | `10` | clamp to range | next ASR session | Minimum normalized transcript length before text-similarity echo suppression is considered. |
+| `echo_suppression.tail_window_ms` | `DurationMs` | `0..10000` | `2000` | clamp to range | next ASR session | Window after outbound TTS tail in which normalized text-similarity echo suppression is eligible. |
+| `echo_suppression.short_token_coverage_percent` | `RatioPercent` | `0..100` | `66` | clamp to range | next ASR session | Short-utterance token coverage threshold for text echo suppression. |
+| `echo_suppression.short_longest_token_run` | `Count` | `1..64` | `2` | clamp to range | next ASR session | Short-utterance contiguous token-run threshold for text echo suppression. |
+| `echo_suppression.long_min_tokens` | `Count` | `2..64` | `4` | clamp to range | next ASR session | Token count where long-utterance thresholds take over. |
+| `echo_suppression.long_token_coverage_percent` | `RatioPercent` | `0..100` | `60` | clamp to range | next ASR session | Long-utterance token coverage threshold for text echo suppression. |
+| `echo_suppression.long_longest_token_run` | `Count` | `1..64` | `3` | clamp to range | next ASR session | Long-utterance contiguous token-run threshold for text echo suppression. |
 | `logging.enabled` | `bool` | `true,false` | `false` | reject non-bool | immediate | Enables writer, not media blocking. |
 | `logging.queue_capacity` | `Count` | `1024..1048576` | `65536` | clamp to range | next writer start | Bounded event queue size. |
 | `logging.per_frame_sample_rate` | `Ratio` | `0.0..1.0` | `0.0` | reject NaN, clamp to range | immediate | `asr.ingest_frame` sampling. |
@@ -959,22 +1091,31 @@ peak_threshold = 1100
 onset_min_silence_ms = 180
 
 [voice_quality.endpoint]
-trailing_silence_ms = 650
+trailing_silence_ms = 900
 min_turn_words = 2
 min_turn_chars = 6
 merge_window_ms = 350
+final_settle_ms = 800
+final_settle_trailing_punctuation = [",", ":", ";"]
+final_settle_lead_words = ["although", "because", "whereas", "while", "when", "if", "unless", "since", "before", "after", "though"]
+final_settle_tail_words = ["a", "an", "also", "the", "and", "or", "but", "if", "then", "than", "because", "so", "to", "of", "for", "with", "without", "in", "on", "at", "by", "from", "as", "is", "are", "was", "were", "be", "being", "been", "this", "that", "these", "those", "my", "your", "our", "their", "his", "her", "its"]
+final_settle_dangling_suffixes = ["'", "-"]
+conversation_tail_words = ["a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "did", "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might", "must", "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were", "where", "will", "with", "would"]
+conversation_incomplete_tail_hold_ms = 2500
+conversation_low_confidence_threshold_percent = 45
+conversation_playback_hold_poll_ms = 100
 max_turn_words = 80
 max_turn_duration_ms = 12000
 
 [voice_quality.asr]
-finish_pad_ms = 160
+finish_pad_ms = 320
 repeated_token_run_threshold = 16
 repeated_q_run_threshold = 8
 
 [voice_quality.tts]
 chunking_enabled = true
 max_text_chunk_chars = 90
-first_chunk_max_chars = 0
+first_chunk_max_chars = 40
 prebuffer_chunks = 1
 
 [voice_quality.text_call]
@@ -987,9 +1128,20 @@ callback_timeout_ms = 5000
 [voice_quality.barge_in]
 enabled = true
 speech_onset_cancel_enabled = true
+onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 final_asr_cancel_enabled = true
 clear_timeout_ms = 1000
+
+[voice_quality.echo_suppression]
+enabled = true
+min_text_chars = 10
+tail_window_ms = 2000
+short_token_coverage_percent = 66
+short_longest_token_run = 2
+long_min_tokens = 4
+long_token_coverage_percent = 60
+long_longest_token_run = 3
 
 [voice_quality.logging]
 enabled = false
@@ -1020,10 +1172,9 @@ max_inappropriate_cancel_rate = 0.03
 Bootstrap precedence:
 
 1. Code defaults.
-2. Profile defaults selected by `--quality-profile` or TOML profile.
-3. `--quality-config <path>` TOML overrides.
-4. `--load <state>` replayed state lines.
-5. CLI flag overrides.
+2. `--config <gateway.toml>` declarative state, including `[voice_quality.*]` patches/full config.
+3. Narrow CLI process overrides: `--bind`, `--tui`, `--socket`, `--artifact-root`, `--log-file`.
+4. Live TUI/socket commands at their documented apply boundary.
 
 Post-boot precedence:
 
@@ -1041,41 +1192,48 @@ Config hashing:
 
 ## Persistence and Parity Tests
 
-State dump/load must use replayable line-oriented commands, not a separate private config format.
+State dump/load uses a readable gateway TOML state file, not replayed command lines and not an opaque hex payload. `state dump <path>` writes durable process/Telnyx/media/conversation/startup state plus the full resolved `[voice_quality.*]` config. When quality logging is enabled, the dump also includes `[quality_logging] path = ...`; startup rejects `voice_quality.logging.enabled = true` without that path because it cannot recreate the JSONL sink. Restart with `telnyx-gateway --config <path>`.
 
-Example dump lines:
+Example dump shape:
 
-```text
-quality profile balanced
-quality speech rms-threshold 220
-quality speech peak-threshold 1100
-quality speech onset-min-silence-ms 180
-quality endpoint trailing-silence-ms 650
-quality endpoint min-turn-words 2
-quality endpoint min-turn-chars 6
-quality endpoint merge-window-ms 350
-quality endpoint max-turn-words 80
-quality endpoint max-turn-duration-ms 12000
-quality asr finish-pad-ms 160
-quality asr repeated-token-run-threshold 16
-quality asr repeated-q-run-threshold 8
-quality tts first-chunk-max-chars 0
-quality text-call max-active-turns 32
-quality text-call latest-response-wins on
-quality logging include-transcript-text off
-quality logging redaction-mode metrics-only
-quality judge off
+```toml
+version = 1
+
+[process]
+bind = "127.0.0.1:8080"
+socket = "/tmp/telnyx-gateway.sock"
+artifact_root = "$HOME/artifacts/hf-cache"
+
+[telnyx]
+api_base = "https://api.telnyx.com/v2"
+api_key_ref = "env:TELNYX_API_KEY"
+
+[gateway]
+media_codec = "PCMU"
+media_sample_rate_hz = 8000
+
+[conversation]
+enabled = true
+processor = "identity"
+tts_backend = "kokoro-82m"
+
+[startup]
+warm_models = true
+
+[voice_quality.endpoint]
+trailing_silence_ms = 900
+final_settle_ms = 800
 ```
 
 Required round-trip tests:
 
 | Test | Requirement |
 |---|---|
-| CLI to resolved config | CLI flags produce the same `VoiceQualityConfig` as equivalent TOML plus state lines. |
-| REPL to state dump | Mutating via REPL then dumping state emits replay lines that recreate the same `config_id`. |
-| Socket to state dump | Mutating via socket command then dumping state emits equivalent replay lines. |
-| State load parity | Loading dumped lines after TOML and before CLI overrides follows the bootstrap precedence exactly. |
-| Validation parity | Invalid values are rejected or clamped the same way from CLI, REPL, socket, and state load. |
+| Config to resolved state | `--config <gateway.toml>` produces the expected durable gateway state and `VoiceQualityConfig`. |
+| REPL to state dump | Mutating via REPL then dumping state emits TOML that recreates the same `config_id`. |
+| Socket to state dump | Mutating via socket command then dumping state emits equivalent TOML. |
+| State load parity | Loading dumped TOML through `--config` recreates durable state without transient calls/media. |
+| Validation parity | Invalid values are rejected or clamped consistently from config TOML, REPL, socket, and state load. |
 | Boundary parity | Hot reload does not affect the active ASR session; it takes effect on the next `asr.session.started`. |
 
 ## Proposed CLI Surface
@@ -1083,15 +1241,13 @@ Required round-trip tests:
 Gateway startup:
 
 ```text
-telnyx-gateway \
-  --quality-config ./telnyx-quality.toml \
-  --quality-profile balanced \
-  --endpoint-trailing-silence-ms 650 \
-  --speech-rms-threshold 220 \
-  --speech-peak-threshold 1100 \
-  --speech-onset-min-silence-ms 180 \
-  --turn-log-jsonl ./turns.jsonl \
-  --quality-report-json ./quality-report.json
+telnyx-gateway --config ./gateway.toml
+```
+
+Ad hoc operator command replay while the gateway is running:
+
+```text
+source ./debug-commands.repl
 ```
 
 Offline analysis:
@@ -1117,21 +1273,24 @@ telnyx-gateway tune-endpoint ./turns.jsonl \
 Harness profiling:
 
 ```text
+# gateway-echo.repl contains: quality logging on ./gateway-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness gateway-echo \
-  --turn-log-jsonl ./gateway-echo-turns.jsonl \
+  --config ./gateway-echo.toml \
   --report-json ./gateway-echo-report.json
 
+# text-call-echo.repl contains: quality logging on ./text-call-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness text-call-echo \
   --app-url <websocket-url> \
-  --turn-log-jsonl ./text-call-echo-turns.jsonl \
+  --config ./text-call-echo.toml \
   --report-json ./text-call-echo-report.json
 
+# agent-tmux-echo.repl contains: quality logging on ./agent-tmux-echo-turns.jsonl
 telnyx-gateway profile-roundtrip \
   --harness agent-tmux-echo \
   --agent-socket <path> \
-  --turn-log-jsonl ./agent-tmux-echo-turns.jsonl \
+  --config ./agent-tmux-echo.toml \
   --report-json ./agent-tmux-echo-report.json
 ```
 
@@ -1141,8 +1300,7 @@ Replay/corpus extension:
 telnyx-gateway replay-capture <capture-dir> \
   --backend kroko-2025 \
   --chunk-ms 20 \
-  --trailing-silence-pad-ms 800 \
-  --turn-log-jsonl ./replay-turns.jsonl
+  --trailing-silence-pad-ms 800
 
 telnyx-gateway asr-golden-ab <manifest> \
   --backend sherpa-2023 \
@@ -1167,6 +1325,7 @@ quality endpoint trailing-silence-ms <ms>
 quality endpoint min-turn-words <n>
 quality endpoint min-turn-chars <n>
 quality endpoint merge-window-ms <ms>
+quality endpoint final-settle-ms <ms>
 quality endpoint max-turn-words <n>
 quality endpoint max-turn-duration-ms <ms>
 quality speech status
@@ -1184,10 +1343,16 @@ quality text-call playback-wait-timeout-ms <ms>
 quality text-call latest-response-wins on|off
 quality text-call callback-timeout-ms <ms>
 quality tts status
+quality tts generation-mode buffered|streaming
 quality tts chunking on|off
 quality tts max-text-chunk-chars <n>
 quality tts first-chunk-max-chars <n>
 quality tts prebuffer-chunks <n>
+quality early-response status
+quality early-response on|off
+quality early-response boundary none|clause|sentence
+quality early-response start-timing while-speaking|endpoint-candidate-only
+# `warm tts` loads the configured TTS backend and runs a tiny discarded probe synthesis.
 quality logging status
 quality logging on <path>
 quality logging off
@@ -1236,7 +1401,8 @@ Implementation requirements:
 This supports call-to-call tuning loops such as:
 
 ```text
-quality endpoint trailing-silence-ms 650
+quality endpoint trailing-silence-ms 900
+quality endpoint final-settle-ms 800
 quality speech rms-threshold 220
 quality barge-in clear-timeout-ms 750
 quality tts chunking off
@@ -1251,6 +1417,7 @@ Gateway socket input examples:
 ```text
 quality status
 quality endpoint trailing-silence-ms 950
+quality endpoint final-settle-ms 800
 quality speech rms-threshold 220
 quality barge-in clear-timeout-ms 750
 quality tts chunking off
@@ -1322,7 +1489,7 @@ Live sampling:
 3. Optionally enable sampled LLM judging at the report layer.
 4. Review daily or weekly reports.
 5. Apply runtime config changes through REPL/socket.
-6. Persist state as replayable `quality ...` lines.
+6. Persist state as readable gateway TOML with `state dump`.
 7. Compare before/after windows with denominators, exclusions, and confounders.
 
 Example live flow:
@@ -1333,7 +1500,7 @@ quality judge on --sample-rate 0.05 --model <judge-model>
 quality report ./reports/telnyx-quality-current.json
 quality recommendations ./reports/telnyx-quality-recommendations.json
 quality endpoint trailing-silence-ms 950
-state dump ./state-after-quality-tune.repl
+state dump ./state-after-quality-tune.toml
 ```
 
 ## Optimization Strategy
