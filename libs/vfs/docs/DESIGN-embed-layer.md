@@ -1,447 +1,470 @@
 # DESIGN — Embedded Layer + Access Logging for motlie-vfs
 
 > Tracking issue: [#590](https://github.com/chungers/motlie/issues/590).
-> Extension to `motlie-vfs`. First consumer: `bins/mstream` distributes its
-> `.agents/skills/project/` skill tree baked into the binary and mounts it over
-> FUSE on startup.
+> PR: [#591](https://github.com/chungers/motlie/pull/591).
+> **Merge target / anchor branch: `feature/vmm-vz` (`e4e0229f`).** All code
+> citations below are line numbers on that branch (`libs/vfs/src/core/server.rs`
+> is 5421 lines there). Extension to `motlie-vfs`. First consumer:
+> `bins/mstream` distributes its `.agents/skills/project/` skill tree baked into
+> the binary and mounts it over FUSE on startup.
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-06-28 | @claude-vfs-fuse | Initial draft. Scope: (1) embedded static layer-backing in the overlay, populated at build time via `include_dir!`; (2) synchronous access-logging observer hook. Decisions locked with David: new static layer-backing (not seeded MemOverlay); `include_dir!` whole-dir tooling; extend `motlie-vfs` (no new crate). |
-| 2026-06-28 | @claude-vfs-fuse | Add §4.6 Runtime ownership: file uid/gid discovered at runtime (`geteuid/getegid`, default `Owner::CurrentUser`), never baked; maps onto existing mount owner-override; omit `AllowOther` for single-user local mount. Resolves the owner part of §6.2. |
-| 2026-06-29 | @claude-vfs-fuse | Expand §4.1 with the concrete code shape for the static layer: `LayerSource` enum, `StaticLayer` resolution, `Layer` accessor dispatch, `put_static_layer` constructor, and `mem_entries_mut` RO gating. Server unchanged (only overlay method bodies change). Records the A-vs-B + copy-up analysis: seeding gives mutate-in-place, not COW; true COW needs a separate `do_write` copy-up change (server.rs:1343) orthogonal to layer choice. |
-| 2026-06-29 | @claude-vfs-fuse | Add §4.8 Consumer walkthrough (mstream): build-time asset designation via `include_dir!` in the binary crate, runtime composition into layers, and the asset → layer → tag → mountpoint mapping (with table). Path mapping is identity (whole-dir); multiple trees/disk compose by priority; multiple mounts = multiple builders. |
+| 2026-06-28 | @claude-vfs-fuse | Initial draft (anchored to `main`). Scope: embedded static layer-backing + access-logging observer. |
+| 2026-06-28 | @claude-vfs-fuse | §4.6 runtime ownership; §4.1 code shape; §4.8 consumer walkthrough; copy-up note. |
+| 2026-06-30 | @claude-vfs-fuse | **RE-ANCHOR against `feature/vmm-vz` (`e4e0229f`)** after review (PR #591, 2 reviewers NEEDS WORK, 21 inline). Re-cited every `server.rs:NNNN`. Corrected two stale claims: (a) overlay attrs use `ov_attrs.uid/gid` directly, NOT `apply_owner_override` — embedded uid/gid set at registration; (b) "server zero change" is false — EROFS propagation + observer lock-scope require server edits. Addressed must-fixes: static-layer EROFS + error propagation, symlink semantics (bake-time reject), tag publication, observer outside the mounts RwLock, guest `client+vsock` left intact via a split `local-mount`/`fuser-client` feature, `include_dir!` path fix, fixed-epoch mtime + `rerun-if-changed`, direct-`/dev/fuse` mount, platform matrix, host deps + degrade contract. Decisions locked with David: degrade-on-mount-failure; default mountpoint `$XDG_RUNTIME_DIR/mstream/skills`; bake-time symlink reject; fixed-epoch mtime; separate static attr type; `include_dir` always-on light dep. |
 
 ---
 
 ## 1. Problem
 
-We want a Rust binary to **carry a tree of files baked in at build time** and, at
+A Rust binary should **carry a tree of files baked in at build time** and, at
 runtime, **mount and serve them over FUSE** as part of a composed filesystem,
 while **logging all read/write access** (tracing / OTEL).
 
-`motlie-vfs` already provides the FUSE engine and a layered in-memory overlay
-with union/shadow/whiteout semantics (verified: `do_readdir` server.rs:1104,
-`MemOverlay::readdir_children` overlay.rs:522, overlay-before-disk resolution at
-server.rs:1646/1297). What it lacks:
+`motlie-vfs` on `feature/vmm-vz` already provides the FUSE engine and a layered
+in-memory overlay with union/shadow/whiteout **and symlink** semantics
+(`OverlayEntryKind::{Content,Symlink,Whiteout,SyntheticDir}`, overlay.rs:24-29;
+merge in `do_readdir`; overlay-before-disk resolution in `do_lookup`/`do_read`).
+What it lacks:
 
 1. A layer whose contents are **embedded in the binary** (no host directory, no
-   runtime injection calls). Today all overlay content is either host-disk or
-   runtime `put()`.
-2. A **reliable, path-aware access log**. The existing `FsEvent` broadcast is
-   lossy (`try_send`) and emits an empty `path` / `None` bytes
-   (`emit_event` server.rs:404). Only the server knows inode→path, so logging
-   cannot be reconstructed from outside.
+   runtime injection). Today every overlay entry is host-disk or runtime
+   `put()`.
+2. A **reliable, path-aware access log**. `emit_event` (server.rs:406-416) sends
+   `path: String::new()` (line 412) with `bytes: None`; `path_hint_for_op`
+   (server.rs:2139-2178) returns empty for `Read`/`Write` (line 2163). Only the
+   server knows inode→path, so logging cannot be reconstructed externally.
 
 ### First use case (mstream)
-`mstream` bakes `.agents/skills/project/` into its binary. On startup it mounts
-that tree over FUSE at a configurable path (default: cwd), so the binary itself
-distributes both working code and skill files. Access to those files is logged.
+`mstream` bakes `.agents/skills/project/` into its binary and, on startup, mounts
+that tree over FUSE so the binary distributes both working code and skill files.
+Access is logged.
 
 ## 2. Goals / Non-Goals
 
 ### Goals
-- A new **embedded (static) layer** in the overlay stack, backed by a
-  `&'static include_dir::Dir`, resolved lazily, read-only by construction.
-- Compose embedded + in-mem + disk layers programmatically, preserving the
-  existing union/shadow/whiteout semantics (embedded shadows disk; in-mem
-  shadows embedded).
-- **Build-time tooling**: `include_dir!` bakes a whole directory tree; the
-  consuming binary owns the macro call.
-- **Access logging**: a synchronous observer hook on every op carrying
-  `(op_kind, tag, resolved path, bytes, errno, latency)` → tracing/OTEL.
-- A thin local-mount helper (in-process `FuseClient` over `handle_op` +
-  `spawn_mount2`) returning an unmount-on-drop handle.
+- A new **embedded (static) layer**: a layer backed by `&'static include_dir::Dir`,
+  lazily resolved, read-only by construction, zero-copy reads (`Bytes::from_static`).
+- Compose embedded + in-mem + disk layers programmatically, preserving existing
+  union/shadow/whiteout/symlink merge. Multiple embedded layers (one `Dir` each).
+- **Build-time tooling**: `include_dir!` whole-dir; macro call in the consuming
+  binary; deterministic builds (fixed-epoch mtime + `cargo:rerun-if-changed`).
+- **Access logging**: a synchronous observer hook carrying
+  `(op_kind, tag, resolved path, bytes, errno, latency)` → tracing/OTEL,
+  invoked **after** the mount lock is released.
+- A Linux local in-process mount helper using the **direct blocking
+  `fuser::mount2()`** path (matching vmm-vz), with explicit unmount + stale-mount
+  recovery.
+- **Degrade-not-die**: if the mount can't be established, the daemon logs and
+  continues without it.
 
 ### Non-Goals (v1)
-- No selective/glob file specification or path remapping (whole-dir only;
-  see Alternatives).
-- No compression of embedded content.
-- No write-back to the embedded layer (it is read-only; writes land in an
-  in-mem layer above it or are denied — see §6).
-- No change to vsock / VM guest paths.
+- **Embedded symlinks** — rejected at bake time (the static layer models files +
+  dirs only; see §4.1). No symlink targets/escape policy in v1.
+- Selective/glob file specification, path remapping, content compression.
+- **Copy-up / writable embedded files** — embedded is read-only; writes are
+  denied (`EROFS`). Real overlayfs COW is a separate future server change (§6).
+- No change to the VM/vsock guest path or to `v1_mount_options` (which the
+  root-managed guest service depends on).
 - No persistence/transport of log events beyond the caller's sink.
+- **macOS host mount** — `feature/vmm-vz` gates the FUSE mount Linux-only
+  (`client/mod.rs:12`); on a macOS host the local mount is unavailable (§9).
+
+### Deployment preconditions (new host dependency)
+Adding a FUSE mount turns mstream from a pure-userspace daemon into one with host
+preconditions: **`/dev/fuse` present + accessible**, the setuid **`fusermount3`**
+helper (libfuse3) installed, and inside containers typically **`CAP_SYS_ADMIN`**
+(or `--device /dev/fuse` + a permissive seccomp profile). See §9 for the
+degrade-vs-hard-fail contract and platform matrix.
 
 ## 3. Requirements
 
 ### Functional
-- FR-1 A layer may be backed by `&'static include_dir::Dir`; `resolve`,
-  `readdir`, `getattr`, `read`, xattr-list behave as for a read-only tree.
-  Each static layer wraps exactly one `Dir`; **multiple embedded layers**
-  (distinct trees, distinct priorities) may be composed in one stack.
-- FR-2 Embedded entries participate in the existing priority-ordered union:
-  same-name entry in a higher layer shadows the embedded one; embedded shadows
-  disk; whiteouts in higher layers hide embedded entries.
-- FR-3 Mutations targeting the embedded layer fail cleanly (EROFS); mutations
-  to paths *shadowing* embedded content go to a writable layer if present.
-- FR-4 Directory structure derives from the baked `Dir` — no synthetic-parent
-  bookkeeping needed for embedded entries.
-- FR-5 A synchronous observer is invoked for every `handle_op`, after dispatch,
-  with resolved path, op kind, byte count (read/write), errno, and latency.
-- FR-6 A local mount helper mounts an `FsServer` in-process over FUSE and
-  returns a handle that unmounts on drop.
+- FR-1 A layer may be backed by `&'static include_dir::Dir`; `lookup`, `readdir`,
+  `getattr`, `read` behave as a read-only tree. Each static layer wraps one `Dir`;
+  **multiple** embedded layers may compose. Accessors stay **exhaustive** over
+  `OverlayEntryKind` (incl. `Symlink`), even though a static layer never produces
+  `Symlink` (FR-1a).
+- FR-1a **Embedded symlinks rejected at bake time** — registration fails if the
+  source tree contains a symlink; `symlink_target` over a static layer is always
+  `None`.
+- FR-2 Embedded entries participate in the existing priority-ordered union/shadow/
+  whiteout. Embedded shadows disk; a higher-priority layer shadows a lower.
+- FR-3 **Writes to embedded content fail with `EROFS`.** This requires: (a)
+  `writable_layer` (server.rs:430-449) must **skip `Static` layers**; (b) the
+  server mutators that currently **ignore overlay errors** must propagate them
+  (see §4.2). Today `do_write` (1383), `do_create` (1429-1435), `do_unlink`
+  (1686/1689), `do_rmdir` (1748), `do_rename` (1824-1826/1866-1873) use
+  `let _ = …` and return success regardless — they would falsely report success
+  over an immutable entry.
+- FR-4 Directory structure derives from the baked `Dir`; static-only tags must be
+  **published** (today tag discovery iterates `layer.entries.keys()` — a static
+  layer has none; see §4.1 tag-publication fix).
+- FR-5 A synchronous observer is invoked for every `handle_op`, **after the
+  `mounts` RwLock is released**, with resolved path, op kind, bytes, errno,
+  latency. fh-based path/bytes for `Read`/`Write`/`Release` are captured
+  **pre-dispatch** (Release frees the fh during dispatch; Read/Write path hints
+  are empty).
+- FR-6 A Linux local mount helper mounts an `FsServer` in-process via blocking
+  `fuser::mount2()`, with an explicit `unmount()` and startup stale-mount recovery.
+- FR-7 If the mount fails, the consumer **degrades** (logs, continues) — it does
+  not abort.
+- FR-8 **Deterministic builds**: embedded mtime defaults to a fixed epoch; the
+  consuming binary emits `cargo:rerun-if-changed` for the baked tree.
 
 ### Non-Functional
-- NF-1 Zero-copy embedded reads: content served as `Bytes::from_static` slices
-  into `.rodata`; no per-read allocation.
-- NF-2 Observer must not drop events (synchronous, unlike the lossy broadcast)
-  and must add negligible overhead when no observer is installed.
-- NF-3 `include_dir` dependency is feature-gated (`embed`); core users unaffected.
+- NF-1 Zero-copy embedded reads (`Bytes::from_static` into `.rodata`).
+- NF-2 Observer never drops events (synchronous) and adds negligible overhead when
+  absent; it must not run under the `mounts` RwLock.
+- NF-3 The local mount path must not drag `vsock` into embedding daemons; guest
+  `client+vsock` behavior unchanged.
 - NF-4 No `unwrap`/`expect` in library paths; `thiserror` for new error types.
 
-## 4. Design (approved direction)
+## 4. Design (re-anchored to feature/vmm-vz)
 
-### 4.1 Layer source abstraction (overlay.rs)
-Today a `Layer` owns `entries: HashMap<(tag,path), OverlayNode>`. We introduce a
-backing enum so a layer is either the existing in-mem map or a static tree, then
-push the Mem-vs-Static difference behind a few `Layer` accessors so the existing
-resolution call sites barely change.
+### 4.1 Static layer in the overlay (overlay.rs)
+On vmm-vz a `Layer` is `{ name, priority, entries: HashMap<(String,String),
+OverlayNode> }` (overlay.rs:135-140). We replace the bare `entries` field with a
+`LayerSource`, then push the Mem-vs-Static difference behind `Layer` accessors so
+the snapshot-walking read methods (`resolve` 531-541, `readdir_children` 579-594,
+`resolve_attrs` 318-332, `symlink_target` 494-504) change only their inner
+`layer.entries.get(...)` calls.
 
-**Core types:**
+**Core types** (the `Static` variant is **unconditional** — `include_dir` is a
+light always-on dep, not a cfg'd feature, to avoid cfg'd match arms across
+overlay.rs):
 ```rust
 enum LayerSource {
-    Mem(HashMap<(String, String), OverlayNode>),    // existing behavior
-    Static(StaticLayer),                            // new: embedded
+    Mem(HashMap<(String, String), OverlayNode>),    // existing
+    Static(StaticLayer),                            // new, read-only
 }
 
 struct StaticLayer {
     dir: &'static include_dir::Dir<'static>,
-    tag: String,          // single-tag binding
-    mode_file: u32,       // baked, e.g. 0o444   (uid/gid set at runtime via §4.6)
-    mode_dir:  u32,       // baked, e.g. 0o555
-    mtime: SystemTime,    // §8 policy (fixed epoch or build time)
+    tag: String,          // single-tag binding (drives publication, below)
+    uid: u32, gid: u32,   // set at REGISTRATION from Owner (§4.6) — NOT runtime override
+    mode_file: u32,       // e.g. 0o444
+    mode_dir:  u32,       // e.g. 0o555
+    mtime: SystemTime,    // fixed epoch by default (FR-8)
 }
 
-struct Layer {
-    name: String,
-    priority: u32,
-    source: LayerSource,  // was: entries: HashMap<...>
-}
+struct Layer { name: String, priority: u32, source: LayerSource }
 ```
+Note: `OverlayAttrs` on vmm-vz is `{ mode, uid, gid }` (overlay.rs:40-45) — **no
+`mtime`**. We keep static mtime in `StaticLayer` (a static-only attr concern), not
+by widening the shared `OverlayAttrs`/`OverlayNode` (overlay.rs:102-111).
 
-**Static resolution (the new logic):**
+**Static resolution** (files + dirs only; symlinks rejected at bake → FR-1a):
 ```rust
 impl StaticLayer {
     fn lookup(&self, tag: &str, path: &str) -> Option<OverlayEntryKind> {
         if tag != self.tag { return None; }
-        let rel = path.trim_start_matches('/');                 // "/a/b" -> "a/b"
-        if rel.is_empty() { return Some(OverlayEntryKind::SyntheticDir); }   // root
+        let rel = path.trim_start_matches('/');
+        if rel.is_empty() { return Some(OverlayEntryKind::SyntheticDir); }
         if let Some(f) = self.dir.get_file(rel) {
-            return Some(OverlayEntryKind::Content(Bytes::from_static(f.contents()))); // zero-copy
+            return Some(OverlayEntryKind::Content(Bytes::from_static(f.contents())));
         }
         self.dir.get_dir(rel).map(|_| OverlayEntryKind::SyntheticDir)
     }
-
-    fn children(&self, tag: &str, dir_path: &str) -> Vec<(String, OverlayEntryKind)> {
-        if tag != self.tag { return vec![]; }
-        let rel = dir_path.trim_start_matches('/');
-        let dir = if rel.is_empty() { self.dir }
-                  else { match self.dir.get_dir(rel) { Some(d) => d, None => return vec![] } };
-        dir.entries().iter().map(|e| {
-            let name = e.path().file_name().unwrap().to_string_lossy().into_owned();
-            match e {
-                include_dir::DirEntry::Dir(_)  => (name, OverlayEntryKind::SyntheticDir),
-                include_dir::DirEntry::File(f) => (name, OverlayEntryKind::Content(Bytes::from_static(f.contents()))),
-            }
-        }).collect()
+    fn children(&self, tag: &str, dir_path: &str) -> Vec<(String, OverlayEntryKind)> { /* enumerate Dir */ }
+    fn attrs(&self, tag: &str, path: &str) -> Option<OverlayAttrs> {
+        self.lookup(tag, path).map(|k| match k {
+            OverlayEntryKind::SyntheticDir => OverlayAttrs { mode: self.mode_dir, uid: self.uid, gid: self.gid },
+            _                              => OverlayAttrs { mode: self.mode_file, uid: self.uid, gid: self.gid },
+        })
     }
+    fn symlink_target(&self, _tag: &str, _path: &str) -> Option<String> { None } // FR-1a
 }
 ```
 
-**Dispatch — `Layer` accessors (so call sites don't branch):**
+**Dispatch — `Layer` accessors** (read methods call these instead of
+`layer.entries.get`; the `Mem` arm matches all `OverlayEntryKind` incl. `Symlink`,
+staying exhaustive):
 ```rust
 impl Layer {
-    fn lookup(&self, tag: &str, path: &str) -> Option<OverlayEntryKind> {
-        match &self.source {
-            LayerSource::Mem(m)    => m.get(&(tag.into(), path.into())).map(|n| n.kind.clone()),
-            LayerSource::Static(s) => s.lookup(tag, path),
-        }
+    fn lookup(&self, tag, path) -> Option<OverlayEntryKind> { match &self.source {
+        LayerSource::Mem(m) => m.get(&(tag.into(),path.into())).map(|n| n.kind.clone()),
+        LayerSource::Static(s) => s.lookup(tag, path), } }
+    fn children(&self, tag, dir) -> Vec<(String, OverlayEntryKind)> { /* Mem: existing is_direct_child; Static: s.children */ }
+    fn attrs(&self, tag, path) -> Option<OverlayAttrs> { /* … */ }
+    fn symlink_target(&self, tag, path) -> Option<String> { match &self.source {
+        LayerSource::Mem(m) => /* existing */, LayerSource::Static(s) => s.symlink_target(tag,path), } }
+    fn bound_tags(&self) -> Vec<String> { match &self.source {  // for publication/discovery
+        LayerSource::Mem(m) => m.keys().map(|(t,_)| t.clone()).collect(),
+        LayerSource::Static(s) => vec![s.tag.clone()], } }
+    fn entry_count(&self) -> usize { /* Mem: m.len(); Static: best-effort Dir count */ }
+}
+```
+
+**Tag publication fix (FR-4).** `republish_all_tags` (overlay.rs:610-628) and
+`tags()` (226-235) discover tags via `layer.entries.keys()` → a static-only tag is
+never published and `load_snapshot` (569-575) returns an empty `TagSnapshot`.
+Fix: (a) `put_static_layer` explicitly calls `republish_tag(&layers, &tag)` for
+its bound tag — and since `republish_tag` (598-608) snapshots **all**
+`layers.values()`, the static layer is included; (b) `tags()` /
+`republish_all_tags` iterate `Layer::bound_tags()` instead of `entries.keys()`.
+`list_layer`/`list_effective` (506-565) gain a `Static` branch (best-effort
+enumerate the `Dir`).
+
+**Constructor + RO gating:**
+```rust
+pub fn put_static_layer(&self, name: &str, priority: u32, tag: &str,
+                        dir: &'static include_dir::Dir<'static>, owner: (u32,u32)) -> Result<()> {
+    reject_symlinks(dir)?;                              // FR-1a, bake/registration check
+    let mut layers = self.layers.lock();
+    layers.insert(name.into(), Arc::new(Layer { name: name.into(), priority,
+        source: LayerSource::Static(StaticLayer { dir, tag: tag.into(),
+            uid: owner.0, gid: owner.1, mode_file: 0o444, mode_dir: 0o555,
+            mtime: FIXED_EPOCH }) }));
+    self.republish_tag(&layers, tag);                  // FR-4
+    Ok(())
+}
+// get_layer_mut (overlay.rs:642-649) gains: Static => bail!("layer is read-only (embedded)")
+```
+Mutation entry points (`apply_batch` 424-482, `set_xattr` 341-376, `create_dir`
+268-284) reject `Static` layers; xattr getters return `ENODATA`.
+
+### 4.2 Server changes required (EROFS — FR-3)
+"Server zero change" from the earlier draft is **withdrawn**. Two server edits:
+
+1. **`writable_layer` (server.rs:430-449) must skip `Static`.** It currently walks
+   up to the owning layer and falls back to the highest-priority layer, with no
+   read-only check (RO is otherwise enforced only at mount level, 298-299). It must
+   skip `Static` layers when selecting a write target.
+2. **Propagate overlay mutation errors.** The mutators that today discard overlay
+   errors must map a rejected write to `EROFS`:
+   - `do_write` (1383), `do_create` (1429-1435), `do_unlink` (1686/1689),
+     `do_rmdir` (1748), `do_rename` (1824-1826/1866-1873): replace `let _ = …`
+     with error handling → `EROFS` when the overlay rejects.
+   - `do_symlink` (1951) already checks its `create_symlink` result — use it as
+     the pattern.
+
+### 4.3 Access-logging observer (server.rs)
+`handle_op` (server.rs:161-178) holds `mounts.read()` (line 162) across **both**
+`dispatch` (175) and `emit_event` (176). A synchronous observer must **not** run
+under that guard (arbitrary tracing/OTEL code could block `add_mount`/`remove_mount`
+or re-enter the server). Restructure:
+```rust
+pub fn handle_op(&self, tag: &str, op: FsOp) -> FsResult {
+    let pre = { let mounts = self.mounts.read()?;                  // guard scope 1
+        let mount = mounts.get(tag).ok_or(ENOENT)?;
+        let pre = self.capture_pre(mount, &op);   // fh→path/bytes for Read/Write/Release
+        let result = self.dispatch(mount, &op);
+        (pre, result)
+    };                                                            // guard DROPPED here
+    let (pre, result) = pre;
+    if let Some(obs) = &self.observer {                           // observer OUTSIDE the lock
+        obs.on_access(&FsAccess { op: FsOpKind::from_op(&op), tag,
+            path: pre.path(&op, &result), bytes: pre.bytes(&result),
+            errno: errno_of(&result), latency: pre.elapsed() });
     }
-    fn children(&self, tag: &str, dir: &str) -> Vec<(String, OverlayEntryKind)> {
-        match &self.source {
-            LayerSource::Mem(_)    => self.mem_children(tag, dir),  // existing is_direct_child logic
-            LayerSource::Static(s) => s.children(tag, dir),
-        }
-    }
-    fn attrs(&self, tag: &str, path: &str) -> Option<OverlayAttrs> { /* same shape */ }
+    result
 }
 ```
-
-Existing public methods shrink to dispatch, e.g.:
 ```rust
-pub fn resolve(&self, tag: &str, path: &str) -> Option<(String, OverlayEntryKind)> {
-    let snap = self.load_snapshot(tag);
-    for layer in &snap.layers {                       // priority desc, unchanged
-        if let Some(kind) = layer.lookup(tag, path) { return Some((layer.name.clone(), kind)); }
-    }
-    None
+pub struct FsAccess<'a> { pub op: FsOpKind, pub tag: &'a str, pub path: &'a str,
+    pub bytes: Option<usize>, pub errno: Option<i32>, pub latency: Duration }
+pub trait FsObserver: Send + Sync + 'static { fn on_access(&self, a: &FsAccess<'_>); }
+```
+Pre-dispatch capture is required because `path_hint_for_op` (2139-2178) yields an
+empty path for `Read`/`Write` (2163) and `Release` removes the fh during dispatch.
+The lossy `FsEvent` broadcast stays as-is for streaming consumers.
+
+### 4.4 Local mount helper (client::local, Linux)
+vmm-vz deliberately **avoids `AutoUnmount`/`spawn_mount2`** — `client/fuse.rs:6-14`
+calls it "proven unreliable" — and uses blocking `fuser::mount2()`
+(`guest.rs:142`). We follow that, not the earlier `spawn_mount2`/drop design:
+```rust
+pub struct LocalMount { mountpoint: PathBuf, join: JoinHandle<io::Result<()>> }
+pub fn mount_local(server: Arc<FsServer>, tag: &str, mountpoint: &Path) -> Result<LocalMount> {
+    recover_stale_mount(mountpoint);                  // lazy-unmount a wedged prior mount
+    std::fs::create_dir_all(mountpoint)?;
+    let join = thread::spawn(move || {
+        let client = FuseClient::new(move |op| server.handle_op(&tag, op));
+        fuser::mount2(client, &mountpoint, &local_mount_options())   // blocks until unmounted
+    });
+    Ok(LocalMount { mountpoint, join })
 }
-```
-`readdir_children` and `resolve_attrs` change the same way: `layer.entries.get(...)`
-→ `layer.lookup/children/attrs(...)`.
-
-**Constructor + read-only gating:**
-```rust
-impl MemOverlay {
-    pub fn put_static_layer(&self, name: &str, priority: u32, tag: &str,
-                            dir: &'static include_dir::Dir<'static>, attrs: OverlayAttrs) -> Result<()> {
-        let mut layers = self.layers.lock();
-        layers.insert(name.into(), Arc::new(Layer {
-            name: name.into(), priority,
-            source: LayerSource::Static(StaticLayer { dir, tag: tag.into(),
-                mode_file: attrs.mode, mode_dir: 0o555, mtime: attrs.mtime }),
-        }));
-        self.republish_all_tags(&layers);
-        Ok(())
-    }
+impl LocalMount {
+    pub fn unmount(&self) -> Result<()> { /* fusermount3 -u (or umount2) → mount2 returns */ }
 }
-
-// every mutation path routes through this — Static rejects:
-fn mem_entries_mut<'a>(arc: &'a mut Arc<Layer>, name: &str)
-    -> Result<&'a mut HashMap<(String,String), OverlayNode>> {
-    match &mut Arc::make_mut(arc).source {
-        LayerSource::Mem(m)    => Ok(m),
-        LayerSource::Static(_) => bail!("layer {name} is read-only (embedded)"),
-    }
-}
+// local_mount_options(): Linux, RO, NO AllowOther — distinct from v1_mount_options
+// (server.rs/client uses v1_mount_options for the guest; we do NOT change it).
 ```
-`apply_batch`, `set_xattr`, `remove_xattr`, `create_dir` swap `get_layer_mut` →
-`mem_entries_mut`, so embedded writes fail cleanly (EROFS upstream). xattr getters
-on a `Static` layer return `ENODATA`.
-
-**Blast radius / notes:**
-- **Server (server.rs): zero change** — it already calls `overlay.resolve` /
-  `readdir_children` / `resolve_attrs`; only their bodies change. So
-  `do_readdir` / `do_lookup` / `do_read` transparently include static layers and
-  the merge/shadow logic stays in one place.
-- **Snapshots unchanged** — `TagSnapshot { layers: Vec<Arc<Layer>> }`; a Static
-  layer Arc-clones for free (just the `&'static` ref).
-- **`Bytes::from_static` requires `'static`** — holds because the consuming binary
-  declares `static SKILLS: Dir = include_dir!(…)`.
-- **Feature gating:** the `embed` feature pulls `include_dir`; gate the `Static`
-  variant + match arms with `#[cfg(feature = "embed")]`, or keep `include_dir` as
-  a light always-on dep to avoid cfg'd enum arms (decide in PLAN).
-
-### 4.2 Build-time tooling
-The consuming binary owns the bake; the macro path is binary-relative:
-
-```rust
-// bins/mstream
-use include_dir::{include_dir, Dir};
-static SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/.agents/skills/project");
-```
-
-vfs exposes a registration entry point (no macro in vfs). One call per `Dir`;
-register as many as you like, each its own layer at its own priority:
-
-```rust
-overlay.put_static_layer("skills", 50, tag, &SKILLS, OverlayAttrs::ro());
-overlay.put_static_layer("docs",   40, tag, &DOCS,   OverlayAttrs::ro());
-// "skills" shadows "docs" shadows disk for same-named paths.
-```
-
-### 4.3 Access-logging observer (core)
-A synchronous hook mirroring the existing `PolicyFn`, invoked inline in
-`handle_op` after dispatch:
-
-```rust
-pub struct FsAccess<'a> {
-    pub op: FsOpKind,
-    pub tag: &'a str,
-    pub path: &'a str,      // resolved, mount-relative
-    pub bytes: Option<usize>,
-    pub errno: Option<i32>, // None = ok
-    pub latency: Duration,
-}
-pub trait FsObserver: Send + Sync + 'static {
-    fn on_access(&self, a: &FsAccess<'_>);
-}
-// builder: .observer(impl FsObserver)
-```
-
-The app supplies a `tracing`/OTEL implementation. The lossy `FsEvent` broadcast
-stays for streaming consumers; we additionally populate its `path`/`bytes`
-(one-line fix) but do not rely on it for audit.
-
-### 4.4 Local mount helper (client::local)
-```rust
-pub struct LocalMount { /* BackgroundSession */ }
-pub fn mount_local(server: Arc<FsServer>, tag: &str, mountpoint: &Path,
-                   ro: bool) -> Result<LocalMount>;
-// internally: FuseClient::new(move |op| server.handle_op(tag, op)) + spawn_mount2
-```
-`LocalMount` unmounts on drop.
+- **Unmount** is explicit (`fusermount3 -u`/`libc::umount2`); the blocking
+  `mount2` returns when the mountpoint is unmounted. Wire `unmount()` into
+  mstream's graceful-stop path (`daemon.rs` `watch::channel` select loop).
+- **Stale-mount recovery**: a `SIGKILL`ed prior daemon leaves a wedged mount
+  ("Transport endpoint is not connected"); `recover_stale_mount` lazy-unmounts it
+  on startup (Drop alone is insufficient — it doesn't run on signal/abort).
+- **Mountpoint** does **not** default to cwd (§4.6/§9).
 
 ### 4.5 Composition API (thin builder)
 ```rust
 EmbeddedFs::builder()
+    .tag("skills")
+    .embedded("skill-files", 50, &SKILLS)    // static layer (one Dir); RO
     .disk_base("/work", /*ro*/ false)        // optional bottom layer
-    .embedded("skills", 50, &SKILLS)         // static layer (one Dir)
-    .embedded("docs",   40, &DOCS)           // another static layer (another Dir)
-    .mem_layer("runtime", 100)               // optional writable top
-    .owner(Owner::CurrentUser)               // default: runtime geteuid/getegid (§4.6)
+    .owner(Owner::CurrentUser)               // resolved at registration (§4.6)
     .observer(tracing_sink())
-    .mount("/mnt/skills")?;                   // -> LocalMount
-// Composition is fully programmatic: add disk / embedded / mem layers in any
-// number; priority (desc) sets shadowing. Embedded > disk; mem > embedded.
+    .mount(mountpoint)?;                      // -> LocalMount (Linux); Err on no-FUSE → caller degrades
 ```
 
-### 4.6 Runtime ownership (no bake)
-For the user-space case (mstream), file ownership is **discovered at runtime**,
-never baked. The daemon runs as the invoking user, so its own euid/egid are that
-user:
-
+### 4.6 Runtime ownership (no bake) — corrected
+The daemon runs as the invoking user, so its euid/egid are that user:
 ```rust
-enum Owner { CurrentUser, Fixed(u32, u32), Root }   // default: CurrentUser
-fn resolve(o: Owner) -> Option<(u32, u32)> {
-    match o {
-        Owner::CurrentUser => Some(unsafe { (libc::geteuid(), libc::getegid()) }),
-        Owner::Fixed(u, g) => Some((u, g)),
-        Owner::Root        => Some((0, 0)),
-    }
-}
+enum Owner { CurrentUser, Fixed(u32,u32), Root }   // default CurrentUser
+// CurrentUser => (libc::geteuid(), libc::getegid())
 ```
-
-This maps onto the **existing** mount owner-override: `FsServerBuilder::mount_as
-(tag, path, ro, Some((uid, gid)))`. vfs already rewrites the returned `FileAttr`
-through `apply_owner_override` at all 7 attr-returning sites (server.rs:106, 933,
-1017, 1187, 1467, 1598, 1894), **independent of entry kind** — so embedded/static
-entries inherit the discovered uid/gid for free. Embedded layers therefore bake
-only mode bits; uid/gid stay 0 in the binary.
-
-Mount option note: for the single-user local case we **omit `AllowOther`** (vfs's
-`v1_mount_options` sets it for the root-managed VM service). Only the mounting
-user sees the mount — the desired default, and it avoids the
-`/etc/fuse.conf user_allow_other` requirement.
+**Correction vs the prior draft:** on vmm-vz, overlay entries take
+`ov_attrs.uid/gid` **directly** in `do_lookup` (922-934) and `do_getattr`
+(1010-1022); `apply_owner_override` (def 2658-2663) is applied **only at the 7
+disk sites** (106, 956, 1041, 1214, 1496, 1630, 1967). So embedded entries do
+**not** inherit a mount owner-override "for free", and making the override global
+would break explicit guest overlay ownership. Instead, the resolved `(uid, gid)`
+is written **into the static layer's attrs at registration** (`put_static_layer`'s
+`owner` arg → `StaticLayer.uid/gid`). Embedded files thus appear owned by the
+invoking user with **no bake** and **no change to guest semantics**. The local
+mount also omits `AllowOther` so only the mounting user sees it.
 
 ### 4.7 Data flow
 ```
 read("/SKILL.md")
   └ FUSE -> FuseClient closure -> FsServer::handle_op(tag, Read)
-       ├ policy.check(...)            (allow/deny)
-       ├ resolve: mem? -> embedded? -> disk?   (priority desc; embedded zero-copy)
-       ├ FsResult::Data{bytes}
+       ├ [under mounts.read()] capture_pre(fh→path/bytes) ; dispatch:
+       │     resolve: mem? -> embedded(static)? -> disk?  (priority desc; zero-copy)
+       │     FsResult::Data{bytes}
+       ├ [guard dropped]
        └ observer.on_access({Read, path:/SKILL.md, bytes, errno:None, latency})
 ```
 
 ### 4.8 Consumer walkthrough: asset → mount mapping (mstream)
-End-to-end, a consumer does three things: **designate assets at build time**,
-**compose them into layers under a tag**, and **mount that tag at a path**.
-
-**(1) Build-time — designate the assets** (in the consuming binary crate):
+**(1) Build-time — designate assets** (in the binary crate). The skill tree is at
+the **workspace root**, so from `bins/mstream` the path needs `../../`:
 ```toml
 # bins/mstream/Cargo.toml
 [dependencies]
-motlie-vfs  = { path = "../../libs/vfs", features = ["client", "embed"] }
+motlie-vfs  = { path = "../../libs/vfs", features = ["local-mount"] }  # NOT "client" (pulls vsock)
 include_dir = "0.7"
 ```
 ```rust
-// bins/mstream/src/skills.rs  — the include_dir! macro must live in the binary,
-// since the baked path + bytes are binary-specific. This *is* the designation.
+// bins/mstream/src/skills.rs
 use include_dir::{include_dir, Dir};
-pub static SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/.agents/skills/project");
+pub static SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../.agents/skills/project");
+```
+```rust
+// bins/mstream/build.rs  (already exists; uses rerun-if-changed for git metadata)
+// FR-8: include_dir! (proc-macro, stable Rust) emits NO rerun-if-changed, so an
+// edited SKILL.md with no .rs change ships a STALE embed. Walk the tree and emit:
+fn watch_skills() { for path in walk("../../.agents/skills/project") {
+    println!("cargo:rerun-if-changed={}", path.display()); } }
 ```
 
-**(2)+(3) Runtime — map assets → layers → tag → mountpoint:**
+**(2)+(3) Runtime — compose + mount, degrading on failure:**
 ```rust
-use motlie_vfs::embed::{EmbeddedFs, Owner};
-use motlie_vfs::client::local::LocalMount;
-
-fn serve_skills(mountpoint: &std::path::Path) -> anyhow::Result<LocalMount> {
-    EmbeddedFs::builder()
-        .tag("skills")                       // the mount namespace
-        .embedded("skill-files", 50, &crate::skills::SKILLS) // asset Dir -> RO static layer
-        // .mem_layer("scratch", 100)        // optional writable upper (off in v1; see §6 copy-up)
-        .read_only(true)
-        .owner(Owner::CurrentUser)           // geteuid/getegid at runtime (§4.6)
-        .observer(TracingObserver::new())    // logs every read/write access
-        .mount(mountpoint)                   // -> LocalMount (unmounts on drop)
+fn serve_skills(mp: &Path) -> Option<LocalMount> {
+    match EmbeddedFs::builder().tag("skills")
+            .embedded("skill-files", 50, &crate::skills::SKILLS)
+            .owner(Owner::CurrentUser).observer(TracingObserver::new())
+            .mount(mp) {
+        Ok(m)  => Some(m),
+        Err(e) => { tracing::warn!("skills FUSE unavailable: {e}; continuing without mount"); None }
+    }
 }
-
-// startup
-let mp = cli.mount_path.unwrap_or(std::env::current_dir()?);   // default: cwd
-let _skills = serve_skills(&mp)?;            // held in a guard for the process lifetime
-// ... run mstream; on exit/signal, drop(_skills) unmounts.
+// startup: default mountpoint is a daemon-owned runtime dir, NOT cwd:
+let mp = cli.mount_path.unwrap_or_else(default_runtime_mount); // $XDG_RUNTIME_DIR/mstream/skills
+let skills = serve_skills(&mp);          // Option<LocalMount> held for process lifetime
+// graceful stop (daemon.rs watch::channel): if let Some(m) = &skills { let _ = m.unmount(); }
 ```
 
-**The mapping chain:**
-
-| Stage | Artifact | API |
-|------|----------|-----|
-| designate | `static SKILLS: Dir = include_dir!(…)` | (binary crate) |
-| → layer | RO static layer `"skill-files"`, priority 50, bound to tag `skills` | `.embedded(name, prio, &DIR)` |
-| → tag | `skills` = composed namespace (this + any mem/disk layers) | `.tag("skills")` |
-| → mount | one FUSE mount at `mountpoint` | `.mount(path) -> LocalMount` |
-
-**Path mapping is identity (whole-dir):** a file at `<DIR>/a/b.md` is served at
-`<mountpoint>/a/b.md`. A directory `<DIR>/sub` lists under `<mountpoint>/sub`.
-
-**Multiple asset trees / a disk base** compose into the same tag by priority —
-embedded shadows disk; a higher-priority embedded layer shadows a lower one:
-```rust
-EmbeddedFs::builder()
-    .tag("agent")
-    .embedded("skills", 50, &SKILLS)         // SKILLS shadows DOCS shadows disk
-    .embedded("docs",   40, &DOCS)
-    .disk_base("/work", /*ro*/ false)        // real fs at the bottom
-    .owner(Owner::CurrentUser)
-    .mount("/mnt/agent")?;
-```
-**Several independent mounts** = several builders (each its own tag + mountpoint +
-`LocalMount`); each returns a handle the app holds and drops to unmount.
+**Mapping chain:** `static SKILLS = include_dir!(…)` → `.embedded(name, prio, &DIR)`
+(RO static layer bound to tag) → `.tag("skills")` (composed namespace) →
+`.mount(path)` → `LocalMount`. **Path mapping is identity** (`<DIR>/a/b.md` →
+`<mountpoint>/a/b.md`). Multiple trees/disk compose by priority; several mounts =
+several builders.
 
 ## 5. System design / components to test
-- **StaticLayer resolution** (overlay): file/dir lookup, readdir enumeration,
-  path normalization, RO mutation rejection.
-- **Union/shadow with embedded**: embedded shadows disk; mem shadows embedded;
-  whiteout hides embedded. (Extends existing overlay tests.)
-- **Observer**: invoked exactly once per op; correct path/bytes/errno/latency;
-  zero overhead when absent; never drops.
-- **Local mount**: mount/serve/read a baked tree; unmount on drop; RO enforcement.
-- **mstream integration**: bake skill dir, mount at default path, log access.
+- **StaticLayer resolution** (overlay): file/dir lookup, readdir enumeration, path
+  normalization, exhaustive `OverlayEntryKind` match, RO mutation rejection.
+- **EROFS propagation** (server): a write/create/unlink/rmdir/rename whose target
+  resolves to a `Static` layer returns `EROFS` (regression-guards the
+  `let _ = …` paths at 1383/1429/1686/1748/1824).
+- **Tag publication**: a static-only tag is visible after `put_static_layer`
+  (snapshot non-empty; `tags()` includes it).
+- **Union/shadow/symlink with embedded**: embedded shadows disk; mem shadows
+  embedded; whiteout hides embedded; bake-time symlink reject.
+- **Observer**: invoked once per op, **after** the `mounts` guard is dropped;
+  correct path/bytes/errno/latency incl. fh-based `Read`/`Write`/`Release`;
+  no deadlock with `add_mount`/`remove_mount`.
+- **Local mount**: mount/serve/read; explicit unmount; stale-mount recovery;
+  degrade path on no-`/dev/fuse`.
+- **mstream integration**: correct `include_dir!` path builds; `rerun-if-changed`
+  rebuilds on skill edits; fixed-epoch mtime reproducible.
+- **CI**: needs `libfuse-dev`/`libfuse3-dev` + `pkg-config`, and `/dev/fuse` for
+  the mount tests (§8/§9).
 
-## 6. Open decisions (for interactive design)
-- **Read-only vs writable mount.** Embedded layer is RO. Is the *mount* RO
-  (writes denied, EROFS) or writable-scratch (writes land in a mem layer above)?
-  Affects whether `mem_layer` is default-on and whiteout semantics.
-  - **Copy-up note:** vfs has **no copy-up today**. `do_write` (server.rs:1343)
-    resolves the *winning* layer and writes back into that same layer
-    (mutate-in-place); with a Static lower layer the write fails (EROFS), with a
-    seeded mem layer it would corrupt the embedded original. True overlayfs-style
-    COW (write to lower-only file → copy content up into the writable layer,
-    leave lower intact) is a **separate `do_write`/`do_setattr` change**,
-    orthogonal to the A/B layer choice. v1 default: RO → EROFS; copy-up is a
-    future feature if writable embedded files are needed.
-- **Embedded entry attrs.** ~~owner~~ **RESOLVED (§4.6):** owner is discovered at
-  runtime via `geteuid/getegid` (default `Owner::CurrentUser`), never baked.
-  Still open: default mode (0o444/0o555?) and **mtime policy** (fixed epoch for
-  reproducible builds vs build timestamp; `include_dir` `metadata` feature can
-  carry mtime).
-- **Tag binding of a static layer.** Bound to one tag (simplest) vs tag-agnostic
-  serving its tree under any tag.
-- **Observer vs broadcast.** Confirm we add the sync observer (recommended) and
-  only minimally fix the existing event; or invest in the broadcast instead.
-- **mstream mount UX.** Default mount path (cwd hides existing contents during
-  mount); foreground vs background lifecycle; unmount on signal/exit.
+## 6. Open / resolved decisions
+- ✅ **Mount failure** → degrade (FR-7).
+- ✅ **Default mountpoint** → `$XDG_RUNTIME_DIR/mstream/skills` (not cwd).
+- ✅ **Embedded symlinks** → bake-time reject (FR-1a).
+- ✅ **mtime** → fixed epoch default; build-timestamp opt-in only (FR-8).
+- ✅ **Attr model** → separate static-only attr type (no widening of `OverlayAttrs`).
+- ✅ **include_dir gating** → always-on light dep; `Static` variant unconditional.
+- ◻ **Default mode bits** — proposing `0o444` files / `0o555` dirs.
+- ◻ **Copy-up (future).** vmm-vz has no copy-up: `do_write` (1344-1398) resolves
+  the *winning* layer and writes back into it (mutate-in-place). With a `Static`
+  lower layer the write now returns `EROFS` (FR-3); real overlayfs COW (copy up
+  into a writable layer on first write) is a separate `do_write`/`do_setattr`
+  change, out of v1 scope.
 
 ## 7. Alternatives considered (appendix)
-- **A1 — Seed a normal MemOverlay layer with `Bytes::from_static`.** No engine
-  change; embedded = ordinary RO Content layer. *Rejected (David):* layer is
-  technically mutable, requires an up-front O(files) seed walk, and lacks a
-  clean read-only-by-type guarantee. Chosen approach makes embedded a distinct,
-  immutable, lazily-resolved backing.
-- **A2 — Manifest/glob build tooling with path remapping.** More flexible
-  (select files, remap, multiple sources) but more machinery. *Deferred:* v1
-  uses `include_dir!` whole-dir; revisit if selective embedding is needed.
-- **A3 — Separate crate for embed+mount.** *Rejected:* fragments the overlay
-  engine; a `embed` feature gate keeps `include_dir` out of the core without a
-  new crate.
+- **A1 — Seed a Mem layer with `Bytes::from_static`.** No engine change, but the
+  layer is mutable, requires an O(files) seed walk, and lacks RO-by-type.
+  *Rejected:* and on vmm-vz it is strictly worse — a write would mutate the
+  in-memory original in place (`do_write` 1383), silently corrupting the baked
+  bytes; the `Static` type makes that an `EROFS`.
+- **A2 — Manifest/glob tooling with remapping.** *Deferred:* v1 is whole-dir.
+- **A3 — Separate crate.** *Rejected:* a feature split (`local-mount`/`fuser-client`)
+  keeps the engine in `motlie-vfs` without dragging vsock into consumers.
 
-## 8. Logistics (for PLAN, not blocking DESIGN)
-- `libs/vfs` is **not** currently a workspace member (`fuser` absent from
-  `Cargo.lock`); wiring it in + enabling `client`/`embed` features is required
-  before mstream can depend on it.
-- New deps: `include_dir` (feature `embed`); `tracing`/`opentelemetry` already
-  in the workspace lockfile.
+## 8. Logistics (re-anchored; for PLAN)
+On `feature/vmm-vz` the main-branch logistics are already done: **`libs/vfs` (root
+Cargo.toml:21) and `bins/mstream` (line 35) are workspace members, and `fuser` is
+in `Cargo.lock`.** Remaining deltas:
+- **Feature split (must-fix #8).** Today `client = ["dep:fuser", "vsock"]` and the
+  mount module is gated `#[cfg(all(feature = "client", target_os = "linux"))]`
+  (`client/mod.rs:12`); `fuser` is a `cfg(target_os="linux")` optional dep,
+  `default-features = false`, v0.15. Introduce:
+  - `fuser-client = ["dep:fuser"]` — the `FuseClient` + mount module, no vsock.
+  - `client = ["fuser-client", "vsock"]` — guest path, unchanged behavior.
+  - `local-mount = ["fuser-client"]` — `client::local`, Linux-only, no `AllowOther`.
+  Re-gate `client::fuse`/`FuseClient` on `fuser-client` (not `client`) so mstream
+  gets a local mount **without** `tokio-vsock`. `client::guest::mount_all`
+  (`guest.rs:94`, gated `client+vsock+linux`) is untouched.
+- **`include_dir`** added as a light **always-on** dep (no `embed` feature; type
+  unconditional) — keeps `LayerSource::Static` from forcing cfg'd match arms.
+- **libfuse build dep.** Enabling `fuser` links libfuse via `pkg-config` at build
+  time. Once mstream depends on `motlie-vfs` with `local-mount`, the **workspace
+  build requires `libfuse-dev`/`libfuse3-dev` + `pkg-config`** on every host/CI
+  runner — document the dev-container/CI image change. `fuser`'s
+  `default-features = false` must be preserved so guest cross-compiles
+  (`mbuild`) don't need a target libfuse sysroot.
+- **mstream** gains `motlie-vfs` (`local-mount`) + `include_dir` deps, a
+  `skills.rs`, a build.rs `rerun-if-changed` walk, and an unmount in its
+  graceful-stop path.
+
+## 9. Platform matrix & degrade contract
+| Host | Local FUSE mount | Behavior |
+|------|------------------|----------|
+| Linux x86_64 / aarch64 + `/dev/fuse` + `fusermount3` | yes | mount + serve + log |
+| Linux without `/dev/fuse`/perms (e.g. locked-down container) | no | **degrade**: warn, run unmounted |
+| macOS host (vmm-vz vz branch) | no (mount gated Linux-only, `client/mod.rs:12`) | **degrade**: warn, run unmounted |
+
+**Degrade-vs-hard-fail contract (FR-7):** mount failure is **non-fatal** — the
+daemon logs a `WARN` (`"skills FUSE unavailable: {reason}; continuing without
+mount"`) and runs normally; skills simply aren't served over FUSE. This preserves
+mstream's run-anywhere property and makes FUSE an optional enhancement. The
+mount-available state should be surfaced (status/health) so operators can tell.
