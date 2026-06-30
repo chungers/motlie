@@ -22,7 +22,7 @@ pub mod kokoro_82m;
 #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
 pub mod piper_en_us_ljspeech_medium;
 #[cfg(feature = "model-qwen3-tts-cpp")]
-pub mod qwen3_tts_cpp;
+pub mod qwen3_tts_cpp_0_6b;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -49,7 +49,7 @@ impl TtsModels {
             #[cfg(feature = "model-kokoro-82m")]
             Self::Kokoro82m => kokoro_82m::SELECTOR,
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp::SELECTOR,
+            Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp_0_6b::SELECTOR,
         }
     }
 
@@ -60,7 +60,7 @@ impl TtsModels {
             #[cfg(feature = "model-kokoro-82m")]
             Self::Kokoro82m => kokoro_82m::descriptor().id,
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp::descriptor().id,
+            Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp_0_6b::descriptor().id,
         }
     }
 
@@ -71,7 +71,7 @@ impl TtsModels {
             #[cfg(feature = "model-kokoro-82m")]
             Self::Kokoro82m => kokoro_82m::descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp::descriptor(),
+            Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp_0_6b::descriptor(),
         }
     }
 
@@ -116,7 +116,7 @@ impl FromStr for TtsModels {
                 selector: value.to_owned(),
             }),
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            qwen3_tts_cpp::SELECTOR => Ok(Self::Qwen3TtsCpp0_6B),
+            qwen3_tts_cpp_0_6b::SELECTOR => Ok(Self::Qwen3TtsCpp0_6B),
             #[cfg(not(feature = "model-qwen3-tts-cpp"))]
             QWEN3_TTS_CPP_0_6B_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
                 selector: value.to_owned(),

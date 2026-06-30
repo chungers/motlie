@@ -184,7 +184,6 @@ mod tests {
         let embedding: EmbeddingCode = 1;
 
         // Phase 1: Allocate IDs and persist
-        let allocated_ids: Vec<VecId>;
         {
             let storage = create_test_storage(temp_dir.path());
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
@@ -192,7 +191,9 @@ mod tests {
             let allocator = IdAllocator::new();
 
             // Allocate 10 IDs
-            allocated_ids = (0..10).map(|_| allocator.allocate_local()).collect();
+            for _ in 0..10 {
+                allocator.allocate_local();
+            }
 
             // Free ID 5
             allocator.free_local(5);

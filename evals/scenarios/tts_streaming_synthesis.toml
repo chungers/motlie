@@ -1,0 +1,59 @@
+schema_version = 1
+id = "tts_streaming_synthesis"
+capability = "tts"
+summary = "Streaming speech synthesis smoke for Kokoro incremental TTS."
+
+[bundle_filter]
+capability = "tts"
+backend = ["Ort"]
+
+[input]
+text = "Hello from Motlie streaming speech."
+synthesis_mode = "streaming"
+max_buffered_audio_ms = 80
+iterations = 3
+warmup_iterations = 1
+
+[[input.corpus]]
+id = "short_phrase"
+label = "short phrase"
+text = "Hello from Motlie streaming speech."
+
+[[input.corpus]]
+id = "short_sentence"
+label = "short sentence"
+text = "Motlie streams the first playable audio chunk while synthesis continues in the background."
+
+[[input.corpus]]
+id = "medium_passage"
+label = "medium passage"
+text = "This medium streaming synthesis prompt checks whether Kokoro keeps first audio latency stable while it prepares a complete spoken response for an evaluation operator."
+
+[[input.corpus]]
+id = "long_passage"
+label = "long multi-sentence passage"
+text = "Streaming speech should expose useful latency differences as the input grows. This longer passage gives the synthesizer enough work to separate first playable audio from total synthesis completion. The evaluation records both numbers, plus chunk pacing and underrun signals, so reviewers can identify the input lengths where incremental output provides the clearest benefit."
+
+[assertions]
+min_audio_duration_ms = 250
+min_sample_count = 1
+require_streaming_proof = true
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+capture_peak_rss = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.local-cpu-aarch64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.apple-metal]
+
+[profiles.dgx-spark.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.cuda-workstation.gates]
+max_process_swap_delta_bytes = 4294967296

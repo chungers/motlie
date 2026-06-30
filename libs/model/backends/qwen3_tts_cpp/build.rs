@@ -52,7 +52,11 @@ fn main() {
         },
     );
     if cfg!(target_os = "macos") {
-        config.define("GGML_METAL", "ON");
+        // qwen3-tts.cpp's vendored ggml registry links Metal/BLAS symbols unless the
+        // companion archives are linked into qwen3tts_shared. Keep those backends off
+        // until the vendor CMake linkage is fixed; CoreML/Accelerate remain enabled.
+        config.define("GGML_METAL", "OFF");
+        config.define("GGML_BLAS", "OFF");
     }
     if cfg!(target_env = "gnu") {
         config.define("CMAKE_EXE_LINKER_FLAGS", "-fopenmp");
@@ -77,6 +81,9 @@ fn main() {
 
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-lib=dylib=c++");
+        println!("cargo:rustc-link-lib=framework=Accelerate");
+        println!("cargo:rustc-link-lib=framework=Metal");
+        println!("cargo:rustc-link-lib=framework=MetalKit");
     } else if cfg!(target_env = "gnu") {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
@@ -152,7 +159,8 @@ fn build_ggml_submodule(ggml_dir: &Path) -> PathBuf {
         if cfg!(feature = "cuda") { "ON" } else { "OFF" }
     ));
     if cfg!(target_os = "macos") {
-        configure.arg("-DGGML_METAL=ON");
+        configure.arg("-DGGML_METAL=OFF");
+        configure.arg("-DGGML_BLAS=OFF");
     }
     run_or_panic(&mut configure, "configure nested ggml submodule");
 
@@ -261,6 +269,11 @@ endif()
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(QWEN3_TTS_COREML ${MOTLIE_ENABLE_COREML} CACHE BOOL "" FORCE)
 
+if(APPLE)
+    set(GGML_METAL OFF CACHE BOOL "" FORCE)
+    set(GGML_BLAS OFF CACHE BOOL "" FORCE)
+endif()
+
 add_subdirectory("${MOTLIE_VENDOR_DIR}" vendor-build)
 
 foreach(test_target test_tokenizer test_encoder test_transformer test_decoder)
@@ -281,6 +294,15 @@ if(TARGET qwen3-tts-cli)
         EXCLUDE_FROM_ALL TRUE
         EXCLUDE_FROM_DEFAULT_BUILD TRUE
     )
+endif()
+
+if(APPLE)
+    find_library(MOTLIE_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+    foreach(lib_target text_tokenizer tts_transformer audio_tokenizer_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli)
+        if(TARGET ${lib_target})
+            target_link_libraries(${lib_target} PUBLIC ${MOTLIE_ACCELERATE_FRAMEWORK})
+        endif()
+    endforeach()
 endif()
 
 if(MOTLIE_ENABLE_CUDA)

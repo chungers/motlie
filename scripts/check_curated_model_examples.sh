@@ -20,7 +20,8 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-features="model-whisper-base-en,model-sherpa-onnx-streaming,model-moonshine-streaming,model-piper-en-us-ljspeech-medium,model-qwen3-tts-cpp"
+speech_features="model-whisper-base-en,model-sherpa-onnx-streaming,model-moonshine-streaming,model-piper-en-us-ljspeech-medium,model-qwen3-tts-cpp"
+chat_tool_features="model-qwen3-4b,model-gemma4-e2b"
 
 fail() {
   echo "ERROR: $*" >&2
@@ -43,7 +44,31 @@ case "${mode}" in
   check)
     ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule
     cargo check -p motlie-model-espeak-ng -p motlie-model-piper --lib
-    run_with_optional_ort cargo check -p motlie-models --lib --examples --no-default-features --features "${features}"
+
+    note "checking motlie-models lib with curated speech features"
+    run_with_optional_ort cargo check -p motlie-models \
+      --lib \
+      --no-default-features \
+      --features "${speech_features}"
+
+    note "checking chat/tool examples without ORT-backed Piper/Moonshine/Sherpa features"
+    cargo check -p motlie-models \
+      --example chat_tool_binding \
+      --example chat_multimodal_gemma4 \
+      --example chat_gguf_gwen3_gemma4 \
+      --example bench_chat \
+      --no-default-features \
+      --features "${chat_tool_features}"
+
+    note "checking ASR/TTS examples with ORT-backed features isolated from chat/tool examples"
+    run_with_optional_ort cargo check -p motlie-models \
+      --example tts_piper \
+      --example tts_qwen3_tts_cpp \
+      --example asr_whisper \
+      --example asr_sherpa_onnx \
+      --example asr_moonshine \
+      --no-default-features \
+      --features "${speech_features}"
     ;;
   build)
     ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule --require-ort
@@ -54,7 +79,7 @@ case "${mode}" in
       --example asr_sherpa_onnx \
       --example asr_moonshine \
       --no-default-features \
-      --features "${features}"
+      --features "${speech_features}"
     ;;
   smoke-qwen3-whisper)
     ./scripts/check_models_build_prereqs.sh --require-qwen-submodule

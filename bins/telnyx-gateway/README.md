@@ -20,21 +20,24 @@ ONNX Runtime from source for the gateway.
 ### Agent-Assisted Headless Test
 
 For live tests with an agent operator, run the gateway without the TUI and expose
-a local Unix-domain command socket:
+a local Unix-domain command socket. The checked-in canonical startup config is
+[`gateway.toml`](gateway.toml); it contains the full strict TOML surface with
+placeholder routing fields and `env:` secret references only. For continued
+local tuning, materialize live values in `$HOME/telnyx-test/gateway.toml` and
+pass that path with `--config`.
 
 ```sh
 cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
 rm -f /tmp/motlie-telnyx-gateway.sock
-: > /home/dchung/telnyx-gateway-live.log
+: > "$HOME/telnyx-gateway-live.log"
 
 env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
   TELNYX_API_KEY="$TELNYX_API_KEY" \
   cargo run -p motlie-telnyx-gateway --features sherpa -- \
+    --config bins/telnyx-gateway/gateway.toml \
     --bind 127.0.0.1:8080 \
-    --load /home/dchung/telnyx-test/config.repl \
     --socket /tmp/motlie-telnyx-gateway.sock \
-    --log-file /home/dchung/telnyx-gateway-live.log \
-    --capture-dir /home/dchung/telnyx-test/captures
+    --log-file "$HOME/telnyx-gateway-live.log"
 ```
 
 The socket accepts one gateway REPL command per line and returns one JSON object
@@ -109,7 +112,7 @@ Replay a capture and compute WER without another phone call:
 
 ```sh
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
-  --no-asr-download \
+  --artifact-root "$HOME/artifacts/hf-cache" \
   replay-capture /home/dchung/telnyx-test/captures/<gateway-call-id>/<stream-id> \
   --backend sherpa \
   --reference-file /home/dchung/telnyx-test/reference.txt
@@ -127,7 +130,7 @@ Replay the golden corpus across comparable backends:
 
 ```sh
 cargo run -p motlie-telnyx-gateway --features sherpa -- \
-  --no-asr-download \
+  --artifact-root "$HOME/artifacts/hf-cache" \
   replay-corpus bins/telnyx-gateway/corpus/asr-golden.json \
   --backend sherpa-zipformer-2023 \
   --backend sherpa-zipformer-kroko-2025 \
@@ -212,34 +215,35 @@ Prerequisites:
 - Tailscale Funnel or equivalent proxies `/` to `http://127.0.0.1:8080`.
 - The selected Telnyx Call Control application has an Outbound Voice Profile.
 - The `from-number` is outbound-enabled for that profile.
-- Piper artifacts can be downloaded through the curated catalog, or are already
-  present under the gateway artifact root.
+- Piper/Kokoro artifacts are preloaded under the gateway artifact root. The
+  gateway does not download missing model artifacts at runtime.
 - A system `libespeak-ng` installation and phonemization data are available for
   Piper. The gateway auto-detects common data paths such as
   `/usr/lib/<arch>/espeak-ng-data` and `/usr/share/espeak-ng-data`; if your host
   stores it elsewhere, export `PIPER_ESPEAKNG_DATA_DIRECTORY` to the directory
   that contains the eSpeak-ng data files before starting the gateway.
 
-Start a TUI session with an agent socket:
+Start a TUI session with an agent socket. The command below uses the canonical
+[`gateway.toml`](gateway.toml), which should stay parse-clean under the strict
+`--config` loader and keeps secrets as references such as `env:TELNYX_API_KEY`:
 
 ```sh
 cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
 rm -f /tmp/motlie-telnyx-gateway.sock
-: > /home/dchung/telnyx-gateway-live.log
+: > "$HOME/telnyx-gateway-live.log"
 
 env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
   TELNYX_API_KEY="$TELNYX_API_KEY" \
   PIPER_ESPEAKNG_DATA_DIRECTORY="${PIPER_ESPEAKNG_DATA_DIRECTORY:-/usr/lib/x86_64-linux-gnu/espeak-ng-data}" \
   cargo run -p motlie-telnyx-gateway --features "sherpa piper" -- \
+    --config bins/telnyx-gateway/gateway.toml \
     --tui \
     --bind 127.0.0.1:8080 \
-    --load /home/dchung/telnyx-test/config.repl \
     --socket /tmp/motlie-telnyx-gateway.sock \
-    --log-file /home/dchung/telnyx-gateway-live.log \
-    --capture-dir /home/dchung/telnyx-test/captures
+    --log-file "$HOME/telnyx-gateway-live.log"
 ```
 
-If the replay file is not loaded or needs changes, run these in the TUI shell:
+If the gateway TOML is missing live tunnel values or needs changes, run these in the TUI shell and persist them with `state dump <path>`:
 
 ```text
 config set webhook-url https://<host>/telnyx/webhooks
@@ -394,11 +398,16 @@ the live test.
 
 Artifacts are loaded from:
 
-1. `--asr-artifact-root <path>`
+1. `--artifact-root <path>`
 2. `MOTLIE_VOICE_ARTIFACT_ROOT`
-3. `.agents/skills/voice/artifacts/hf-cache`
+3. `$HOME/artifacts/hf-cache`, the operator convention also written as `~/artifacts/hf-cache`
+4. `.agents/skills/voice/artifacts/hf-cache` when `HOME` is unset
 
-By default, missing Sherpa artifacts are downloaded through the curated `motlie-models` catalog. Pass `--no-asr-download` to fail closed instead.
+Missing artifacts fail startup or warmup loudly. Use the curated
+`motlie-models-download` workflow or another explicit preload step before
+starting the gateway. For Kokoro streaming, `motlie-models-download kokoro_82m`
+also prepares the Sherpa-compatible `tokens.txt` from Kokoro `tokenizer.json`;
+the gateway does not repair or download artifacts at runtime.
 
 For local protocol testing without model startup:
 

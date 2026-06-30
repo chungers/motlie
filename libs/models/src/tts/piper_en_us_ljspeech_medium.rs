@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, QuantizationScheme,
+    StartOptions,
 };
 use motlie_model_piper::{PiperHandle, PiperSpeechBundle, PiperSpeechSpec};
 
@@ -45,7 +46,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(MODEL_FILE),
             ArtifactRule::Exact(CONFIG_FILE),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Fp32),
     }
 }
 
@@ -68,6 +69,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "piper_en_us_ljspeech_medium",
             &checkpoint,
+            crate::ArtifactProvenance::new("mit", crate::ArtifactGating::Public),
         )),
     }
 }

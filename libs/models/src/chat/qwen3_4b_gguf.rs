@@ -31,7 +31,6 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
         include: vec![
             ArtifactRule::Suffix("-Q4_K_M.gguf"),
             ArtifactRule::Suffix("-Q8_0.gguf"),
-            ArtifactRule::Suffix("-f16.gguf"),
         ],
         quantization: None,
     }
@@ -66,6 +65,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "qwen3_4b_gguf",
             &checkpoint,
+            crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
         )),
     }
 }
@@ -101,8 +101,8 @@ fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::BundleFamily;
-    use motlie_model::CapabilityDescriptor;
     use motlie_model::eval::EvalTrack;
+    use motlie_model::CapabilityDescriptor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -115,21 +115,15 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::LlamaCpp);
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Chat));
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Reasoning));
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Chat)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Completion)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::ToolUse)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Chat));
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Completion));
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::ToolUse));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[

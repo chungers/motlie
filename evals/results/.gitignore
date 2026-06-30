@@ -1,0 +1,11 @@
+*
+!.gitignore
+!*/
+!**/results.jsonl
+!**/summary.md
+!**/run-manifest.toml
+!**/failures/
+!**/failures/*.md
+!coverage/INDEX.json
+**/logs/
+**/logs/**

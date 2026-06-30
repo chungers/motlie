@@ -22,8 +22,8 @@ use motlie_model_piper::PiperHandle;
 use motlie_model_qwen3_tts_cpp::Qwen3TtsCppHandle;
 use motlie_model_sherpa_onnx::SherpaOnnxHandle;
 use motlie_model_whisper_cpp::WhisperCppHandle;
-use motlie_models::asr::{moonshine_streaming_en, sherpa_onnx_streaming_en, whisper_base_en};
-use motlie_models::tts::{piper_en_us_ljspeech_medium, qwen3_tts_cpp};
+use motlie_models::asr::{moonshine_streaming_en, sherpa_onnx_streaming_zipformer_en, whisper_base_en};
+use motlie_models::tts::{piper_en_us_ljspeech_medium, qwen3_tts_cpp_0_6b};
 use motlie_models::{
     AsrModels, Catalog, LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX, TtsModels,
     download_bundle_artifacts,
@@ -776,7 +776,7 @@ fn selected_tts_model(backend: TtsBackend) -> TtsModels {
 fn selected_asr_model(backend: AsrBackend) -> AsrModels {
     match backend {
         AsrBackend::Whisper => AsrModels::WhisperBaseEn,
-        AsrBackend::Sherpa => AsrModels::SherpaOnnxStreamingEn,
+        AsrBackend::Sherpa => AsrModels::SherpaOnnxStreamingZipformerEn,
         AsrBackend::Moonshine => AsrModels::MoonshineStreamingEn,
     }
 }
@@ -863,10 +863,10 @@ async fn start_selected_asr(
             model.as_str()
         ),
         (
-            AsrModels::SherpaOnnxStreamingEn,
+            AsrModels::SherpaOnnxStreamingZipformerEn,
             AsrExecutionMode::StreamingFinalOnly | AsrExecutionMode::StreamingWithPartials,
         ) => Ok(StartedAsrHandle::Sherpa(start_sherpa(config, quiet).await?)),
-        (AsrModels::SherpaOnnxStreamingEn, AsrExecutionMode::Batch) => bail!(
+        (AsrModels::SherpaOnnxStreamingZipformerEn, AsrExecutionMode::Batch) => bail!(
             "selected ASR model '{}' resolved to a batch transcription contract but only a streaming voice-agent adapter exists",
             model.as_str()
         ),
@@ -905,7 +905,7 @@ async fn start_qwen(config: &VoiceConfig, quiet: bool) -> Result<Qwen3TtsCppHand
         quiet,
         TtsModels::Qwen3TtsCpp0_6B.bundle_id(),
         "qwen3-tts.cpp",
-        qwen3_tts_cpp::start_typed,
+        qwen3_tts_cpp_0_6b::start_typed,
     )
     .await
 }
@@ -925,9 +925,9 @@ async fn start_sherpa(config: &VoiceConfig, quiet: bool) -> Result<SherpaOnnxHan
     start_with_bootstrap(
         config,
         quiet,
-        AsrModels::SherpaOnnxStreamingEn.bundle_id(),
+        AsrModels::SherpaOnnxStreamingZipformerEn.bundle_id(),
         "Sherpa",
-        sherpa_onnx_streaming_en::start_typed,
+        sherpa_onnx_streaming_zipformer_en::start_typed,
     )
     .await
 }
@@ -1146,11 +1146,16 @@ fn print_segment_events(segments: &[TranscriptSegment]) {
         } else {
             "[partial]"
         };
+        let confidence = segment
+            .confidence
+            .map(|confidence| format!(" confidence={confidence:.3}"))
+            .unwrap_or_default();
         println!(
-            "{marker} [{:.2}s - {:.2}s] {}",
+            "{marker} [{:.2}s - {:.2}s] {}{}",
             segment.start_ms as f64 / 1000.0,
             segment.end_ms as f64 / 1000.0,
-            segment.text
+            segment.text,
+            confidence
         );
     }
 }

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 #[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 use std::path::Path;
 use std::path::PathBuf;
@@ -5,7 +6,7 @@ use std::sync::Arc;
 use std::{fmt, str::FromStr};
 
 #[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
-use anyhow::{bail, Context};
+use anyhow::Context;
 use async_trait::async_trait;
 use clap::ValueEnum;
 use motlie_model::typed::{AudioBuf, Mono};
@@ -19,7 +20,7 @@ use motlie_voice::app::TranscriptEvent;
 #[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 use tokio::sync::Mutex;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AsrTranscriptEvent {
     pub event: TranscriptEvent,
     pub decision: AsrTranscriptDecision,
@@ -226,16 +227,6 @@ impl SherpaAsrArtifact {
             Self::ZipformerEnKroko20250806 => "sherpa-zipformer-en-kroko-2025-08-06",
         }
     }
-
-    #[cfg(feature = "sherpa")]
-    fn asr_model(self) -> motlie_models::AsrModels {
-        match self {
-            Self::ZipformerEn20230626 => motlie_models::AsrModels::SherpaOnnxStreamingEn,
-            Self::ZipformerEnKroko20250806 => {
-                motlie_models::AsrModels::SherpaOnnxStreamingEnKroko2025
-            }
-        }
-    }
 }
 
 pub struct UnavailableAsrFactory {
@@ -258,25 +249,19 @@ impl InboundAsrFactory for UnavailableAsrFactory {
 #[cfg(feature = "sherpa")]
 pub struct SherpaAsrFactory {
     artifact_root: PathBuf,
-    allow_download: bool,
     artifact: SherpaAsrArtifact,
     handle: Mutex<Option<Arc<motlie_model_sherpa_onnx::SherpaOnnxHandle>>>,
 }
 
 #[cfg(feature = "sherpa")]
 impl SherpaAsrFactory {
-    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
-        Self::with_artifact(artifact_root, allow_download, SherpaAsrArtifact::default())
+    pub fn new(artifact_root: PathBuf) -> Self {
+        Self::with_artifact(artifact_root, SherpaAsrArtifact::default())
     }
 
-    pub fn with_artifact(
-        artifact_root: PathBuf,
-        allow_download: bool,
-        artifact: SherpaAsrArtifact,
-    ) -> Self {
+    pub fn with_artifact(artifact_root: PathBuf, artifact: SherpaAsrArtifact) -> Self {
         Self {
             artifact_root,
-            allow_download,
             artifact,
             handle: Mutex::new(None),
         }
@@ -288,8 +273,7 @@ impl SherpaAsrFactory {
             return Ok(Arc::clone(handle));
         }
 
-        let handle =
-            Arc::new(start_sherpa(&self.artifact_root, self.allow_download, self.artifact).await?);
+        let handle = Arc::new(start_sherpa(&self.artifact_root, self.artifact).await?);
         *guard = Some(Arc::clone(&handle));
         Ok(handle)
     }
@@ -353,16 +337,14 @@ impl InboundAsrSession for SherpaAsrSession {
 #[cfg(feature = "moonshine")]
 pub struct MoonshineAsrFactory {
     artifact_root: PathBuf,
-    allow_download: bool,
     handle: Mutex<Option<Arc<motlie_model_moonshine::MoonshineHandle>>>,
 }
 
 #[cfg(feature = "moonshine")]
 impl MoonshineAsrFactory {
-    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+    pub fn new(artifact_root: PathBuf) -> Self {
         Self {
             artifact_root,
-            allow_download,
             handle: Mutex::new(None),
         }
     }
@@ -373,7 +355,7 @@ impl MoonshineAsrFactory {
             return Ok(Arc::clone(handle));
         }
 
-        let handle = Arc::new(start_moonshine(&self.artifact_root, self.allow_download).await?);
+        let handle = Arc::new(start_moonshine(&self.artifact_root).await?);
         *guard = Some(Arc::clone(&handle));
         Ok(handle)
     }
@@ -437,16 +419,14 @@ impl InboundAsrSession for MoonshineAsrSession {
 #[cfg(feature = "whisper")]
 pub struct WhisperAsrFactory {
     artifact_root: PathBuf,
-    allow_download: bool,
     handle: Mutex<Option<Arc<motlie_model_whisper_cpp::WhisperCppHandle>>>,
 }
 
 #[cfg(feature = "whisper")]
 impl WhisperAsrFactory {
-    pub fn new(artifact_root: PathBuf, allow_download: bool) -> Self {
+    pub fn new(artifact_root: PathBuf) -> Self {
         Self {
             artifact_root,
-            allow_download,
             handle: Mutex::new(None),
         }
     }
@@ -457,7 +437,7 @@ impl WhisperAsrFactory {
             return Ok(Arc::clone(handle));
         }
 
-        let handle = Arc::new(start_whisper(&self.artifact_root, self.allow_download).await?);
+        let handle = Arc::new(start_whisper(&self.artifact_root).await?);
         *guard = Some(Arc::clone(&handle));
         Ok(handle)
     }
@@ -514,90 +494,32 @@ impl InboundAsrSession for WhisperAsrSession {
 #[cfg(feature = "sherpa")]
 async fn start_sherpa(
     artifact_root: &Path,
-    allow_download: bool,
     artifact: SherpaAsrArtifact,
 ) -> anyhow::Result<motlie_model_sherpa_onnx::SherpaOnnxHandle> {
-    let options = local_only_options(artifact_root);
-    match start_sherpa_artifact(artifact, options).await {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = artifact.label(),
-                "downloading Sherpa ONNX artifacts"
-            );
-            download_sherpa_artifact(artifact, artifact_root)?;
-            start_sherpa_artifact(artifact, local_only_options(artifact_root))
-                .await
-                .map_err(anyhow::Error::from)
-                .with_context(|| format!("start {} after downloading artifacts", artifact.label()))
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail_missing_artifacts(artifact.label(), artifact_root)
-        }
-        Err(err) => Err(anyhow::Error::from(err))
-            .with_context(|| format!("start {} Sherpa ONNX", artifact.label())),
-    }
+    start_sherpa_artifact(artifact, local_only_options(artifact_root))
+        .await
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("start {} Sherpa ONNX", artifact.label()))
 }
 
 #[cfg(feature = "moonshine")]
 async fn start_moonshine(
     artifact_root: &Path,
-    allow_download: bool,
 ) -> anyhow::Result<motlie_model_moonshine::MoonshineHandle> {
-    match motlie_models::asr::moonshine_streaming_en::start_typed(local_only_options(artifact_root))
+    motlie_models::asr::moonshine_streaming_en::start_typed(local_only_options(artifact_root))
         .await
-    {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = "moonshine-streaming-en",
-                "downloading Moonshine artifacts"
-            );
-            download_asr_artifact(
-                motlie_models::AsrModels::MoonshineStreamingEn,
-                artifact_root,
-            )?;
-            motlie_models::asr::moonshine_streaming_en::start_typed(local_only_options(
-                artifact_root,
-            ))
-            .await
-            .map_err(anyhow::Error::from)
-            .context("start Moonshine after downloading artifacts")
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail_missing_artifacts("moonshine-streaming-en", artifact_root)
-        }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Moonshine ASR"),
-    }
+        .map_err(anyhow::Error::from)
+        .context("start Moonshine ASR")
 }
 
 #[cfg(feature = "whisper")]
 async fn start_whisper(
     artifact_root: &Path,
-    allow_download: bool,
 ) -> anyhow::Result<motlie_model_whisper_cpp::WhisperCppHandle> {
-    match motlie_models::asr::whisper_base_en::start_typed(local_only_options(artifact_root)).await
-    {
-        Ok(handle) => Ok(handle),
-        Err(err) if allow_download && missing_local_artifacts(&err) => {
-            tracing::info!(
-                artifact_root = %artifact_root.display(),
-                artifact = "whisper-base-en",
-                "downloading Whisper artifacts"
-            );
-            download_asr_artifact(motlie_models::AsrModels::WhisperBaseEn, artifact_root)?;
-            motlie_models::asr::whisper_base_en::start_typed(local_only_options(artifact_root))
-                .await
-                .map_err(anyhow::Error::from)
-                .context("start Whisper after downloading artifacts")
-        }
-        Err(err) if !allow_download && missing_local_artifacts(&err) => {
-            bail_missing_artifacts("whisper-base-en", artifact_root)
-        }
-        Err(err) => Err(anyhow::Error::from(err)).context("start Whisper ASR"),
-    }
+    motlie_models::asr::whisper_base_en::start_typed(local_only_options(artifact_root))
+        .await
+        .map_err(anyhow::Error::from)
+        .context("start Whisper ASR")
 }
 
 #[cfg(feature = "sherpa")]
@@ -615,26 +537,6 @@ async fn start_sherpa_artifact(
     }
 }
 
-#[cfg(feature = "sherpa")]
-fn download_sherpa_artifact(
-    artifact: SherpaAsrArtifact,
-    artifact_root: &Path,
-) -> anyhow::Result<()> {
-    download_asr_artifact(artifact.asr_model(), artifact_root)
-        .with_context(|| format!("download {} Sherpa ONNX artifacts", artifact.label()))
-}
-
-#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
-fn download_asr_artifact(
-    model: motlie_models::AsrModels,
-    artifact_root: &Path,
-) -> anyhow::Result<()> {
-    let catalog = motlie_models::Catalog::with_defaults();
-    motlie_models::download_bundle_artifacts(&catalog, &model.bundle_id(), artifact_root)
-        .map(|_| ())
-        .map_err(anyhow::Error::from)
-}
-
 #[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
 fn local_only_options(artifact_root: &Path) -> StartOptions {
     StartOptions {
@@ -643,26 +545,6 @@ fn local_only_options(artifact_root: &Path) -> StartOptions {
         }),
         ..Default::default()
     }
-}
-
-#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
-fn missing_local_artifacts(error: &ModelError) -> bool {
-    match error {
-        ModelError::InvalidConfiguration(message) => {
-            message.contains(motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX)
-        }
-        _ => false,
-    }
-}
-
-#[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
-fn bail_missing_artifacts<T>(label: &str, artifact_root: &Path) -> anyhow::Result<T> {
-    bail!(
-        "{} missing for {} under '{}'; rerun without --no-asr-download or preinstall artifacts",
-        motlie_models::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX,
-        label,
-        artifact_root.display()
-    )
 }
 
 #[cfg(any(feature = "sherpa", feature = "moonshine", feature = "whisper"))]
@@ -788,10 +670,20 @@ pub fn default_artifact_root(cli_root: Option<PathBuf>) -> PathBuf {
     if let Some(root) = cli_root {
         return root;
     }
-    if let Some(root) = std::env::var_os("MOTLIE_VOICE_ARTIFACT_ROOT") {
-        return PathBuf::from(root);
-    }
-    PathBuf::from(".agents/skills/voice/artifacts/hf-cache")
+    default_artifact_root_from_env(
+        std::env::var_os("MOTLIE_VOICE_ARTIFACT_ROOT"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn default_artifact_root_from_env(env_root: Option<OsString>, home: Option<OsString>) -> PathBuf {
+    env_root
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.map(PathBuf::from)
+                .map(|home| home.join("artifacts/hf-cache"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".agents/skills/voice/artifacts/hf-cache"))
 }
 
 #[cfg(test)]
@@ -803,6 +695,30 @@ mod tests {
             text: text.to_string(),
             update: motlie_model::TranscriptionUpdate::default(),
         }
+    }
+
+    #[test]
+    fn default_artifact_root_prefers_env_over_home_convention() {
+        assert_eq!(
+            default_artifact_root_from_env(Some("/env/root".into()), Some("/home/user".into())),
+            PathBuf::from("/env/root")
+        );
+    }
+
+    #[test]
+    fn default_artifact_root_uses_home_artifact_convention() {
+        assert_eq!(
+            default_artifact_root_from_env(None, Some("/home/user".into())),
+            PathBuf::from("/home/user/artifacts/hf-cache")
+        );
+    }
+
+    #[test]
+    fn default_artifact_root_falls_back_when_home_is_unset() {
+        assert_eq!(
+            default_artifact_root_from_env(None, None),
+            PathBuf::from(".agents/skills/voice/artifacts/hf-cache")
+        );
     }
 
     #[test]

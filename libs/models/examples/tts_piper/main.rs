@@ -12,11 +12,11 @@ use motlie_model::typed::{SpeechStream, SpeechSynthesizer, SynthesisRequest};
 use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 use motlie_models::tts::piper_en_us_ljspeech_medium;
 
-#[path = "../bundle_support.rs"]
+#[path = "../support/bundle.rs"]
 mod bundle_support;
-#[path = "../quiet_support.rs"]
+#[path = "../support/quiet.rs"]
 mod quiet_support;
-#[path = "../tts_support.rs"]
+#[path = "../support/tts.rs"]
 mod tts_support;
 
 fn main() -> Result<()> {

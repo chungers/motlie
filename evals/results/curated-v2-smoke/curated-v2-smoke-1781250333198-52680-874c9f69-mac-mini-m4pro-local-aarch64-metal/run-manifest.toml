@@ -1,0 +1,7 @@
+snapshot_id = "curated-v2-smoke"
+run_id = "curated-v2-smoke-1781250333198-52680-874c9f69-mac-mini-m4pro-local-aarch64-metal"
+profile = "apple-metal"
+host = "mac-mini-m4pro-local"
+arch = "aarch64"
+command_arg_count = 8
+hf_token_present = true

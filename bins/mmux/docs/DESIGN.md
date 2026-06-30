@@ -8,6 +8,9 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-24 | @codex-562-impl | Added issue #567 design update: list-focused `m` toggles host/machine grouped recency sorting back to global activity recency. |
+| 2026-06-22 | @codex-562-impl | Updated live-test follow-ups: session rows use single-space stable-id rendering, `s`/`g` toggle back to activity recency, and Help keeps its logo fixed while scrolling the key list. |
+| 2026-06-22 | @codex-562-impl | Added issue #562 design updates: session rows show stable tmux ids and list-focused `/` search uses case-insensitive substring matching in current sort order. |
 | 2026-05-28 | @gpt55-342-og | Updated multi-host identity for issue #342: SSH labels and aliases now use endpoint identity and positional `--alias` overrides are removed. |
 | 2026-05-20 | @codex | Added issue #317 host-label override design: `--alias` maps comma-separated display overrides to localhost plus SSH URI order, while empty entries preserve discovered labels. |
 | 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts so `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
@@ -135,6 +138,17 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 
 - The TUI body is split into a left pane `L` and right pane `R`.
 - `L` lists tmux sessions on the target host and has default focus.
+- `L` session rows show the display name and stable tmux session id, for
+  example `486-rv-llm [$42]`, so users can distinguish renamed or similarly
+  named sessions while mmux still dispatches by stable id internally.
+- When `L` has focus, `/` enters quick session search. Typed characters after
+  `/` match session display names, and the highlight jumps to the first
+  matching row in the current sort order. Typing another `/`, Up, or Down
+  cancels search mode and leaves the highlight where it is.
+  Matching is case-insensitive substring (`contains`), not prefix, following
+  the vi/vim/less `/` convention: search is unanchored/match-anywhere, while
+  prefix matching is a typeahead/completion idiom. Iterating matches with
+  `n`/`N` is a possible future follow-up and is out of scope for #562.
 - `R` shows a live active-pane preview for the highlighted session.
 - `L` and `R` participate in pane focus cycling in landscape mode.
 - `L` and `R` are both scrollable. The `L` viewport scrolls automatically to
@@ -220,7 +234,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `h` opens a centered help modal with the built-in motlie logo,
   build date, current build git SHA, key-function reference text, a horizontal
   separator, and an `Ok` button. Build metadata renders below the logo and
-  above the key-function reference.
+  above the key-function reference. The logo and build metadata stay fixed at
+  the top of the modal while the key-function reference scrolls below them
+  with Up/Down, PgUp/PgDn, or `j`/`k`.
 - In create/kill modal dialogs, Left and Right choose between `Cancel` and
   `Ok`; the kill modal also lets `Tab` / `Shift-Tab` cycle those buttons.
   Enter exits the modal and applies `Ok` when selected. `Esc` in a modal is
@@ -266,7 +282,13 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   each group sort by activity time, host order, and session name. Empty
   checked-tag values sort with rows that have no displayed tag. Pressing `g`
   selects the first row in the new order and pressing `g` again restores
-  activity sort. Sorting on the observer-side mark instead of raw host
+  activity sort. Pressing `s` while the session list is focused toggles name
+  sorting: the first press sorts by session name and selects the first row in
+  name order; the next press restores activity recency. Pressing `m` while the
+  session list is focused toggles host sorting: the first press groups rows by
+  host/machine in configured host order with recency order within each host;
+  the next press restores global activity recency. Sorting on the
+  observer-side mark instead of raw host
   `SessionInfo.activity` keeps activity order stable across multi-host fleets
   even when host clocks drift. Stable `(host_id, session_id)` preservation
   keeps the current highlight on the same session after refresh even if the row
@@ -665,8 +687,9 @@ The body area is split horizontally into `L` and `R`.
 
 - `L`: session list. The viewport scrolls to keep the highlighted row visible.
   Rows render display names, attachment markers, optional checked-tag values,
-  and optional multi-host markers; stable tmux session ids are retained in state
-  for dispatch but not shown.
+  optional multi-host markers, and stable tmux session ids in `[$id]` form.
+  The same id remains the dispatch key for attach, kill, rename, tags, and
+  detail refresh.
 - `R`: detail pane for selected-session active-pane live preview.
 
 **Focus model.** The landscape main view has two focus states: `L` (default)
@@ -693,6 +716,7 @@ Main-selector keymap (focus-aware):
 | PgUp / PgDn | Page through session list | Page through R buffer |
 | Home / End | First / last session | Top / bottom of buffer; `End` re-engages live tail |
 | Enter | Refresh live preview now for the highlighted session | No-op |
+| `/` then chars | Search session names and jump highlight to the first match in current sort order; `/`, Up, or Down cancels search | No-op |
 | Tab | Focus → `R` | Focus → `L` |
 | Left / Right | No-op | No-op |
 | `Esc` | Focus → `L` outside modal; `Cancel` inside modal | Focus → `L` outside modal; `Cancel` inside modal |
@@ -705,8 +729,10 @@ Main-selector keymap (focus-aware):
 | `$` then `0…9` | Send a single digit immediately to highlight | No-op |
 | `$` then `!` | Send `{Esc}` immediately to highlight | No-op |
 | `t` | Open tag list/add/update/delete modal for highlight | Same |
-| `g` | Toggle activity/tag grouping | No-op |
-| `h` | Open help modal with logo, key functions, and build git SHA | Same |
+| `g` | Toggle tag grouping / activity recency | No-op |
+| `s` | Toggle name sort / activity recency | No-op |
+| `m` | Toggle host sort / activity recency | No-op |
+| `h` | Open help modal with fixed logo, scrollable key functions, and build git SHA | Same |
 | `a` | Attach highlight | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 
@@ -1290,10 +1316,12 @@ Single-poll reconcile loop driven by the main TUI loop:
    - feed each `SessionInfo.activity` through `ActivityTracker::observe`
      to compute the row's `activity_observed_at_local`
    - sort rows using `SessionSortMode`: activity mode sorts by
-     `activity_observed_at_local` descending; tag-group mode puts rows with
-     visible non-empty checked-tag values before rows without displayed tags,
-     orders tag groups by the most recent activity in each group, then sorts
-     rows within each group by activity time, host order, and session name
+     `activity_observed_at_local` descending; name mode sorts by session name;
+     tag-group mode puts rows with visible non-empty checked-tag values before
+     rows without displayed tags, orders tag groups by the most recent activity
+     in each group, then sorts rows within each group by activity time, host
+     order, and session name; host-group mode groups rows by configured host
+     order and sorts rows within each host by activity recency
    - preserve highlight by `(host_id, session_id)`, falling back to the
      clamped index if the session disappeared
    - call `refresh_detail` **only** when the caller forced it, the

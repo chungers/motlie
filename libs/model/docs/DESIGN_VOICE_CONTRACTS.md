@@ -6,6 +6,10 @@
 | 2026-04-29 | @codex-tts | Implementation update: landed the brownfield compatibility pass in `libs/model` and `libs/models`, including buffered TTS traits, truthful curated metadata, and a shared buffered speech chunk stream. |
 | 2026-04-30 | @codex-tts | Imported the voice-agent skill layer onto the branch and completed the capability-driven composition pass so the voice runtime now derives buffered/batch/streaming behavior from curated metadata after model selection. |
 | 2026-05-02 | @codex-tts | Review follow-up: replaced descriptor-equality routing with typed `TranscriptDelivery` and `SpeechGeneration` metadata so execution semantics no longer depend on summary text, and simplified voice-agent adapter dispatch. |
+| 2026-06-14 PDT | @codex-m6-ds-rv | Added #524 follow-on design pointer: true incremental-audio TTS stays under `CapabilityKind::Speech`, uses a set of `SpeechGeneration` values, and must prove first playable PCM before full utterance synthesis; buffered chunk streams remain non-incremental. |
+| 2026-06-14 PDT | @codex-m6-ds-rv | Reconciled stale streaming-TTS wording with #524: true streaming now means `IncrementalSpeechSynthesizer` / `IncrementalSpeechStream` plus `SpeechGeneration::Streaming`, not the older ambiguous `SpeechStream` shim. |
+| 2026-06-14 PDT | @codex-m6-ds-rv | Kept incremental-TTS controls app-neutral: examples use an opaque request label for diagnostics, not caller-specific stale-response keys. |
+| 2026-06-15 PDT | @codex-m6-ds-rv | Implementation update: added `IncrementalSpeechSynthesizer` / `IncrementalSpeechStream`, changed speech-generation metadata to a set, and made `kokoro/kokoro_82m` the single curated Kokoro model surface for both buffered and streaming generation. |
 
 # Design: Voice Contracts
 
@@ -118,7 +122,9 @@ This design started as the target end state. The implementation landed in this r
 - metadata truth is expressed through richer `CapabilityDescriptor` / `Capabilities` constructors, including typed `TranscriptDelivery` and `SpeechGeneration` sub-discriminants instead of descriptor-equality checks
 - a shared `BufferedSpeechChunkStream` now carries the common buffered chunking path used by Piper and both Qwen3 TTS integrations
 
-That means the compiler can now distinguish buffered TTS backends from ASR streaming backends, while higher-level code can continue to consume chunked speech output during migration. On this branch the imported `voice-agent` runtime now uses curated capability metadata to decide whether a selected model is batch ASR, streaming ASR, or buffered TTS instead of inferring those semantics from backend names, and it resolves ASR delivery from typed `TranscriptDelivery` metadata rather than descriptor summary text. A stricter dedicated `StreamingSpeechSynthesizer` split is still a possible follow-on, but it is not required for this brownfield correction.
+That means the compiler can now distinguish buffered TTS backends from ASR streaming backends, while higher-level code can continue to consume chunked speech output during migration. On this branch the imported `voice-agent` runtime now uses curated capability metadata to decide whether a selected model is batch ASR, streaming ASR, or buffered TTS instead of inferring those semantics from backend names, and it resolves ASR delivery from typed `TranscriptDelivery` metadata rather than descriptor summary text.
+
+Follow-on #524 now owns the true incremental-audio TTS split. See [DESIGN_INCREMENTAL_TTS.md](./DESIGN_INCREMENTAL_TTS.md). That design treats true incremental audio as a success gate while keeping `CapabilityKind::Speech`; it replaces the current one-of `speech_generation` metadata with a set of `SpeechGeneration` values so buffered and streaming support can be advertised exactly. True streaming support is represented by `SpeechGeneration::Streaming` plus `IncrementalSpeechSynthesizer` / `IncrementalSpeechStream`; the older `SpeechSynthesizer` / `SpeechStream` surface remains only a chunk-consumable compatibility shim and must not satisfy streaming support by itself.
 
 ## Proposed Design
 
@@ -169,7 +175,7 @@ pub trait BufferedVoiceCloneSynthesizer<const RATE_HZ: u32, C: ChannelLayout>: S
 
 `SpeechSynthesizer` and `VoiceCloneSynthesizer` are retained for compatibility, but they now clearly mean “returns chunk-consumable audio output”, not necessarily true incremental generation. Buffered backends implement the new buffered traits and then adapt into chunked streams only when callers still need the older stream-shaped surface.
 
-A stricter dedicated `StreamingSpeechSynthesizer` / `StreamingVoiceCloneSynthesizer` split remains a reasonable future refinement once higher-level callers are ready for the narrower distinction.
+The #524 follow-on narrows that future refinement to `IncrementalSpeechSynthesizer` / `IncrementalSpeechStream` for the `SpeechGeneration::Streaming` case. `SpeechSynthesizer` and `VoiceCloneSynthesizer` stay compatibility shims for chunk-consumable output and are not proof of true streaming.
 
 ### 3. Add explicit speech execution metadata
 
@@ -198,7 +204,7 @@ That leaves backend-local code focused on:
 Higher-level apps such as the voice skills should be able to compose against typed behavior instead of backend identity.
 
 Examples:
-- a low-latency turn-taking path should require `StreamingSpeechSynthesizer + StreamingTranscriber`
+- a low-latency turn-taking path should require `IncrementalSpeechSynthesizer`, `SpeechGeneration::Streaming`, and `StreamingTranscriber`
 - a robust fallback path can use `BufferedSpeechSynthesizer + BatchTranscriber`
 - a cloning workflow can require one of the explicit cloning traits
 
@@ -222,9 +228,10 @@ That gives composition a compiler-visible contract instead of hidden backend ass
 
 ### Proposed true streaming TTS path
 
-1. Skill selects a model advertising `CapabilityDescriptor::speech_stream()`.
-2. Backend returns a real `SpeechStream`.
-3. Higher-level app may compose it with streaming ASR or live playback confidently.
+1. Skill selects a model advertising `CapabilityKind::Speech` plus `SpeechGeneration::Streaming`.
+2. Backend implements `IncrementalSpeechSynthesizer` and returns an `IncrementalSpeechStream`.
+3. The stream yields first playable PCM before an independent synthesis-complete signal, not merely before a terminal stream event.
+4. Higher-level app may compose it with streaming ASR or live playback confidently.
 
 ## API Ergonomics Examples
 
@@ -245,13 +252,20 @@ let audio = handle
 ```rust
 let handle = some_streaming_tts_bundle.start_typed(opts).await?;
 let mut stream = handle
-    .synthesize_streaming(SynthesisRequest {
-        text: "Hello from Motlie.".into(),
-        params: Default::default(),
-    })
+    .synthesize_incremental(
+        SynthesisRequest {
+            text: "Hello from Motlie.".into(),
+            params: Default::default(),
+        },
+        IncrementalSpeechControls {
+            cancel,
+            request_label,
+            max_buffered_audio_ms,
+        },
+    )
     .await?;
 
-while let Some(chunk) = stream.next_chunk().await? {
+while let Some(chunk) = stream.next_audio_chunk().await? {
     play(chunk).await?;
 }
 stream.finish().await?;

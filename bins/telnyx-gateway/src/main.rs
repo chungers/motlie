@@ -4,19 +4,18 @@ use std::sync::Arc;
 use clap::Parser;
 use motlie_driver::CommandEngine;
 use motlie_telnyx_gateway::adapter::{
-    AsrRegistry, EchoAsrFactory, SharedAsrFactory, SharedAsrRegistry, SherpaAsrArtifact,
-    default_artifact_root,
+    default_artifact_root, AsrRegistry, EchoAsrFactory, SharedAsrFactory, SharedAsrRegistry,
+    SherpaAsrArtifact,
 };
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::{Cli, CliCommand, ReplayBackendArg};
-use motlie_telnyx_gateway::conversation::{ConversationRuntime, default_conversation_handler};
+use motlie_telnyx_gateway::conversation::ConversationRuntime;
 use motlie_telnyx_gateway::media::SharedMediaRegistry;
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
-use motlie_telnyx_gateway::operator::script::run_repl_file;
-use motlie_telnyx_gateway::operator::state::{LogLevel, SharedState, shared_state};
-use motlie_telnyx_gateway::quality::{QualityEventSink, VoiceQualityConfig};
+use motlie_telnyx_gateway::operator::config_file::LoadedGatewayConfig;
+use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
 use motlie_telnyx_gateway::replay::ReplayBackend;
-use motlie_telnyx_gateway::serve::{AppServices, serve};
+use motlie_telnyx_gateway::serve::{serve, AppServices};
 use motlie_telnyx_gateway::text_calls::SharedTextCallRegistry;
 use motlie_telnyx_gateway::tts::{SharedTtsFactory, SharedTtsRegistry, TtsRegistry};
 use tokio::time::{self, Duration};
@@ -24,12 +23,21 @@ use tokio::time::{self, Duration};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let mut gateway_config = match &cli.config {
+        Some(path) => LoadedGatewayConfig::load(path)?,
+        None => LoadedGatewayConfig::defaults(),
+    };
+    apply_cli_overrides(&cli, &mut gateway_config);
+
     let default_tui_log = PathBuf::from("telnyx-gateway.log");
-    let log_file = cli
-        .log_file
-        .as_deref()
-        .or_else(|| cli.tui.then_some(default_tui_log.as_path()));
+    let log_file = gateway_config.process.log_file.as_deref().or_else(|| {
+        gateway_config
+            .process
+            .tui
+            .then_some(default_tui_log.as_path())
+    });
     let _logging_guard = motlie_telnyx_gateway::logging::init(log_file)?;
+    let artifact_root = default_artifact_root(gateway_config.process.artifact_root.clone());
 
     match cli.command.as_ref() {
         Some(CliCommand::ReplayCapture(args)) => {
@@ -37,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
             let report = motlie_telnyx_gateway::replay::replay_capture(
                 args,
                 backend.label(),
-                build_asr_factory(&cli, backend),
+                build_asr_factory(&artifact_root, backend),
             )
             .await?;
             print_replay_report(&report);
@@ -48,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
                 .selected_backends()
                 .into_iter()
                 .map(|backend| {
-                    ReplayBackend::new(backend.label(), build_asr_factory(&cli, backend))
+                    ReplayBackend::new(backend.label(), build_asr_factory(&artifact_root, backend))
                 })
                 .collect();
             let report = motlie_telnyx_gateway::replay::replay_corpus(args, backends).await?;
@@ -56,13 +64,9 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(CliCommand::GoldenTts(args)) => {
-            let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
-            let report = motlie_telnyx_gateway::golden_ab::generate_tts_wavs(
-                args,
-                artifact_root,
-                !cli.no_asr_download,
-            )
-            .await?;
+            let report =
+                motlie_telnyx_gateway::golden_ab::generate_tts_wavs(args, artifact_root.clone())
+                    .await?;
             print_golden_tts_report(&report);
             return Ok(());
         }
@@ -71,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
                 .selected_backends()
                 .into_iter()
                 .map(|backend| {
-                    ReplayBackend::new(backend.label(), build_asr_factory(&cli, backend))
+                    ReplayBackend::new(backend.label(), build_asr_factory(&artifact_root, backend))
                 })
                 .collect();
             let report = motlie_telnyx_gateway::golden_ab::run_golden_ab(args, backends).await?;
@@ -80,14 +84,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(CliCommand::TtsGoldenAb(args)) => {
             let asr_backend = args.asr_backend;
-            let fixed_asr =
-                ReplayBackend::new(asr_backend.label(), build_asr_factory(&cli, asr_backend));
-            let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+            let fixed_asr = ReplayBackend::new(
+                asr_backend.label(),
+                build_asr_factory(&artifact_root, asr_backend),
+            );
             let report = motlie_telnyx_gateway::golden_ab::run_tts_golden_ab(
                 args,
                 fixed_asr,
-                artifact_root,
-                !cli.no_asr_download,
+                artifact_root.clone(),
             )
             .await?;
             print_tts_golden_ab_report(&report);
@@ -96,37 +100,35 @@ async fn main() -> anyhow::Result<()> {
         None => {}
     }
 
-    let state = shared_state(cli.bind);
+    let state = shared_state(gateway_config.process.bind);
     {
-        let quality_config = initial_quality_config(&cli)?;
         let mut guard = state.write().await;
-        guard.set_quality_config(quality_config);
+        gateway_config.apply_to_state(&mut guard)?;
+        guard.config.bind = Some(gateway_config.process.bind);
         guard.log(
             LogLevel::Info,
-            format!("listener configured on {}", cli.bind),
+            format!("listener configured on {}", gateway_config.process.bind),
         );
-        guard.config.capture_dir = cli.capture_dir.clone();
     }
 
-    let api_key = std::env::var(&cli.telnyx_api_key_env).ok();
-    let telnyx = TelnyxClient::new(cli.telnyx_api_base.clone(), api_key, cli.dry_run_telnyx);
-    let asr = build_live_asr_registry(&cli);
+    let api_key = gateway_config.telnyx_api_key()?;
+    let telnyx = TelnyxClient::new(
+        gateway_config.telnyx.api_base.clone(),
+        api_key,
+        gateway_config.telnyx.dry_run,
+    );
+    let asr = build_live_asr_registry(&artifact_root);
     let media = SharedMediaRegistry::default();
     let text_calls = SharedTextCallRegistry::default();
-    let tts = build_tts_registry(&cli);
-    let conversation = ConversationRuntime::new_with_handler_options(
+    let tts = build_tts_registry(&artifact_root);
+    let conversation = ConversationRuntime::new_with_processor_options(
         telnyx.clone(),
         tts.clone(),
-        default_conversation_handler(),
-        cli.conversation_smoke_test,
-        cli.conversation_smoke_test,
+        gateway_config.conversation.enabled,
+        gateway_config.conversation.final_coalescing_enabled,
     );
-    if cli.conversation_smoke_test {
-        state.write().await.log(
-            LogLevel::Info,
-            "conversation smoke-test enabled".to_string(),
-        );
-    }
+    conversation.set_barge_in_enabled(gateway_config.conversation.barge_in_enabled);
+
     let services = AppServices {
         state: state.clone(),
         telnyx: telnyx.clone(),
@@ -137,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
         text_calls: text_calls.clone(),
     };
 
-    let server = tokio::spawn(serve(cli.bind, services));
+    let server = tokio::spawn(serve(gateway_config.process.bind, services));
     let context = GatewayContext::with_services(
         state.clone(),
         telnyx,
@@ -146,14 +148,20 @@ async fn main() -> anyhow::Result<()> {
         tts,
         conversation,
         motlie_telnyx_gateway::adapter::LiveAsrBackend::default(),
-    );
-    let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
-
-    if let Some(path) = &cli.load {
-        let _ = run_repl_file(&mut replay_engine, path).await?;
+    )
+    .with_text_calls(text_calls.clone());
+    let mut startup_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
+    if gateway_config.startup.warm_models {
+        let warm_output = startup_engine
+            .run_argv(&["warm".to_string()])
+            .await
+            .map_err(|error| anyhow::anyhow!("startup warm_models failed: {error}"))?;
+        for line in warm_output.lines {
+            state.write().await.log(LogLevel::Info, line);
+        }
     }
-    apply_quality_cli_overrides(&cli, &state).await?;
-    let socket_task = if let Some(path) = cli.socket.clone() {
+
+    let socket_task = if let Some(path) = gateway_config.process.socket.clone() {
         let socket_context = Arc::new(context.for_new_source());
         {
             let mut guard = state.write().await;
@@ -169,20 +177,21 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    if cli.tui {
+    if gateway_config.process.tui {
         let tui_context = context.for_new_source();
         let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(tui_context);
         motlie_telnyx_gateway::operator::tui::run_tui(&mut engine).await?;
     } else {
-        println!("telnyx-gateway listening on {}", cli.bind);
-        if cli.socket.is_some() {
-            println!(
-                "inbound is disabled by default; use the command socket for M1 operator control"
-            );
+        println!(
+            "telnyx-gateway listening on {}",
+            gateway_config.process.bind
+        );
+        if gateway_config.process.socket.is_some() {
+            println!("inbound is disabled by default; use the command socket for operator control");
             wait_for_shutdown(state.clone()).await?;
         } else {
             println!(
-                "inbound is disabled by default; use --tui or --socket for M1 operator control"
+                "inbound is disabled by default; use --tui, --socket, or --config for operator control"
             );
             tokio::signal::ctrl_c().await?;
         }
@@ -196,48 +205,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn initial_quality_config(cli: &Cli) -> anyhow::Result<VoiceQualityConfig> {
-    let mut config = cli
-        .quality_profile
-        .map(VoiceQualityConfig::for_profile)
-        .unwrap_or_default();
-    if let Some(path) = &cli.quality_config {
-        config.apply_toml_file(path)?;
+fn apply_cli_overrides(cli: &Cli, gateway_config: &mut LoadedGatewayConfig) {
+    if let Some(bind) = cli.bind {
+        gateway_config.process.bind = bind;
     }
-    Ok(config)
-}
-
-async fn apply_quality_cli_overrides(cli: &Cli, state: &SharedState) -> anyhow::Result<()> {
-    {
-        let mut guard = state.write().await;
-        if let Some(value) = cli.endpoint_trailing_silence_ms {
-            guard.quality.config.set_endpoint_trailing_silence_ms(value);
-        }
-        if let Some(value) = cli.speech_rms_threshold {
-            guard.quality.config.set_speech_rms_threshold(value)?;
-        }
-        if let Some(value) = cli.speech_peak_threshold {
-            guard.quality.config.set_speech_peak_threshold(value);
-        }
-        if let Some(value) = cli.speech_onset_min_silence_ms {
-            guard.quality.config.set_speech_onset_min_silence_ms(value);
-        }
-        guard.quality.config_id = guard.quality.config.config_id();
+    if cli.tui {
+        gateway_config.process.tui = true;
     }
-
-    if let Some(path) = &cli.turn_log_jsonl {
-        let capacity = state.read().await.quality.config.logging.queue_capacity;
-        let sink = QualityEventSink::start_jsonl_writer(path, capacity)?;
-        let mut guard = state.write().await;
-        guard.quality.config.set_logging_enabled(true);
-        guard.quality.config_id = guard.quality.config.config_id();
-        guard.set_quality_event_sink(sink, Some(path.clone()));
-        guard.log(
-            LogLevel::Info,
-            format!("quality logging on {}", path.display()),
-        );
+    if let Some(socket) = &cli.socket {
+        gateway_config.process.socket = Some(socket.clone());
     }
-    Ok(())
+    if let Some(artifact_root) = &cli.artifact_root {
+        gateway_config.process.artifact_root = Some(artifact_root.clone());
+    }
+    if let Some(log_file) = &cli.log_file {
+        gateway_config.process.log_file = Some(log_file.clone());
+    }
 }
 
 fn print_corpus_report(report: &motlie_telnyx_gateway::replay::CorpusReplayReport) {
@@ -270,25 +253,22 @@ fn print_corpus_report(report: &motlie_telnyx_gateway::replay::CorpusReplayRepor
     }
 }
 
-fn build_tts_registry(cli: &Cli) -> SharedTtsRegistry {
-    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
-    let allow_download = !cli.no_asr_download;
+fn build_tts_registry(artifact_root: &Path) -> SharedTtsRegistry {
     Arc::new(TtsRegistry::new(
-        build_kokoro_tts_factory(&artifact_root, allow_download),
-        build_piper_tts_factory(&artifact_root, allow_download),
+        build_kokoro_tts_factory(artifact_root),
+        build_piper_tts_factory(artifact_root),
     ))
 }
 
 #[cfg(feature = "kokoro")]
-fn build_kokoro_tts_factory(artifact_root: &Path, allow_download: bool) -> SharedTtsFactory {
+fn build_kokoro_tts_factory(artifact_root: &Path) -> SharedTtsFactory {
     Arc::new(motlie_telnyx_gateway::tts::KokoroTtsFactory::new(
         artifact_root.to_path_buf(),
-        allow_download,
     ))
 }
 
 #[cfg(not(feature = "kokoro"))]
-fn build_kokoro_tts_factory(_artifact_root: &Path, _allow_download: bool) -> SharedTtsFactory {
+fn build_kokoro_tts_factory(_artifact_root: &Path) -> SharedTtsFactory {
     Arc::new(motlie_telnyx_gateway::tts::UnavailableTtsFactory::new(
         motlie_telnyx_gateway::tts::LiveTtsBackend::Kokoro82m.model_label(),
         "Kokoro-82M TTS is unavailable; rebuild with --features kokoro",
@@ -296,15 +276,14 @@ fn build_kokoro_tts_factory(_artifact_root: &Path, _allow_download: bool) -> Sha
 }
 
 #[cfg(feature = "piper")]
-fn build_piper_tts_factory(artifact_root: &Path, allow_download: bool) -> SharedTtsFactory {
+fn build_piper_tts_factory(artifact_root: &Path) -> SharedTtsFactory {
     Arc::new(motlie_telnyx_gateway::tts::PiperTtsFactory::new(
         artifact_root.to_path_buf(),
-        allow_download,
     ))
 }
 
 #[cfg(not(feature = "piper"))]
-fn build_piper_tts_factory(_artifact_root: &Path, _allow_download: bool) -> SharedTtsFactory {
+fn build_piper_tts_factory(_artifact_root: &Path) -> SharedTtsFactory {
     Arc::new(motlie_telnyx_gateway::tts::UnavailableTtsFactory::new(
         motlie_telnyx_gateway::tts::LiveTtsBackend::Piper.model_label(),
         "Piper TTS is unavailable; rebuild with --features piper",
@@ -482,86 +461,83 @@ async fn wait_for_shutdown(
     }
 }
 
-fn build_live_asr_registry(cli: &Cli) -> SharedAsrRegistry {
+fn build_live_asr_registry(artifact_root: &Path) -> SharedAsrRegistry {
     if std::env::var_os("MOTLIE_TELNYX_ECHO_ASR").is_some() {
         let echo: SharedAsrFactory = Arc::new(EchoAsrFactory);
         return Arc::new(AsrRegistry::new(echo.clone(), echo));
     }
 
     Arc::new(AsrRegistry::new(
-        build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEn20230626),
-        build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEnKroko20250806),
+        build_sherpa_asr_factory(artifact_root, SherpaAsrArtifact::ZipformerEn20230626),
+        build_sherpa_asr_factory(artifact_root, SherpaAsrArtifact::ZipformerEnKroko20250806),
     ))
 }
 
-fn build_asr_factory(cli: &Cli, backend: ReplayBackendArg) -> SharedAsrFactory {
+fn build_asr_factory(artifact_root: &Path, backend: ReplayBackendArg) -> SharedAsrFactory {
     match backend {
-        ReplayBackendArg::Auto => build_auto_asr_factory(cli),
+        ReplayBackendArg::Auto => build_auto_asr_factory(artifact_root),
         ReplayBackendArg::Echo => Arc::new(EchoAsrFactory),
         ReplayBackendArg::Sherpa | ReplayBackendArg::SherpaZipformer2023 => {
-            build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEn20230626)
+            build_sherpa_asr_factory(artifact_root, SherpaAsrArtifact::ZipformerEn20230626)
         }
         ReplayBackendArg::SherpaZipformerKroko2025 => {
-            build_sherpa_asr_factory(cli, SherpaAsrArtifact::ZipformerEnKroko20250806)
+            build_sherpa_asr_factory(artifact_root, SherpaAsrArtifact::ZipformerEnKroko20250806)
         }
-        ReplayBackendArg::Moonshine => build_moonshine_asr_factory(cli),
-        ReplayBackendArg::Whisper => build_whisper_asr_factory(cli),
+        ReplayBackendArg::Moonshine => build_moonshine_asr_factory(artifact_root),
+        ReplayBackendArg::Whisper => build_whisper_asr_factory(artifact_root),
     }
 }
 
-fn build_auto_asr_factory(cli: &Cli) -> SharedAsrFactory {
+fn build_auto_asr_factory(artifact_root: &Path) -> SharedAsrFactory {
     if std::env::var_os("MOTLIE_TELNYX_ECHO_ASR").is_some() {
         return Arc::new(EchoAsrFactory);
     }
-    build_sherpa_asr_factory(cli, SherpaAsrArtifact::default())
+    build_sherpa_asr_factory(artifact_root, SherpaAsrArtifact::default())
 }
 
 #[cfg(feature = "sherpa")]
-fn build_sherpa_asr_factory(cli: &Cli, artifact: SherpaAsrArtifact) -> SharedAsrFactory {
-    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+fn build_sherpa_asr_factory(artifact_root: &Path, artifact: SherpaAsrArtifact) -> SharedAsrFactory {
     Arc::new(
         motlie_telnyx_gateway::adapter::SherpaAsrFactory::with_artifact(
-            artifact_root,
-            !cli.no_asr_download,
+            artifact_root.to_path_buf(),
             artifact,
         ),
     )
 }
 
 #[cfg(not(feature = "sherpa"))]
-fn build_sherpa_asr_factory(_cli: &Cli, _artifact: SherpaAsrArtifact) -> SharedAsrFactory {
+fn build_sherpa_asr_factory(
+    _artifact_root: &Path,
+    _artifact: SherpaAsrArtifact,
+) -> SharedAsrFactory {
     Arc::new(motlie_telnyx_gateway::adapter::UnavailableAsrFactory::new(
         "gateway was built without a live ASR backend; rebuild with --features sherpa or use --backend echo for replay protocol testing",
     ))
 }
 
 #[cfg(feature = "moonshine")]
-fn build_moonshine_asr_factory(cli: &Cli) -> SharedAsrFactory {
-    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+fn build_moonshine_asr_factory(artifact_root: &Path) -> SharedAsrFactory {
     Arc::new(motlie_telnyx_gateway::adapter::MoonshineAsrFactory::new(
-        artifact_root,
-        !cli.no_asr_download,
+        artifact_root.to_path_buf(),
     ))
 }
 
 #[cfg(not(feature = "moonshine"))]
-fn build_moonshine_asr_factory(_cli: &Cli) -> SharedAsrFactory {
+fn build_moonshine_asr_factory(_artifact_root: &Path) -> SharedAsrFactory {
     Arc::new(motlie_telnyx_gateway::adapter::UnavailableAsrFactory::new(
         "gateway was built without Moonshine ASR; rebuild with --features moonshine or --features golden-ab",
     ))
 }
 
 #[cfg(feature = "whisper")]
-fn build_whisper_asr_factory(cli: &Cli) -> SharedAsrFactory {
-    let artifact_root = default_artifact_root(cli.asr_artifact_root.clone());
+fn build_whisper_asr_factory(artifact_root: &Path) -> SharedAsrFactory {
     Arc::new(motlie_telnyx_gateway::adapter::WhisperAsrFactory::new(
-        artifact_root,
-        !cli.no_asr_download,
+        artifact_root.to_path_buf(),
     ))
 }
 
 #[cfg(not(feature = "whisper"))]
-fn build_whisper_asr_factory(_cli: &Cli) -> SharedAsrFactory {
+fn build_whisper_asr_factory(_artifact_root: &Path) -> SharedAsrFactory {
     Arc::new(motlie_telnyx_gateway::adapter::UnavailableAsrFactory::new(
         "gateway was built without Whisper ASR; rebuild with --features whisper or --features golden-ab",
     ))

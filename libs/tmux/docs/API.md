@@ -22,6 +22,8 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-26 | @codex-570-impl | Added `AttachMode` for mode-aware transport attach command construction while keeping window lifecycle outside `motlie-tmux`. |
+| 2026-06-25 | @codex-570-impl | Documented public `AttachCommand` resolution/rendering APIs used by mstream attach while preserving tmux transport ownership. |
 | 2026-05-30 | @codex-359-og | Added explicit session-id sink filters, documented that session-name filters no longer match stable `$N` ids, and clarified scoped discontinuity delivery. |
 | 2026-05-30 | @codex-355-rv | Added stable session-id target specs and documented that resolved `Target::target_string()` uses tmux ids while names remain display metadata. |
 | 2026-05-28 | @gpt55-342-og | Added `SshConfig::endpoint_alias()` and `connect_with_endpoint_alias()` for stable SSH endpoint display and HostHandle aliases. |
@@ -961,6 +963,31 @@ to suppress client-side connection diagnostics.
 
 `AttachExit::shell_status()` maps normal exits to their exit code and Unix
 signal exits to `128 + signal`, which is the value CLI callers should return.
+
+Callers that need to hand the command to another process can resolve it without
+attaching by choosing an attach transport mode:
+
+```rust
+use motlie_tmux::{AttachMode, AttachOptions};
+
+let command = target.attach_command(AttachMode::PtyHandoff).await?;
+println!("{}", command.shell_command());
+
+let exit = tokio::task::spawn_blocking(move || {
+    motlie_tmux::run_attach_command_with_options(command, AttachOptions::default())
+})
+.await??;
+```
+
+`AttachMode::PtyHandoff` builds the top-level handoff command: local targets use
+bare `tmux attach-session`, and remote targets use `ssh -t ... tmux
+attach-session`. `AttachMode::WindowInjection` builds the nested-in-existing-tmux
+command shape: local targets use `env -u TMUX tmux ... attach-session` so tmux
+will allow a nested client in the caller pane, while remote targets continue to
+use SSH attach. `AttachCommand` exposes the raw `program()` and `args()` argv for
+process spawning plus `shell_command()` for shell-safe display or wrapper
+handoff. This is still transport only: higher-level CLI policy, daemon RPCs, and
+tmux window lifecycle remain outside `motlie-tmux`.
 
 ### Session Status Bar Overrides
 

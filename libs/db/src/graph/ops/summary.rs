@@ -264,30 +264,6 @@ pub(crate) fn resolve_node_summary_from_txn(
     }
 }
 
-/// Resolve a node summary from a transaction context (strict).
-///
-/// Returns an error if the summary hash is missing or not found.
-pub(crate) fn resolve_node_summary_from_txn_strict(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    summary_hash: Option<SummaryHash>,
-) -> Result<NodeSummary> {
-    let hash = summary_hash.ok_or_else(|| anyhow::anyhow!("Missing node summary hash"))?;
-
-    let summaries_cf = txn_db
-        .cf_handle(NodeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-
-    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
-
-    match txn.get_cf(summaries_cf, &key_bytes)? {
-        Some(bytes) => {
-            let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
-        }
-        None => Err(anyhow::anyhow!("Missing node summary for hash {:?}", hash)),
-    }
-}
 
 /// Resolve an edge summary from the EdgeSummaries cold CF.
 ///
@@ -382,30 +358,6 @@ pub(crate) fn resolve_edge_summary_from_txn(
     }
 }
 
-/// Resolve an edge summary from a transaction context (strict).
-///
-/// Returns an error if the summary hash is missing or not found.
-pub(crate) fn resolve_edge_summary_from_txn_strict(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    summary_hash: Option<SummaryHash>,
-) -> Result<EdgeSummary> {
-    let hash = summary_hash.ok_or_else(|| anyhow::anyhow!("Missing edge summary hash"))?;
-
-    let summaries_cf = txn_db
-        .cf_handle(EdgeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-
-    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
-
-    match txn.get_cf(summaries_cf, &key_bytes)? {
-        Some(bytes) => {
-            let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
-        }
-        None => Err(anyhow::anyhow!("Missing edge summary for hash {:?}", hash)),
-    }
-}
 
 /// Check whether a node summary exists in storage.
 pub(crate) fn node_summary_exists(storage: &Storage, hash: SummaryHash) -> Result<bool> {

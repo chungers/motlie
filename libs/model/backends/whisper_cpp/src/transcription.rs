@@ -7,9 +7,9 @@ use motlie_model::typed::{AudioBuf, BatchTranscriber, Mono};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
-    UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, StartOptions, TranscriptSegment, TranscriptionParams,
+    TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 
 use crate::common::{
@@ -89,7 +89,7 @@ impl BackendAdapter for WhisperCppTranscriptionAdapter {
     ) -> Result<Self::Handle, ModelError> {
         // Reject unsupported quantization requests explicitly.
         self.quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let model_path = resolve_ggml_model_path(checkpoint)?;
         let ctx = load_whisper_model(&model_path)?;
@@ -151,7 +151,7 @@ impl WhisperCppTranscriptionBundle {
         // Reject unsupported quantization requests explicitly.
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let model_path = if let Some(artifact_policy) = options.artifact_policy {
             configure_artifact_policy(self.model_filename, artifact_policy)?
@@ -254,6 +254,22 @@ impl BundleHandle for WhisperCppHandle {
             text_generation: None,
             embeddings: None,
         })
+    }
+
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        if cfg!(feature = "cuda") {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "whisper_cpp:cuda".to_owned(),
+                offload: Some("cuda_execution_provider=on".to_owned()),
+                selected_device: Some("0".to_owned()),
+            })
+        } else {
+            Some(RuntimeAcceleratorObservation {
+                backend_mode: "whisper_cpp:cpu".to_owned(),
+                offload: Some("accelerator_feature=none".to_owned()),
+                selected_device: None,
+            })
+        }
     }
 
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
@@ -360,11 +376,13 @@ fn decode_samples(
             .to_owned();
         let t0 = segment.start_timestamp();
         let t1 = segment.end_timestamp();
+        let confidence = whisper_segment_confidence(&segment);
 
         segments.push(TranscriptSegment {
             start_ms: (t0 * 10) as u64,
             end_ms: (t1 * 10) as u64,
             text,
+            confidence,
             final_segment: true,
         });
     }
@@ -376,6 +394,16 @@ fn decode_samples(
     }
 
     Ok(TranscriptionUpdate { segments })
+}
+
+fn whisper_segment_confidence(segment: &whisper_rs::WhisperSegment<'_>) -> Option<f32> {
+    let last_token = segment.n_tokens().checked_sub(1)?;
+    let token = segment.get_token(last_token)?;
+    native_whisper_token_confidence(token.token_probability())
+}
+
+fn native_whisper_token_confidence(probability: f32) -> Option<f32> {
+    (probability.is_finite() && (0.0..=1.0).contains(&probability)).then_some(probability)
 }
 
 impl BatchTranscriber for WhisperCppHandle {
@@ -432,5 +460,19 @@ mod tests {
             .capabilities()
             .supports(CapabilityKind::Transcription));
         assert_eq!(bundle.metadata().quantization, QuantizationSupport::none());
+    }
+
+    #[test]
+    fn native_whisper_token_confidence_accepts_probability_range() {
+        assert_eq!(native_whisper_token_confidence(0.0), Some(0.0));
+        assert_eq!(native_whisper_token_confidence(0.75), Some(0.75));
+        assert_eq!(native_whisper_token_confidence(1.0), Some(1.0));
+    }
+
+    #[test]
+    fn native_whisper_token_confidence_rejects_non_probability_values() {
+        assert_eq!(native_whisper_token_confidence(-0.1), None);
+        assert_eq!(native_whisper_token_confidence(1.1), None);
+        assert_eq!(native_whisper_token_confidence(f32::NAN), None);
     }
 }

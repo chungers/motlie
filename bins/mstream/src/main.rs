@@ -1,3 +1,4 @@
+mod attach;
 mod build_info;
 mod cli;
 mod client;
@@ -31,6 +32,7 @@ async fn run() -> anyhow::Result<i32> {
     let socket = cli.socket_path();
 
     match cli.command {
+        Command::Attach(args) => return attach::run(&socket, args).await,
         Command::Daemon(DaemonCommand::Start(args)) => {
             if args.foreground {
                 daemon::run_foreground(socket).await?;

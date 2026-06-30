@@ -3008,6 +3008,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "evals"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hound",
+ "motlie-eval-tools",
+ "motlie-model",
+ "motlie-models",
+ "motlie-voice",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
 name = "exr"
 version = "1.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3869,6 +3887,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gray_matter"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3563a3eb8bacf11a0a6d93de7885f2cca224dddff0114e4eb8053ca0f1918acd"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4233,9 +4262,9 @@ checksum = "e9025058dae765dee5070ec375f591e2ba14638c63feff74f13805a72e523163"
 
 [[package]]
 name = "http"
-version = "1.4.2"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+checksum = "8be7462df143984c4598a256ef469b251d7d7f9e271135073e78fc535414f3d0"
 dependencies = [
  "bytes",
  "itoa",
@@ -4293,9 +4322,9 @@ checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.12"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9155a582abd142abc056962c29e3ce5ff2ad5469f4246b537ed42c5deba857da"
+checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
 dependencies = [
  "ctutils",
  "subtle",
@@ -4894,12 +4923,13 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.100"
+version = "0.3.99"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2025f20d7a4fa7785846e7b63d10a76d3f1cee98ee5cb79ea59703f95e42162"
+checksum = "142bc4740e452c1e57ade0cbc129f139c9093e354346f0872ef985f4f5cf5f11"
 dependencies = [
  "cfg-if",
  "futures-util",
+ "once_cell",
  "wasm-bindgen",
 ]
 
@@ -5741,7 +5771,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
- "uuid 1.23.3",
+ "uuid 1.23.2",
  "variantly",
  "vob",
 ]
@@ -5776,7 +5806,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "utoipa",
- "uuid 1.23.3",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -5932,6 +5962,8 @@ name = "motlie-agent"
 version = "0.1.0"
 dependencies = [
  "motlie-tmux",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6014,6 +6046,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-eval-tools"
+version = "0.1.0"
+dependencies = [
+ "motlie-model",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "motlie-mcp"
 version = "0.1.0"
 dependencies = [
@@ -6075,14 +6117,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "motlie-model-eval"
-version = "0.1.0"
-dependencies = [
- "motlie-model",
- "motlie-models",
-]
-
-[[package]]
 name = "motlie-model-kokoro"
 version = "0.1.0"
 dependencies = [
@@ -6093,6 +6127,7 @@ dependencies = [
  "ndarray",
  "ort",
  "serde_json",
+ "sherpa-onnx",
  "tokenizers 0.21.4",
  "tokio",
  "tracing",
@@ -6133,6 +6168,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "motlie-model",
+ "motlie-model-ort",
  "ndarray",
  "ort",
  "serde_json",
@@ -6183,6 +6219,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "motlie-model",
+ "motlie-model-ort",
+ "ndarray",
+ "ort",
  "sherpa-onnx",
  "tokio",
  "tracing",
@@ -6257,7 +6296,6 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "motlie-agent",
- "motlie-telnyx-gateway",
  "motlie-tmux",
  "reqwest 0.13.4",
  "serde",
@@ -6266,7 +6304,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "uuid 1.23.3",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -6281,9 +6319,11 @@ dependencies = [
  "clap",
  "crossterm 0.29.0",
  "futures-util",
+ "gray_matter",
  "hex",
  "hmac 0.12.1",
  "hound",
+ "motlie-agent",
  "motlie-driver",
  "motlie-model",
  "motlie-model-kokoro",
@@ -6309,7 +6349,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "urlencoding",
- "uuid 1.23.3",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -6332,7 +6372,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid 1.23.3",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -7091,11 +7131,11 @@ dependencies = [
 [[package]]
 name = "ort-sys"
 version = "2.0.0-rc.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
 dependencies = [
+ "bzip2",
  "hmac-sha256",
  "lzma-rust2",
+ "tar",
  "ureq 3.3.0",
 ]
 
@@ -7781,7 +7821,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
- "uuid 1.23.3",
+ "uuid 1.23.2",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -8621,9 +8661,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.4"
+version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
+checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -8644,9 +8684,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.11"
+version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rend"
@@ -8805,7 +8845,7 @@ dependencies = [
  "rkyv_derive",
  "seahash",
  "tinyvec",
- "uuid 1.23.3",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -8848,7 +8888,7 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
- "uuid 1.23.3",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -10036,8 +10076,6 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 [[package]]
 name = "sherpa-onnx"
 version = "1.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f70620e4fa58e4cb1acf4e0a9c2cbc7496ea8284f80e55be23d443b92e563e49"
 dependencies = [
  "serde",
  "serde_json",
@@ -10806,7 +10844,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "time",
- "uuid 1.23.3",
+ "uuid 1.23.2",
  "winapi",
 ]
 
@@ -12268,9 +12306,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.23.3"
+version = "1.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
+checksum = "d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7"
 dependencies = [
  "atomic",
  "getrandom 0.4.2",
@@ -12341,7 +12379,7 @@ checksum = "ee90657203a8644e9a0860a0db6a7887d8ef0c7bc09fc22dfa4ae75df65bac86"
 dependencies = [
  "bitflags 2.13.0",
  "libc",
- "uuid 1.23.3",
+ "uuid 1.23.2",
  "vm-memory",
  "vmm-sys-util",
 ]
@@ -12598,9 +12636,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.123"
+version = "0.2.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a254a4b10c19a76f09a27640e7ffbf9bc30bf67e16a3bf28aaefa4920fe81563"
+checksum = "3ed04576f974d2b2fba0f38c51dbc5518011e38c36bf1143164be765528fd409"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -12611,9 +12649,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.73"
+version = "0.4.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54568702fabf5d4849ce2b90fadfa64168a097eaf4b351ce9df8b687a0086aaf"
+checksum = "9473dbd2991ae90b6291c3c32c30c6187ac49aa32f9905d1cce280ec1e110b0f"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -12621,9 +12659,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.123"
+version = "0.2.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24a40fc75b0ec6f3746ceb10d36f53a93dcd68a93b11b6445983945d79eba0dc"
+checksum = "916151b09da36bd82f6615cbf3a419e2f0ba23a03c6160e8e92eb6bd4aa1dec6"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -12631,9 +12669,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.123"
+version = "0.2.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "908f34bd9b9ce3d4caf07b72dfab63d61504d156856c6bd3cd87fa350cf3985b"
+checksum = "299047362ccbfce148b67ab7e73349f77748e00c8296f9542adfad2ad82c5c5e"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -12644,9 +12682,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.123"
+version = "0.2.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7acbf7616c27b194bbb550bf77ed0c2c3e5b7fd1260a93082b95fb7f47959b92"
+checksum = "9a929b2c61f11ba3e9bc35b50c1f25cb38e0e892c0c231ae2b8cf78d5dad4437"
 dependencies = [
  "unicode-ident",
 ]
@@ -12713,9 +12751,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.100"
+version = "0.3.99"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e0871acf327f283dc6da28a1696cdc64fb355ba9f935d052021fa77f35cce69"
+checksum = "6d621441cfc37b84979402712047321980c178f299193a3589d05b99e8763436"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -12797,7 +12835,7 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "thiserror 1.0.69",
- "uuid 1.23.3",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -13637,18 +13675,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.52"
+version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce1022995ff5ff5d841ad7d994facc23098cd40152f2c1d11cd607c6f530653f"
+checksum = "3b065d4f0e55f82fae73202e189638116a87c55ab6b8e6c2721e13dd9d854ad1"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.52"
+version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ae7f38b72ec2a254e2b87ef277cf2cd4fb97cbebf944faa6f33354da0867930"
+checksum = "0b631b19d36a892ab55420c92dbc83ccd79274f25be714855d3074aa71cab639"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -22,8 +22,9 @@ motlie-model-ort = { path = "../ort" }
 ndarray = "0.17"
 serde_json = "1.0"
 ort.workspace = true
+sherpa-onnx = "1.13.2"
 tokenizers = "0.21"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"
 
 [dev-dependencies]

@@ -1,0 +1,41 @@
+schema_version = 1
+id = "chat_smoke"
+capability = "chat"
+summary = "Single-turn and follow-up chat smoke for curated text/chat bundles."
+
+[bundle_filter]
+capability = "chat"
+backend = ["MistralRs", "LlamaCpp"]
+
+[input]
+system_prompt = "Be concise. Answer in one paragraph."
+prompt = "In one sentence, explain what Motlie model bundles are for."
+followup_prompt = "Now say that more simply."
+# No a-priori max_tokens cap (#492): generation runs to the model's natural EOS.
+# A guessed cap produces false think-token-exhaustion failures and cannot be
+# known a priori when curating a new model. Natural token usage is recorded as
+# metrics for empirical cross-model discovery instead.
+temperature = 0.2
+
+[assertions]
+min_response_chars = 16
+min_followup_response_chars = 8
+
+[metrics]
+capture_startup_ms = true
+capture_request_latency = true
+capture_peak_rss = true
+
+[profiles.local-cpu-x86_64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.local-cpu-aarch64.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.apple-metal]
+
+[profiles.dgx-spark.gates]
+max_process_swap_delta_bytes = 4294967296
+
+[profiles.cuda-workstation.gates]
+max_process_swap_delta_bytes = 4294967296

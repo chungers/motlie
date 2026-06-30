@@ -82,10 +82,6 @@ pub struct Index {
     dim: usize,
     /// Number of bidirectional links per node (M parameter)
     m: usize,
-    /// Maximum links per node at layers > 0 (typically 2*M)
-    m_max: usize,
-    /// Maximum links per node at layer 0 (typically 2*M)
-    m_max_0: usize,
     /// Search beam width during index construction
     ef_construction: usize,
     /// Probability multiplier for layer assignment: P(layer = L) = exp(-L * m_l)
@@ -118,8 +114,6 @@ impl Index {
             nav_cache,
             dim: spec.dim as usize,
             m: spec.m(),
-            m_max: spec.m_max(),
-            m_max_0: spec.m_max_0(),
             ef_construction: spec.ef_construction(),
             m_l: spec.m_l(),
             batch_threshold,

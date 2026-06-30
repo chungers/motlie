@@ -616,11 +616,12 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             conversation_tts_warm
         )),
         Line::from(format!(
-            "endpoint: trailing={}ms min_words={} min_chars={} merge={}ms max_words={} max={}ms",
+            "endpoint: trailing={}ms min_words={} min_chars={} merge={}ms settle={}ms max_words={} max={}ms",
             quality.endpoint.trailing_silence_ms,
             quality.endpoint.min_turn_words,
             quality.endpoint.min_turn_chars,
             quality.endpoint.merge_window_ms,
+            quality.endpoint.final_settle_ms,
             quality.endpoint.max_turn_words,
             quality.endpoint.max_turn_duration_ms
         )),
@@ -631,15 +632,28 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             quality.speech.onset_min_silence_ms
         )),
         Line::from(format!(
-            "barge-in: enabled={} onset={} partial={} final={} clear={}ms",
+            "barge-in: enabled={} onset={} playback={} partial={} final={} clear={}ms",
             quality.barge_in.enabled,
             quality.barge_in.speech_onset_cancel_enabled,
+            quality.barge_in.onset_during_playback.label(),
             quality.barge_in.partial_asr_cancel_enabled,
             quality.barge_in.final_asr_cancel_enabled,
             quality.barge_in.clear_timeout_ms
         )),
         Line::from(format!(
-            "tts: chunking={} max_chars={} first={} prebuf={} backend={} warm={} conversation_backend={}",
+            "echo: enabled={} min_chars={} tail={}ms short={}%/run{} long_min={} long={}%/run{}",
+            quality.echo_suppression.enabled,
+            quality.echo_suppression.min_text_chars,
+            quality.echo_suppression.tail_window_ms,
+            quality.echo_suppression.short_token_coverage_percent,
+            quality.echo_suppression.short_longest_token_run,
+            quality.echo_suppression.long_min_tokens,
+            quality.echo_suppression.long_token_coverage_percent,
+            quality.echo_suppression.long_longest_token_run
+        )),
+        Line::from(format!(
+            "tts: mode={} chunking={} max_chars={} first={} prebuf={} backend={} warm={} conversation_backend={}",
+            quality.tts.generation_mode.label(),
             quality.tts.chunking_enabled,
             quality.tts.max_text_chunk_chars,
             quality.tts.first_chunk_max_chars,
@@ -647,6 +661,15 @@ fn selected_runtime_lines(state: &GatewayState, session: &OperatorSession) -> Ve
             tts_backend.label(),
             tts_warm,
             conversation_tts_backend.label()
+        )),
+        Line::from(format!(
+            "early: enabled={} boundary={:?} min_chars={} debounce={}ms updates={} prebuf_frames={}",
+            quality.early_response.enabled,
+            quality.early_response.boundary,
+            quality.early_response.min_text_chars,
+            quality.early_response.debounce_ms,
+            quality.early_response.max_updates_per_utterance,
+            quality.early_response.provisional_max_prebuffer_frames
         )),
         Line::from(format!(
             "text-call: max={} media_ready={}ms playback_wait={}ms callback={}ms latest_wins={}",
@@ -755,6 +778,13 @@ fn selected_detail_lines(state: &GatewayState, session: &OperatorSession) -> Vec
             selected_call_conversation_status(call)
         )),
     ];
+    if call.echo_suppressed_transcripts > 0 {
+        let mut echo_line = format!("echo-suppressed: {}", call.echo_suppressed_transcripts);
+        if let Some(preview) = &call.last_echo_suppressed_preview {
+            echo_line.push_str(&format!(" last={}", preview));
+        }
+        lines.push(Line::from(echo_line));
+    }
     if let Some(reason) = &call.terminal_reason {
         lines.push(Line::from(format!("ended: {reason}")));
     }
@@ -802,14 +832,31 @@ fn selected_call_tts_status(call: &crate::operator::state::CallSession) -> Strin
     let Some(tts) = &call.tts else {
         return "idle".to_string();
     };
+    let buffer_frames = tts.frames_queued.saturating_sub(tts.frames_sent);
     let mut status = format!(
-        "{} backend={} playback={} frames={}/{}",
+        "{} backend={} playback={} frames={}/{} buffer={}",
         tts.status.label(),
         tts.backend.label(),
         tts.playback_id,
         tts.frames_sent,
-        tts.frames_queued
+        tts.frames_queued,
+        buffer_frames
     );
+    if let Some(first_audio_ms) = tts.first_audio_latency_ms {
+        status.push_str(&format!(" first_audio_ms={first_audio_ms}"));
+    }
+    if tts.pre_audio_wait_ticks > 0 {
+        status.push_str(&format!(
+            " pre_audio_wait_ms~{}",
+            tts.pre_audio_wait_ticks.saturating_mul(20)
+        ));
+    }
+    if tts.underrun_ticks > 0 {
+        status.push_str(&format!(
+            " underrun_ms~{}",
+            tts.underrun_ticks.saturating_mul(20)
+        ));
+    }
     if let Some(mark) = &tts.mark_name {
         status.push_str(&format!(" mark={mark}"));
     }

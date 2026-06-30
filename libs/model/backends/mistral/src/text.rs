@@ -1,15 +1,15 @@
 use std::future::Future;
 
-use mistralrs::TextModelBuilder;
 use mistralrs::core::NormalLoaderType;
+use mistralrs::{ModelDType, TextModelBuilder};
 use motlie_model::{
     BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, GenerationParams,
-    ModelError, QuantizationBits, QuantizationSupport, StartOptions, UnsupportedEmbeddings,
+    ModelError, QuantizationScheme, QuantizationSupport, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    MistralMessageParts, configure_artifact_policy, map_quantization_bits, paged_attn_context_size,
-    should_force_cpu, text_only_message_parts,
+    configure_artifact_policy, map_quantization_scheme, paged_attn_context_size, should_force_cpu,
+    text_only_message_parts, MistralMessageParts,
 };
 use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 
@@ -53,14 +53,19 @@ impl MistralTextSpec {
             // adapter in common.rs, not mistralrs::RequestBuilder's tool replay.
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
-                [QuantizationBits::Four, QuantizationBits::Eight],
-                QuantizationBits::Four,
+                [
+                    QuantizationScheme::Bf16,
+                    QuantizationScheme::IsqQ4,
+                    QuantizationScheme::IsqQ8,
+                ],
+                QuantizationScheme::Bf16,
             )
             .unwrap_or_else(|e| {
                 tracing::error!("curated quantization construction failed (this is a bug): {e}");
                 QuantizationSupport::without_recommended([
-                    QuantizationBits::Four,
-                    QuantizationBits::Eight,
+                    QuantizationScheme::Bf16,
+                    QuantizationScheme::IsqQ4,
+                    QuantizationScheme::IsqQ8,
                 ])
             }),
             recommended_generation_params: GenerationParams::default(),
@@ -108,7 +113,7 @@ impl MistralProfile for TextProfile {
     fn build_model(
         model_id: &str,
         arch: Self::Arch,
-        resolved_quantization: Option<QuantizationBits>,
+        resolved_quantization: Option<QuantizationScheme>,
         options: StartOptions,
     ) -> impl Future<Output = Result<mistralrs::Model, ModelError>> + Send {
         build_text_model(model_id, arch, resolved_quantization, options)
@@ -137,12 +142,12 @@ impl MistralProfile for TextProfile {
 async fn build_text_model(
     model_id: &str,
     arch: MistralTextArch,
-    resolved_quantization: Option<QuantizationBits>,
+    resolved_quantization: Option<QuantizationScheme>,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization: _, // already resolved by caller
+        quantization_scheme: _, // already resolved by caller
         unpack_root,
         max_concurrency,
     } = options;
@@ -165,8 +170,20 @@ async fn build_text_model(
 
     let mut builder = TextModelBuilder::new(model_target).with_loader_type(arch.loader_type());
 
-    if let Some(bits) = resolved_quantization {
-        builder = builder.with_auto_isq(map_quantization_bits(bits)?);
+    if let Some(scheme) = resolved_quantization {
+        builder = match scheme {
+            QuantizationScheme::Bf16 => builder.with_dtype(ModelDType::BF16),
+            QuantizationScheme::Fp16 => builder.with_dtype(ModelDType::F16),
+            QuantizationScheme::Fp32 => builder.with_dtype(ModelDType::F32),
+            QuantizationScheme::IsqQ4 | QuantizationScheme::IsqQ8 => {
+                builder.with_auto_isq(map_quantization_scheme(scheme)?)
+            }
+            other => {
+                return Err(ModelError::InvalidConfiguration(format!(
+                    "mistral.rs text backend does not support {other:?} quantization"
+                )))
+            }
+        };
     }
     if should_force_cpu() {
         builder = builder.with_force_cpu();
@@ -211,7 +228,7 @@ mod tests {
     use mistralrs::IsqBits;
     use motlie_model::{
         ArtifactPolicy, BackendAdapter, BackendKind, BundleHandle, ChatModel, ChatRequest,
-        ChatRole, CompletionModel, CompletionRequest, QuantizationBits, StartOptions,
+        ChatRole, CompletionModel, CompletionRequest, QuantizationScheme, StartOptions,
     };
 
     #[test]
@@ -243,7 +260,7 @@ mod tests {
         );
         assert_eq!(
             adapter.quantization().recommended(),
-            Some(QuantizationBits::Four)
+            Some(QuantizationScheme::Bf16)
         );
     }
 
@@ -254,11 +271,11 @@ mod tests {
             "Qwen3 4B".into(),
             Capabilities::chat_completion_and_tool_use(),
             QuantizationSupport::with_recommended(
-                [QuantizationBits::Four, QuantizationBits::Eight],
-                QuantizationBits::Four,
+                [QuantizationScheme::IsqQ4, QuantizationScheme::IsqQ8],
+                QuantizationScheme::IsqQ4,
             )
             .expect("test quantization support is valid"),
-            Some(QuantizationBits::Four),
+            Some(QuantizationScheme::IsqQ4),
             MistralStubKind::Text,
         );
 
@@ -299,15 +316,15 @@ mod tests {
     #[test]
     fn quantization_bits_map_to_isq_bits() {
         assert_eq!(
-            map_quantization_bits(QuantizationBits::Four).expect("q4 should map"),
+            map_quantization_scheme(QuantizationScheme::IsqQ4).expect("q4 should map"),
             IsqBits::Four
         );
         assert_eq!(
-            map_quantization_bits(QuantizationBits::Eight).expect("q8 should map"),
+            map_quantization_scheme(QuantizationScheme::IsqQ8).expect("q8 should map"),
             IsqBits::Eight
         );
-        assert!(map_quantization_bits(QuantizationBits::Five).is_err());
-        assert!(map_quantization_bits(QuantizationBits::FloatEight).is_err());
+        assert!(map_quantization_scheme(QuantizationScheme::GgufQ5_K_M).is_err());
+        assert!(map_quantization_scheme(QuantizationScheme::Bf16).is_err());
     }
 
     #[test]

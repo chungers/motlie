@@ -61,6 +61,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "qwen3_6_27b_gguf",
             &checkpoint,
+            crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
         )),
     }
 }
@@ -138,20 +139,20 @@ mod tests {
         assert_eq!(variant.checkpoint.format, CheckpointFormat::Gguf);
         assert_eq!(
             variant.quantization.recommended(),
-            Some(motlie_model::QuantizationBits::Five)
+            Some(motlie_model::QuantizationScheme::GgufQ5_K_M)
         );
         assert!(variant
             .quantization
-            .supports(motlie_model::QuantizationBits::Four));
+            .supports(motlie_model::QuantizationScheme::GgufQ4_K_M));
         assert!(variant
             .quantization
-            .supports(motlie_model::QuantizationBits::Five));
+            .supports(motlie_model::QuantizationScheme::GgufQ5_K_M));
         assert!(variant
             .quantization
-            .supports(motlie_model::QuantizationBits::Eight));
+            .supports(motlie_model::QuantizationScheme::GgufQ8_0));
         assert!(!variant
             .quantization
-            .supports(motlie_model::QuantizationBits::FloatEight));
+            .supports(motlie_model::QuantizationScheme::Fp16));
     }
 
     #[test]

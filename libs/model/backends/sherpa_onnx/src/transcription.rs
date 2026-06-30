@@ -7,9 +7,9 @@ use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSes
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, StartOptions,
-    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
-    UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint,
+    RuntimeAcceleratorObservation, StartOptions, TranscriptSegment, TranscriptionParams,
+    TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use sherpa_onnx::{
     OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, OnlineTransducerModelConfig,
@@ -106,7 +106,7 @@ impl BackendAdapter for SherpaOnnxStreamingAdapter {
     ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
-            .resolve(options.quantization, &identity.id)?;
+            .resolve(options.quantization_scheme, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.artifact_spec())?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
@@ -166,7 +166,7 @@ impl SherpaOnnxStreamingBundle {
     pub async fn start_typed(&self, options: StartOptions) -> Result<SherpaOnnxHandle, ModelError> {
         self.metadata
             .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
+            .resolve(options.quantization_scheme, &self.metadata.id)?;
 
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.artifacts.artifact_spec(), policy)?
@@ -243,6 +243,23 @@ impl BundleHandle for SherpaOnnxHandle {
         })
     }
 
+    fn accelerator_observation(&self) -> Option<RuntimeAcceleratorObservation> {
+        let provider = self.runtime.provider;
+        Some(RuntimeAcceleratorObservation {
+            backend_mode: format!("sherpa_onnx:{}", provider.as_provider_str()),
+            offload: Some(match provider {
+                #[cfg(feature = "cuda")]
+                SherpaProviderTarget::Cuda => "cuda_execution_provider=on;provider=cuda".to_owned(),
+                SherpaProviderTarget::Cpu => sherpa_cpu_offload_reason(),
+            }),
+            selected_device: match provider {
+                #[cfg(feature = "cuda")]
+                SherpaProviderTarget::Cuda => Some("0".to_owned()),
+                SherpaProviderTarget::Cpu => None,
+            },
+        })
+    }
+
     fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
@@ -290,8 +307,49 @@ fn new_transcription_handle(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SherpaProviderTarget {
+    Cpu,
+    #[cfg(feature = "cuda")]
+    Cuda,
+}
+
+impl SherpaProviderTarget {
+    fn as_provider_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            #[cfg(feature = "cuda")]
+            Self::Cuda => "cuda",
+        }
+    }
+}
+
 struct SherpaOnnxRuntime {
     recognizer: Mutex<OnlineRecognizer>,
+    provider: SherpaProviderTarget,
+}
+
+fn sherpa_provider_target() -> SherpaProviderTarget {
+    #[cfg(feature = "cuda")]
+    {
+        if !motlie_model::metrics_runtime::should_force_cpu()
+            && motlie_model_ort::cuda_ep_available()
+        {
+            return SherpaProviderTarget::Cuda;
+        }
+    }
+
+    SherpaProviderTarget::Cpu
+}
+
+fn sherpa_cpu_offload_reason() -> String {
+    if motlie_model::metrics_runtime::should_force_cpu() {
+        "provider=cpu;force_cpu=true".to_owned()
+    } else if cfg!(feature = "cuda") {
+        "provider=cpu;cuda_feature_noop".to_owned()
+    } else {
+        "provider=cpu".to_owned()
+    }
 }
 
 fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, ModelError> {
@@ -305,7 +363,8 @@ fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, Mo
     };
     config.model_config.tokens = Some(path_to_string(&artifacts.tokens)?);
     config.model_config.num_threads = NUM_THREADS;
-    config.model_config.provider = Some("cpu".to_string());
+    let provider = sherpa_provider_target();
+    config.model_config.provider = Some(provider.as_provider_str().to_owned());
     config.decoding_method = Some("modified_beam_search".to_string());
     config.max_active_paths = MODIFIED_BEAM_SEARCH_PATHS;
     config.enable_endpoint = true;
@@ -316,11 +375,15 @@ fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, Mo
     let recognizer =
         OnlineRecognizer::create(&config).ok_or_else(|| ModelError::BackendInitialization {
             backend: "sherpa-onnx",
-            message: "failed to create upstream sherpa-onnx online recognizer".into(),
+            message: format!(
+                "failed to create upstream sherpa-onnx online recognizer with provider `{}`",
+                provider.as_provider_str()
+            ),
         })?;
 
     Ok(SherpaOnnxRuntime {
         recognizer: Mutex::new(recognizer),
+        provider,
     })
 }
 
@@ -445,6 +508,7 @@ impl SherpaOnnxStream {
                 start_ms: result_start_ms(result),
                 end_ms: self.audio_position_ms(),
                 text: text.to_string(),
+                confidence: sherpa_result_confidence(result),
                 final_segment: true,
             });
         }
@@ -458,6 +522,7 @@ impl SherpaOnnxStream {
             start_ms: result_start_ms(result),
             end_ms: self.audio_position_ms(),
             text: text.to_string(),
+            confidence: sherpa_result_confidence(result),
             final_segment: false,
         })
     }
@@ -501,6 +566,24 @@ fn result_start_ms(result: &RecognizerResult) -> u64 {
         .unwrap_or_default() as u64
 }
 
+fn sherpa_result_confidence(result: &RecognizerResult) -> Option<f32> {
+    latest_sherpa_token_confidence(result.ys_probs.as_deref())
+}
+
+fn latest_sherpa_token_confidence(ys_probs: Option<&[f32]>) -> Option<f32> {
+    let native_probs = ys_probs.filter(|probs| !probs.is_empty())?;
+
+    native_probs
+        .iter()
+        .rev()
+        .copied()
+        .find_map(sherpa_log_prob_to_confidence)
+}
+
+fn sherpa_log_prob_to_confidence(log_prob: f32) -> Option<f32> {
+    (log_prob.is_finite() && log_prob <= 0.0).then(|| log_prob.exp())
+}
+
 fn non_empty_update(update: TranscriptionUpdate) -> Option<TranscriptionUpdate> {
     if update.segments.is_empty() {
         None
@@ -539,6 +622,8 @@ mod tests {
             segment: None,
             start_time: Some(1.25),
             is_final: false,
+            ys_probs: None,
+            lm_probs: None,
         };
 
         assert_eq!(result_start_ms(&result), 1_250);
@@ -553,8 +638,40 @@ mod tests {
             segment: None,
             start_time: Some(-0.25),
             is_final: false,
+            ys_probs: None,
+            lm_probs: None,
         };
 
         assert_eq!(result_start_ms(&result), 0);
+    }
+
+    #[test]
+    fn sherpa_confidence_uses_latest_ys_log_prob() {
+        let confidence = latest_sherpa_token_confidence(Some(&[-0.7, -0.2]));
+
+        assert_eq!(confidence, Some((-0.2_f32).exp()));
+    }
+
+    #[test]
+    fn sherpa_confidence_returns_none_without_ys_probs() {
+        let result = RecognizerResult {
+            text: "hello".into(),
+            tokens: vec![],
+            timestamps: None,
+            segment: None,
+            start_time: None,
+            is_final: false,
+            ys_probs: None,
+            lm_probs: Some(vec![-0.1]),
+        };
+
+        assert_eq!(sherpa_result_confidence(&result), None);
+    }
+
+    #[test]
+    fn sherpa_confidence_ignores_non_native_log_prob_values() {
+        let confidence = latest_sherpa_token_confidence(Some(&[f32::NAN, 0.5]));
+
+        assert_eq!(confidence, None);
     }
 }

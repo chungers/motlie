@@ -4,7 +4,7 @@ use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, CheckpointFormat, ContentKind, EmbeddingDistance,
     EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
-    StartOptions,
+    QuantizationScheme, StartOptions,
 };
 use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingHandle, MistralEmbeddingSpec};
 
@@ -54,15 +54,11 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact("config.json"),
             ArtifactRule::Exact("modules.json"),
             ArtifactRule::Exact("tokenizer.json"),
-            ArtifactRule::Exact("tokenizer.model"),
             ArtifactRule::Exact("tokenizer_config.json"),
-            ArtifactRule::Exact("special_tokens_map.json"),
             ArtifactRule::Exact("1_Pooling/config.json"),
-            ArtifactRule::Exact("2_Dense/config.json"),
             ArtifactRule::Suffix(".safetensors"),
-            ArtifactRule::Suffix(".safetensors.index.json"),
         ],
-        quantization: None,
+        quantization: Some(QuantizationScheme::Bf16),
     }
 }
 
@@ -88,6 +84,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(crate::bundle_artifacts_from_checkpoint(
             "qwen3_embedding_06b",
             &checkpoint,
+            crate::ArtifactProvenance::new("apache-2.0", crate::ArtifactGating::Public),
         )),
     }
 }
@@ -135,7 +132,7 @@ mod tests {
     use super::*;
     use crate::Catalog;
     use motlie_model::{
-        ArtifactPolicy, BundleHandle, EmbeddingModel, EmbeddingRequest, QuantizationBits,
+        ArtifactPolicy, BundleHandle, EmbeddingModel, EmbeddingRequest, QuantizationScheme,
         StartOptions,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -161,12 +158,9 @@ mod tests {
             .expect("descriptor should expose curated artifact control");
         assert_eq!(artifacts.control_name, "qwen3_embedding_06b");
         assert!(artifacts.includes("model.safetensors"));
-        assert!(artifacts.includes("model.safetensors.index.json"));
         assert!(artifacts.includes("config.json"));
         assert!(artifacts.includes("modules.json"));
-        assert!(artifacts.includes("tokenizer.model"));
         assert!(artifacts.includes("1_Pooling/config.json"));
-        assert!(artifacts.includes("2_Dense/config.json"));
         assert!(!artifacts.includes("README.md"));
     }
 
@@ -180,12 +174,16 @@ mod tests {
     }
 
     #[test]
-    fn q8_is_supported_but_q4_is_rejected() {
+    fn bf16_and_q8_are_supported_but_q4_is_rejected() {
         let quantization = variant_descriptor().quantization.clone();
 
-        assert_eq!(quantization.recommended(), None);
-        assert!(quantization.supports(motlie_model::QuantizationBits::Eight));
-        assert!(!quantization.supports(motlie_model::QuantizationBits::Four));
+        assert_eq!(
+            quantization.recommended(),
+            Some(motlie_model::QuantizationScheme::Bf16)
+        );
+        assert!(quantization.supports(motlie_model::QuantizationScheme::Bf16));
+        assert!(quantization.supports(motlie_model::QuantizationScheme::IsqQ8));
+        assert!(!quantization.supports(motlie_model::QuantizationScheme::IsqQ4));
     }
 
     #[test]
@@ -236,7 +234,7 @@ mod tests {
         let handle = bundle
             .start(StartOptions {
                 artifact_policy: Some(ArtifactPolicy::LocalOnly { root: root.into() }),
-                quantization: Some(QuantizationBits::Eight),
+                quantization_scheme: Some(QuantizationScheme::IsqQ8),
                 ..Default::default()
             })
             .await
@@ -263,7 +261,7 @@ mod tests {
         let unsupported = handle
             .descriptor()
             .quantization
-            .resolve(Some(QuantizationBits::Four), &handle.descriptor().id)
+            .resolve(Some(QuantizationScheme::IsqQ4), &handle.descriptor().id)
             .expect_err("unsupported Q4 should fail");
         assert!(matches!(unsupported, ModelError::InvalidConfiguration(_)));
 
