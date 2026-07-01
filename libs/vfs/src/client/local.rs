@@ -3,6 +3,8 @@
 //! This path uses blocking `fuser::mount2()` in a dedicated thread and keeps
 //! vsock out of local embedding daemons.
 
+use anyhow::{Context, Result};
+use fuser::{MountOption, Session};
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -10,10 +12,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
-
-use anyhow::{Context, Result};
-use fuser::MountOption;
 
 use crate::client::fuse::FuseClient;
 use crate::core::server::FsServer;
@@ -48,32 +46,16 @@ pub fn mount_local(server: Arc<FsServer>, tag: &str, mountpoint: &Path) -> Resul
     std::fs::create_dir_all(mountpoint)
         .with_context(|| format!("failed to create mountpoint {}", mountpoint.display()))?;
 
-    let tag = tag.to_string();
-    let mountpoint_for_thread = mountpoint.to_path_buf();
+    let request_server = Arc::clone(&server);
+    let request_tag = tag.to_string();
+    let client = FuseClient::new(move |op| request_server.handle_op(&request_tag, op));
+    let options = local_mount_options();
+    let mut session =
+        Session::new(client, mountpoint, &options).context("local FUSE mount failed")?;
     let join = thread::Builder::new()
         .name(format!("vfs-local-{tag}"))
-        .spawn(move || {
-            let request_server = Arc::clone(&server);
-            let request_tag = tag.clone();
-            let client = FuseClient::new(move |op| request_server.handle_op(&request_tag, op));
-            fuser::mount2(client, &mountpoint_for_thread, &local_mount_options())
-        })
+        .spawn(move || session.run())
         .context("failed to spawn local FUSE mount thread")?;
-
-    thread::sleep(Duration::from_millis(25));
-    if join.is_finished() {
-        match join.join() {
-            Ok(Ok(())) => anyhow::bail!(
-                "local FUSE mount exited immediately for {}",
-                mountpoint.display()
-            ),
-            Ok(Err(err)) => return Err(err).context("local FUSE mount failed"),
-            Err(_) => anyhow::bail!(
-                "local FUSE mount thread panicked for {}",
-                mountpoint.display()
-            ),
-        }
-    }
 
     Ok(LocalMount {
         mountpoint: mountpoint.to_path_buf(),

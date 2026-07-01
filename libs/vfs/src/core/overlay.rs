@@ -454,6 +454,11 @@ impl MemOverlay {
         owner: (u32, u32),
     ) -> Result<()> {
         let mut layers = self.layers.lock();
+        let mut republish_tags = layers
+            .get(name)
+            .map(|layer| layer.bound_tags())
+            .unwrap_or_default();
+        republish_tags.push(tag.to_string());
         layers.insert(
             name.to_string(),
             Arc::new(Layer {
@@ -470,7 +475,11 @@ impl MemOverlay {
                 }),
             }),
         );
-        self.republish_tag(&layers, tag);
+        republish_tags.sort();
+        republish_tags.dedup();
+        for tag in republish_tags {
+            self.republish_tag(&layers, &tag);
+        }
         Ok(())
     }
 
@@ -1161,6 +1170,22 @@ mod tests {
             o.get("static", "skills", "/nested/tool.md").unwrap(),
             "# tool\n"
         );
+    }
+
+    #[test]
+    fn static_layer_replace_invalidates_old_tag_snapshot() {
+        let o = overlay();
+        o.put_static_layer("static", 50, "old", &STATIC_FIXTURE, (0, 0))
+            .unwrap();
+
+        assert!(o.resolve_entry("old", "/hello.txt").is_some());
+        o.put_static_layer("static", 50, "new", &STATIC_FIXTURE, (0, 0))
+            .unwrap();
+
+        assert!(o.resolve_entry("old", "/hello.txt").is_none());
+        assert!(o.readdir_children("old", "/").is_empty());
+        assert!(o.resolve_entry("new", "/hello.txt").is_some());
+        assert_eq!(o.tags(), vec!["new".to_string()]);
     }
 
     #[test]

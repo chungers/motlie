@@ -502,6 +502,13 @@ impl FsServer {
         observer.on_access(&access);
     }
 
+    fn overlay_entry_is_read_only(&self, mount: &MountState, path: &str) -> bool {
+        self.overlay
+            .as_ref()
+            .and_then(|overlay| overlay.resolve_entry(&mount.tag, path))
+            .is_some_and(|entry| !entry.writable)
+    }
+
     /// Resolve overlay for a mount-relative path. Returns None if overlay is disabled
     /// or the path has no overlay entry.
     fn resolve_overlay(&self, tag: &str, path: &str) -> Option<(String, OverlayEntryKind)> {
@@ -646,6 +653,9 @@ impl FsServer {
                 }
             }
         };
+        if self.overlay_entry_is_read_only(mount, &path) {
+            return FsResult::Error { errno: libc::EROFS };
+        }
         if host_path.is_none() {
             if let Some(overlay) = &self.overlay {
                 return overlay
@@ -825,6 +835,9 @@ impl FsServer {
                 }
             }
         };
+        if self.overlay_entry_is_read_only(mount, &path) {
+            return FsResult::Error { errno: libc::EROFS };
+        }
         if host_path.is_none() {
             if let Some(overlay) = &self.overlay {
                 return overlay
@@ -1142,18 +1155,29 @@ impl FsServer {
     }
 
     fn do_setattr(&self, mount: &MountState, inode: u64, set: &SetAttrFields) -> FsResult {
-        let table = mount.inode_table.lock();
-        let entry = match table.get(inode) {
-            Some(e) => e,
-            None => {
-                return FsResult::Error {
-                    errno: libc::ENOENT,
+        let (path, host_path, inode_id, stored_attrs) = {
+            let table = mount.inode_table.lock();
+            let entry = match table.get(inode) {
+                Some(e) => e,
+                None => {
+                    return FsResult::Error {
+                        errno: libc::ENOENT,
+                    }
                 }
-            }
+            };
+            (
+                entry.path.clone(),
+                entry.host_path.clone(),
+                entry.inode,
+                entry.attrs.clone(),
+            )
         };
-        if let Some(hp) = &entry.host_path {
-            let hp = hp.clone();
-            drop(table);
+
+        if self.overlay_entry_is_read_only(mount, &path) {
+            return FsResult::Error { errno: libc::EROFS };
+        }
+
+        if let Some(hp) = host_path {
             if set.uid.is_some() || set.gid.is_some() {
                 if let Err(e) = set_ownership(&hp, set.uid, set.gid) {
                     return FsResult::Error {
@@ -1183,9 +1207,7 @@ impl FsServer {
             self.do_getattr(mount, inode)
         } else {
             // Overlay entry — persist updated attrs in InodeTable
-            let inode_id = entry.inode;
-            let mut attrs = entry.attrs.clone();
-            drop(table);
+            let mut attrs = stored_attrs;
             if let Some(mode) = set.mode {
                 attrs.mode = mode;
             }
@@ -4277,6 +4299,46 @@ mod tests {
                     fh,
                     offset: 0,
                     data: bytes::Bytes::from_static(b"x"),
+                },
+            ),
+            FsResult::Error { errno } if errno == libc::EROFS
+        ));
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Setattr {
+                    inode,
+                    attrs: SetAttrFields {
+                        mode: Some(0o644),
+                        uid: Some(0),
+                        gid: Some(0),
+                        size: Some(0),
+                        atime: Some(UNIX_EPOCH),
+                        mtime: Some(UNIX_EPOCH),
+                    },
+                },
+            ),
+            FsResult::Error { errno } if errno == libc::EROFS
+        ));
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Setxattr {
+                    inode,
+                    name: "user.static".into(),
+                    value: bytes::Bytes::from_static(b"x"),
+                    flags: 0,
+                    position: 0,
+                },
+            ),
+            FsResult::Error { errno } if errno == libc::EROFS
+        ));
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Removexattr {
+                    inode,
+                    name: "user.static".into(),
                 },
             ),
             FsResult::Error { errno } if errno == libc::EROFS

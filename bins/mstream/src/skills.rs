@@ -9,7 +9,20 @@ pub static PROJECT_SKILLS: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../../.agents/skills/project");
 
 #[cfg(target_os = "linux")]
-pub type SkillsMount = motlie_vfs::client::local::LocalMount;
+pub struct SkillsMount {
+    mount: motlie_vfs::client::local::LocalMount,
+    backing_dir: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl SkillsMount {
+    fn unmount(self) -> Result<()> {
+        let backing_dir = self.backing_dir.clone();
+        let result = self.mount.unmount();
+        clean_empty_backing_dir(&backing_dir);
+        result
+    }
+}
 
 #[cfg(not(target_os = "linux"))]
 pub struct SkillsMount;
@@ -38,7 +51,7 @@ fn try_mount_project_skills() -> Result<Option<SkillsMount>> {
 
     let owner = current_owner();
     let server = FsServer::builder()
-        .mount("skills", backing_dir, false)
+        .mount("skills", backing_dir.clone(), true)
         .overlay(true)
         .observer(SkillAccessObserver)
         .build()
@@ -49,15 +62,22 @@ fn try_mount_project_skills() -> Result<Option<SkillsMount>> {
         .put_static_layer("project-skills", 50, "skills", &PROJECT_SKILLS, owner)
         .context("failed to register embedded project skills")?;
 
-    let mount = motlie_vfs::client::local::mount_local(Arc::new(server), "skills", &mountpoint)
-        .with_context(|| {
-            format!(
-                "failed to mount embedded skills at {}",
-                mountpoint.display()
-            )
-        })?;
+    let mount =
+        match motlie_vfs::client::local::mount_local(Arc::new(server), "skills", &mountpoint)
+            .with_context(|| {
+                format!(
+                    "failed to mount embedded skills at {}",
+                    mountpoint.display()
+                )
+            }) {
+            Ok(mount) => mount,
+            Err(err) => {
+                clean_empty_backing_dir(&backing_dir);
+                return Err(err);
+            }
+        };
     eprintln!("skills FUSE mounted at {}", mount.mountpoint().display());
-    Ok(Some(mount))
+    Ok(Some(SkillsMount { mount, backing_dir }))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -95,6 +115,22 @@ fn backing_dir_for_mountpoint(mountpoint: &Path) -> Option<PathBuf> {
     mountpoint
         .parent()
         .map(|parent| parent.join("skills-backing"))
+}
+
+#[cfg(target_os = "linux")]
+fn clean_empty_backing_dir(backing_dir: &Path) {
+    match std::fs::remove_dir(backing_dir) {
+        Ok(()) => {}
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) => {}
+        Err(err) => eprintln!(
+            "failed to remove empty skills backing dir {}: {err}",
+            backing_dir.display()
+        ),
+    }
 }
 
 #[cfg(target_os = "linux")]
