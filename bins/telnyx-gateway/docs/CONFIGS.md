@@ -140,8 +140,8 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | Key | Live identity starting point | Purpose |
 | --- | --- | --- |
 | `trailing_silence_ms` | `850` | Silence before local endpoint for the current no-barge-in Identity baseline. |
-| `min_turn_words` | `2` | Minimum words for committed turn dispatch. |
-| `min_turn_chars` | `6` | Minimum characters for committed turn dispatch. |
+| `min_turn_words` | `2` | Low-information word threshold used for reports and low-confidence conversation-tail holds. |
+| `min_turn_chars` | `6` | Low-information character threshold used for reports and low-confidence conversation-tail holds. |
 | `merge_window_ms` | `120` | Merge adjacent ASR finals from one thought. |
 | `final_settle_ms` | `500` | Hold structurally incomplete final fragments. |
 | `final_settle_trailing_punctuation` | `[",", ":", ";"]` | Punctuation that suggests continuation. |
@@ -149,8 +149,8 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | `final_settle_tail_words` | See canonical config | Tail words that suggest continuation. |
 | `final_settle_dangling_suffixes` | `["'", "-"]` | Dangling suffixes that suggest continuation. |
 | `conversation_tail_words` | See canonical config | Conversation-level incomplete-tail words. |
-| `conversation_incomplete_tail_hold_ms` | `250` | Hold for incomplete conversation tails. |
-| `conversation_low_confidence_threshold_percent` | `45` | Backend confidence threshold for holds. |
+| `conversation_incomplete_tail_hold_ms` | `250` | Processor-local hold for incomplete or low-confidence conversation tails; active playback wait does not consume this budget. |
+| `conversation_low_confidence_threshold_percent` | `45` | Backend confidence threshold for provisional low-confidence holds, including short final fragments even when ASR inserts terminal punctuation. |
 | `conversation_playback_hold_poll_ms` | `10` | Poll cadence while waiting for playback clearance. |
 | `conversation_playback_max_hold_ms` | `0` for bounded-pending reliability; positive only to test cap behavior | Active-playback max hold for final debounce/deferred Say. |
 | `max_turn_words` | `80` | Report/guard threshold for long turns. |

@@ -309,7 +309,18 @@ impl EndpointQualityConfig {
 
     pub fn conversation_low_confidence_hold_allowed(&self, text: &str) -> bool {
         let trimmed = text.trim();
-        !trimmed.is_empty() && !has_terminal_punctuation(trimmed)
+        if trimmed.is_empty() {
+            return false;
+        }
+        if !has_terminal_punctuation(trimmed) {
+            return true;
+        }
+        let word_count = trimmed
+            .split_whitespace()
+            .filter(|word| word.chars().any(char::is_alphanumeric))
+            .count();
+        let char_count = trimmed.chars().filter(|ch| ch.is_alphanumeric()).count();
+        word_count <= self.min_turn_words || char_count <= self.min_turn_chars
     }
 }
 

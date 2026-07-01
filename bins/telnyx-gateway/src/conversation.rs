@@ -1335,7 +1335,7 @@ fn merge_conversation_finals(existing: &str, next: &str) -> String {
 
 fn conversation_final_hold_reason(pending: &PendingConversationFinal) -> Option<&'static str> {
     let endpoint = &pending.quality_config.endpoint;
-    if pending.final_transcript_at.elapsed()
+    if conversation_final_hold_elapsed(pending, ConversationFinalHoldKind::IncompleteTail)
         >= Duration::from_millis(endpoint.conversation_incomplete_tail_hold_ms)
     {
         return None;
@@ -4941,6 +4941,11 @@ second"
                 .conversation_incomplete_tail_reason("Can you hear me?"),
             None
         );
+        assert!(
+            EndpointQualityConfig::default().conversation_low_confidence_hold_allowed("miss it.")
+        );
+        assert!(!EndpointQualityConfig::default()
+            .conversation_low_confidence_hold_allowed("Can you hear me?"));
     }
 
     #[tokio::test]
@@ -5060,6 +5065,99 @@ second"
         assert_eq!(
             call.conversation.last_assistant_text.as_deref(),
             Some("The endpoint sounded glitchy today.")
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_playback_hold_does_not_age_out_low_confidence_fragment_hold() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_conversation_call(&state, ConversationMode::Manual).await;
+        state.write().await.record_conversation_speaking(
+            &gateway_call_id,
+            "assistant is speaking".to_string(),
+            "tts_test".to_string(),
+        );
+        let media_registry = SharedMediaRegistry::default();
+        let (tx, _rx) = mpsc::channel(4);
+        media_registry
+            .register_call(gateway_call_id.clone(), tx)
+            .await;
+        let cancel = SpeechCancelToken::default();
+        media_registry
+            .start_speech(&gateway_call_id, "tts_test".to_string(), cancel)
+            .await
+            .expect("register active speech");
+        let runtime = test_runtime();
+        {
+            let mut guard = state.write().await;
+            guard.quality.config.set_barge_in_enabled(false);
+            guard.quality.config.set_endpoint_merge_window_ms(5);
+            guard
+                .quality
+                .config
+                .set_endpoint_conversation_incomplete_tail_hold_ms(80);
+            guard
+                .quality
+                .config
+                .set_endpoint_conversation_playback_hold_poll_ms(10);
+            guard.quality.config_id = guard.quality.config.config_id();
+        }
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "miss it.".to_string(),
+                update: transcription_update_with_confidence("miss it.", Some(0.2), true),
+            },
+            None,
+        )
+        .await
+        .expect("low-confidence final should be accepted");
+        sleep(Duration::from_millis(160)).await;
+        media_registry
+            .finish_speech(&gateway_call_id, "tts_test")
+            .await;
+        sleep(Duration::from_millis(30)).await;
+
+        {
+            let guard = state.read().await;
+            let call = guard.calls.get(&gateway_call_id).expect("call exists");
+            assert_eq!(call.conversation.status, ConversationStatus::Speaking);
+            assert!(call.conversation.last_user_text.is_none());
+            assert_eq!(
+                call.conversation.last_assistant_text.as_deref(),
+                Some("assistant is speaking")
+            );
+        }
+
+        handle_transcript_event(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            TranscriptEvent::Final {
+                text: "clearly.".to_string(),
+                update: transcription_update_with_confidence("clearly.", Some(0.9), true),
+            },
+            None,
+        )
+        .await
+        .expect("continuation final should be accepted");
+        sleep(Duration::from_millis(40)).await;
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.conversation.status, ConversationStatus::Proposed);
+        assert_eq!(
+            call.conversation.last_user_text.as_deref(),
+            Some("miss it. clearly.")
+        );
+        assert_eq!(
+            call.conversation.last_assistant_text.as_deref(),
+            Some("miss it. clearly.")
         );
     }
 
