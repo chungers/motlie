@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-01 PDT | @codex-541 | Updated the continuation protocol after the short-complete-response TTS probe: current no-barge-in baseline is 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, and bounded FIFO Identity; post-merge follow-up is #587 barge-in validation, #586 echo/AEC measurement, and short-terminal-phrase TTS audio inspection. |
 | 2026-06-29 PDT | @codex-541 | Added #586 echo-characterization live-run protocol: enable the diagnostic per run, record `media.echo_characterization` metrics, and leave AEC/VAD behavior changes to follow-up after PR #588. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs to the live-test protocol; the next barge-in run should verify one clean replacement turn before #586 AEC/VAD work. |
 | 2026-06-28 PDT | @codex-541 | Recorded the failed barge-in Identity 450 ms run: post-playback ASR fragments escaped as new turns, so the next barge-in step is a code fix rather than knob-only tuning. |
@@ -170,12 +171,13 @@ knobs for traceability:
 - `voice_quality.tts.prebuffer_chunks = 1`
 - `voice_quality.tts.streaming_start_buffer_ms = 450`
 - `voice_quality.tts.tail_pad_ms = 200`
-- `voice_quality.endpoint.trailing_silence_ms = 850`
+- `voice_quality.endpoint.trailing_silence_ms = 1100`
 - `voice_quality.endpoint.merge_window_ms = 120`
 - `voice_quality.endpoint.final_settle_ms = 500`
 - `voice_quality.endpoint.conversation_incomplete_tail_hold_ms = 250`
 - `voice_quality.endpoint.conversation_playback_hold_poll_ms = 10`
 - `voice_quality.endpoint.conversation_playback_max_hold_ms = 0`
+- `voice_quality.asr.finish_pad_ms = 600`
 - `voice_quality.conversation_policy.mode = "no_barge_in_bounded_pending"`
 - `voice_quality.conversation_policy.max_pending_outputs = 3`
 - `voice_quality.conversation_policy.pending_output_order = "fifo"`
@@ -196,18 +198,17 @@ knobs for traceability:
 Use `conversation_policy.mode = "current_compat"` only for baseline/regression
 runs that intentionally reproduce the legacy latest-only drop behavior.
 
-Recent live-run finding: on 2026-06-24, this profile produced a solid audible
-improvement on inbound Identity/repeat with good audio quality. The completed
-run recorded 12 attempted playbacks, 12 completed playbacks, 0 canceled/failed
-playbacks, 13 raw ASR finals, 1 pre-fix excluded turn without playback, and 0
-dropped quality events. Follow-up code classified that excluded turn as a
-coalesced source-turn accounting artifact rather than a dropped repeat: quality
-summary attempted/played/canceled turn counts now include every linked source
-turn, not only the selected response turn. Remaining issues were ASR fragments
-such as `Motlie -> Martley`, `barge in -> bar J`, and a perceived `hang`/`hang
-up` tail miss, plus long first-audio/tail latency during serial playback. Do not
-assume early-response is active just because the config enables it; verify
-accepted/rejected provisional-response quality events.
+Recent live-run finding: on 2026-07-01, the local short-complete-response TTS
+chunking probe used this no-barge-in Identity profile with
+`trailing_silence_ms = 1100`, `finish_pad_ms = 600`, and
+`streaming_start_buffer_ms = 450`. The run produced 5 expected script sentences
+as 5 ASR finals and 5 processor-visible turns, strict script WER 3.17% with no
+deletions, and clean endpoint alignment. The line containing `miss it` reached
+ASR, Identity, and TTS as one chunk, but the caller still did not hear that short
+terminal phrase. Treat the remaining defect as a TTS/acoustic/prosody follow-up,
+not an endpointing or dispatch-loss bug. Do not assume early-response is active
+just because the config enables it; verify accepted/rejected provisional-response
+quality events.
 
 ## Run-By-Run Tuning Ladder
 
@@ -527,38 +528,47 @@ Previous 2026-06-25 result:
   replacement-sentence echo/fragment conditions, so treat 2026-06-25 as an
   encouraging sample, not a validated baseline.
 
-Next barge-in Identity run:
+Next barge-in Identity run after PR #588 merges:
 
-- Do not run another config-only barge-in probe first.
-- Implement a general post-barge-in dispatch guard: during active assistant
-  playback and a short post-playback echo window, short or low-content finals
-  should be suppressed or held unless they carry strong non-echo evidence.
+- Re-run the #587 validation profile; do not change endpoint, TTS, and policy
+  knobs in the same run unless the hypothesis is explicitly a knob probe.
+- The post-barge-in dispatch guard is implemented in PR #588. Verify that during
+  active assistant playback and the short post-playback echo window, short,
+  weak-signal, or assistant-echo finals are suppressed before they can cancel
+  replacement playback or reach the processor.
 - Keep `voice_quality.barge_in.missing_signal_policy = "conservative"`,
   `partial_min_confidence = 0.50`, `partial_min_stability = 0.50`, and
   `final_min_confidence = 0.70`; leave `final_min_stability` unset until final
   ASR emits stability.
-- After the code fix, rerun this same profile with the same script shape and
-  verify one clean replacement turn, 0 stale echo replay, and stable outbound
-  pacing.
+- Enable `[voice_quality.echo_characterization]` for the run so #586 has inbound
+  vs outbound correlation, delay, and echo-return data.
+- Success is one clean replacement turn, 0 stale echo/fragment processor turns,
+  stable outbound pacing, and enough `media.echo_characterization` spans to
+  decide the #586 AEC/VAD boundary follow-up.
 
 ### Next No-Barge-In Follow-Up
 
 For the next no-barge-in Identity run, keep the bounded FIFO policy fixed and do
-not re-enable turn batching. The 2026-06-28 450 ms pacing run keeps this as the
-best repeat-reliability and pacing baseline, while the remaining no-barge-in
-work is endpoint segmentation.
+not re-enable turn batching. The 2026-07-01 run keeps this as the best
+repeat-reliability and pacing baseline: 1100 ms endpoint trailing silence, 600
+ms ASR finish pad, 450 ms TTS start buffer, and bounded FIFO Identity. The
+remaining no-barge-in work is short-terminal-phrase TTS intelligibility, not
+endpoint dispatch loss.
 
 Hold this baseline unless testing one explicit hypothesis. Change one
-endpointing knob per run:
+knob family per run:
 
 ```toml
 [voice_quality.endpoint]
-trailing_silence_ms = 850
+trailing_silence_ms = 1100
 merge_window_ms = 120
 final_settle_ms = 500
 conversation_incomplete_tail_hold_ms = 250
 conversation_playback_hold_poll_ms = 10
 conversation_playback_max_hold_ms = 0
+
+[voice_quality.asr]
+finish_pad_ms = 600
 
 [voice_quality.conversation_policy]
 mode = "no_barge_in_bounded_pending"
@@ -573,16 +583,23 @@ post_barge_in_fragment_max_words = 2
 
 Next hypotheses, one per run:
 
-- Endpoint segmentation: test exactly one of `final_settle_ms = 650` or
-  `merge_window_ms = 180`; success is one processor-visible turn for the script
-  without stale tail latency or overmerging unrelated speech.
+- Short terminal phrase TTS: keep endpoint and policy knobs fixed, capture the
+  generated audio artifact for a line such as `The next phrase is short and easy
+  to lose. Miss it.`, and A/B only generic text shaping or TTS prosody changes.
+  Success is caller-audible terminal words without adding endpoint latency or
+  keyword-specific handling.
 - TTS pacing: keep `streaming_start_buffer_ms = 450` as the current baseline.
   Do not test `prebuffer_chunks = 2` unless underruns return under the 450 ms
   setting.
-- Barge-in validation: after the endpoint segmentation probe, re-run the current
+- Barge-in validation: after PR #588 merges, re-run the current
   `barge_in_coalesce_after_silence` Identity profile with the shared 450 ms TTS
-  start buffer to confirm interruption/replacement playback still has 0
-  underruns and acceptable first-audio latency.
+  start buffer and echo characterization enabled. Success is one clean
+  replacement turn, 0 stale echo/fragment processor turns, and acceptable
+  first-audio latency.
+- #586 AEC/VAD boundary: after the #587 validation sample, use the collected
+  `media.echo_characterization` spans to choose AEC insertion or an echo-aware
+  onset gate. Do not make policy consume the diagnostic until the correlation,
+  delay, and echo-return evidence supports the boundary.
 - Turn-batching validation: after barge-in is revalidated, run
   `processor = "turn_batched_identity"` with fixed N=2 and confirm the prompt
   handler sees one joined prompt with two source turns, not two separate

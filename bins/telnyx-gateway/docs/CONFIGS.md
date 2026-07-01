@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-01 PDT | @codex-541 | Updated the current no-barge-in Identity baseline after the short-complete-response TTS chunking probe: 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, and post-merge follow-up split between #587 barge-in validation and #586 AEC/VAD. |
 | 2026-06-29 PDT | @codex-541 | Added opt-in #586 `echo_characterization` diagnostic knobs for measuring inbound/outbound echo correlation before the AEC/VAD follow-up. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs for suppressing active/recent-playback echo fragments before they cancel or reach the processor. |
 | 2026-06-28 PDT | @codex-541 | Marked `barge_in_coalesce_after_silence` experimental and not live-validated pending the post-playback dispatch guard tracked in #587. |
@@ -139,7 +140,7 @@ Use explicit overrides in live-run configs so each run is self-describing.
 
 | Key | Live identity starting point | Purpose |
 | --- | --- | --- |
-| `trailing_silence_ms` | `850` | Silence before local endpoint for the current no-barge-in Identity baseline. |
+| `trailing_silence_ms` | `1100` | Silence before local endpoint for the current no-barge-in Identity baseline; the 2026-07-01 probe produced 5/5 expected sentence turns with no split/merge. |
 | `min_turn_words` | `2` | Low-information word threshold used for reports and low-confidence conversation-tail holds. |
 | `min_turn_chars` | `6` | Low-information character threshold used for reports and low-confidence conversation-tail holds. |
 | `merge_window_ms` | `120` | Merge adjacent ASR finals from one thought. |
@@ -162,7 +163,7 @@ Use explicit overrides in live-run configs so each run is self-describing.
 
 | Key | Typical value | Purpose |
 | --- | --- | --- |
-| `finish_pad_ms` | `320` | Extra ASR flush padding after endpoint. |
+| `finish_pad_ms` | `600` | Extra ASR flush padding after endpoint for current live Identity runs; keep this with the 1100 ms trailing-silence baseline unless testing ASR tail latency. |
 | `repeated_token_run_threshold` | `16` | Suppress repeated-token hallucinations. |
 | `repeated_q_run_threshold` | `8` | Suppress repeated `Q` hallucinations. |
 
@@ -175,7 +176,7 @@ Use explicit overrides in live-run configs so each run is self-describing.
 | `generation_mode` | `"streaming"` | Selects buffered vs incremental TTS. |
 | `chunking_enabled` | `true` | Splits long replies before synthesis. |
 | `max_text_chunk_chars` | `70` | Later chunk packing budget for the current no-barge-in Identity baseline. |
-| `first_chunk_max_chars` | `40` | Hard cap for the first incremental TTS request; if the first sentence or unsentenced segment is longer, the remainder goes through normal `max_text_chunk_chars` packing. |
+| `first_chunk_max_chars` | `40` | First incremental TTS request target for long responses; short complete responses that fit `max_text_chunk_chars` stay in one chunk so tiny terminal phrases are not split into their own playback tail. |
 | `prebuffer_chunks` | `1` | Buffered-mode prepared chunks required before playback starts. |
 | `streaming_start_buffer_ms` | `450` | Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in Identity pacing baseline. Lower for latency only if underruns remain controlled. |
 | `tail_pad_ms` | `200` | Silence frames appended before the final Telnyx mark for normal committed TTS, protecting final syllables from mark/tail clipping. |
@@ -280,12 +281,15 @@ debounce_ms = 180
 max_updates_per_utterance = 1
 
 [voice_quality.endpoint]
-trailing_silence_ms = 850
+trailing_silence_ms = 1100
 merge_window_ms = 120
 final_settle_ms = 500
 conversation_incomplete_tail_hold_ms = 250
 conversation_playback_hold_poll_ms = 10
 conversation_playback_max_hold_ms = 0
+
+[voice_quality.asr]
+finish_pad_ms = 600
 
 [voice_quality.barge_in]
 enabled = false
@@ -304,17 +308,18 @@ post_barge_in_fragment_max_chars = 12
 post_barge_in_fragment_max_words = 2
 ```
 
-The current 2026-06-28 inbound Identity no-barge-in baseline keeps these
+The current 2026-07-01 inbound Identity no-barge-in baseline keeps these
 values as the best repeat-reliability starting point, with
-`streaming_start_buffer_ms = 450` now promoted for TTS pacing. The 450 ms probe
-completed 2/2 playbacks with 0 underruns and a 73 ms max inter-frame gap,
-compared with the prior 300 ms run's 58 underruns and 1180 ms max gap. The core
-measured sentence remained exact, including `hang up`, while endpoint
-segmentation still split one intended passage into two ASR finals. Layer A keeps
+`streaming_start_buffer_ms = 450`, `trailing_silence_ms = 1100`, and
+`finish_pad_ms = 600`. The latest local TTS chunking probe preserved 5 expected
+sentence turns as 5 processor-visible turns, kept the short `miss it` sentence
+in one TTS chunk, and produced strict script WER 3.17% with no deletions. The
+remaining `miss it` complaint is therefore not an endpoint, ASR dispatch,
+Identity, chunk-loss, or Telnyx mark-handling issue; post-merge follow-up should
+inspect synthesized audio/prosody for short terminal phrases and compare a
+small TTS text-shaping A/B before changing endpoint knobs again. Layer A keeps
 barge-in score knobs visible in the config for telemetry and fail-closed policy
-validation, but this profile still disables cancellation. Next validate this TTS
-pacing baseline under barge-in and turn-batching N=2 after the no-barge-in
-endpoint segmentation probe.
+validation, but this profile still disables cancellation.
 
 Recommended barge-in Identity smoke-test profile:
 
@@ -344,12 +349,15 @@ debounce_ms = 180
 max_updates_per_utterance = 1
 
 [voice_quality.endpoint]
-trailing_silence_ms = 850
+trailing_silence_ms = 1100
 merge_window_ms = 120
 final_settle_ms = 500
 conversation_incomplete_tail_hold_ms = 250
 conversation_playback_hold_poll_ms = 10
 conversation_playback_max_hold_ms = 0
+
+[voice_quality.asr]
+finish_pad_ms = 600
 
 [voice_quality.barge_in]
 enabled = true
@@ -380,13 +388,15 @@ post_barge_in_fragment_max_words = 2
 The 2026-06-28 barge-in Identity run with this profile and
 `streaming_start_buffer_ms = 450` failed the human quality bar before #587: short
 and post-playback echo-like ASR finals escaped as new turns, Identity repeated
-them out of sequence, and outbound pacing recorded 77 underruns. #587 adds the
-post-barge-in dispatch guard so guarded short/echo-like finals do not cancel
-replacement playback or reach the processor. Keep this profile as the re-test
-case until a live barge-in sample confirms one clean replacement turn; #586 still
-owns AEC/VAD-anchored boundary validation. Collect qualitative feedback only
-after hangup or after `conversation smoke-test off`, otherwise Identity/repeat
-will capture and repeat the feedback as more caller turns.
+them out of sequence, and outbound pacing recorded 77 underruns. PR #588
+implements the #587 post-barge-in dispatch guard so guarded short/echo-like
+finals do not cancel replacement playback or reach the processor. After merge,
+run this profile as the #587 validation sample with `echo_characterization`
+enabled and require one clean replacement turn, no stale echo/fragment processor
+turn, and stable outbound pacing. #586 still owns AEC/VAD-anchored boundary
+validation after those measurements. Collect qualitative feedback only after
+hangup or after `conversation smoke-test off`, otherwise Identity/repeat will
+capture and repeat the feedback as more caller turns.
 
 ### Echo Suppression
 
