@@ -18,6 +18,7 @@
 | 2026-06-30 | @claude-vfs-fuse | **RE-ANCHOR against `feature/vmm-vz` (`e4e0229f`)** after review (PR #591, 2 reviewers NEEDS WORK, 21 inline). Re-cited every `server.rs:NNNN`. Corrected two stale claims: (a) overlay attrs use `ov_attrs.uid/gid` directly, NOT `apply_owner_override` — embedded uid/gid set at registration; (b) "server zero change" is false — EROFS propagation + observer lock-scope require server edits. Addressed must-fixes: static-layer EROFS + error propagation, symlink semantics (bake-time reject), tag publication, observer outside the mounts RwLock, guest `client+vsock` left intact via a split `local-mount`/`fuser-client` feature, `include_dir!` path fix, fixed-epoch mtime + `rerun-if-changed`, direct-`/dev/fuse` mount, platform matrix, host deps + degrade contract. Decisions locked with David: degrade-on-mount-failure; old default runtime mountpoint decision, superseded by the 2026-07-01 explicit `--mount <DIR>` cleanup; bake-time symlink reject; fixed-epoch mtime; separate static attr type; `include_dir` always-on light dep. |
 | 2026-07-01 | @codex-590-impl | Implementation pass for #590. Added status plan link, noted the generic symlink-detection gap in `include_dir::Dir`, and documented that mstream enforces bake-time symlink rejection with a source-tree `build.rs` scan while the VFS static layer remains file/dir-only. |
 | 2026-07-01 | @codex-590-impl | Switched mstream skills mounting to explicit `daemon start --mount <DIR>`; no `--mount` means no FUSE mount. Moved the baked source path into `build.rs` via `MSTREAM_SKILLS_DIR`. |
+| 2026-07-01 | @codex-590-impl | Renamed mstream embedded skills identifiers to drop the redundant `project` qualifier; the on-disk `.agents/skills/project` source path is unchanged. |
 
 ---
 
@@ -365,7 +366,7 @@ include_dir = "0.7"
 // edited SKILL.md with no .rs change ships a STALE embed. Compute the workspace
 // root path, reject symlinks while walking, and emit both file/dir watches and
 // the env var consumed by skills.rs.
-fn configure_project_skills() -> io::Result<()> {
+fn configure_skills() -> io::Result<()> {
     let root = workspace_root()?.join(".agents/skills/project");
     watch_tree(&root)?;
     println!("cargo:rustc-env=MSTREAM_SKILLS_DIR={}", root.display());
@@ -376,7 +377,7 @@ fn configure_project_skills() -> io::Result<()> {
 // bins/mstream/src/skills.rs
 use include_dir::{include_dir, Dir};
 
-pub const PROJECT_SKILLS_DIR: &str = env!("MSTREAM_SKILLS_DIR");
+pub const SKILLS_DIR: &str = env!("MSTREAM_SKILLS_DIR");
 pub static SKILLS: Dir = include_dir!("$MSTREAM_SKILLS_DIR");
 ```
 
@@ -384,7 +385,7 @@ pub static SKILLS: Dir = include_dir!("$MSTREAM_SKILLS_DIR");
 > `include_dir` 0.7 does not accept `include_dir!(env!("MSTREAM_SKILLS_DIR"))`;
 > the macro requires a string literal and expands `$MSTREAM_SKILLS_DIR` itself.
 > `build.rs` remains the source of truth for the absolute path, and
-> `PROJECT_SKILLS_DIR` keeps the build-provided env visible to tests.
+> `SKILLS_DIR` keeps the build-provided env visible to tests.
 
 **(2)+(3) Runtime — compose + mount, degrading on failure:**
 ```rust

@@ -6,8 +6,8 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=MSTREAM_BUILD_GIT_SHA");
     watch_git_metadata();
-    if let Err(err) = configure_project_skills() {
-        panic!("failed to configure embedded project skills: {err}");
+    if let Err(err) = configure_skills() {
+        panic!("failed to configure embedded skills: {err}");
     }
 
     let sha = std::env::var("MSTREAM_BUILD_GIT_SHA").unwrap_or_else(|_| current_git_sha());
@@ -31,14 +31,14 @@ fn watch_git_metadata() {
     }
 }
 
-fn configure_project_skills() -> io::Result<()> {
-    let root = project_skills_dir()?;
+fn configure_skills() -> io::Result<()> {
+    let root = skills_dir()?;
     watch_tree(&root)?;
     println!("cargo:rustc-env=MSTREAM_SKILLS_DIR={}", root.display());
     Ok(())
 }
 
-fn project_skills_dir() -> io::Result<PathBuf> {
+fn skills_dir() -> io::Result<PathBuf> {
     let manifest_dir = match std::env::var_os("CARGO_MANIFEST_DIR") {
         Some(value) => PathBuf::from(value),
         None => {

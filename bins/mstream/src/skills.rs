@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use include_dir::{include_dir, Dir};
 use motlie_vfs::core::{FsAccess, FsObserver, FsServer};
 
-pub const PROJECT_SKILLS_DIR: &str = env!("MSTREAM_SKILLS_DIR");
-pub static PROJECT_SKILLS: Dir<'static> = include_dir!("$MSTREAM_SKILLS_DIR");
+pub const SKILLS_DIR: &str = env!("MSTREAM_SKILLS_DIR");
+pub static SKILLS: Dir<'static> = include_dir!("$MSTREAM_SKILLS_DIR");
 
 #[cfg(target_os = "linux")]
 pub struct SkillsMount {
@@ -27,14 +27,14 @@ impl SkillsMount {
 #[cfg(not(target_os = "linux"))]
 pub struct SkillsMount;
 
-pub fn mount_project_skills(mountpoint: Option<PathBuf>) -> Option<SkillsMount> {
+pub fn mount_skills(mountpoint: Option<PathBuf>) -> Option<SkillsMount> {
     let Some(mountpoint) = mountpoint else {
         eprintln!(
             "skills FUSE unavailable: no --mount specified; continuing without mounting skills"
         );
         return None;
     };
-    match try_mount_project_skills(mountpoint) {
+    match try_mount_skills(mountpoint) {
         Ok(Some(mount)) => Some(mount),
         Ok(None) => None,
         Err(err) => {
@@ -45,7 +45,7 @@ pub fn mount_project_skills(mountpoint: Option<PathBuf>) -> Option<SkillsMount> 
 }
 
 #[cfg(target_os = "linux")]
-fn try_mount_project_skills(mountpoint: PathBuf) -> Result<Option<SkillsMount>> {
+fn try_mount_skills(mountpoint: PathBuf) -> Result<Option<SkillsMount>> {
     let backing_dir = backing_dir_for_mountpoint(&mountpoint)
         .context("failed to choose embedded skills backing directory")?;
     std::fs::create_dir_all(&backing_dir)
@@ -61,10 +61,8 @@ fn try_mount_project_skills(mountpoint: PathBuf) -> Result<Option<SkillsMount>> 
     server
         .overlay()
         .context("embedded skills VFS server was built without overlay support")?
-        .put_static_layer("project-skills", 50, "skills", &PROJECT_SKILLS, owner)
-        .with_context(|| {
-            format!("failed to register embedded project skills from {PROJECT_SKILLS_DIR}")
-        })?;
+        .put_static_layer("project-skills", 50, "skills", &SKILLS, owner)
+        .with_context(|| format!("failed to register embedded skills from {SKILLS_DIR}"))?;
 
     let mount =
         match motlie_vfs::client::local::mount_local(Arc::new(server), "skills", &mountpoint)
@@ -85,13 +83,13 @@ fn try_mount_project_skills(mountpoint: PathBuf) -> Result<Option<SkillsMount>> 
 }
 
 #[cfg(not(target_os = "linux"))]
-fn try_mount_project_skills(_mountpoint: PathBuf) -> Result<Option<SkillsMount>> {
+fn try_mount_skills(_mountpoint: PathBuf) -> Result<Option<SkillsMount>> {
     eprintln!("skills FUSE unavailable on this host platform; continuing without mount");
     Ok(None)
 }
 
 #[cfg(target_os = "linux")]
-pub fn unmount_project_skills(mount: Option<SkillsMount>) {
+pub fn unmount_skills(mount: Option<SkillsMount>) {
     if let Some(mount) = mount {
         if let Err(err) = mount.unmount() {
             eprintln!("failed to unmount skills FUSE: {err}");
@@ -100,7 +98,7 @@ pub fn unmount_project_skills(mount: Option<SkillsMount>) {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn unmount_project_skills(_mount: Option<SkillsMount>) {}
+pub fn unmount_skills(_mount: Option<SkillsMount>) {}
 
 #[cfg(target_os = "linux")]
 fn backing_dir_for_mountpoint(mountpoint: &Path) -> Option<PathBuf> {
@@ -152,20 +150,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_skills_are_embedded() {
-        assert!(PROJECT_SKILLS.get_file("SKILL.md").is_some());
+    fn skills_are_embedded() {
+        assert!(SKILLS.get_file("SKILL.md").is_some());
     }
 
     #[test]
-    fn project_skills_dir_is_supplied_by_build_script() {
-        let path = Path::new(PROJECT_SKILLS_DIR);
+    fn skills_dir_is_supplied_by_build_script() {
+        let path = Path::new(SKILLS_DIR);
         assert!(path.is_absolute());
         assert!(path.ends_with(".agents/skills/project"));
     }
 
     #[test]
     fn omitted_mountpoint_does_not_mount_skills() {
-        assert!(mount_project_skills(None).is_none());
+        assert!(mount_skills(None).is_none());
     }
 
     #[cfg(target_os = "linux")]
