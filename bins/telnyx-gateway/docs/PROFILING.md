@@ -754,8 +754,8 @@ Report-only/advisory analysis knobs:
 
 | Knob | Report use | Live protocol effect |
 |---|---|---|
-| `endpoint.min_turn_words` | Label possible low-information fragments. | None; must not suppress `caller.turn`. |
-| `endpoint.min_turn_chars` | Label tiny text fragments. | None; must not suppress `caller.turn`. |
+| `endpoint.min_turn_words` | Label possible low-information fragments. | No M4 `caller.turn` suppression; coalescing conversation processors may use it to hold low-confidence short finals. |
+| `endpoint.min_turn_chars` | Label tiny text fragments. | No M4 `caller.turn` suppression; coalescing conversation processors may use it to hold low-confidence short finals. |
 | `endpoint.merge_window_ms` | Suggest adjacent-turn merge candidates in reports; processor-local committed-turn debounce for coalescing conversation processors. | None for M4 app-agent `caller.turn`; coalescing conversation processors may delay/merge only their local processor input. |
 | `endpoint.final_settle_ms` | Explain bounded live holds for dangling-tail final fragments. | Holds only structurally incomplete finals before `caller.turn`; merges with a continuation final or flushes on timeout/stream end. |
 | `endpoint.final_settle_trailing_punctuation` / `endpoint.final_settle_lead_words` / `endpoint.final_settle_tail_words` / `endpoint.final_settle_dangling_suffixes` | Explain why a final was considered structurally incomplete. | TOML/replay policy only; defaults preserve the live-tuned English fragment classifier. |
@@ -1008,8 +1008,8 @@ Prompt requirements:
 | `speech.peak_threshold` | `PeakThreshold(i32)` | `0..32767` | `1100` | clamp to range | next ASR session | Live speech gate. |
 | `speech.onset_min_silence_ms` | `DurationMs` | `0..2000` | `180` | clamp to range | next ASR session | Barge-in onset sensitivity. |
 | `endpoint.trailing_silence_ms` | `DurationMs` | `100..5000` | `900` | clamp to range | next ASR session | Live endpointing. |
-| `endpoint.min_turn_words` | `ReportOnlyCount` | `0..50` | `2` | clamp to range | report only | Short-turn label threshold only. |
-| `endpoint.min_turn_chars` | `ReportOnlyCount` | `0..200` | `6` | clamp to range | report only | Tiny-turn label threshold only. |
+| `endpoint.min_turn_words` | `Count` | `0..50` | `2` | clamp to range | report; new conversation turn | Short-turn label threshold; also marks low-confidence short finals as provisional for processor-local conversation coalescing. |
+| `endpoint.min_turn_chars` | `Count` | `0..200` | `6` | clamp to range | report; new conversation turn | Tiny-turn label threshold; also marks low-confidence short finals as provisional for processor-local conversation coalescing. |
 | `endpoint.merge_window_ms` | `DurationMs` | `0..5000` | `350` | clamp to range | new conversation turn; no M4 `caller.turn` merge | Adjacent-turn recommendation and processor-local committed final debounce only. |
 | `endpoint.final_settle_ms` | `DurationMs` | `0..5000` | `800` | clamp to range | next ASR session | Bounded media-path hold/merge for structurally incomplete final fragments before live dispatch. |
 | `endpoint.final_settle_trailing_punctuation` | `StringList` | max 8 entries, 32 chars each | `[",", ":", ";"]` | reject oversize | next ASR session | Holdable trailing punctuation policy. |
@@ -1017,8 +1017,8 @@ Prompt requirements:
 | `endpoint.final_settle_tail_words` | `StringList` | max 64 entries, 256 chars each | `a,an,also,...` | reject oversize | next ASR session | Holdable dangling-tail word policy. |
 | `endpoint.final_settle_dangling_suffixes` | `StringList` | max 8 entries, 32 chars each | `["'", "-"]` | reject oversize | next ASR session | Holdable dangling suffix policy. |
 | `endpoint.conversation_tail_words` | `StringList` | max 64 entries, 256 chars each | `a,an,and,...` | reject oversize | new conversation turn | Handler-local incomplete-tail policy. |
-| `endpoint.conversation_incomplete_tail_hold_ms` | `DurationMs` | `0..10000` | `2500` | clamp to range | new conversation turn | Max processor-local hold for incomplete tails or low-confidence non-terminal finals. |
-| `endpoint.conversation_low_confidence_threshold_percent` | `Percent` | `0..100` | `45` | clamp to range | new conversation turn | Backend-native confidence threshold for processor-local non-terminal holds. |
+| `endpoint.conversation_incomplete_tail_hold_ms` | `DurationMs` | `0..10000` | `2500` | clamp to range | new conversation turn | Max processor-local hold for incomplete tails or low-confidence provisional finals; active playback wait does not consume this budget. |
+| `endpoint.conversation_low_confidence_threshold_percent` | `Percent` | `0..100` | `45` | clamp to range | new conversation turn | Backend-native confidence threshold for processor-local provisional holds, including short finals where ASR-inserted punctuation is not strong enough to prove turn completeness. |
 | `endpoint.conversation_playback_hold_poll_ms` | `DurationMs` | `10..1000` | `100` | clamp to range | new conversation turn | Recheck cadence while a coalescing handler or deferred conversation `Say` waits for active playback to finish. |
 | `endpoint.conversation_playback_max_hold_ms` | `DurationMs` | `0..180000` | `0` | clamp to range | new conversation turn | Max active-playback hold for processor-local final debounce and deferred conversation `Say`; `0` preserves the historical unbounded wait. |
 | `endpoint.max_turn_words` | `ReportOnlyCount` | `1..500` | `80` | clamp to range | report only | Overmerged-turn label threshold only. |

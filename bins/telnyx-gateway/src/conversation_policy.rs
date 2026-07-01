@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::echo_match::match_assistant_echo_signature;
+
 use crate::early_response::MissingSignalPolicy;
 use crate::quality::{
-    BargeInQualityConfig, ConversationPolicyConfig, ConversationPolicyMode, PendingOutputOrder,
+    BargeInQualityConfig, ConversationPolicyConfig, ConversationPolicyMode,
+    EchoSuppressionQualityConfig, PendingOutputOrder,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -182,6 +185,78 @@ pub struct BargeInTranscriptEvidence<'a> {
     pub stability: Option<f32>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinalTranscriptDispatchAction {
+    Forward,
+    SuppressPostPlaybackEcho,
+}
+
+impl FinalTranscriptDispatchAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::SuppressPostPlaybackEcho => "suppress_post_playback_echo",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinalTranscriptDispatchReason {
+    Forward,
+    EmptyTranscript,
+    AssistantEcho,
+    ShortFragment,
+    WeakSignal,
+}
+
+impl FinalTranscriptDispatchReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::EmptyTranscript => "empty_transcript",
+            Self::AssistantEcho => "assistant_echo",
+            Self::ShortFragment => "short_fragment",
+            Self::WeakSignal => "weak_signal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FinalTranscriptDispatchDecision {
+    pub action: FinalTranscriptDispatchAction,
+    pub reason: FinalTranscriptDispatchReason,
+}
+
+impl FinalTranscriptDispatchDecision {
+    fn forward() -> Self {
+        Self {
+            action: FinalTranscriptDispatchAction::Forward,
+            reason: FinalTranscriptDispatchReason::Forward,
+        }
+    }
+
+    fn suppress(reason: FinalTranscriptDispatchReason) -> Self {
+        Self {
+            action: FinalTranscriptDispatchAction::SuppressPostPlaybackEcho,
+            reason,
+        }
+    }
+
+    pub fn forwards(self) -> bool {
+        self.action == FinalTranscriptDispatchAction::Forward
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinalTranscriptDispatchEvidence<'a> {
+    pub text: &'a str,
+    pub post_barge_in_guard_active: bool,
+    pub active_or_recent_playback: bool,
+    pub confidence: Option<f32>,
+    pub stability: Option<f32>,
+    pub assistant_echo_signature: Option<&'a str>,
+}
+
 impl BargeInTranscriptEvidence<'_> {
     pub fn char_count(self) -> usize {
         self.text.chars().filter(|ch| !ch.is_whitespace()).count()
@@ -270,6 +345,50 @@ impl ConversationPolicyConfig {
             assistant_output,
         }
     }
+
+    pub fn decide_final_transcript_dispatch(
+        &self,
+        barge_in: &BargeInQualityConfig,
+        echo_suppression: &EchoSuppressionQualityConfig,
+        evidence: FinalTranscriptDispatchEvidence<'_>,
+    ) -> FinalTranscriptDispatchDecision {
+        if self.mode == ConversationPolicyMode::CurrentCompat
+            || !barge_in.enabled
+            || !evidence.post_barge_in_guard_active
+            || !evidence.active_or_recent_playback
+        {
+            return FinalTranscriptDispatchDecision::forward();
+        }
+        if !has_normalized_transcript_content(evidence.text) {
+            return FinalTranscriptDispatchDecision::suppress(
+                FinalTranscriptDispatchReason::EmptyTranscript,
+            );
+        }
+        if post_playback_echo_match(echo_suppression, evidence) {
+            return FinalTranscriptDispatchDecision::suppress(
+                FinalTranscriptDispatchReason::AssistantEcho,
+            );
+        }
+        // ASR confidence can be high on post-playback echo fragments; length remains the
+        // echo-biased guardrail during this narrow replacement-playback window.
+        if is_post_playback_fragment(evidence.text, self) {
+            return FinalTranscriptDispatchDecision::suppress(
+                FinalTranscriptDispatchReason::ShortFragment,
+            );
+        }
+        let barge_in_evidence = BargeInTranscriptEvidence {
+            text: evidence.text,
+            active_playback: true,
+            confidence: evidence.confidence,
+            stability: evidence.stability,
+        };
+        if !transcript_scores_allow_barge_in(barge_in, BargeInTrigger::Final, barge_in_evidence) {
+            return FinalTranscriptDispatchDecision::suppress(
+                FinalTranscriptDispatchReason::WeakSignal,
+            );
+        }
+        FinalTranscriptDispatchDecision::forward()
+    }
 }
 
 fn transcript_evidence_allows_barge_in(
@@ -298,6 +417,27 @@ fn transcript_evidence_allows_barge_in(
 
 fn has_normalized_transcript_content(text: &str) -> bool {
     text.chars().any(|ch| ch.is_alphanumeric())
+}
+
+fn is_post_playback_fragment(text: &str, policy: &ConversationPolicyConfig) -> bool {
+    let char_count = text.chars().filter(|ch| ch.is_alphanumeric()).count();
+    let word_count = text
+        .split_whitespace()
+        .filter(|word| has_normalized_transcript_content(word))
+        .count();
+    char_count <= policy.post_barge_in_fragment_max_chars
+        || word_count <= policy.post_barge_in_fragment_max_words
+}
+
+fn post_playback_echo_match(
+    config: &EchoSuppressionQualityConfig,
+    evidence: FinalTranscriptDispatchEvidence<'_>,
+) -> bool {
+    let Some(assistant_echo_signature) = evidence.assistant_echo_signature else {
+        return false;
+    };
+
+    match_assistant_echo_signature(config, evidence.text, assistant_echo_signature).is_some()
 }
 
 fn legacy_transcript_scores_allow_barge_in(
@@ -495,6 +635,9 @@ mod tests {
             max_pending_outputs,
             pending_output_order: order,
             post_barge_in_silence_ms: 1_200,
+            post_barge_in_echo_guard_ms: 2_000,
+            post_barge_in_fragment_max_chars: 12,
+            post_barge_in_fragment_max_words: 2,
         }
     }
 
@@ -593,6 +736,137 @@ mod tests {
 
         assert!(decision.cancels_playback());
         assert!(decision.forwards_caller_transcript());
+    }
+
+    fn post_barge_in_policy() -> ConversationPolicyConfig {
+        ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCoalesceAfterSilence,
+            post_barge_in_echo_guard_ms: 2_000,
+            ..ConversationPolicyConfig::default()
+        }
+    }
+
+    fn scored_final_barge_in() -> BargeInQualityConfig {
+        BargeInQualityConfig {
+            final_min_confidence: Some(0.70),
+            ..BargeInQualityConfig::default()
+        }
+    }
+
+    fn guarded_final_evidence<'a>(
+        text: &'a str,
+        assistant_echo_signature: Option<&'a str>,
+    ) -> FinalTranscriptDispatchEvidence<'a> {
+        FinalTranscriptDispatchEvidence {
+            text,
+            post_barge_in_guard_active: true,
+            active_or_recent_playback: true,
+            confidence: Some(0.91),
+            stability: None,
+            assistant_echo_signature,
+        }
+    }
+
+    #[test]
+    fn current_compat_dispatch_guard_forwards_short_finals() {
+        let policy = ConversationPolicyConfig::default();
+        let decision = policy.decide_final_transcript_dispatch(
+            &scored_final_barge_in(),
+            &EchoSuppressionQualityConfig::default(),
+            guarded_final_evidence("up now", None),
+        );
+
+        assert!(decision.forwards());
+    }
+
+    #[test]
+    fn post_barge_in_dispatch_guard_suppresses_short_final_fragments() {
+        let policy = post_barge_in_policy();
+        let decision = policy.decide_final_transcript_dispatch(
+            &scored_final_barge_in(),
+            &EchoSuppressionQualityConfig::default(),
+            guarded_final_evidence("up now", None),
+        );
+
+        assert_eq!(
+            decision.action,
+            FinalTranscriptDispatchAction::SuppressPostPlaybackEcho
+        );
+        assert_eq!(
+            decision.reason,
+            FinalTranscriptDispatchReason::ShortFragment
+        );
+    }
+
+    #[test]
+    fn cancel_only_dispatch_guard_suppresses_short_final_fragments() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            post_barge_in_echo_guard_ms: 2_000,
+            ..ConversationPolicyConfig::default()
+        };
+        let decision = policy.decide_final_transcript_dispatch(
+            &scored_final_barge_in(),
+            &EchoSuppressionQualityConfig::default(),
+            guarded_final_evidence("up now", None),
+        );
+
+        assert_eq!(
+            decision.reason,
+            FinalTranscriptDispatchReason::ShortFragment
+        );
+    }
+
+    #[test]
+    fn post_barge_in_dispatch_guard_suppresses_score_absent_finals() {
+        let policy = post_barge_in_policy();
+        let decision = policy.decide_final_transcript_dispatch(
+            &scored_final_barge_in(),
+            &EchoSuppressionQualityConfig::default(),
+            FinalTranscriptDispatchEvidence {
+                text: "this sentence has enough non echo words",
+                post_barge_in_guard_active: true,
+                active_or_recent_playback: true,
+                confidence: None,
+                stability: None,
+                assistant_echo_signature: None,
+            },
+        );
+
+        assert_eq!(decision.reason, FinalTranscriptDispatchReason::WeakSignal);
+    }
+
+    #[test]
+    fn post_barge_in_dispatch_guard_suppresses_garbled_assistant_echo() {
+        let policy = post_barge_in_policy();
+        let decision = policy.decide_final_transcript_dispatch(
+            &scored_final_barge_in(),
+            &EchoSuppressionQualityConfig::default(),
+            guarded_final_evidence(
+                "He's been paint this replacement sentence clearly after the interrup",
+                Some("please repeat this replacement sentence clearly after the interruption"),
+            ),
+        );
+
+        assert_eq!(
+            decision.reason,
+            FinalTranscriptDispatchReason::AssistantEcho
+        );
+    }
+
+    #[test]
+    fn post_barge_in_dispatch_guard_forwards_strong_non_echo_replacement() {
+        let policy = post_barge_in_policy();
+        let decision = policy.decide_final_transcript_dispatch(
+            &scored_final_barge_in(),
+            &EchoSuppressionQualityConfig::default(),
+            guarded_final_evidence(
+                "please repeat this replacement sentence clearly after the interruption",
+                Some("the gateway will begin repeating this long sentence"),
+            ),
+        );
+
+        assert!(decision.forwards());
     }
 
     #[test]
@@ -895,6 +1169,9 @@ mod tests {
             max_pending_outputs: 1,
             pending_output_order: PendingOutputOrder::LatestOnly,
             post_barge_in_silence_ms: 1_500,
+            post_barge_in_echo_guard_ms: 2_000,
+            post_barge_in_fragment_max_chars: 12,
+            post_barge_in_fragment_max_words: 2,
         };
         let decision =
             policy.decide_barge_in(&BargeInQualityConfig::default(), BargeInTrigger::Final);

@@ -231,6 +231,11 @@ max_pending_outputs = 3
 pending_output_order = "fifo"
 # Reserved for barge-in coalescing profiles; inactive for this no-barge-in mode.
 post_barge_in_silence_ms = 1200
+# Post-coalesced-dispatch guard window for active/recent playback echo fragments.
+post_barge_in_echo_guard_ms = 2000
+# Short guarded finals at or below these normalized sizes are suppressed.
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 
 [voice_quality.echo_suppression]
 # Suppress transcripts that match active assistant TTS, except same-source provisional audio.

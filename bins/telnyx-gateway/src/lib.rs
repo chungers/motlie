@@ -5,6 +5,7 @@ pub mod cli;
 pub mod conversation;
 pub mod conversation_policy;
 pub mod early_response;
+pub(crate) mod echo_match;
 pub mod error;
 pub mod events;
 pub mod golden_ab;

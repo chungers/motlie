@@ -309,7 +309,18 @@ impl EndpointQualityConfig {
 
     pub fn conversation_low_confidence_hold_allowed(&self, text: &str) -> bool {
         let trimmed = text.trim();
-        !trimmed.is_empty() && !has_terminal_punctuation(trimmed)
+        if trimmed.is_empty() {
+            return false;
+        }
+        if !has_terminal_punctuation(trimmed) {
+            return true;
+        }
+        let word_count = trimmed
+            .split_whitespace()
+            .filter(|word| word.chars().any(char::is_alphanumeric))
+            .count();
+        let char_count = trimmed.chars().filter(|ch| ch.is_alphanumeric()).count();
+        word_count <= self.min_turn_words || char_count <= self.min_turn_chars
     }
 }
 
@@ -542,6 +553,12 @@ pub struct ConversationPolicyConfig {
     pub pending_output_order: PendingOutputOrder,
     #[serde(default = "default_conversation_policy_post_barge_in_silence_ms")]
     pub post_barge_in_silence_ms: u64,
+    #[serde(default = "default_conversation_policy_post_barge_in_echo_guard_ms")]
+    pub post_barge_in_echo_guard_ms: u64,
+    #[serde(default = "default_conversation_policy_post_barge_in_fragment_max_chars")]
+    pub post_barge_in_fragment_max_chars: usize,
+    #[serde(default = "default_conversation_policy_post_barge_in_fragment_max_words")]
+    pub post_barge_in_fragment_max_words: usize,
 }
 
 fn default_conversation_policy_active_playback_hold_ms() -> u64 {
@@ -556,6 +573,18 @@ fn default_conversation_policy_post_barge_in_silence_ms() -> u64 {
     ConversationPolicyConfig::default().post_barge_in_silence_ms
 }
 
+fn default_conversation_policy_post_barge_in_echo_guard_ms() -> u64 {
+    ConversationPolicyConfig::default().post_barge_in_echo_guard_ms
+}
+
+fn default_conversation_policy_post_barge_in_fragment_max_chars() -> usize {
+    ConversationPolicyConfig::default().post_barge_in_fragment_max_chars
+}
+
+fn default_conversation_policy_post_barge_in_fragment_max_words() -> usize {
+    ConversationPolicyConfig::default().post_barge_in_fragment_max_words
+}
+
 impl Default for ConversationPolicyConfig {
     fn default() -> Self {
         Self {
@@ -564,6 +593,9 @@ impl Default for ConversationPolicyConfig {
             max_pending_outputs: 1,
             pending_output_order: PendingOutputOrder::LatestOnly,
             post_barge_in_silence_ms: 1_200,
+            post_barge_in_echo_guard_ms: 2_000,
+            post_barge_in_fragment_max_chars: 12,
+            post_barge_in_fragment_max_words: 2,
         }
     }
 }
@@ -591,6 +623,25 @@ impl Default for EchoSuppressionQualityConfig {
             long_min_tokens: 4,
             long_token_coverage_percent: 60,
             long_longest_token_run: 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EchoCharacterizationQualityConfig {
+    pub enabled: bool,
+    pub window_ms: u64,
+    pub max_delay_ms: u64,
+    pub emit_interval_ms: u64,
+}
+
+impl Default for EchoCharacterizationQualityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_ms: 240,
+            max_delay_ms: 160,
+            emit_interval_ms: 500,
         }
     }
 }
@@ -681,6 +732,8 @@ pub struct VoiceQualityConfig {
     pub conversation_policy: ConversationPolicyConfig,
     #[serde(default)]
     pub echo_suppression: EchoSuppressionQualityConfig,
+    #[serde(default)]
+    pub echo_characterization: EchoCharacterizationQualityConfig,
     pub logging: LoggingQualityConfig,
     pub quality_judge: QualityJudgeConfig,
     pub targets: QualityTargetsConfig,
@@ -714,6 +767,7 @@ impl VoiceQualityConfig {
             barge_in: BargeInQualityConfig::default(),
             conversation_policy: ConversationPolicyConfig::default(),
             echo_suppression: EchoSuppressionQualityConfig::default(),
+            echo_characterization: EchoCharacterizationQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
             quality_judge: QualityJudgeConfig::default(),
             targets: QualityTargetsConfig::default(),
@@ -1008,6 +1062,24 @@ impl VoiceQualityConfig {
             0,
             30_000,
         )?;
+        ensure_u64(
+            "conversation_policy.post_barge_in_echo_guard_ms",
+            self.conversation_policy.post_barge_in_echo_guard_ms,
+            0,
+            30_000,
+        )?;
+        ensure_usize(
+            "conversation_policy.post_barge_in_fragment_max_chars",
+            self.conversation_policy.post_barge_in_fragment_max_chars,
+            0,
+            200,
+        )?;
+        ensure_usize(
+            "conversation_policy.post_barge_in_fragment_max_words",
+            self.conversation_policy.post_barge_in_fragment_max_words,
+            0,
+            50,
+        )?;
         ensure_usize(
             "echo_suppression.min_text_chars",
             self.echo_suppression.min_text_chars,
@@ -1049,6 +1121,24 @@ impl VoiceQualityConfig {
             self.echo_suppression.long_longest_token_run,
             1,
             64,
+        )?;
+        ensure_u64(
+            "echo_characterization.window_ms",
+            self.echo_characterization.window_ms,
+            20,
+            2_000,
+        )?;
+        ensure_u64(
+            "echo_characterization.max_delay_ms",
+            self.echo_characterization.max_delay_ms,
+            0,
+            1_000,
+        )?;
+        ensure_u64(
+            "echo_characterization.emit_interval_ms",
+            self.echo_characterization.emit_interval_ms,
+            20,
+            60_000,
         )?;
         ensure_usize(
             "logging.queue_capacity",
@@ -1314,6 +1404,15 @@ impl VoiceQualityConfig {
             if let Some(value) = policy.post_barge_in_silence_ms {
                 self.set_conversation_policy_post_barge_in_silence_ms(value);
             }
+            if let Some(value) = policy.post_barge_in_echo_guard_ms {
+                self.set_conversation_policy_post_barge_in_echo_guard_ms(value);
+            }
+            if let Some(value) = policy.post_barge_in_fragment_max_chars {
+                self.set_conversation_policy_post_barge_in_fragment_max_chars(value);
+            }
+            if let Some(value) = policy.post_barge_in_fragment_max_words {
+                self.set_conversation_policy_post_barge_in_fragment_max_words(value);
+            }
         }
         if let Some(echo) = patch.echo_suppression {
             if let Some(value) = echo.enabled {
@@ -1339,6 +1438,20 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = echo.long_longest_token_run {
                 self.set_echo_suppression_long_longest_token_run(value);
+            }
+        }
+        if let Some(echo) = patch.echo_characterization {
+            if let Some(value) = echo.enabled {
+                self.set_echo_characterization_enabled(value);
+            }
+            if let Some(value) = echo.window_ms {
+                self.set_echo_characterization_window_ms(value);
+            }
+            if let Some(value) = echo.max_delay_ms {
+                self.set_echo_characterization_max_delay_ms(value);
+            }
+            if let Some(value) = echo.emit_interval_ms {
+                self.set_echo_characterization_emit_interval_ms(value);
             }
         }
         if let Some(logging) = patch.logging {
@@ -2018,6 +2131,48 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_conversation_policy_post_barge_in_echo_guard_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 30_000);
+        self.conversation_policy.post_barge_in_echo_guard_ms = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_echo_guard_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_fragment_max_chars(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 200);
+        self.conversation_policy.post_barge_in_fragment_max_chars = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_fragment_max_chars",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_fragment_max_words(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 50);
+        self.conversation_policy.post_barge_in_fragment_max_words = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_fragment_max_words",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
     pub fn set_echo_suppression_enabled(&mut self, value: bool) -> QualityMutationOutcome {
         self.echo_suppression.enabled = value;
         self.outcome(
@@ -2113,6 +2268,52 @@ impl VoiceQualityConfig {
             "echo_suppression.long_longest_token_run",
             clamped.value,
             ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_characterization_enabled(&mut self, value: bool) -> QualityMutationOutcome {
+        self.echo_characterization.enabled = value;
+        self.outcome(
+            "echo_characterization.enabled",
+            value,
+            ApplyBoundary::Immediate,
+            false,
+        )
+    }
+
+    pub fn set_echo_characterization_window_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 20, 2_000);
+        self.echo_characterization.window_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.window_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_characterization_max_delay_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 1_000);
+        self.echo_characterization.max_delay_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.max_delay_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_characterization_emit_interval_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 20, 60_000);
+        self.echo_characterization.emit_interval_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.emit_interval_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
             clamped.clamped,
         )
     }
@@ -2389,6 +2590,8 @@ pub struct QualityConfigPatch {
     #[serde(default)]
     pub echo_suppression: Option<EchoSuppressionQualityConfigPatch>,
     #[serde(default)]
+    pub echo_characterization: Option<EchoCharacterizationQualityConfigPatch>,
+    #[serde(default)]
     pub logging: Option<LoggingQualityConfigPatch>,
     #[serde(default)]
     pub quality_judge: Option<QualityJudgeConfigPatch>,
@@ -2483,6 +2686,9 @@ pub struct ConversationPolicyConfigPatch {
     pub max_pending_outputs: Option<usize>,
     pub pending_output_order: Option<PendingOutputOrder>,
     pub post_barge_in_silence_ms: Option<u64>,
+    pub post_barge_in_echo_guard_ms: Option<u64>,
+    pub post_barge_in_fragment_max_chars: Option<usize>,
+    pub post_barge_in_fragment_max_words: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2496,6 +2702,15 @@ pub struct EchoSuppressionQualityConfigPatch {
     pub long_min_tokens: Option<usize>,
     pub long_token_coverage_percent: Option<u64>,
     pub long_longest_token_run: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EchoCharacterizationQualityConfigPatch {
+    pub enabled: Option<bool>,
+    pub window_ms: Option<u64>,
+    pub max_delay_ms: Option<u64>,
+    pub emit_interval_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2744,6 +2959,10 @@ mod tests {
             [voice_quality.conversation_policy]
             max_pending_output = 3
             "#,
+            r#"
+            [voice_quality.echo_characterization]
+            emit_intervals_ms = 500
+            "#,
         ] {
             let error = VoiceQualityConfig::from_toml_str(raw)
                 .expect_err("unknown voice_quality keys should fail closed");
@@ -2801,6 +3020,18 @@ mod tests {
             PendingOutputOrder::LatestOnly
         );
         assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 1_200);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            2_000
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            12
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            2
+        );
     }
 
     #[test]
@@ -2813,6 +3044,9 @@ mod tests {
             max_pending_outputs = 3
             pending_output_order = "fifo"
             post_barge_in_silence_ms = 1200
+            post_barge_in_echo_guard_ms = 1800
+            post_barge_in_fragment_max_chars = 10
+            post_barge_in_fragment_max_words = 2
             "#,
         )
         .expect("conversation policy config parses");
@@ -2827,6 +3061,19 @@ mod tests {
             config.conversation_policy.pending_output_order,
             PendingOutputOrder::Fifo
         );
+        assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 1_200);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            1_800
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            10
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            2
+        );
     }
 
     #[test]
@@ -2837,6 +3084,9 @@ mod tests {
             active_playback_hold_ms = 999999
             max_pending_outputs = 0
             post_barge_in_silence_ms = 999999
+            post_barge_in_echo_guard_ms = 999999
+            post_barge_in_fragment_max_chars = 999999
+            post_barge_in_fragment_max_words = 999999
             "#,
         )
         .expect("conversation policy numeric knobs clamp");
@@ -2844,6 +3094,54 @@ mod tests {
         assert_eq!(config.conversation_policy.active_playback_hold_ms, 180_000);
         assert_eq!(config.conversation_policy.max_pending_outputs, 1);
         assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 30_000);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            30_000
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            200
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            50
+        );
+    }
+
+    #[test]
+    fn toml_accepts_echo_characterization_config() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.echo_characterization]
+            enabled = true
+            window_ms = 320
+            max_delay_ms = 180
+            emit_interval_ms = 250
+            "#,
+        )
+        .expect("echo characterization config parses");
+
+        assert!(config.echo_characterization.enabled);
+        assert_eq!(config.echo_characterization.window_ms, 320);
+        assert_eq!(config.echo_characterization.max_delay_ms, 180);
+        assert_eq!(config.echo_characterization.emit_interval_ms, 250);
+    }
+
+    #[test]
+    fn echo_characterization_numeric_toml_knobs_clamp() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.echo_characterization]
+            window_ms = 1
+            max_delay_ms = 999999
+            emit_interval_ms = 1
+            "#,
+        )
+        .expect("echo characterization numeric knobs clamp");
+
+        assert_eq!(config.echo_characterization.window_ms, 20);
+        assert_eq!(config.echo_characterization.max_delay_ms, 1_000);
+        assert_eq!(config.echo_characterization.emit_interval_ms, 20);
     }
 
     #[test]

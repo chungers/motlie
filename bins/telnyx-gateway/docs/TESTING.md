@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-01 PDT | @codex-541 | Recorded the #587 live barge-in dispatch-guard validation pass and current continuation protocol: no-barge-in baseline is 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, and bounded FIFO Identity; remaining follow-up is #586 echo/AEC measurement plus short-terminal-phrase TTS audio inspection. |
+| 2026-06-29 PDT | @codex-541 | Added #586 echo-characterization live-run protocol: enable the diagnostic per run, record `media.echo_characterization` metrics, and leave AEC/VAD behavior changes to follow-up after PR #588. |
+| 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs to the live-test protocol; the next barge-in run should verify one clean replacement turn before #586 AEC/VAD work. |
 | 2026-06-28 PDT | @codex-541 | Recorded the failed barge-in Identity 450 ms run: post-playback ASR fragments escaped as new turns, so the next barge-in step is a code fix rather than knob-only tuning. |
 | 2026-06-28 PDT | @codex-541 | Promoted `streaming_start_buffer_ms = 450` for the no-barge-in Identity TTS pacing baseline and recorded that barge-in plus turn-batching N=2 still require separate validation. |
 | 2026-06-28 PDT | @codex-541 | Reaffirmed the current best inbound Identity no-barge-in live-test knobs after Layer A score-gated barge-in landed: bounded FIFO pending output, streaming Kokoro first-chunk/tail padding, clause early response, and conservative score telemetry. |
@@ -76,7 +79,7 @@ Create the run config from a committed redacted example. Use the generic templat
 The global TOML surface and tuning knobs are documented in
 [`CONFIGS.md`](CONFIGS.md). Use that guide as the canonical user-facing
 reference for conversation, endpoint, TTS, early response, barge-in,
-conversation policy, and quality logging knobs.
+conversation policy, echo characterization, and quality logging knobs.
 
 ```sh
 RUN_ID="$(date +%Y%m%d-%H%M%S)-clause-coalesce-v1"
@@ -168,12 +171,13 @@ knobs for traceability:
 - `voice_quality.tts.prebuffer_chunks = 1`
 - `voice_quality.tts.streaming_start_buffer_ms = 450`
 - `voice_quality.tts.tail_pad_ms = 200`
-- `voice_quality.endpoint.trailing_silence_ms = 850`
+- `voice_quality.endpoint.trailing_silence_ms = 1100`
 - `voice_quality.endpoint.merge_window_ms = 120`
 - `voice_quality.endpoint.final_settle_ms = 500`
 - `voice_quality.endpoint.conversation_incomplete_tail_hold_ms = 250`
 - `voice_quality.endpoint.conversation_playback_hold_poll_ms = 10`
 - `voice_quality.endpoint.conversation_playback_max_hold_ms = 0`
+- `voice_quality.asr.finish_pad_ms = 600`
 - `voice_quality.conversation_policy.mode = "no_barge_in_bounded_pending"`
 - `voice_quality.conversation_policy.max_pending_outputs = 3`
 - `voice_quality.conversation_policy.pending_output_order = "fifo"`
@@ -194,18 +198,17 @@ knobs for traceability:
 Use `conversation_policy.mode = "current_compat"` only for baseline/regression
 runs that intentionally reproduce the legacy latest-only drop behavior.
 
-Recent live-run finding: on 2026-06-24, this profile produced a solid audible
-improvement on inbound Identity/repeat with good audio quality. The completed
-run recorded 12 attempted playbacks, 12 completed playbacks, 0 canceled/failed
-playbacks, 13 raw ASR finals, 1 pre-fix excluded turn without playback, and 0
-dropped quality events. Follow-up code classified that excluded turn as a
-coalesced source-turn accounting artifact rather than a dropped repeat: quality
-summary attempted/played/canceled turn counts now include every linked source
-turn, not only the selected response turn. Remaining issues were ASR fragments
-such as `Motlie -> Martley`, `barge in -> bar J`, and a perceived `hang`/`hang
-up` tail miss, plus long first-audio/tail latency during serial playback. Do not
-assume early-response is active just because the config enables it; verify
-accepted/rejected provisional-response quality events.
+Recent live-run finding: on 2026-07-01, the local short-complete-response TTS
+chunking probe used this no-barge-in Identity profile with
+`trailing_silence_ms = 1100`, `finish_pad_ms = 600`, and
+`streaming_start_buffer_ms = 450`. The run produced 5 expected script sentences
+as 5 ASR finals and 5 processor-visible turns, strict script WER 3.17% with no
+deletions, and clean endpoint alignment. The line containing `miss it` reached
+ASR, Identity, and TTS as one chunk, but the caller still did not hear that short
+terminal phrase. Treat the remaining defect as a TTS/acoustic/prosody follow-up,
+not an endpointing or dispatch-loss bug. Do not assume early-response is active
+just because the config enables it; verify accepted/rejected provisional-response
+quality events.
 
 ## Run-By-Run Tuning Ladder
 
@@ -256,6 +259,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Observed on 2026-06-21 by @codex-535: this profile capped the old serial
@@ -318,6 +324,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 3
 pending_output_order = "fifo"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Success criteria:
@@ -407,6 +416,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Use `barge_in_coalesce_after_silence` when validating interruption followed by
@@ -468,6 +480,9 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 1
 pending_output_order = "latest_only"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Success criteria:
@@ -513,38 +528,49 @@ Previous 2026-06-25 result:
   replacement-sentence echo/fragment conditions, so treat 2026-06-25 as an
   encouraging sample, not a validated baseline.
 
-Next barge-in Identity run:
+#587 barge-in Identity validation result:
 
-- Do not run another config-only barge-in probe first.
-- Implement a general post-barge-in dispatch guard: during active assistant
-  playback and a short post-playback echo window, short or low-content finals
-  should be suppressed or held unless they carry strong non-echo evidence.
-- Keep `voice_quality.barge_in.missing_signal_policy = "conservative"`,
-  `partial_min_confidence = 0.50`, `partial_min_stability = 0.50`, and
-  `final_min_confidence = 0.70`; leave `final_min_stability` unset until final
-  ASR emits stability.
-- After the code fix, rerun this same profile with the same script shape and
-  verify one clean replacement turn, 0 stale echo replay, and stable outbound
-  pacing.
+- 2026-07-01 run `20260701-162134-587-bargein-dispatchguard-v1` passed the
+  live dispatch-guard check with this profile.
+- The initial long caller turn reached Identity and started playback; the caller
+  interrupted with the replacement sentence; the original playback was canceled.
+- Assistant-echo transcripts during active/recent playback were suppressed,
+  including the final `A gateway will begin repeating this`; that echo did not
+  reach `conversation.processor_visible_turn`.
+- The replacement turn `Stop now, please repeat this replacement sentence
+  clearly after the interruption` was the only post-barge-in processor-visible
+  turn and its playback completed.
+- Metrics: 2 processor-visible turns, 3 suppressed assistant-echo transcripts,
+  1 canceled playback, 1 completed replacement playback, 0 stale echo/fragment
+  processor turns, 0 outbound underruns, 0 inbound lost packets, and 15
+  `media.echo_characterization` spans.
+- #587 is live-validated for this Identity/repeat sample. Future barge-in runs
+  should focus on #586 AEC/VAD boundary measurements unless a reviewer requests
+  repeated #587 sampling.
 
 ### Next No-Barge-In Follow-Up
 
 For the next no-barge-in Identity run, keep the bounded FIFO policy fixed and do
-not re-enable turn batching. The 2026-06-28 450 ms pacing run keeps this as the
-best repeat-reliability and pacing baseline, while the remaining no-barge-in
-work is endpoint segmentation.
+not re-enable turn batching. The 2026-07-01 run keeps this as the best
+repeat-reliability and pacing baseline: 1100 ms endpoint trailing silence, 600
+ms ASR finish pad, 450 ms TTS start buffer, and bounded FIFO Identity. The
+remaining no-barge-in work is short-terminal-phrase TTS intelligibility, not
+endpoint dispatch loss.
 
 Hold this baseline unless testing one explicit hypothesis. Change one
-endpointing knob per run:
+knob family per run:
 
 ```toml
 [voice_quality.endpoint]
-trailing_silence_ms = 850
+trailing_silence_ms = 1100
 merge_window_ms = 120
 final_settle_ms = 500
 conversation_incomplete_tail_hold_ms = 250
 conversation_playback_hold_poll_ms = 10
 conversation_playback_max_hold_ms = 0
+
+[voice_quality.asr]
+finish_pad_ms = 600
 
 [voice_quality.conversation_policy]
 mode = "no_barge_in_bounded_pending"
@@ -552,20 +578,28 @@ active_playback_hold_ms = 1000
 max_pending_outputs = 3
 pending_output_order = "fifo"
 post_barge_in_silence_ms = 1200
+post_barge_in_echo_guard_ms = 2000
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 ```
 
 Next hypotheses, one per run:
 
-- Endpoint segmentation: test exactly one of `final_settle_ms = 650` or
-  `merge_window_ms = 180`; success is one processor-visible turn for the script
-  without stale tail latency or overmerging unrelated speech.
+- Short terminal phrase TTS: keep endpoint and policy knobs fixed, capture the
+  generated audio artifact for a line such as `The next phrase is short and easy
+  to lose. Miss it.`, and A/B only generic text shaping or TTS prosody changes.
+  Success is caller-audible terminal words without adding endpoint latency or
+  keyword-specific handling.
 - TTS pacing: keep `streaming_start_buffer_ms = 450` as the current baseline.
   Do not test `prebuffer_chunks = 2` unless underruns return under the 450 ms
   setting.
-- Barge-in validation: after the endpoint segmentation probe, re-run the current
-  `barge_in_coalesce_after_silence` Identity profile with the shared 450 ms TTS
-  start buffer to confirm interruption/replacement playback still has 0
-  underruns and acceptable first-audio latency.
+- Barge-in regression: keep the #587 validation profile available for repeated
+  sampling if reviewers request it, but the 2026-07-01 live sample passed the
+  dispatch-guard acceptance check.
+- #586 AEC/VAD boundary: use the collected `media.echo_characterization` spans
+  and additional barge-in samples to choose AEC insertion or an echo-aware onset
+  gate. Do not make policy consume the diagnostic until the correlation, delay,
+  and echo-return evidence supports the boundary.
 - Turn-batching validation: after barge-in is revalidated, run
   `processor = "turn_batched_identity"` with fixed N=2 and confirm the prompt
   handler sees one joined prompt with two source turns, not two separate
@@ -1088,6 +1122,22 @@ PY
 Redact phone numbers, live public hosts, connection IDs, call IDs, and unrelated
 personal data before copying logs into issues or PR comments.
 
+For #586 echo-characterization probes, enable this block in the per-run config:
+
+```toml
+[voice_quality.echo_characterization]
+enabled = true
+window_ms = 240
+max_delay_ms = 160
+emit_interval_ms = 500
+```
+
+During analysis, extract `media.echo_characterization` quality spans and record
+at least event count, max/p95 `correlation_peak`, observed `estimated_delay_ms`
+range, `echo_return_db` range, and whether spans occurred during `active` or
+`recent` playback. These spans are diagnostic only in PR #588; post-merge #586
+work uses them to choose AEC insertion vs. echo-aware onset gating.
+
 Append the structured WER and latency/quality blocks, quantitative metrics,
 qualitative caller feedback, bugs/gaps, and proposed tuning changes to the same
 per-run TOML file below the closing `+++` delimiter. That file is the run record;
@@ -1113,6 +1163,9 @@ Quantitative:
   dropped or canceled audio.
 - Echo suppression: whether playback leakage created false ASR partials or
   finals.
+- Echo characterization when enabled: `media.echo_characterization` event count,
+  correlation peak distribution, estimated delay range, echo return level, and
+  active-vs-recent playback state.
 - Quality events: malformed events, missing timestamps, or gaps that prevent
   measurement.
 - Layer 3 turn batching: accumulation count matches k of N, `batch_id` and

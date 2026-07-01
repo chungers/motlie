@@ -2970,7 +2970,7 @@ mod tests {
                 .config
                 .set_tts_generation_mode(TtsGenerationMode::Streaming);
             guard.quality.config.set_tts_first_chunk_max_chars(40);
-            guard.quality.config.set_tts_max_text_chunk_chars(90);
+            guard.quality.config.set_tts_max_text_chunk_chars(48);
             guard.quality.config.set_tts_tail_pad_ms(0);
             assert_eq!(guard.quality.config.tts.streaming_start_buffer_ms, 300);
             let config_id = guard.quality.config.config_id();

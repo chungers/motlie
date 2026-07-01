@@ -488,7 +488,7 @@ pub fn split_speech_text_with_first_chunk_max_chars(
     let mut segments = VecDeque::from(speech_segments(text));
     let mut chunks = Vec::new();
 
-    if first_chunk_max_chars > 0 {
+    if first_chunk_max_chars > 0 && !speech_segments_fit(&segments, max_chars) {
         push_first_speech_chunk(&mut chunks, &mut segments, first_chunk_max_chars);
     }
 
@@ -546,6 +546,7 @@ impl StreamingSpeechTextPacker {
         let mut pending_segments = VecDeque::from(segments.to_vec());
         if !self.emitted_first_chunk
             && self.first_chunk_max_chars > 0
+            && !speech_segments_fit(&pending_segments, self.max_chars)
             && push_first_speech_chunk(chunks, &mut pending_segments, self.first_chunk_max_chars)
         {
             self.emitted_first_chunk = true;
@@ -612,6 +613,20 @@ fn push_trimmed_segment(segments: &mut Vec<String>, segment: &mut String) {
         segments.push(trimmed.to_string());
     }
     segment.clear();
+}
+
+fn speech_segments_fit(segments: &VecDeque<String>, max_chars: usize) -> bool {
+    let mut chars = 0usize;
+    for segment in segments {
+        let separator = usize::from(chars > 0);
+        chars = chars
+            .saturating_add(separator)
+            .saturating_add(segment.chars().count());
+        if chars > max_chars {
+            return false;
+        }
+    }
+    true
 }
 
 fn push_first_speech_chunk(
@@ -975,17 +990,40 @@ mod tests {
     }
 
     #[test]
-    fn split_speech_text_first_chunk_ramp_honors_cap_before_sentence_boundary() {
+    fn split_speech_text_first_chunk_ramp_skips_short_responses_that_fit_normal_chunk() {
+        assert_eq!(
+            split_speech_text_with_first_chunk_max_chars(
+                "The next phrase is short and easy to lose. Miss it.",
+                70,
+                40,
+            ),
+            vec!["The next phrase is short and easy to lose. Miss it."]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_first_chunk_ramp_honors_cap_for_long_responses() {
         assert_eq!(
             split_speech_text_with_first_chunk_max_chars(
                 "A complete first sentence. The second sentence follows quickly.",
-                90,
+                30,
                 12,
             ),
             vec![
                 "A complete",
-                "first sentence. The second sentence follows quickly."
+                "first sentence.",
+                "The second sentence follows",
+                "quickly."
             ]
+        );
+    }
+
+    #[test]
+    fn streaming_speech_packer_keeps_short_final_response_in_one_chunk() {
+        let mut packer = StreamingSpeechTextPacker::new(true, 70, 40);
+        assert_eq!(
+            packer.push_fragment("The next phrase is short and easy to lose. Miss it.", true,),
+            vec!["The next phrase is short and easy to lose. Miss it."]
         );
     }
 
