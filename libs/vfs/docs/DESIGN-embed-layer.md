@@ -20,6 +20,8 @@
 | 2026-07-01 | @codex-590-impl | Switched mstream skills mounting to explicit `daemon start --mount-skill <DIR>`; no `--mount-skill` means no FUSE mount. Moved the baked source path into `build.rs` via `MSTREAM_SKILLS_DIR`. |
 | 2026-07-01 | @codex-590-impl | Renamed mstream embedded skills identifiers to drop the redundant `project` qualifier; the on-disk `.agents/skills/project` source path is unchanged. |
 | 2026-07-01 | @codex-590-impl | Renamed the mstream daemon skills mount flag to `--mount-skill`; mount semantics are unchanged. |
+| 2026-07-01 | @codex-590-impl | Refused `--mount-skill` targets that cover the daemon working directory to avoid leaving callers in a disconnected FUSE mount. |
+| 2026-07-01 | @codex-590-impl | Added foreground signal handling and daemon-owned artifact cleanup: socket removal, unique temporary skills backing directory, and empty created-mountpoint removal. |
 
 ---
 
@@ -46,8 +48,11 @@ What it lacks:
 ### First use case (mstream)
 `mstream` bakes `.agents/skills/project/` into its binary. When started with
 `daemon start --mount-skill <DIR>`, it mounts that tree over FUSE at `<DIR>` so the
-binary distributes both working code and skill files. Without `--mount-skill`, it logs
-the degraded state and runs without a skills mount. Access is logged when mounted.
+binary distributes both working code and skill files. `<DIR>` must not be the daemon
+working directory or one of its parents; that configuration is rejected and degraded
+to avoid leaving the caller in a disconnected FUSE mount after daemon exit. Without
+`--mount-skill`, it logs the degraded state and runs without a skills mount. Access
+is logged when mounted.
 
 ## 2. Goals / Non-Goals
 
@@ -405,7 +410,8 @@ fn serve_skills(mp: Option<PathBuf>) -> Option<LocalMount> {
 }
 // startup: mounting is explicit; omitted --mount-skill keeps the daemon unmounted:
 let skills = serve_skills(cli.mount);    // Option<LocalMount> held for process lifetime
-// graceful stop (daemon.rs watch::channel): if let Some(m) = skills { let _ = m.unmount(); }
+// graceful stop, SIGINT, SIGTERM: unmount; remove daemon-owned backing dir/socket;
+// remove an empty mountpoint only if mstream created it.
 ```
 
 **Mapping chain:** `static SKILLS = include_dir!(…)` → `.embedded(name, prio, &DIR)`
@@ -431,14 +437,17 @@ several builders.
   degrade path on no-`/dev/fuse`.
 - **mstream integration**: `build.rs` supplies `MSTREAM_SKILLS_DIR`;
   `rerun-if-changed` rebuilds on skill edits; fixed-epoch mtime reproducible;
-  no `--mount-skill` degrades without creating a mount.
+  no `--mount-skill` degrades without creating a mount; mountpoints that cover
+  the daemon cwd are refused; foreground signal exits clean up skills mount
+  resources, daemon-owned backing dirs, and socket files.
 - **CI**: needs `libfuse-dev`/`libfuse3-dev` + `pkg-config`, and `/dev/fuse` for
   the mount tests (§8/§9).
 
 ## 6. Open / resolved decisions
 - ✅ **Mount failure** → degrade (FR-7).
 - ✅ **Mountpoint** → explicit `mstream daemon start --mount-skill <DIR>`; no
-  implicit cwd or XDG runtime default.
+  implicit cwd or XDG runtime default; `<DIR>` is rejected when it is the daemon
+  working directory or one of its parents.
 - ✅ **Embedded symlinks** → bake-time reject (FR-1a).
 - ✅ **mtime** → fixed epoch default; build-timestamp opt-in only (FR-8).
 - ✅ **Attr model** → separate static-only attr type (no widening of `OverlayAttrs`).
@@ -484,8 +493,9 @@ in `Cargo.lock`.** Remaining deltas:
   (`mbuild`) don't need a target libfuse sysroot.
 - **mstream** gains `motlie-vfs` (`local-mount`) + `include_dir` deps, a
   `skills.rs`, a build.rs `MSTREAM_SKILLS_DIR` + `rerun-if-changed` walk, an
-  explicit `daemon start --mount-skill <DIR>` option, and an unmount in its
-  graceful-stop path.
+  explicit `daemon start --mount-skill <DIR>` option, cwd-covering mountpoint
+  rejection, SIGINT/SIGTERM handling, socket cleanup, daemon-owned backing-dir
+  cleanup, and an unmount in its graceful-stop path.
 
 ## 9. Platform matrix & degrade contract
 | Host | Local FUSE mount | Behavior |
@@ -493,12 +503,19 @@ in `Cargo.lock`.** Remaining deltas:
 | Any host, `daemon start` without `--mount-skill` | no | **degrade**: warn, run unmounted |
 | Linux x86_64 / aarch64 + `/dev/fuse` + `fusermount3` + `--mount-skill <DIR>` | yes | mount + serve + log |
 | Linux with `--mount-skill <DIR>` but without `/dev/fuse`/perms (e.g. locked-down container) | no | **degrade**: warn, run unmounted |
+| Linux with `--mount-skill <DIR>` where `<DIR>` is the daemon cwd or its parent | no | **degrade**: warn, run unmounted |
 | macOS host with `--mount-skill <DIR>` (vmm-vz vz branch) | no (mount gated Linux-only, `client/mod.rs:12`) | **degrade**: warn, run unmounted |
 
 **Degrade-vs-hard-fail contract (FR-7):** missing `--mount-skill` and mount failure
 are **non-fatal** — the daemon logs a `WARN` (`"skills FUSE unavailable: no
 --mount-skill specified; continuing without mounting skills"` or `"skills FUSE
 unavailable: {reason}; continuing without mount"`) and runs normally; skills
-simply aren't served over FUSE. This preserves mstream's run-anywhere property
-and makes FUSE an optional enhancement. The mount-available state should be
-surfaced (status/health) so operators can tell.
+simply aren't served over FUSE. `--mount-skill` also degrades when the requested
+mountpoint is the daemon working directory or one of its parents, because mounting
+there can leave the caller inside a disconnected FUSE endpoint after daemon exit.
+This preserves mstream's run-anywhere property and makes FUSE an optional
+enhancement. On graceful stop, `daemon stop`, SIGINT, and SIGTERM, mstream
+unmounts the skills FUSE mount, removes its unique temporary backing directory,
+removes the socket file, and removes the mountpoint only when mstream created it
+and it is empty. The mount-available state should be surfaced (status/health) so
+operators can tell.

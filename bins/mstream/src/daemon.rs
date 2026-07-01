@@ -68,16 +68,52 @@ pub async fn run_foreground(
     socket: PathBuf,
     skills_mountpoint: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let event_store_path = DaemonState::event_store_path_for_socket(&socket);
+    let state = Arc::new(Mutex::new(DaemonState::with_event_store(event_store_path)?));
     prepare_socket(&socket).await?;
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind daemon socket {}", socket.display()))?;
-    let event_store_path = DaemonState::event_store_path_for_socket(&socket);
-    let state = Arc::new(Mutex::new(DaemonState::with_event_store(event_store_path)?));
-    let output_audit_task = DaemonState::spawn_output_audit_task(Arc::clone(&state)).await?;
+    let output_audit_task = match DaemonState::spawn_output_audit_task(Arc::clone(&state)).await {
+        Ok(task) => task,
+        Err(err) => {
+            shutdown_state(&state).await;
+            clean_socket(&socket);
+            return Err(err);
+        }
+    };
     let channel_delivery_task =
-        DaemonState::spawn_channel_delivery_task(Arc::clone(&state)).await?;
-    let (stop_tx, mut stop_rx) = watch::channel(false);
+        match DaemonState::spawn_channel_delivery_task(Arc::clone(&state)).await {
+            Ok(task) => task,
+            Err(err) => {
+                output_audit_task.abort();
+                let _ = output_audit_task.await;
+                shutdown_state(&state).await;
+                clean_socket(&socket);
+                return Err(err);
+            }
+        };
+    let (stop_tx, stop_rx) = watch::channel(false);
     let skills_mount = crate::skills::mount_skills(skills_mountpoint);
+    let run_result = run_daemon_loop(listener, Arc::clone(&state), stop_tx, stop_rx).await;
+
+    output_audit_task.abort();
+    let _ = output_audit_task.await;
+    channel_delivery_task.abort();
+    let _ = channel_delivery_task.await;
+    shutdown_state(&state).await;
+    crate::skills::unmount_skills(skills_mount);
+    clean_socket(&socket);
+    run_result
+}
+
+async fn run_daemon_loop(
+    listener: UnixListener,
+    state: Arc<Mutex<DaemonState>>,
+    stop_tx: watch::Sender<bool>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let shutdown_signal = shutdown_signal();
+    tokio::pin!(shutdown_signal);
 
     loop {
         tokio::select! {
@@ -96,17 +132,43 @@ pub async fn run_foreground(
                     break;
                 }
             }
+            _ = &mut shutdown_signal => {
+                break;
+            }
         }
     }
-
-    output_audit_task.abort();
-    let _ = output_audit_task.await;
-    channel_delivery_task.abort();
-    let _ = channel_delivery_task.await;
-    shutdown_state(&state).await;
-    crate::skills::unmount_skills(skills_mount);
-    let _ = fs::remove_file(&socket);
     Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    match signal(SignalKind::terminate()) {
+        Ok(mut terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        Err(err) => {
+            eprintln!("failed to install SIGTERM handler: {err}");
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn clean_socket(socket: &Path) {
+    match fs::remove_file(socket) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => eprintln!("failed to remove daemon socket {}: {err}", socket.display()),
+    }
 }
 
 async fn shutdown_state(state: &Arc<Mutex<DaemonState>>) {

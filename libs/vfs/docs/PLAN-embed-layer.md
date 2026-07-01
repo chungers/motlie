@@ -7,6 +7,8 @@
 | 2026-07-01 | @codex-590-impl | Added implementation tracking for approved design #590 and marked completed tasks from the implementation pass. |
 | 2026-07-01 | @codex-590-impl | Updated mstream consumer tasks for explicit `daemon start --mount-skill <DIR>` and build-script-owned `MSTREAM_SKILLS_DIR`. |
 | 2026-07-01 | @codex-590-impl | Renamed the mstream daemon skills mount flag to `--mount-skill <DIR>` with no behavior change. |
+| 2026-07-01 | @codex-590-impl | Added daemon-cwd mountpoint rejection to avoid disconnected FUSE endpoints in the caller's working directory. |
+| 2026-07-01 | @codex-590-impl | Added foreground signal shutdown and cleanup tracking for daemon-owned socket, mount backing directory, and created mountpoint artifacts. |
 
 ## Scope
 
@@ -41,15 +43,19 @@ This plan tracks implementation of [DESIGN-embed-layer.md](./DESIGN-embed-layer.
   - [x] Reject symlinks in the baked source tree during the mstream build.
   - [x] Depend on `motlie-vfs` with `features = ["local-mount"]`, not `client`.
   - [x] Mount only when `mstream daemon start --mount-skill <DIR>` is provided.
-  - [x] Degrade with a warning when `--mount-skill` is omitted, the platform is unsupported, or FUSE mount is unavailable.
+  - [x] Degrade with a warning when `--mount-skill` is omitted, the platform is unsupported, FUSE mount is unavailable, or the mountpoint covers the daemon cwd.
   - [x] Add CLI/build-env tests for `--mount-skill`, omitted mount, and `MSTREAM_SKILLS_DIR`.
-  - [x] Unmount during daemon graceful shutdown.
+  - [x] Unmount during daemon graceful shutdown, including foreground SIGINT/SIGTERM.
+  - [x] Use a unique daemon-owned skills backing directory and remove it during cleanup.
+  - [x] Remove daemon-created empty mountpoints and socket files during cleanup.
 
 - [x] 5. Tests and verification ([DESIGN §5](./DESIGN-embed-layer.md#5-system-design--components-to-test))
   - [x] Add static-layer unit tests for resolve, readdir, tag publication, shadow/whiteout, symlink semantics, and read-only mutation rejection.
   - [x] Add server tests for static read, fixed mtime, and `EROFS` on write/create/unlink.
   - [x] Add observer tests for fh-based read/release paths, byte counts, errno, and post-lock callback scope.
   - [x] Add mstream embedded asset tests.
+  - [x] Add mstream cleanup tests for unique backing dirs and created mountpoints.
+  - [x] Add mstream mountpoint guard tests for daemon cwd coverage and relative path normalization.
   - [x] Verify `motlie-vfs` default, `local-mount`, and `client` feature builds.
 
 ## Known Gaps
