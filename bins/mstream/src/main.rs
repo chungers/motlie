@@ -5,6 +5,7 @@ mod client;
 mod daemon;
 mod jsonl;
 mod protocol;
+mod skills;
 mod state;
 mod tags;
 mod timeline;

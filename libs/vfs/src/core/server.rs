@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Result};
 use parking_lot::{Condvar, Mutex};
@@ -48,6 +48,35 @@ struct FhEntry {
     backing: FhBacking,
     lock_key: LockKey,
     lock_owners: HashSet<u64>,
+}
+
+pub struct FsAccess<'a> {
+    pub op: FsOpKind,
+    pub tag: &'a str,
+    pub path: &'a str,
+    pub bytes: Option<usize>,
+    pub errno: Option<i32>,
+    pub latency: Duration,
+}
+
+pub trait FsObserver: Send + Sync + 'static {
+    fn on_access(&self, access: &FsAccess<'_>);
+}
+
+struct AccessPre {
+    path: String,
+    bytes: Option<usize>,
+    started: Instant,
+}
+
+impl AccessPre {
+    fn without_mount(op: &FsOp, started: Instant) -> Self {
+        Self {
+            path: String::new(),
+            bytes: pre_dispatch_bytes(op),
+            started,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +157,7 @@ pub struct FsServer {
     mounts: RwLock<HashMap<String, MountState>>,
     policy: Box<dyn PolicyFn>,
     event_tx: Option<broadcast::Sender<FsEvent>>,
+    observer: Option<Arc<dyn FsObserver>>,
     overlay: Option<MemOverlay>,
     /// Monotonic counter for synthetic file handles (overlay-backed opens).
     next_fh: AtomicU64,
@@ -143,6 +173,7 @@ pub struct FsServerBuilder {
     mounts: Vec<MountConfig>,
     event_capacity: Option<usize>,
     policy: Option<Box<dyn PolicyFn>>,
+    observer: Option<Arc<dyn FsObserver>>,
     overlay_enabled: bool,
 }
 
@@ -154,26 +185,39 @@ impl FsServer {
             mounts: Vec::new(),
             event_capacity: None,
             policy: None,
+            observer: None,
             overlay_enabled: false,
         }
     }
 
     pub fn handle_op(&self, tag: &str, op: FsOp) -> FsResult {
-        let mounts = match self.mounts.read() {
-            Ok(m) => m,
-            Err(_) => return FsResult::Error { errno: libc::EIO },
-        };
-        let mount = match mounts.get(tag) {
-            Some(m) => m,
-            None => {
-                return FsResult::Error {
-                    errno: libc::ENOENT,
+        let started = Instant::now();
+        let (pre, result, emit_legacy_event) = match self.mounts.read() {
+            Ok(mounts) => match mounts.get(tag) {
+                Some(mount) => {
+                    let pre = self.capture_access_pre(mount, &op, started);
+                    let result = self.dispatch(mount, &op);
+                    (pre, result, true)
                 }
-            }
+                None => (
+                    AccessPre::without_mount(&op, started),
+                    FsResult::Error {
+                        errno: libc::ENOENT,
+                    },
+                    false,
+                ),
+            },
+            Err(_) => (
+                AccessPre::without_mount(&op, started),
+                FsResult::Error { errno: libc::EIO },
+                false,
+            ),
         };
 
-        let result = self.dispatch(mount, &op);
-        self.emit_event(tag, &op, &result);
+        if emit_legacy_event {
+            self.emit_event(tag, &op, &result);
+        }
+        self.emit_access(tag, &op, &pre, &result);
         result
     }
 
@@ -251,6 +295,16 @@ impl FsServerBuilder {
         self
     }
 
+    pub fn observer(mut self, observer: impl FsObserver) -> Self {
+        self.observer = Some(Arc::new(observer));
+        self
+    }
+
+    pub fn observer_arc(mut self, observer: Arc<dyn FsObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     pub fn overlay(mut self, enabled: bool) -> Self {
         self.overlay_enabled = enabled;
         self
@@ -280,6 +334,7 @@ impl FsServerBuilder {
             mounts: RwLock::new(mount_map),
             policy: self.policy.unwrap_or_else(|| Box::new(AllowAll)),
             event_tx,
+            observer: self.observer,
             overlay,
             next_fh: AtomicU64::new(1),
             fh_table: Mutex::new(HashMap::new()),
@@ -403,6 +458,23 @@ impl FsServer {
         }
     }
 
+    fn capture_access_pre(&self, mount: &MountState, op: &FsOp, started: Instant) -> AccessPre {
+        let path = match op {
+            FsOp::Read { fh, .. } | FsOp::Write { fh, .. } | FsOp::Release { fh, .. } => self
+                .fh_table
+                .lock()
+                .get(fh)
+                .map(|entry| entry.path.clone())
+                .unwrap_or_else(|| self.path_hint_for_op(mount, op)),
+            _ => self.path_hint_for_op(mount, op),
+        };
+        AccessPre {
+            path,
+            bytes: pre_dispatch_bytes(op),
+            started,
+        }
+    }
+
     fn emit_event(&self, tag: &str, op: &FsOp, _result: &FsResult) {
         if let Some(ref tx) = self.event_tx {
             let _ = tx.send(FsEvent {
@@ -413,6 +485,21 @@ impl FsServer {
                 bytes: None,
             });
         }
+    }
+
+    fn emit_access(&self, tag: &str, op: &FsOp, pre: &AccessPre, result: &FsResult) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        let access = FsAccess {
+            op: FsOpKind::from_op(op),
+            tag,
+            path: &pre.path,
+            bytes: access_bytes(op, pre, result),
+            errno: result_errno(result),
+            latency: pre.started.elapsed(),
+        };
+        observer.on_access(&access);
     }
 
     /// Resolve overlay for a mount-relative path. Returns None if overlay is disabled
@@ -426,14 +513,16 @@ impl FsServer {
         self.resolve_overlay(tag, path).is_some()
     }
 
-    /// Find the highest-priority layer name for overlay mutations.
+    /// Find the highest-priority writable layer name for overlay mutations.
     fn writable_layer(&self, tag: &str, path: &str) -> Option<String> {
         if let Some(overlay) = &self.overlay {
-            // Walk up from path to find owning layer
+            // Walk up from path to find a writable owning layer. Static layers are read-only.
             let mut current = path.to_string();
             loop {
-                if let Some((layer, _)) = overlay.resolve(tag, &current) {
-                    return Some(layer);
+                if let Some(entry) = overlay.resolve_entry(tag, &current) {
+                    if entry.writable {
+                        return Some(entry.layer);
+                    }
                 }
                 let parent = parent_path(&current);
                 if parent == current {
@@ -441,8 +530,8 @@ impl FsServer {
                 }
                 current = parent;
             }
-            // Fall back to highest-priority layer
-            overlay.layers().first().map(|l| l.name.clone())
+            // Fall back to the highest-priority writable layer.
+            overlay.first_writable_layer()
         } else {
             None
         }
@@ -895,14 +984,13 @@ impl FsServer {
         };
         let rel_path = child_path(&parent_path, name);
 
-        // Check overlay first — use resolve_attrs to get real metadata
-        if let Some((_layer, kind, ov_attrs)) = self
+        // Check overlay first — use resolved metadata so static entries keep fixed mtime.
+        if let Some(entry) = self
             .overlay
             .as_ref()
-            .and_then(|o| o.resolve_attrs(&mount.tag, &rel_path))
+            .and_then(|o| o.resolve_entry(&mount.tag, &rel_path))
         {
-            let now = SystemTime::now();
-            let (file_kind, size, ino_kind) = match &kind {
+            let (file_kind, size, ino_kind) = match &entry.kind {
                 OverlayEntryKind::Content(b) => {
                     (FileType::RegularFile, b.len() as u64, InodeKind::Content)
                 }
@@ -923,14 +1011,14 @@ impl FsServer {
                 inode: 0,
                 size,
                 blocks,
-                atime: now,
-                mtime: now,
-                ctime: now,
+                atime: entry.mtime,
+                mtime: entry.mtime,
+                ctime: entry.mtime,
                 kind: file_kind,
-                mode: ov_attrs.mode,
+                mode: entry.attrs.mode,
                 nlink: 1,
-                uid: ov_attrs.uid,
-                gid: ov_attrs.gid,
+                uid: entry.attrs.uid,
+                gid: entry.attrs.gid,
             };
             let mut table = mount.inode_table.lock();
             match table.allocate(&rel_path, ino_kind, None, attrs.clone()) {
@@ -993,10 +1081,10 @@ impl FsServer {
         let stored_attrs = entry.attrs.clone();
         drop(table);
 
-        // Check overlay first — overlay attrs take precedence over disk
+        // Check overlay first — overlay attrs take precedence over disk.
         if let Some(overlay) = &self.overlay {
-            if let Some((_layer, kind, ov_attrs)) = overlay.resolve_attrs(&mount.tag, &path) {
-                let (file_kind, size) = match &kind {
+            if let Some(entry) = overlay.resolve_entry(&mount.tag, &path) {
+                let (file_kind, size) = match &entry.kind {
                     OverlayEntryKind::Content(bytes) => (FileType::RegularFile, bytes.len() as u64),
                     OverlayEntryKind::Symlink(target) => (FileType::Symlink, target.len() as u64),
                     OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64),
@@ -1011,14 +1099,14 @@ impl FsServer {
                     inode,
                     size,
                     blocks,
-                    atime: stored_attrs.atime,
-                    mtime: stored_attrs.mtime,
-                    ctime: stored_attrs.ctime,
+                    atime: entry.mtime,
+                    mtime: entry.mtime,
+                    ctime: entry.mtime,
                     kind: file_kind,
-                    mode: ov_attrs.mode,
+                    mode: entry.attrs.mode,
                     nlink: 1,
-                    uid: ov_attrs.uid,
-                    gid: ov_attrs.gid,
+                    uid: entry.attrs.uid,
+                    gid: entry.attrs.gid,
                 };
                 return FsResult::Attr { attrs, ttl_secs: 0 };
             }
@@ -1367,23 +1455,37 @@ impl FsServer {
 
         // Check overlay first
         if let Some(overlay) = &self.overlay {
-            if let Some((layer, OverlayEntryKind::Content(existing), attrs)) =
-                overlay.resolve_attrs(&tag, &path)
-            {
-                let mut buf = existing.to_vec();
-                let start = offset as usize;
-                if start > buf.len() {
-                    buf.resize(start, 0);
+            if let Some(entry) = overlay.resolve_entry(&tag, &path) {
+                if !entry.writable {
+                    return FsResult::Error { errno: libc::EROFS };
                 }
-                let end = start + data.len();
-                if end > buf.len() {
-                    buf.resize(end, 0);
+                if let OverlayEntryKind::Content(existing) = entry.kind {
+                    let mut buf = existing.to_vec();
+                    let start = offset as usize;
+                    if start > buf.len() {
+                        buf.resize(start, 0);
+                    }
+                    let end = start + data.len();
+                    if end > buf.len() {
+                        buf.resize(end, 0);
+                    }
+                    buf[start..end].copy_from_slice(data);
+                    if overlay
+                        .put_with_attrs(
+                            &entry.layer,
+                            &tag,
+                            &path,
+                            entry.attrs,
+                            bytes::Bytes::from(buf),
+                        )
+                        .is_err()
+                    {
+                        return FsResult::Error { errno: libc::EIO };
+                    }
+                    return FsResult::Written {
+                        size: data.len() as u32,
+                    };
                 }
-                buf[start..end].copy_from_slice(data);
-                let _ = overlay.put_with_attrs(&layer, &tag, &path, attrs, bytes::Bytes::from(buf));
-                return FsResult::Written {
-                    size: data.len() as u32,
-                };
             }
         }
 
@@ -1423,65 +1525,65 @@ impl FsServer {
 
         // If parent is overlay-managed, create in overlay
         if self.is_overlay_managed(&mount.tag, &parent_path) {
-            if let Some(layer) = self.writable_layer(&mount.tag, &parent_path) {
-                if let Some(overlay) = &self.overlay {
-                    let attrs = super::overlay::OverlayAttrs { mode, uid, gid };
-                    let _ = overlay.put_with_attrs(
-                        &layer,
-                        &mount.tag,
-                        &rel_path,
-                        attrs,
-                        bytes::Bytes::new(),
-                    );
-                    let now = SystemTime::now();
-                    let blocks = logical_blocks(FileType::RegularFile, 0);
-                    let file_attrs = FileAttr {
-                        inode: 0,
-                        size: 0,
-                        blocks,
-                        atime: now,
-                        mtime: now,
-                        ctime: now,
-                        kind: FileType::RegularFile,
-                        mode,
-                        nlink: 1,
-                        uid,
-                        gid,
-                    };
-                    let mut table = mount.inode_table.lock();
-                    match table.allocate(&rel_path, InodeKind::Content, None, file_attrs.clone()) {
-                        Ok(inode) => {
-                            let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                            let final_attrs = table
-                                .get(inode)
-                                .map(|e| e.attrs.clone())
-                                .unwrap_or(file_attrs);
-                            // Allocate fh — create is atomic create+open in FUSE
-                            let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-                            self.fh_table.lock().insert(
-                                fh,
-                                FhEntry {
-                                    tag: mount.tag.clone(),
-                                    path: rel_path.clone(),
-                                    backing: FhBacking::Overlay,
-                                    lock_key: LockKey::OverlayFile {
-                                        tag: mount.tag.clone(),
-                                        inode,
-                                    },
-                                    lock_owners: HashSet::new(),
-                                },
-                            );
-                            return FsResult::Created {
-                                inode,
-                                generation: gen,
-                                attrs: final_attrs,
-                                fh,
-                                ttl_secs: 0,
-                            };
-                        }
-                        Err(_) => return FsResult::Error { errno: libc::EIO },
-                    };
+            let Some(layer) = self.writable_layer(&mount.tag, &parent_path) else {
+                return FsResult::Error { errno: libc::EROFS };
+            };
+            if let Some(overlay) = &self.overlay {
+                let attrs = super::overlay::OverlayAttrs { mode, uid, gid };
+                if overlay
+                    .put_with_attrs(&layer, &mount.tag, &rel_path, attrs, bytes::Bytes::new())
+                    .is_err()
+                {
+                    return FsResult::Error { errno: libc::EIO };
                 }
+                let now = SystemTime::now();
+                let blocks = logical_blocks(FileType::RegularFile, 0);
+                let file_attrs = FileAttr {
+                    inode: 0,
+                    size: 0,
+                    blocks,
+                    atime: now,
+                    mtime: now,
+                    ctime: now,
+                    kind: FileType::RegularFile,
+                    mode,
+                    nlink: 1,
+                    uid,
+                    gid,
+                };
+                let mut table = mount.inode_table.lock();
+                match table.allocate(&rel_path, InodeKind::Content, None, file_attrs.clone()) {
+                    Ok(inode) => {
+                        let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                        let final_attrs = table
+                            .get(inode)
+                            .map(|e| e.attrs.clone())
+                            .unwrap_or(file_attrs);
+                        // Allocate fh — create is atomic create+open in FUSE
+                        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+                        self.fh_table.lock().insert(
+                            fh,
+                            FhEntry {
+                                tag: mount.tag.clone(),
+                                path: rel_path.clone(),
+                                backing: FhBacking::Overlay,
+                                lock_key: LockKey::OverlayFile {
+                                    tag: mount.tag.clone(),
+                                    inode,
+                                },
+                                lock_owners: HashSet::new(),
+                            },
+                        );
+                        return FsResult::Created {
+                            inode,
+                            generation: gen,
+                            attrs: final_attrs,
+                            fh,
+                            ttl_secs: 0,
+                        };
+                    }
+                    Err(_) => return FsResult::Error { errno: libc::EIO },
+                };
             }
         }
 
@@ -1578,43 +1680,44 @@ impl FsServer {
 
         // Under overlay-managed parent → create SyntheticDir in overlay
         if self.is_overlay_managed(&mount.tag, &parent_path) {
-            if let Some(layer) = self.writable_layer(&mount.tag, &parent_path) {
-                if let Some(overlay) = &self.overlay {
-                    let ov_attrs = super::overlay::OverlayAttrs { mode, uid, gid };
-                    if overlay
-                        .create_dir(&layer, &mount.tag, &rel_path, ov_attrs)
-                        .is_err()
-                    {
-                        return FsResult::Error { errno: libc::EIO };
+            let Some(layer) = self.writable_layer(&mount.tag, &parent_path) else {
+                return FsResult::Error { errno: libc::EROFS };
+            };
+            if let Some(overlay) = &self.overlay {
+                let ov_attrs = super::overlay::OverlayAttrs { mode, uid, gid };
+                if overlay
+                    .create_dir(&layer, &mount.tag, &rel_path, ov_attrs)
+                    .is_err()
+                {
+                    return FsResult::Error { errno: libc::EIO };
+                }
+                let now = SystemTime::now();
+                let blocks = logical_blocks(FileType::Directory, 0);
+                let attrs = FileAttr {
+                    inode: 0,
+                    size: 0,
+                    blocks,
+                    atime: now,
+                    mtime: now,
+                    ctime: now,
+                    kind: FileType::Directory,
+                    mode,
+                    nlink: 2,
+                    uid,
+                    gid,
+                };
+                let mut table = mount.inode_table.lock();
+                match table.allocate(&rel_path, InodeKind::SyntheticDir, None, attrs.clone()) {
+                    Ok(inode) => {
+                        let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                        return FsResult::Entry {
+                            inode,
+                            generation: gen,
+                            attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs),
+                            ttl_secs: 0,
+                        };
                     }
-                    let now = SystemTime::now();
-                    let blocks = logical_blocks(FileType::Directory, 0);
-                    let attrs = FileAttr {
-                        inode: 0,
-                        size: 0,
-                        blocks,
-                        atime: now,
-                        mtime: now,
-                        ctime: now,
-                        kind: FileType::Directory,
-                        mode,
-                        nlink: 2,
-                        uid,
-                        gid,
-                    };
-                    let mut table = mount.inode_table.lock();
-                    match table.allocate(&rel_path, InodeKind::SyntheticDir, None, attrs.clone()) {
-                        Ok(inode) => {
-                            let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                            return FsResult::Entry {
-                                inode,
-                                generation: gen,
-                                attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs),
-                                ttl_secs: 0,
-                            };
-                        }
-                        Err(_) => return FsResult::Error { errno: libc::EIO },
-                    }
+                    Err(_) => return FsResult::Error { errno: libc::EIO },
                 }
             }
         }
@@ -1677,16 +1780,22 @@ impl FsServer {
 
         if let Some((layer, kind)) = self.resolve_overlay(&mount.tag, &rel_path) {
             if let Some(overlay) = &self.overlay {
+                if !overlay.layer_is_writable(&layer) {
+                    return FsResult::Error { errno: libc::EROFS };
+                }
                 match kind {
                     OverlayEntryKind::Content(_) | OverlayEntryKind::Symlink(_) => {
                         // Check if there's a base-layer file underneath
                         let host_path = mount.backing.resolve(&rel_path);
-                        if host_path.exists() {
+                        let mutation = if host_path.exists() {
                             // Shadowed file → replace with whiteout
-                            let _ = overlay.whiteout(&layer, &mount.tag, &rel_path);
+                            overlay.whiteout(&layer, &mount.tag, &rel_path)
                         } else {
                             // Pure synthetic → just remove
-                            let _ = overlay.remove(&layer, &mount.tag, &rel_path);
+                            overlay.remove(&layer, &mount.tag, &rel_path)
+                        };
+                        if mutation.is_err() {
+                            return FsResult::Error { errno: libc::EIO };
                         }
                         let mut table = mount.inode_table.lock();
                         table.remove_path(&rel_path);
@@ -1736,6 +1845,9 @@ impl FsServer {
 
         if let Some((layer, kind)) = self.resolve_overlay(&mount.tag, &rel_path) {
             if let Some(overlay) = &self.overlay {
+                if !overlay.layer_is_writable(&layer) {
+                    return FsResult::Error { errno: libc::EROFS };
+                }
                 match kind {
                     OverlayEntryKind::SyntheticDir => {
                         // Check if empty (no overlay children)
@@ -1745,7 +1857,9 @@ impl FsServer {
                                 errno: libc::ENOTEMPTY,
                             };
                         }
-                        let _ = overlay.remove(&layer, &mount.tag, &rel_path);
+                        if overlay.remove(&layer, &mount.tag, &rel_path).is_err() {
+                            return FsResult::Error { errno: libc::EIO };
+                        }
                         let mut table = mount.inode_table.lock();
                         table.remove_path(&rel_path);
                         return FsResult::Ok;
@@ -1815,15 +1929,30 @@ impl FsServer {
         match (src_overlay.is_some(), dst_is_overlay) {
             // Overlay → overlay (same layer check done implicitly)
             (true, true) => {
-                if let Some((src_layer, OverlayEntryKind::Content(content), attrs)) = self
+                if let Some(entry) = self
                     .overlay
                     .as_ref()
-                    .and_then(|o| o.resolve_attrs(&mount.tag, &src_path))
+                    .and_then(|o| o.resolve_entry(&mount.tag, &src_path))
                 {
-                    if let Some(overlay) = &self.overlay {
-                        let _ = overlay
-                            .put_with_attrs(&src_layer, &mount.tag, &dst_path, attrs, content);
-                        let _ = overlay.remove(&src_layer, &mount.tag, &src_path);
+                    if !entry.writable {
+                        return FsResult::Error { errno: libc::EROFS };
+                    }
+                    if let (Some(overlay), OverlayEntryKind::Content(content)) =
+                        (&self.overlay, entry.kind)
+                    {
+                        if overlay
+                            .put_with_attrs(
+                                &entry.layer,
+                                &mount.tag,
+                                &dst_path,
+                                entry.attrs,
+                                content,
+                            )
+                            .is_err()
+                            || overlay.remove(&entry.layer, &mount.tag, &src_path).is_err()
+                        {
+                            return FsResult::Error { errno: libc::EIO };
+                        }
                         let mut table = mount.inode_table.lock();
                         if let Some(inode) = table.rename_path(&src_path, &dst_path) {
                             if let Some(entry) = table.get_mut(inode) {
@@ -1845,45 +1974,51 @@ impl FsServer {
                 // file into an overlay-managed parent during atomic save.
                 match (fs::read(&host_src), fs::symlink_metadata(&host_src)) {
                     (Ok(content), Ok(meta)) => {
-                        if let Some(layer) = self.writable_layer(&mount.tag, &dst_path) {
-                            if let Some(overlay) = &self.overlay {
-                                #[cfg(unix)]
-                                let (uid, gid) = {
-                                    use std::os::unix::fs::MetadataExt;
-                                    (meta.uid(), meta.gid())
-                                };
-                                #[cfg(not(unix))]
-                                let (uid, gid) = (0, 0);
-                                let mut attrs = super::overlay::OverlayAttrs {
-                                    mode: file_mode_from_metadata(&meta),
-                                    uid,
-                                    gid,
-                                };
-                                if let Some((owner_uid, owner_gid)) = mount.owner_override {
-                                    attrs.uid = owner_uid;
-                                    attrs.gid = owner_gid;
-                                }
-                                let _ = overlay.put_with_attrs(
+                        let Some(layer) = self.writable_layer(&mount.tag, &dst_path) else {
+                            return FsResult::Error { errno: libc::EROFS };
+                        };
+                        if let Some(overlay) = &self.overlay {
+                            #[cfg(unix)]
+                            let (uid, gid) = {
+                                use std::os::unix::fs::MetadataExt;
+                                (meta.uid(), meta.gid())
+                            };
+                            #[cfg(not(unix))]
+                            let (uid, gid) = (0, 0);
+                            let mut attrs = super::overlay::OverlayAttrs {
+                                mode: file_mode_from_metadata(&meta),
+                                uid,
+                                gid,
+                            };
+                            if let Some((owner_uid, owner_gid)) = mount.owner_override {
+                                attrs.uid = owner_uid;
+                                attrs.gid = owner_gid;
+                            }
+                            if overlay
+                                .put_with_attrs(
                                     &layer,
                                     &mount.tag,
                                     &dst_path,
                                     attrs,
                                     bytes::Bytes::from(content),
-                                );
-                                let _ = fs::remove_file(&host_src);
-                                let mut table = mount.inode_table.lock();
-                                if let Some(inode) = table.rename_path(&src_path, &dst_path) {
-                                    if let Some(entry) = table.get_mut(inode) {
-                                        entry.kind = InodeKind::Content;
-                                        entry.host_path = None;
-                                    }
-                                }
-                                drop(table);
-                                self.update_runtime_paths_after_rename(
-                                    &mount.tag, &src_path, &dst_path,
-                                );
-                                return FsResult::Ok;
+                                )
+                                .is_err()
+                            {
+                                return FsResult::Error { errno: libc::EIO };
                             }
+                            let _ = fs::remove_file(&host_src);
+                            let mut table = mount.inode_table.lock();
+                            if let Some(inode) = table.rename_path(&src_path, &dst_path) {
+                                if let Some(entry) = table.get_mut(inode) {
+                                    entry.kind = InodeKind::Content;
+                                    entry.host_path = None;
+                                }
+                            }
+                            drop(table);
+                            self.update_runtime_paths_after_rename(
+                                &mount.tag, &src_path, &dst_path,
+                            );
+                            return FsResult::Ok;
                         }
                         FsResult::Error { errno: libc::EXDEV }
                     }
@@ -1944,9 +2079,7 @@ impl FsServer {
                 gid: mount.owner_override.map(|(_, gid)| gid).unwrap_or(0),
             };
             let Some(layer) = self.writable_layer(&mount.tag, &parent_path) else {
-                return FsResult::Error {
-                    errno: libc::ENOTSUP,
-                };
+                return FsResult::Error { errno: libc::EROFS };
             };
             match overlay.create_symlink(&layer, &mount.tag, &rel_path, target, attrs) {
                 Ok(()) => {
@@ -2175,6 +2308,31 @@ impl FsServer {
             }
             FsOp::Statfs => "/".to_string(),
         }
+    }
+}
+
+fn pre_dispatch_bytes(op: &FsOp) -> Option<usize> {
+    match op {
+        FsOp::Write { data, .. } => Some(data.len()),
+        _ => None,
+    }
+}
+
+fn access_bytes(op: &FsOp, pre: &AccessPre, result: &FsResult) -> Option<usize> {
+    match op {
+        FsOp::Read { .. } => match result {
+            FsResult::Data { data } => Some(data.len()),
+            _ => None,
+        },
+        FsOp::Write { .. } => pre.bytes,
+        _ => None,
+    }
+}
+
+fn result_errno(result: &FsResult) -> Option<i32> {
+    match result {
+        FsResult::Error { errno } => Some(*errno),
+        _ => None,
     }
 }
 
@@ -2813,10 +2971,13 @@ fn truncate_file(path: &Path, size: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use include_dir::{include_dir, Dir};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use std::sync::{mpsc, Arc};
+    use std::sync::{mpsc, Arc, OnceLock};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    static STATIC_FIXTURE: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/tests/fixtures/static");
 
     fn build_test_server(dir: &Path) -> FsServer {
         FsServer::builder()
@@ -3694,7 +3855,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK as i32,
+                    typ: libc::F_WRLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3709,11 +3870,11 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK as i32,
+                typ: libc::F_RDLCK,
                 pid: 5678,
             }),
             FsResult::Lock { start, end, typ, pid }
-                if start == 0 && end == 9 && typ == libc::F_WRLCK as i32 && pid == 1234
+                if start == 0 && end == 9 && typ == libc::F_WRLCK && pid == 1234
         ));
     }
 
@@ -3744,7 +3905,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK as i32,
+                    typ: libc::F_WRLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3760,7 +3921,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_UNLCK as i32,
+                    typ: libc::F_UNLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3776,7 +3937,7 @@ mod tests {
                     lock_owner: 8,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK as i32,
+                    typ: libc::F_WRLCK,
                     pid: 5678,
                     sleep: false,
                 }
@@ -3812,7 +3973,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_RDLCK as i32,
+                    typ: libc::F_RDLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3828,7 +3989,7 @@ mod tests {
                     lock_owner: 8,
                     start: 0,
                     end: 9,
-                    typ: libc::F_RDLCK as i32,
+                    typ: libc::F_RDLCK,
                     pid: 5678,
                     sleep: false,
                 }
@@ -3874,7 +4035,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK as i32,
+                    typ: libc::F_WRLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3892,10 +4053,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK as i32,
+                typ: libc::F_RDLCK,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, .. } if typ == libc::F_UNLCK as i32
+            FsResult::Lock { typ, .. } if typ == libc::F_UNLCK
         ));
     }
 
@@ -3926,7 +4087,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK as i32,
+                    typ: libc::F_WRLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3948,7 +4109,7 @@ mod tests {
                         lock_owner: 8,
                         start: 0,
                         end: 9,
-                        typ: libc::F_WRLCK as i32,
+                        typ: libc::F_WRLCK,
                         pid: 5678,
                         sleep: true,
                     },
@@ -3973,7 +4134,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_UNLCK as i32,
+                    typ: libc::F_UNLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4060,6 +4221,211 @@ mod tests {
                 matches!(server.handle_op("ro", op), FsResult::Error { errno } if errno == libc::EROFS)
             );
         }
+    }
+
+    #[test]
+    fn static_layer_reads_and_rejects_writes_with_fixed_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        server
+            .overlay()
+            .unwrap()
+            .put_static_layer("static", 50, "test", &STATIC_FIXTURE, (123, 456))
+            .unwrap();
+
+        let inode = match server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "hello.txt".into(),
+            },
+        ) {
+            FsResult::Entry { inode, attrs, .. } => {
+                assert_eq!(attrs.mode, 0o444);
+                assert_eq!(attrs.uid, 123);
+                assert_eq!(attrs.gid, 456);
+                assert_eq!(attrs.mtime, UNIX_EPOCH);
+                inode
+            }
+            other => panic!("lookup failed: {:?}", other),
+        };
+        match server.handle_op("test", FsOp::Getattr { inode }) {
+            FsResult::Attr { attrs, .. } => assert_eq!(attrs.mtime, UNIX_EPOCH),
+            other => panic!("getattr failed: {:?}", other),
+        }
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: 0 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("open failed: {:?}", other),
+        };
+        match server.handle_op(
+            "test",
+            FsOp::Read {
+                inode,
+                fh,
+                offset: 0,
+                size: 64,
+            },
+        ) {
+            FsResult::Data { data } => assert_eq!(data, "hello static\n"),
+            other => panic!("read failed: {:?}", other),
+        }
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Write {
+                    inode,
+                    fh,
+                    offset: 0,
+                    data: bytes::Bytes::from_static(b"x"),
+                },
+            ),
+            FsResult::Error { errno } if errno == libc::EROFS
+        ));
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Create {
+                    parent: 1,
+                    name: "new.txt".into(),
+                    mode: 0o644,
+                    flags: 0,
+                    uid: 0,
+                    gid: 0,
+                },
+            ),
+            FsResult::Error { errno } if errno == libc::EROFS
+        ));
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Unlink {
+                    parent: 1,
+                    name: "hello.txt".into(),
+                },
+            ),
+            FsResult::Error { errno } if errno == libc::EROFS
+        ));
+    }
+
+    #[derive(Clone)]
+    struct ObservedAccess {
+        op: FsOpKind,
+        path: String,
+        bytes: Option<usize>,
+        errno: Option<i32>,
+    }
+
+    struct RecordingObserver {
+        events: Arc<std::sync::Mutex<Vec<ObservedAccess>>>,
+    }
+
+    impl FsObserver for RecordingObserver {
+        fn on_access(&self, access: &FsAccess<'_>) {
+            self.events.lock().unwrap().push(ObservedAccess {
+                op: access.op,
+                path: access.path.to_string(),
+                bytes: access.bytes,
+                errno: access.errno,
+            });
+        }
+    }
+
+    #[test]
+    fn observer_records_fh_paths_and_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("hello.txt"), b"hello").unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server = FsServer::builder()
+            .mount("test", dir.path().to_path_buf(), false)
+            .observer(RecordingObserver {
+                events: Arc::clone(&events),
+            })
+            .build()
+            .unwrap();
+        let inode = match server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "hello.txt".into(),
+            },
+        ) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("lookup failed: {:?}", other),
+        };
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: 0 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("open failed: {:?}", other),
+        };
+        server.handle_op(
+            "test",
+            FsOp::Read {
+                inode,
+                fh,
+                offset: 0,
+                size: 3,
+            },
+        );
+        server.handle_op("test", FsOp::Release { inode, fh });
+
+        let events = events.lock().unwrap();
+        let read = events
+            .iter()
+            .find(|event| event.op == FsOpKind::Read)
+            .unwrap();
+        assert_eq!(read.path, "/hello.txt");
+        assert_eq!(read.bytes, Some(3));
+        assert_eq!(read.errno, None);
+        let release = events
+            .iter()
+            .find(|event| event.op == FsOpKind::Release)
+            .unwrap();
+        assert_eq!(release.path, "/hello.txt");
+    }
+
+    struct ReentrantObserver {
+        server: Arc<OnceLock<Arc<FsServer>>>,
+        mount_dir: PathBuf,
+        done: mpsc::Sender<()>,
+    }
+
+    impl FsObserver for ReentrantObserver {
+        fn on_access(&self, access: &FsAccess<'_>) {
+            if access.op != FsOpKind::Getattr {
+                return;
+            }
+            if let Some(server) = self.server.get() {
+                let _ = server.add_mount("observer-added", self.mount_dir.clone(), false);
+            }
+            let _ = self.done.send(());
+        }
+    }
+
+    #[test]
+    fn observer_runs_after_mount_read_lock_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let added_dir = tempfile::tempdir().unwrap();
+        let server_cell = Arc::new(OnceLock::new());
+        let (done_tx, done_rx) = mpsc::channel();
+        let server = Arc::new(
+            FsServer::builder()
+                .mount("test", dir.path().to_path_buf(), false)
+                .observer(ReentrantObserver {
+                    server: Arc::clone(&server_cell),
+                    mount_dir: added_dir.path().to_path_buf(),
+                    done: done_tx,
+                })
+                .build()
+                .unwrap(),
+        );
+        assert!(server_cell.set(Arc::clone(&server)).is_ok());
+
+        let handle_server = Arc::clone(&server);
+        thread::spawn(move || {
+            handle_server.handle_op("test", FsOp::Getattr { inode: 1 });
+        });
+
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(server.has_mount("observer-added"));
     }
 
     #[test]
@@ -4825,7 +5191,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK as i32,
+                    typ: libc::F_WRLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4852,10 +5218,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK as i32,
+                typ: libc::F_RDLCK,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK as i32 && pid == 1234
+            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK && pid == 1234
         ));
 
         let new_dst_inode = match server.handle_op(
@@ -4922,7 +5288,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK as i32,
+                    typ: libc::F_WRLCK,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4949,10 +5315,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK as i32,
+                typ: libc::F_RDLCK,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK as i32 && pid == 1234
+            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK && pid == 1234
         ));
 
         let new_dst_inode = match server.handle_op(

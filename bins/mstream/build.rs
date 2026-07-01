@@ -1,10 +1,14 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MSTREAM_BUILD_GIT_SHA");
     watch_git_metadata();
+    if let Err(err) = watch_project_skills() {
+        panic!("failed to watch embedded project skills: {err}");
+    }
 
     let sha = std::env::var("MSTREAM_BUILD_GIT_SHA").unwrap_or_else(|_| current_git_sha());
     println!("cargo:rustc-env=MSTREAM_BUILD_GIT_SHA={sha}");
@@ -25,6 +29,36 @@ fn watch_git_metadata() {
     if let Some(packed_refs_path) = git_path("packed-refs") {
         println!("cargo:rerun-if-changed={}", packed_refs_path.display());
     }
+}
+
+fn watch_project_skills() -> io::Result<()> {
+    let manifest_dir = match std::env::var_os("CARGO_MANIFEST_DIR") {
+        Some(value) => PathBuf::from(value),
+        None => return Ok(()),
+    };
+    let root = manifest_dir.join("../../.agents/skills/project");
+    watch_tree(&root)
+}
+
+fn watch_tree(root: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(root)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("embedded skill path is a symlink: {}", root.display()),
+        ));
+    }
+    println!("cargo:rerun-if-changed={}", root.display());
+    if !meta.is_dir() {
+        return Ok(());
+    }
+
+    let mut children = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
+    children.sort_by_key(|entry| entry.path());
+    for child in children {
+        watch_tree(&child.path())?;
+    }
+    Ok(())
 }
 
 fn read_head_ref(head_path: &Path) -> Option<String> {

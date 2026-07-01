@@ -66,6 +66,7 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
     let channel_delivery_task =
         DaemonState::spawn_channel_delivery_task(Arc::clone(&state)).await?;
     let (stop_tx, mut stop_rx) = watch::channel(false);
+    let skills_mount = crate::skills::mount_project_skills();
 
     loop {
         tokio::select! {
@@ -92,6 +93,7 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
     channel_delivery_task.abort();
     let _ = channel_delivery_task.await;
     shutdown_state(&state).await;
+    crate::skills::unmount_project_skills(skills_mount);
     let _ = fs::remove_file(&socket);
     Ok(())
 }

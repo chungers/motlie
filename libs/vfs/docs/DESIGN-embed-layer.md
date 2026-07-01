@@ -15,6 +15,7 @@
 | 2026-06-28 | @claude-vfs-fuse | Initial draft (anchored to `main`). Scope: embedded static layer-backing + access-logging observer. |
 | 2026-06-28 | @claude-vfs-fuse | §4.6 runtime ownership; §4.1 code shape; §4.8 consumer walkthrough; copy-up note. |
 | 2026-06-30 | @claude-vfs-fuse | **RE-ANCHOR against `feature/vmm-vz` (`e4e0229f`)** after review (PR #591, 2 reviewers NEEDS WORK, 21 inline). Re-cited every `server.rs:NNNN`. Corrected two stale claims: (a) overlay attrs use `ov_attrs.uid/gid` directly, NOT `apply_owner_override` — embedded uid/gid set at registration; (b) "server zero change" is false — EROFS propagation + observer lock-scope require server edits. Addressed must-fixes: static-layer EROFS + error propagation, symlink semantics (bake-time reject), tag publication, observer outside the mounts RwLock, guest `client+vsock` left intact via a split `local-mount`/`fuser-client` feature, `include_dir!` path fix, fixed-epoch mtime + `rerun-if-changed`, direct-`/dev/fuse` mount, platform matrix, host deps + degrade contract. Decisions locked with David: degrade-on-mount-failure; default mountpoint `$XDG_RUNTIME_DIR/mstream/skills`; bake-time symlink reject; fixed-epoch mtime; separate static attr type; `include_dir` always-on light dep. |
+| 2026-07-01 | @codex-590-impl | Implementation pass for #590. Added status plan link, noted the generic symlink-detection gap in `include_dir::Dir`, and documented that mstream enforces bake-time symlink rejection with a source-tree `build.rs` scan while the VFS static layer remains file/dir-only. |
 
 ---
 
@@ -158,6 +159,9 @@ Note: `OverlayAttrs` on vmm-vz is `{ mode, uid, gid }` (overlay.rs:40-45) — **
 by widening the shared `OverlayAttrs`/`OverlayNode` (overlay.rs:102-111).
 
 **Static resolution** (files + dirs only; symlinks rejected at bake → FR-1a):
+
+> @codex-590-impl 2026-07-01 -- Implementation note: `include_dir::Dir` carries baked files and directories but no source-tree symlink provenance in the runtime value. The VFS static layer therefore never serves symlinks and reports no static symlink targets; mstream enforces the FR-1a bake-time rejection by scanning `.agents/skills/project/` with `symlink_metadata()` in `build.rs` before `include_dir!` runs. A future generic consumer-facing registration API that must reject symlinks for arbitrary source trees needs to carry the source path or a manifest into registration.
+
 ```rust
 impl StaticLayer {
     fn lookup(&self, tag: &str, path: &str) -> Option<OverlayEntryKind> {

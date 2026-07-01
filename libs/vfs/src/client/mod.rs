@@ -9,5 +9,8 @@
 
 pub mod guest;
 
-#[cfg(all(feature = "client", target_os = "linux"))]
+#[cfg(all(feature = "fuser-client", target_os = "linux"))]
 pub mod fuse;
+
+#[cfg(all(feature = "local-mount", target_os = "linux"))]
+pub mod local;
