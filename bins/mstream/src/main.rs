@@ -5,6 +5,7 @@ mod client;
 mod daemon;
 mod jsonl;
 mod protocol;
+mod skills;
 mod state;
 mod tags;
 mod timeline;
@@ -34,10 +35,12 @@ async fn run() -> anyhow::Result<i32> {
     match cli.command {
         Command::Attach(args) => return attach::run(&socket, args).await,
         Command::Daemon(DaemonCommand::Start(args)) => {
-            if args.foreground {
-                daemon::run_foreground(socket).await?;
+            let foreground = args.foreground;
+            let mount = args.mount;
+            if foreground {
+                daemon::run_foreground(socket, mount).await?;
             } else {
-                let records = daemon::start_background(&socket).await?;
+                let records = daemon::start_background(&socket, mount.as_deref()).await?;
                 jsonl::print_records(&records)?;
             }
         }

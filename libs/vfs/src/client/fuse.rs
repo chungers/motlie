@@ -13,15 +13,15 @@
 //! proven unreliable on that helper path; direct `/dev/fuse` mounts are the
 //! correct service-managed behavior here.
 //!
-//! This module requires the `client` feature (which pulls in `fuser`).
+//! This module requires the `fuser-client` feature (which pulls in `fuser`).
 
 use std::ffi::OsStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     FileAttr as FuserFileAttr, FileType as FuserFileType, Filesystem, MountOption, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs,
-    ReplyWrite, ReplyXattr, Request,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen,
+    ReplyStatfs, ReplyWrite, ReplyXattr, Request,
 };
 
 use crate::core::op::*;
@@ -362,7 +362,12 @@ where
             typ,
             pid,
         }) {
-            FsResult::Lock { start, end, typ, pid } => reply.locked(start, end, typ, pid),
+            FsResult::Lock {
+                start,
+                end,
+                typ,
+                pid,
+            } => reply.locked(start, end, typ, pid),
             FsResult::Error { errno } => reply.error(errno),
             _ => reply.error(libc::EIO),
         }

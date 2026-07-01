@@ -1,7 +1,7 @@
 //! GuestMountRunner and GuestMountSpec: guest-side mount orchestration.
 //!
 //! This module compiles on any platform. The real FUSE mount path is gated
-//! behind `#[cfg(all(feature = "client", target_os = "linux"))]`.
+//! behind `#[cfg(all(feature = "fuser-client", target_os = "linux"))]`.
 //!
 //! `GuestMountRunner::mount_all()` spawns one thread per mount spec, calls
 //! the caller-supplied connector closure to obtain a transport, wraps it in

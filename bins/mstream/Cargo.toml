@@ -19,11 +19,15 @@ serde.workspace = true
 thiserror.workspace = true
 motlie-tmux = { path = "../../libs/tmux" }
 motlie-agent = { path = "../../libs/agent" }
+motlie-vfs = { path = "../../libs/vfs", features = ["local-mount"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5.58", features = ["derive"] }
 serde_json = "1.0.149"
 unicode-width = "0.2"
+include_dir = "0.7"
+libc = "0.2"
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3.25.0"
