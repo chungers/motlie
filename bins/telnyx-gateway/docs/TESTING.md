@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
-| 2026-07-01 PDT | @codex-541 | Updated the continuation protocol after the short-complete-response TTS probe: current no-barge-in baseline is 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, and bounded FIFO Identity; post-merge follow-up is #587 barge-in validation, #586 echo/AEC measurement, and short-terminal-phrase TTS audio inspection. |
+| 2026-07-01 PDT | @codex-541 | Recorded the #587 live barge-in dispatch-guard validation pass and current continuation protocol: no-barge-in baseline is 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, and bounded FIFO Identity; remaining follow-up is #586 echo/AEC measurement plus short-terminal-phrase TTS audio inspection. |
 | 2026-06-29 PDT | @codex-541 | Added #586 echo-characterization live-run protocol: enable the diagnostic per run, record `media.echo_characterization` metrics, and leave AEC/VAD behavior changes to follow-up after PR #588. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs to the live-test protocol; the next barge-in run should verify one clean replacement turn before #586 AEC/VAD work. |
 | 2026-06-28 PDT | @codex-541 | Recorded the failed barge-in Identity 450 ms run: post-playback ASR fragments escaped as new turns, so the next barge-in step is a code fix rather than knob-only tuning. |
@@ -528,23 +528,25 @@ Previous 2026-06-25 result:
   replacement-sentence echo/fragment conditions, so treat 2026-06-25 as an
   encouraging sample, not a validated baseline.
 
-Next barge-in Identity run after PR #588 merges:
+#587 barge-in Identity validation result:
 
-- Re-run the #587 validation profile; do not change endpoint, TTS, and policy
-  knobs in the same run unless the hypothesis is explicitly a knob probe.
-- The post-barge-in dispatch guard is implemented in PR #588. Verify that during
-  active assistant playback and the short post-playback echo window, short,
-  weak-signal, or assistant-echo finals are suppressed before they can cancel
-  replacement playback or reach the processor.
-- Keep `voice_quality.barge_in.missing_signal_policy = "conservative"`,
-  `partial_min_confidence = 0.50`, `partial_min_stability = 0.50`, and
-  `final_min_confidence = 0.70`; leave `final_min_stability` unset until final
-  ASR emits stability.
-- Enable `[voice_quality.echo_characterization]` for the run so #586 has inbound
-  vs outbound correlation, delay, and echo-return data.
-- Success is one clean replacement turn, 0 stale echo/fragment processor turns,
-  stable outbound pacing, and enough `media.echo_characterization` spans to
-  decide the #586 AEC/VAD boundary follow-up.
+- 2026-07-01 run `20260701-162134-587-bargein-dispatchguard-v1` passed the
+  live dispatch-guard check with this profile.
+- The initial long caller turn reached Identity and started playback; the caller
+  interrupted with the replacement sentence; the original playback was canceled.
+- Assistant-echo transcripts during active/recent playback were suppressed,
+  including the final `A gateway will begin repeating this`; that echo did not
+  reach `conversation.processor_visible_turn`.
+- The replacement turn `Stop now, please repeat this replacement sentence
+  clearly after the interruption` was the only post-barge-in processor-visible
+  turn and its playback completed.
+- Metrics: 2 processor-visible turns, 3 suppressed assistant-echo transcripts,
+  1 canceled playback, 1 completed replacement playback, 0 stale echo/fragment
+  processor turns, 0 outbound underruns, 0 inbound lost packets, and 15
+  `media.echo_characterization` spans.
+- #587 is live-validated for this Identity/repeat sample. Future barge-in runs
+  should focus on #586 AEC/VAD boundary measurements unless a reviewer requests
+  repeated #587 sampling.
 
 ### Next No-Barge-In Follow-Up
 
@@ -591,15 +593,13 @@ Next hypotheses, one per run:
 - TTS pacing: keep `streaming_start_buffer_ms = 450` as the current baseline.
   Do not test `prebuffer_chunks = 2` unless underruns return under the 450 ms
   setting.
-- Barge-in validation: after PR #588 merges, re-run the current
-  `barge_in_coalesce_after_silence` Identity profile with the shared 450 ms TTS
-  start buffer and echo characterization enabled. Success is one clean
-  replacement turn, 0 stale echo/fragment processor turns, and acceptable
-  first-audio latency.
-- #586 AEC/VAD boundary: after the #587 validation sample, use the collected
-  `media.echo_characterization` spans to choose AEC insertion or an echo-aware
-  onset gate. Do not make policy consume the diagnostic until the correlation,
-  delay, and echo-return evidence supports the boundary.
+- Barge-in regression: keep the #587 validation profile available for repeated
+  sampling if reviewers request it, but the 2026-07-01 live sample passed the
+  dispatch-guard acceptance check.
+- #586 AEC/VAD boundary: use the collected `media.echo_characterization` spans
+  and additional barge-in samples to choose AEC insertion or an echo-aware onset
+  gate. Do not make policy consume the diagnostic until the correlation, delay,
+  and echo-return evidence supports the boundary.
 - Turn-batching validation: after barge-in is revalidated, run
   `processor = "turn_batched_identity"` with fixed N=2 and confirm the prompt
   handler sees one joined prompt with two source turns, not two separate

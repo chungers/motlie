@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
-| 2026-07-01 PDT | @codex-541 | Clarified the post-merge split: #587 dispatch guard is implemented in PR #588 and awaits live barge-in validation, while #586 remains the AEC/VAD boundary follow-up using echo-characterization measurements. |
+| 2026-07-01 PDT | @codex-541 | Recorded the #587 live barge-in validation pass: PR #588 dispatch guard prevented assistant echo from reaching Identity; #586 remains the AEC/VAD boundary follow-up using echo-characterization measurements. |
 | 2026-06-29 PDT | @codex-541 | Added #586 measurement-only echo-characterization note: PR #588 records media correlation data, while AEC/VAD policy remains follow-up. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard design notes: guarded finals are evaluated before cancellation and processor dispatch; #586 remains the AEC/VAD boundary. |
 | 2026-06-28 PDT | @codex-541 | Marked `barge_in_coalesce_after_silence` experimental and not live-validated pending the post-playback dispatch guard tracked in #587. |
@@ -63,7 +63,7 @@ Initial modes:
 - `current_compat`: existing latest-only deferred behavior, including max-hold drop.
 - `no_barge_in_bounded_pending`: no-barge-in mode that stores a bounded queue of pending outputs and drains them after active playback clears.
 - `barge_in_cancel_only`: reserved for moving today's barge-in cancel behavior into the policy module.
-- `barge_in_coalesce_after_silence`: EXPERIMENTAL — PR #588 implements the #587 post-playback dispatch guard, but this mode still needs post-merge live validation before production use. The next validation must prove that replacement playback does not leak stale echo/fragment finals as new processor turns. #586 then owns the AEC/VAD-anchored boundary. The validated default path remains current_compat / no-barge-in.
+- `barge_in_coalesce_after_silence`: EXPERIMENTAL — PR #588 implements the #587 post-playback dispatch guard, and the 2026-07-01 live Identity/repeat sample validated that assistant echo did not leak as a processor-visible replacement turn. #586 still owns the AEC/VAD-anchored boundary before production use beyond the validated smoke-test profile. The validated default path remains current_compat / no-barge-in.
   Reserved for future caller-interruption handling that can cancel, preserve ASR, and regenerate after a silence window.
 
 Config sketch:
@@ -111,7 +111,7 @@ Implemented decisions:
 4. `current_compat`: preserves existing latest-only no-barge-in deferral and existing barge-in cancel semantics.
 5. `no_barge_in_bounded_pending`: retains a bounded pending output queue and drains one assistant output at a time after playback clears.
 6. `barge_in_cancel_only`: makes today's cancel behavior explicit through the policy boundary: cancel active playback, preserve ASR, reset turn batching, and do not replay stale assistant output automatically.
-7. `barge_in_coalesce_after_silence`: cancels active playback, preserves ASR, and coalesces post-barge-in finals until `post_barge_in_silence_ms` before processor dispatch. PR #588 implements the #587 post-barge-in dispatch guard that evaluates later active/recent-playback finals before they can cancel replacement playback or reach the processor. Short/low-content guarded finals, score-absent guarded finals, and guarded finals that match the assistant echo signature are suppressed. Keep this mode in post-merge live validation until #587 has one clean replacement sample and #586 adds the AEC/VAD boundary; `current_compat` / no-barge-in remains the validated default path.
+7. `barge_in_coalesce_after_silence`: cancels active playback, preserves ASR, and coalesces post-barge-in finals until `post_barge_in_silence_ms` before processor dispatch. PR #588 implements the #587 post-barge-in dispatch guard that evaluates later active/recent-playback finals before they can cancel replacement playback or reach the processor. Short/low-content guarded finals, score-absent guarded finals, and guarded finals that match the assistant echo signature are suppressed. The 2026-07-01 live sample validated one clean replacement turn and 0 stale echo/fragment processor turns. Keep this mode under #586 live measurement until the AEC/VAD boundary lands; `current_compat` / no-barge-in remains the validated default path.
 
 Media still owns frame-level speech onset and echo-guard classification. When echo guard classifies onset as likely assistant echo, media defers cancellation to partial/final ASR as before. Once a trigger is valid, the policy decides whether cancellation/coalescing proceeds.
 

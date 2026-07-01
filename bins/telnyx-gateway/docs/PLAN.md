@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-07-01 PDT | @codex-541 | Updated the live-test roadmap for PR #588: #587 dispatch guard is code-complete pending post-merge live barge-in validation; current no-barge-in baseline is 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS buffer, and bounded FIFO Identity; #586 AEC/VAD and short-terminal-phrase TTS intelligibility remain follow-up. |
+| 2026-07-01 PDT | @codex-541 | Updated the live-test roadmap for PR #588 after #587 live validation passed: current no-barge-in baseline is 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS buffer, and bounded FIFO Identity; #586 AEC/VAD and short-terminal-phrase TTS intelligibility remain follow-up. |
 | 2026-06-26 20:51 PDT | @codex-541 | Added processor-visible transcript quality events plus first-audio latency spans for conversation turns and barge-in replacements; updated the PR #565 live-test roadmap to use these artifacts before the next run. |
 | 2026-06-26 PDT | @codex-541 | Added the live-test breadcrumb roadmap for PR #565: every run now updates this PLAN, commits a redacted `docs/tests/*.toml` run record, and links the latest result/next hypothesis so future agents can resume without tmux context. |
 | 2026-06-12 PDT | @codex-366-impl | Resolved #488 generality review by moving final-settle fragment classifiers and conversation final-coalescing hold knobs into `VoiceQualityConfig.endpoint` with default-preserving values; `bins/telnyx-agent` now opts into `motlie.telnyx.text.partials.v1` for live advisory partial delivery. |
@@ -110,8 +110,9 @@ contain live routing values; the committed copy must keep placeholders only.
 | 20260626-163544-7dcbe571-identity-bargein-v1 | inbound Identity/repeat, barge-in enabled, no turn batching | [docs/tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml](./tests/20260626-163544-7dcbe571-identity-bargein-v1.example.toml) | B | Active playback canceled once, replacement played, 0 underruns, 0 transport loss; raw ASR captured one assistant-echo fragment that was suppressed before agent dispatch. | Add agent-visible transcript artifacts and explicit cancel/replacement latency spans before treating raw transcript WER as the control metric. |
 | 20260628-135818-336e9087-layera-nobarge-identity-v1 | inbound Identity/repeat, barge-in disabled, no turn batching | [docs/tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml](./tests/20260628-135818-336e9087-layera-nobarge-identity-v1.example.toml) | C+ | Core measured sentence recognized exactly, including `hang up`, and 2/2 non-hangup playbacks completed; strict script WER 20.59%, two ASR finals split one passage, and outbound pacing still showed 58 underruns with one 1180 ms max gap. | Keep bounded FIFO baseline, then run one controlled endpoint-merge/final-settle probe and one separate TTS pacing probe. |
 | 20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1 | inbound Identity/repeat, barge-in disabled, no turn batching, TTS start buffer 450 ms | [docs/tests/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.example.toml](./tests/20260628-141804-b5ecbbed-tts-startbuf450-nobarge-v1.example.toml) | B | One-knob pacing probe completed 2/2 playbacks with 0 underruns and 73 ms max inter-frame gap; caller feedback was better; core measured sentence including `hang up` was exact. | Promote `streaming_start_buffer_ms = 450`, then test endpoint segmentation, barge-in with 450, and turn-batching N=2 prompt visibility as separate runs. |
-| 20260628-155011-09337980-bargein-startbuf450-v1 | inbound Identity/repeat, barge-in enabled, no turn batching, TTS start buffer 450 ms | [docs/tests/20260628-155011-09337980-bargein-startbuf450-v1.example.toml](./tests/20260628-155011-09337980-bargein-startbuf450-v1.example.toml) | D | Failed quality sample: caller reported words out of sequence and missing phrases; processor saw 6 turns, 4 cancels, 2 completed playbacks, strict WER 30.30%, and outbound pacing had 77 underruns with 1119 ms max gap. | PR #588 implements the #587 dispatch guard; after merge, re-test this barge-in profile before #586 AEC/VAD work. |
+| 20260628-155011-09337980-bargein-startbuf450-v1 | inbound Identity/repeat, barge-in enabled, no turn batching, TTS start buffer 450 ms | [docs/tests/20260628-155011-09337980-bargein-startbuf450-v1.example.toml](./tests/20260628-155011-09337980-bargein-startbuf450-v1.example.toml) | D | Failed quality sample: caller reported words out of sequence and missing phrases; processor saw 6 turns, 4 cancels, 2 completed playbacks, strict WER 30.30%, and outbound pacing had 77 underruns with 1119 ms max gap. | PR #588 implements the #587 dispatch guard; re-tested in 20260701-162134. |
 | 20260701-154921-local-tts-shortchunk-fix-v1 | inbound Identity/repeat, barge-in disabled, no turn batching, local TTS short-chunk fix | [docs/tests/20260701-154921-local-tts-shortchunk-fix-v1.example.toml](./tests/20260701-154921-local-tts-shortchunk-fix-v1.example.toml) | B | 5 expected sentences became 5 ASR finals and 5 processor-visible turns; strict WER 3.17% with no deletions; `miss it` reached ASR/Identity/TTS as one chunk but was still not heard by the caller. | Keep 1100 ms trailing silence, 600 ms ASR finish pad, and 450 ms TTS buffer as the no-barge-in baseline; follow up on TTS/prosody for short terminal phrases. |
+| 20260701-162134-587-bargein-dispatchguard-v1 | inbound Identity/repeat, barge-in enabled, no turn batching, #587 dispatch guard | [docs/tests/20260701-162134-587-bargein-dispatchguard-v1.example.toml](./tests/20260701-162134-587-bargein-dispatchguard-v1.example.toml) | A- | #587 live validation passed: assistant echo final was suppressed before Identity, replacement turn completed, 0 stale echo/fragment processor turns, 0 underruns, 0 packet loss, and 15 echo-characterization spans captured. | Close #587 with this live evidence; continue with #586 AEC/VAD boundary measurement. |
 
 ### Current Roadmap
 
@@ -157,16 +158,18 @@ contain live routing values; the committed copy must keep placeholders only.
   turns, not two separate single-turn prompts; keep barge-in off unless testing
   reset-on-barge-in behavior.
   DESIGN reference: `TESTING.md`, `Protocol B: Turns-Batching Smoke Test`
-- [ ] Post-merge #587 live validation: run the barge-in Identity profile with
+- [x] #587 live validation: @codex-541, 2026-07-01 PDT: run
+  `20260701-162134-587-bargein-dispatchguard-v1` passed with
   `barge_in_coalesce_after_silence`, `streaming_start_buffer_ms = 450`,
   `trailing_silence_ms = 1100`, `finish_pad_ms = 600`, and
-  `echo_characterization.enabled = true`. Success is one clean replacement
-  turn, no stale echo/fragment processor turns, stable outbound pacing, and
-  enough correlation/delay/return-level data to drive #586.
+  `echo_characterization.enabled = true`. The assistant echo final was
+  suppressed before Identity, the replacement turn completed, stale
+  echo/fragment processor turns were 0, outbound underruns were 0, and David
+  confirmed the live behavior after the call.
   DESIGN reference: `TESTING.md`, `Barge-In Policy Profiles`
-- [ ] Post-merge #586 follow-up: analyze `media.echo_characterization` spans
-  across live barge-in samples, then choose AEC insertion or an echo-aware
-  onset gate. Keep this out of the #587 dispatch-guard acceptance decision.
+- [ ] #586 follow-up: analyze `media.echo_characterization` spans across live
+  barge-in samples, then choose AEC insertion or an echo-aware onset gate. Keep
+  this out of the #587 dispatch-guard acceptance decision.
   DESIGN reference: `DESIGN-545-conversation-policy.md`, `Layer B`
 - [x] Run a separate TTS pacing probe from the same baseline. @codex-541,
   2026-06-28 PDT: `streaming_start_buffer_ms = 450` completed with 0

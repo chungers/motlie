@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
-| 2026-07-01 PDT | @codex-541 | Updated the current no-barge-in Identity baseline after the short-complete-response TTS chunking probe: 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, and post-merge follow-up split between #587 barge-in validation and #586 AEC/VAD. |
+| 2026-07-01 PDT | @codex-541 | Updated the current no-barge-in Identity baseline and recorded the #587 live barge-in validation pass: 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, bounded FIFO Identity for no-barge-in, and #586 AEC/VAD as the remaining follow-up. |
 | 2026-06-29 PDT | @codex-541 | Added opt-in #586 `echo_characterization` diagnostic knobs for measuring inbound/outbound echo correlation before the AEC/VAD follow-up. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs for suppressing active/recent-playback echo fragments before they cancel or reach the processor. |
 | 2026-06-28 PDT | @codex-541 | Marked `barge_in_coalesce_after_silence` experimental and not live-validated pending the post-playback dispatch guard tracked in #587. |
@@ -251,7 +251,7 @@ Policy modes:
   bounded pending assistant outputs and drains them after playback clears.
 - `barge_in_cancel_only`: valid caller interruption cancels active output and
   preserves caller ASR without automatic stale replay.
-- `barge_in_coalesce_after_silence`: cancel plus post-barge-in silence coalescing before processor dispatch. #587 adds a post-playback dispatch guard so short/echo-like active-playback finals are suppressed before they can cancel replacement playback or become new processor turns. Keep this mode in live validation until #586 adds the AEC/VAD boundary; the validated production default remains `current_compat` / no-barge-in.
+- `barge_in_coalesce_after_silence`: cancel plus post-barge-in silence coalescing before processor dispatch. #587 adds a post-playback dispatch guard so short/echo-like active-playback finals are suppressed before they can cancel replacement playback or become new processor turns. The 2026-07-01 live Identity/repeat sample validated the dispatch guard: one replacement turn, no stale echo/fragment processor turn, and stable outbound pacing. #586 still owns AEC/VAD-anchored boundary work; the validated production default remains `current_compat` / no-barge-in.
 
 Recommended no-barge-in Identity smoke-test profile:
 
@@ -388,15 +388,15 @@ post_barge_in_fragment_max_words = 2
 The 2026-06-28 barge-in Identity run with this profile and
 `streaming_start_buffer_ms = 450` failed the human quality bar before #587: short
 and post-playback echo-like ASR finals escaped as new turns, Identity repeated
-them out of sequence, and outbound pacing recorded 77 underruns. PR #588
-implements the #587 post-barge-in dispatch guard so guarded short/echo-like
-finals do not cancel replacement playback or reach the processor. After merge,
-run this profile as the #587 validation sample with `echo_characterization`
-enabled and require one clean replacement turn, no stale echo/fragment processor
-turn, and stable outbound pacing. #586 still owns AEC/VAD-anchored boundary
-validation after those measurements. Collect qualitative feedback only after
-hangup or after `conversation smoke-test off`, otherwise Identity/repeat will
-capture and repeat the feedback as more caller turns.
+them out of sequence, and outbound pacing recorded 77 underruns. The 2026-07-01
+#587 live validation passed with this profile plus `trailing_silence_ms = 1100`,
+`finish_pad_ms = 600`, and `echo_characterization.enabled = true`: the assistant
+echo final was suppressed before processor dispatch, the replacement caller turn
+completed, and outbound underruns were 0. #586 still owns AEC/VAD-anchored
+boundary validation after analyzing echo-characterization spans. Collect
+qualitative feedback only after hangup or after `conversation smoke-test off`,
+otherwise Identity/repeat will capture and repeat the feedback as more caller
+turns.
 
 ### Echo Suppression
 
