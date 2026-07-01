@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use include_dir::{include_dir, Dir};
 use motlie_vfs::core::{FsAccess, FsObserver, FsServer};
 
-pub static PROJECT_SKILLS: Dir<'static> =
-    include_dir!("$CARGO_MANIFEST_DIR/../../.agents/skills/project");
+pub const PROJECT_SKILLS_DIR: &str = env!("MSTREAM_SKILLS_DIR");
+pub static PROJECT_SKILLS: Dir<'static> = include_dir!("$MSTREAM_SKILLS_DIR");
 
 #[cfg(target_os = "linux")]
 pub struct SkillsMount {
@@ -27,8 +27,14 @@ impl SkillsMount {
 #[cfg(not(target_os = "linux"))]
 pub struct SkillsMount;
 
-pub fn mount_project_skills() -> Option<SkillsMount> {
-    match try_mount_project_skills() {
+pub fn mount_project_skills(mountpoint: Option<PathBuf>) -> Option<SkillsMount> {
+    let Some(mountpoint) = mountpoint else {
+        eprintln!(
+            "skills FUSE unavailable: no --mount specified; continuing without mounting skills"
+        );
+        return None;
+    };
+    match try_mount_project_skills(mountpoint) {
         Ok(Some(mount)) => Some(mount),
         Ok(None) => None,
         Err(err) => {
@@ -39,11 +45,7 @@ pub fn mount_project_skills() -> Option<SkillsMount> {
 }
 
 #[cfg(target_os = "linux")]
-fn try_mount_project_skills() -> Result<Option<SkillsMount>> {
-    let Some(mountpoint) = default_mountpoint() else {
-        eprintln!("skills FUSE unavailable: XDG_RUNTIME_DIR is not set; continuing without mount");
-        return Ok(None);
-    };
+fn try_mount_project_skills(mountpoint: PathBuf) -> Result<Option<SkillsMount>> {
     let backing_dir = backing_dir_for_mountpoint(&mountpoint)
         .context("failed to choose embedded skills backing directory")?;
     std::fs::create_dir_all(&backing_dir)
@@ -60,7 +62,9 @@ fn try_mount_project_skills() -> Result<Option<SkillsMount>> {
         .overlay()
         .context("embedded skills VFS server was built without overlay support")?
         .put_static_layer("project-skills", 50, "skills", &PROJECT_SKILLS, owner)
-        .context("failed to register embedded project skills")?;
+        .with_context(|| {
+            format!("failed to register embedded project skills from {PROJECT_SKILLS_DIR}")
+        })?;
 
     let mount =
         match motlie_vfs::client::local::mount_local(Arc::new(server), "skills", &mountpoint)
@@ -81,7 +85,7 @@ fn try_mount_project_skills() -> Result<Option<SkillsMount>> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn try_mount_project_skills() -> Result<Option<SkillsMount>> {
+fn try_mount_project_skills(_mountpoint: PathBuf) -> Result<Option<SkillsMount>> {
     eprintln!("skills FUSE unavailable on this host platform; continuing without mount");
     Ok(None)
 }
@@ -97,18 +101,6 @@ pub fn unmount_project_skills(mount: Option<SkillsMount>) {
 
 #[cfg(not(target_os = "linux"))]
 pub fn unmount_project_skills(_mount: Option<SkillsMount>) {}
-
-#[cfg(target_os = "linux")]
-fn default_mountpoint() -> Option<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .map(mountpoint_from_runtime)
-}
-
-#[cfg(target_os = "linux")]
-fn mountpoint_from_runtime(runtime: PathBuf) -> PathBuf {
-    runtime.join("mstream").join("skills")
-}
 
 #[cfg(target_os = "linux")]
 fn backing_dir_for_mountpoint(mountpoint: &Path) -> Option<PathBuf> {
@@ -164,12 +156,24 @@ mod tests {
         assert!(PROJECT_SKILLS.get_file("SKILL.md").is_some());
     }
 
+    #[test]
+    fn project_skills_dir_is_supplied_by_build_script() {
+        let path = Path::new(PROJECT_SKILLS_DIR);
+        assert!(path.is_absolute());
+        assert!(path.ends_with(".agents/skills/project"));
+    }
+
+    #[test]
+    fn omitted_mountpoint_does_not_mount_skills() {
+        assert!(mount_project_skills(None).is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
-    fn mountpoint_uses_runtime_dir() {
+    fn backing_dir_uses_explicit_mount_parent() {
         assert_eq!(
-            mountpoint_from_runtime(PathBuf::from("/tmp/mstream-test-runtime")),
-            PathBuf::from("/tmp/mstream-test-runtime/mstream/skills")
+            backing_dir_for_mountpoint(Path::new("/tmp/mstream-test/skills")).unwrap(),
+            PathBuf::from("/tmp/mstream-test/skills-backing")
         );
     }
 }

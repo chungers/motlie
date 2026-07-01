@@ -6,8 +6,8 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=MSTREAM_BUILD_GIT_SHA");
     watch_git_metadata();
-    if let Err(err) = watch_project_skills() {
-        panic!("failed to watch embedded project skills: {err}");
+    if let Err(err) = configure_project_skills() {
+        panic!("failed to configure embedded project skills: {err}");
     }
 
     let sha = std::env::var("MSTREAM_BUILD_GIT_SHA").unwrap_or_else(|_| current_git_sha());
@@ -31,13 +31,27 @@ fn watch_git_metadata() {
     }
 }
 
-fn watch_project_skills() -> io::Result<()> {
+fn configure_project_skills() -> io::Result<()> {
+    let root = project_skills_dir()?;
+    watch_tree(&root)?;
+    println!("cargo:rustc-env=MSTREAM_SKILLS_DIR={}", root.display());
+    Ok(())
+}
+
+fn project_skills_dir() -> io::Result<PathBuf> {
     let manifest_dir = match std::env::var_os("CARGO_MANIFEST_DIR") {
         Some(value) => PathBuf::from(value),
-        None => return Ok(()),
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "CARGO_MANIFEST_DIR is not set",
+            ))
+        }
     };
-    let root = manifest_dir.join("../../.agents/skills/project");
-    watch_tree(&root)
+    Ok(manifest_dir
+        .join("../..")
+        .canonicalize()?
+        .join(".agents/skills/project"))
 }
 
 fn watch_tree(root: &Path) -> io::Result<()> {

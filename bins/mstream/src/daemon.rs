@@ -15,7 +15,10 @@ use crate::jsonl;
 use crate::protocol::ClientRequest;
 use crate::state::DaemonState;
 
-pub async fn start_background(socket: &Path) -> anyhow::Result<Vec<Value>> {
+pub async fn start_background(
+    socket: &Path,
+    mountpoint: Option<&Path>,
+) -> anyhow::Result<Vec<Value>> {
     if daemon_reachable(socket).await {
         return Ok(vec![jsonl::error(
             "daemon_already_running",
@@ -24,12 +27,17 @@ pub async fn start_background(socket: &Path) -> anyhow::Result<Vec<Value>> {
     }
 
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let child = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .arg("--socket")
         .arg(socket)
         .arg("daemon")
         .arg("start")
-        .arg("--foreground")
+        .arg("--foreground");
+    if let Some(mountpoint) = mountpoint {
+        command.arg("--mount").arg(mountpoint);
+    }
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -56,7 +64,10 @@ pub async fn start_background(socket: &Path) -> anyhow::Result<Vec<Value>> {
     )
 }
 
-pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
+pub async fn run_foreground(
+    socket: PathBuf,
+    skills_mountpoint: Option<PathBuf>,
+) -> anyhow::Result<()> {
     prepare_socket(&socket).await?;
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind daemon socket {}", socket.display()))?;
@@ -66,7 +77,7 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
     let channel_delivery_task =
         DaemonState::spawn_channel_delivery_task(Arc::clone(&state)).await?;
     let (stop_tx, mut stop_rx) = watch::channel(false);
-    let skills_mount = crate::skills::mount_project_skills();
+    let skills_mount = crate::skills::mount_project_skills(skills_mountpoint);
 
     loop {
         tokio::select! {

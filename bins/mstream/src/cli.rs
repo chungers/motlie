@@ -233,6 +233,8 @@ pub enum DaemonCommand {
 pub struct DaemonStartArgs {
     #[arg(long)]
     pub foreground: bool,
+    #[arg(long, value_name = "DIR")]
+    pub mount: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1264,6 +1266,37 @@ mod tests {
         assert_eq!(request.role.as_deref(), Some("implementer"));
         assert_eq!(request.workstream.as_deref(), Some("issue-360"));
         assert_eq!(request.mmux_label.as_deref(), Some("360 impl"));
+    }
+
+    #[test]
+    fn daemon_start_mount_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "daemon",
+            "start",
+            "--foreground",
+            "--mount",
+            "/tmp/mstream-skills",
+        ])
+        .expect("daemon start parses");
+
+        let Command::Daemon(DaemonCommand::Start(args)) = cli.command else {
+            panic!("expected daemon start command");
+        };
+        assert!(args.foreground);
+        assert_eq!(args.mount, Some(PathBuf::from("/tmp/mstream-skills")));
+    }
+
+    #[test]
+    fn daemon_start_without_mount_leaves_skills_unmounted() {
+        let cli = Cli::try_parse_from(["mstream", "daemon", "start", "--foreground"])
+            .expect("daemon start parses");
+
+        let Command::Daemon(DaemonCommand::Start(args)) = cli.command else {
+            panic!("expected daemon start command");
+        };
+        assert!(args.foreground);
+        assert_eq!(args.mount, None);
     }
 
     #[test]

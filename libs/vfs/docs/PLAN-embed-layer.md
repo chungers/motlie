@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-07-01 | @codex-590-impl | Added implementation tracking for approved design #590 and marked completed tasks from the implementation pass. |
+| 2026-07-01 | @codex-590-impl | Updated mstream consumer tasks for explicit `daemon start --mount <DIR>` and build-script-owned `MSTREAM_SKILLS_DIR`. |
 
 ## Scope
 
@@ -33,12 +34,14 @@ This plan tracks implementation of [DESIGN-embed-layer.md](./DESIGN-embed-layer.
   - [x] Add Linux `client::local::mount_local()` using blocking `fuser::mount2()` with explicit unmount and stale-mount recovery.
 
 - [x] 4. mstream first consumer ([DESIGN §4.8](./DESIGN-embed-layer.md#48-consumer-walkthrough-asset--mount-mapping-mstream))
-  - [x] Bake `.agents/skills/project/` with `include_dir!("$CARGO_MANIFEST_DIR/../../.agents/skills/project")`.
+  - [x] Bake `.agents/skills/project/` with `include_dir!("$MSTREAM_SKILLS_DIR")`, with `build.rs` computing the absolute source path.
+  - [x] Emit `cargo:rustc-env=MSTREAM_SKILLS_DIR=<abs-skills-dir>` from `build.rs`.
   - [x] Add `build.rs` watches for the root, subdirectories, and files.
   - [x] Reject symlinks in the baked source tree during the mstream build.
   - [x] Depend on `motlie-vfs` with `features = ["local-mount"]`, not `client`.
-  - [x] Mount at `$XDG_RUNTIME_DIR/mstream/skills` when available.
-  - [x] Degrade with a warning when the platform, runtime dir, or FUSE mount is unavailable.
+  - [x] Mount only when `mstream daemon start --mount <DIR>` is provided.
+  - [x] Degrade with a warning when `--mount` is omitted, the platform is unsupported, or FUSE mount is unavailable.
+  - [x] Add CLI/build-env tests for `--mount`, omitted mount, and `MSTREAM_SKILLS_DIR`.
   - [x] Unmount during daemon graceful shutdown.
 
 - [x] 5. Tests and verification ([DESIGN §5](./DESIGN-embed-layer.md#5-system-design--components-to-test))
@@ -51,4 +54,5 @@ This plan tracks implementation of [DESIGN-embed-layer.md](./DESIGN-embed-layer.
 ## Known Gaps
 
 - [ ] @codex-590-impl 2026-07-01 -- Generic library registration cannot independently reject symlinks from `include_dir::Dir` alone because that runtime value exposes baked files and directories, not source-tree symlink provenance. mstream enforces the approved bake-time rejection by scanning the source tree in `build.rs`; a future generic API should accept a source path or manifest if arbitrary consumers need the same guarantee.
+- [ ] @codex-590-impl 2026-07-01 -- `include_dir` 0.7 requires a string-literal macro argument, so `skills.rs` uses `include_dir!("$MSTREAM_SKILLS_DIR")` instead of the requested `include_dir!(env!("MSTREAM_SKILLS_DIR"))`. `build.rs` still owns the absolute path and exposes it through `MSTREAM_SKILLS_DIR`.
 - [ ] Live FUSE mount testing still requires host `/dev/fuse`/`fusermount3` access. Unit and compile gates cover the degrade path and mount helper construction; a live mount smoke should be run on a FUSE-enabled Linux host before depending operationally on the mount.
