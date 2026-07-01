@@ -35,7 +35,7 @@ pub async fn start_background(
         .arg("start")
         .arg("--foreground");
     if let Some(mountpoint) = mountpoint {
-        command.arg("--mount").arg(mountpoint);
+        command.arg("--mount-skill").arg(mountpoint);
     }
     let child = command
         .stdin(Stdio::null())

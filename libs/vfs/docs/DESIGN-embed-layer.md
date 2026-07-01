@@ -7,7 +7,7 @@
 > is 5421 lines there). Extension to `motlie-vfs`. First consumer:
 > `bins/mstream` distributes its `.agents/skills/project/` skill tree baked into
 > the binary and can mount it over FUSE when the daemon is started with
-> `--mount <DIR>`.
+> `--mount-skill <DIR>`.
 
 ## Changelog
 
@@ -15,10 +15,11 @@
 |------|-----|---------|
 | 2026-06-28 | @claude-vfs-fuse | Initial draft (anchored to `main`). Scope: embedded static layer-backing + access-logging observer. |
 | 2026-06-28 | @claude-vfs-fuse | §4.6 runtime ownership; §4.1 code shape; §4.8 consumer walkthrough; copy-up note. |
-| 2026-06-30 | @claude-vfs-fuse | **RE-ANCHOR against `feature/vmm-vz` (`e4e0229f`)** after review (PR #591, 2 reviewers NEEDS WORK, 21 inline). Re-cited every `server.rs:NNNN`. Corrected two stale claims: (a) overlay attrs use `ov_attrs.uid/gid` directly, NOT `apply_owner_override` — embedded uid/gid set at registration; (b) "server zero change" is false — EROFS propagation + observer lock-scope require server edits. Addressed must-fixes: static-layer EROFS + error propagation, symlink semantics (bake-time reject), tag publication, observer outside the mounts RwLock, guest `client+vsock` left intact via a split `local-mount`/`fuser-client` feature, `include_dir!` path fix, fixed-epoch mtime + `rerun-if-changed`, direct-`/dev/fuse` mount, platform matrix, host deps + degrade contract. Decisions locked with David: degrade-on-mount-failure; old default runtime mountpoint decision, superseded by the 2026-07-01 explicit `--mount <DIR>` cleanup; bake-time symlink reject; fixed-epoch mtime; separate static attr type; `include_dir` always-on light dep. |
+| 2026-06-30 | @claude-vfs-fuse | **RE-ANCHOR against `feature/vmm-vz` (`e4e0229f`)** after review (PR #591, 2 reviewers NEEDS WORK, 21 inline). Re-cited every `server.rs:NNNN`. Corrected two stale claims: (a) overlay attrs use `ov_attrs.uid/gid` directly, NOT `apply_owner_override` — embedded uid/gid set at registration; (b) "server zero change" is false — EROFS propagation + observer lock-scope require server edits. Addressed must-fixes: static-layer EROFS + error propagation, symlink semantics (bake-time reject), tag publication, observer outside the mounts RwLock, guest `client+vsock` left intact via a split `local-mount`/`fuser-client` feature, `include_dir!` path fix, fixed-epoch mtime + `rerun-if-changed`, direct-`/dev/fuse` mount, platform matrix, host deps + degrade contract. Decisions locked with David: degrade-on-mount-failure; old default runtime mountpoint decision, superseded by the 2026-07-01 explicit `--mount-skill <DIR>` cleanup; bake-time symlink reject; fixed-epoch mtime; separate static attr type; `include_dir` always-on light dep. |
 | 2026-07-01 | @codex-590-impl | Implementation pass for #590. Added status plan link, noted the generic symlink-detection gap in `include_dir::Dir`, and documented that mstream enforces bake-time symlink rejection with a source-tree `build.rs` scan while the VFS static layer remains file/dir-only. |
-| 2026-07-01 | @codex-590-impl | Switched mstream skills mounting to explicit `daemon start --mount <DIR>`; no `--mount` means no FUSE mount. Moved the baked source path into `build.rs` via `MSTREAM_SKILLS_DIR`. |
+| 2026-07-01 | @codex-590-impl | Switched mstream skills mounting to explicit `daemon start --mount-skill <DIR>`; no `--mount-skill` means no FUSE mount. Moved the baked source path into `build.rs` via `MSTREAM_SKILLS_DIR`. |
 | 2026-07-01 | @codex-590-impl | Renamed mstream embedded skills identifiers to drop the redundant `project` qualifier; the on-disk `.agents/skills/project` source path is unchanged. |
+| 2026-07-01 | @codex-590-impl | Renamed the mstream daemon skills mount flag to `--mount-skill`; mount semantics are unchanged. |
 
 ---
 
@@ -44,8 +45,8 @@ What it lacks:
 
 ### First use case (mstream)
 `mstream` bakes `.agents/skills/project/` into its binary. When started with
-`daemon start --mount <DIR>`, it mounts that tree over FUSE at `<DIR>` so the
-binary distributes both working code and skill files. Without `--mount`, it logs
+`daemon start --mount-skill <DIR>`, it mounts that tree over FUSE at `<DIR>` so the
+binary distributes both working code and skill files. Without `--mount-skill`, it logs
 the degraded state and runs without a skills mount. Access is logged when mounted.
 
 ## 2. Goals / Non-Goals
@@ -391,7 +392,7 @@ pub static SKILLS: Dir = include_dir!("$MSTREAM_SKILLS_DIR");
 ```rust
 fn serve_skills(mp: Option<PathBuf>) -> Option<LocalMount> {
     let Some(mp) = mp else {
-        tracing::warn!("skills FUSE unavailable: no --mount specified; continuing without mounting skills");
+        tracing::warn!("skills FUSE unavailable: no --mount-skill specified; continuing without mounting skills");
         return None;
     };
     match EmbeddedFs::builder().tag("skills")
@@ -402,7 +403,7 @@ fn serve_skills(mp: Option<PathBuf>) -> Option<LocalMount> {
         Err(e) => { tracing::warn!("skills FUSE unavailable: {e}; continuing without mount"); None }
     }
 }
-// startup: mounting is explicit; omitted --mount keeps the daemon unmounted:
+// startup: mounting is explicit; omitted --mount-skill keeps the daemon unmounted:
 let skills = serve_skills(cli.mount);    // Option<LocalMount> held for process lifetime
 // graceful stop (daemon.rs watch::channel): if let Some(m) = skills { let _ = m.unmount(); }
 ```
@@ -430,13 +431,13 @@ several builders.
   degrade path on no-`/dev/fuse`.
 - **mstream integration**: `build.rs` supplies `MSTREAM_SKILLS_DIR`;
   `rerun-if-changed` rebuilds on skill edits; fixed-epoch mtime reproducible;
-  no `--mount` degrades without creating a mount.
+  no `--mount-skill` degrades without creating a mount.
 - **CI**: needs `libfuse-dev`/`libfuse3-dev` + `pkg-config`, and `/dev/fuse` for
   the mount tests (§8/§9).
 
 ## 6. Open / resolved decisions
 - ✅ **Mount failure** → degrade (FR-7).
-- ✅ **Mountpoint** → explicit `mstream daemon start --mount <DIR>`; no
+- ✅ **Mountpoint** → explicit `mstream daemon start --mount-skill <DIR>`; no
   implicit cwd or XDG runtime default.
 - ✅ **Embedded symlinks** → bake-time reject (FR-1a).
 - ✅ **mtime** → fixed epoch default; build-timestamp opt-in only (FR-8).
@@ -483,20 +484,20 @@ in `Cargo.lock`.** Remaining deltas:
   (`mbuild`) don't need a target libfuse sysroot.
 - **mstream** gains `motlie-vfs` (`local-mount`) + `include_dir` deps, a
   `skills.rs`, a build.rs `MSTREAM_SKILLS_DIR` + `rerun-if-changed` walk, an
-  explicit `daemon start --mount <DIR>` option, and an unmount in its
+  explicit `daemon start --mount-skill <DIR>` option, and an unmount in its
   graceful-stop path.
 
 ## 9. Platform matrix & degrade contract
 | Host | Local FUSE mount | Behavior |
 |------|------------------|----------|
-| Any host, `daemon start` without `--mount` | no | **degrade**: warn, run unmounted |
-| Linux x86_64 / aarch64 + `/dev/fuse` + `fusermount3` + `--mount <DIR>` | yes | mount + serve + log |
-| Linux with `--mount <DIR>` but without `/dev/fuse`/perms (e.g. locked-down container) | no | **degrade**: warn, run unmounted |
-| macOS host with `--mount <DIR>` (vmm-vz vz branch) | no (mount gated Linux-only, `client/mod.rs:12`) | **degrade**: warn, run unmounted |
+| Any host, `daemon start` without `--mount-skill` | no | **degrade**: warn, run unmounted |
+| Linux x86_64 / aarch64 + `/dev/fuse` + `fusermount3` + `--mount-skill <DIR>` | yes | mount + serve + log |
+| Linux with `--mount-skill <DIR>` but without `/dev/fuse`/perms (e.g. locked-down container) | no | **degrade**: warn, run unmounted |
+| macOS host with `--mount-skill <DIR>` (vmm-vz vz branch) | no (mount gated Linux-only, `client/mod.rs:12`) | **degrade**: warn, run unmounted |
 
-**Degrade-vs-hard-fail contract (FR-7):** missing `--mount` and mount failure
+**Degrade-vs-hard-fail contract (FR-7):** missing `--mount-skill` and mount failure
 are **non-fatal** — the daemon logs a `WARN` (`"skills FUSE unavailable: no
---mount specified; continuing without mounting skills"` or `"skills FUSE
+--mount-skill specified; continuing without mounting skills"` or `"skills FUSE
 unavailable: {reason}; continuing without mount"`) and runs normally; skills
 simply aren't served over FUSE. This preserves mstream's run-anywhere property
 and makes FUSE an optional enhancement. The mount-available state should be

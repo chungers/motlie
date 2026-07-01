@@ -233,7 +233,11 @@ pub enum DaemonCommand {
 pub struct DaemonStartArgs {
     #[arg(long)]
     pub foreground: bool,
-    #[arg(long, value_name = "DIR")]
+    #[arg(
+        long = "mount-skill",
+        value_name = "DIR",
+        help = "Mount embedded skills at DIR"
+    )]
     pub mount: Option<PathBuf>,
 }
 
@@ -1269,13 +1273,13 @@ mod tests {
     }
 
     #[test]
-    fn daemon_start_mount_flag_parses() {
+    fn daemon_start_mount_skill_flag_parses() {
         let cli = Cli::try_parse_from([
             "mstream",
             "daemon",
             "start",
             "--foreground",
-            "--mount",
+            "--mount-skill",
             "/tmp/mstream-skills",
         ])
         .expect("daemon start parses");

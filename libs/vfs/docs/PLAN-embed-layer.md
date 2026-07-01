@@ -5,7 +5,8 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-07-01 | @codex-590-impl | Added implementation tracking for approved design #590 and marked completed tasks from the implementation pass. |
-| 2026-07-01 | @codex-590-impl | Updated mstream consumer tasks for explicit `daemon start --mount <DIR>` and build-script-owned `MSTREAM_SKILLS_DIR`. |
+| 2026-07-01 | @codex-590-impl | Updated mstream consumer tasks for explicit `daemon start --mount-skill <DIR>` and build-script-owned `MSTREAM_SKILLS_DIR`. |
+| 2026-07-01 | @codex-590-impl | Renamed the mstream daemon skills mount flag to `--mount-skill <DIR>` with no behavior change. |
 
 ## Scope
 
@@ -39,9 +40,9 @@ This plan tracks implementation of [DESIGN-embed-layer.md](./DESIGN-embed-layer.
   - [x] Add `build.rs` watches for the root, subdirectories, and files.
   - [x] Reject symlinks in the baked source tree during the mstream build.
   - [x] Depend on `motlie-vfs` with `features = ["local-mount"]`, not `client`.
-  - [x] Mount only when `mstream daemon start --mount <DIR>` is provided.
-  - [x] Degrade with a warning when `--mount` is omitted, the platform is unsupported, or FUSE mount is unavailable.
-  - [x] Add CLI/build-env tests for `--mount`, omitted mount, and `MSTREAM_SKILLS_DIR`.
+  - [x] Mount only when `mstream daemon start --mount-skill <DIR>` is provided.
+  - [x] Degrade with a warning when `--mount-skill` is omitted, the platform is unsupported, or FUSE mount is unavailable.
+  - [x] Add CLI/build-env tests for `--mount-skill`, omitted mount, and `MSTREAM_SKILLS_DIR`.
   - [x] Unmount during daemon graceful shutdown.
 
 - [x] 5. Tests and verification ([DESIGN §5](./DESIGN-embed-layer.md#5-system-design--components-to-test))

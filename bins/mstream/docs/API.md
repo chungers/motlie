@@ -4,7 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-07-01 | @codex-590-impl | Documented optional `daemon start --mount <DIR>` skills FUSE mount and no-mount default. |
+| 2026-07-01 | @codex-590-impl | Renamed daemon skills mount flag to `--mount-skill <DIR>` with unchanged opt-in semantics. |
+| 2026-07-01 | @codex-590-impl | Documented optional `daemon start --mount-skill <DIR>` skills FUSE mount and no-mount default. |
 | 2026-06-26 | @codex-570-impl | Clarified that `attach` command construction is delegated to libtmux `AttachMode`; mstream owns only RPC and visit-window lifecycle. |
 | 2026-06-26 | @codex-570-impl | Documented direct `env -u TMUX` local attach for `attach --here` and failed visit-pane diagnostics before cleanup. |
 | 2026-06-25 | @codex-570-impl | Documented auto-sweep on `attach --here` and the at-most-one stale attach window invariant. |
@@ -67,7 +68,7 @@ release binary is available on `PATH`.
 
 ```sh
 mstream --socket /tmp/mstream.sock daemon start
-mstream --socket /tmp/mstream.sock daemon start --mount /tmp/mstream-skills
+mstream --socket /tmp/mstream.sock daemon start --mount-skill /tmp/mstream-skills
 mstream --socket /tmp/mstream.sock daemon status
 mstream --socket /tmp/mstream.sock daemon stop
 mstream --version
@@ -78,10 +79,10 @@ debugging:
 
 ```sh
 mstream --socket /tmp/mstream.sock daemon start --foreground
-mstream --socket /tmp/mstream.sock daemon start --foreground --mount /tmp/mstream-skills
+mstream --socket /tmp/mstream.sock daemon start --foreground --mount-skill /tmp/mstream-skills
 ```
 
-`--mount <DIR>` is opt-in. When supplied, the daemon mounts the embedded
+`--mount-skill <DIR>` is opt-in. When supplied, the daemon mounts the embedded
 project skills tree at `<DIR>` through the local FUSE helper. When omitted, it
 logs that no mount was requested and continues without serving skills over FUSE;
 mount failures are also non-fatal degrade paths.

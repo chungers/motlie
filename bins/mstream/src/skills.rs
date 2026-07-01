@@ -30,7 +30,7 @@ pub struct SkillsMount;
 pub fn mount_skills(mountpoint: Option<PathBuf>) -> Option<SkillsMount> {
     let Some(mountpoint) = mountpoint else {
         eprintln!(
-            "skills FUSE unavailable: no --mount specified; continuing without mounting skills"
+            "skills FUSE unavailable: no --mount-skill specified; continuing without mounting skills"
         );
         return None;
     };
