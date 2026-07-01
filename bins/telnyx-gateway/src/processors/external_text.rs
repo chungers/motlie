@@ -37,7 +37,7 @@ impl ExternalTextStreamConversationProcessor {
                     },
                 ))
             }
-            AgentTextFrame::AgentTurn { turn_id, text } => {
+            AgentTextFrame::AgentTurn { turn_id, text, .. } => {
                 let timing = match input.timing {
                     Some(timing) => timing,
                     None => {

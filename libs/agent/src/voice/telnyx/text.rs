@@ -10,10 +10,10 @@ pub const TEXT_CALL_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TextCallAggregationPolicy {
+pub enum ResponseMode {
     #[default]
-    GatewayOwned,
-    AgentOwned,
+    PerTurn,
+    TurnBatched,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -114,7 +114,7 @@ pub struct AcceptCallResponse {
     #[serde(default)]
     pub extensions: Vec<String>,
     #[serde(default)]
-    pub aggregation: TextCallAggregationPolicy,
+    pub response_mode: ResponseMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -142,6 +142,8 @@ pub enum GatewayTextFrame {
         protocol: String,
         call_id: String,
         direction: TextCallDirection,
+        #[serde(default)]
+        response_mode: ResponseMode,
     },
     #[serde(rename = "caller.turn")]
     CallerTurn {
@@ -231,6 +233,14 @@ pub enum GatewayTextFrame {
         reason: String,
         sequence: u64,
     },
+    #[serde(rename = "turn_batch.reset")]
+    TurnBatchReset {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch_id: Option<String>,
+        epoch: u64,
+        sequence: u64,
+    },
     #[serde(rename = "session.end")]
     SessionEnd { reason: String, sequence: u64 },
     #[serde(rename = "error")]
@@ -248,11 +258,22 @@ pub enum AgentTextFrame {
     AgentTurnPartial {
         turn_id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
         #[serde(default = "default_true")]
         append: bool,
     },
     #[serde(rename = "agent.turn")]
-    AgentTurn { turn_id: String, text: String },
+    AgentTurn {
+        turn_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
+    },
     #[serde(rename = "agent.turn.provisional.partial")]
     AgentTurnProvisionalPartial {
         provisional_turn_id: String,
@@ -420,6 +441,8 @@ mod tests {
             AgentTextFrame::AgentTurn {
                 turn_id: "turn-test".to_string(),
                 text: "reply".to_string(),
+                batch_id: None,
+                epoch: None,
             }
         );
     }
@@ -435,9 +458,27 @@ mod tests {
             AgentTextFrame::AgentTurnPartial {
                 turn_id: "turn-test".to_string(),
                 text: "hello".to_string(),
+                batch_id: None,
+                epoch: None,
                 append: true,
             }
         );
+    }
+
+    #[test]
+    fn agent_turn_can_carry_turn_batch_epoch() {
+        let frame = AgentTextFrame::AgentTurn {
+            turn_id: "turn-test".to_string(),
+            text: "reply".to_string(),
+            batch_id: Some("turn-batch-0-0".to_string()),
+            epoch: Some(0),
+        };
+        let encoded = serde_json::to_value(&frame).expect("frame serializes");
+        assert_eq!(encoded["type"], "agent.turn");
+        assert_eq!(encoded["batch_id"], "turn-batch-0-0");
+        assert_eq!(encoded["epoch"], 0);
+        let decoded: AgentTextFrame = serde_json::from_value(encoded).expect("frame deserializes");
+        assert_eq!(decoded, frame);
     }
 
     #[test]
@@ -468,6 +509,53 @@ mod tests {
         assert_eq!(encoded["superseded_by_turn_id"], "turn-new");
         assert_eq!(encoded["reason"], "new_caller_turn");
         assert_eq!(encoded["sequence"], 7);
+    }
+
+    #[test]
+    fn session_start_carries_response_mode_default() {
+        let frame: GatewayTextFrame = serde_json::from_str(
+            r#"{"type":"session.start","protocol":"motlie.telnyx.text.v1","call_id":"call-1","direction":"inbound"}"#,
+        )
+        .expect("session start deserializes");
+        assert_eq!(
+            frame,
+            GatewayTextFrame::SessionStart {
+                protocol: TEXT_CALL_PROTOCOL.to_string(),
+                call_id: "call-1".to_string(),
+                direction: TextCallDirection::Inbound,
+                response_mode: ResponseMode::PerTurn,
+            }
+        );
+    }
+
+    #[test]
+    fn accept_response_uses_response_mode_contract() {
+        let response = AcceptCallResponse {
+            protocol: TEXT_CALL_PROTOCOL.to_string(),
+            call_url: "ws://127.0.0.1/text".to_string(),
+            accept: true,
+            extensions: Vec::new(),
+            response_mode: ResponseMode::TurnBatched,
+        };
+        let encoded = serde_json::to_value(response).expect("response serializes");
+        assert_eq!(encoded["response_mode"], "turn_batched");
+        assert!(encoded.get("aggregation").is_none());
+    }
+
+    #[test]
+    fn turn_batch_reset_serializes_as_ordered_gateway_frame() {
+        let frame = GatewayTextFrame::TurnBatchReset {
+            reason: "barge_in".to_string(),
+            batch_id: Some("turn-batch-0-0".to_string()),
+            epoch: 1,
+            sequence: 8,
+        };
+        let encoded = serde_json::to_value(frame).expect("frame serializes");
+        assert_eq!(encoded["type"], "turn_batch.reset");
+        assert_eq!(encoded["reason"], "barge_in");
+        assert_eq!(encoded["batch_id"], "turn-batch-0-0");
+        assert_eq!(encoded["epoch"], 1);
+        assert_eq!(encoded["sequence"], 8);
     }
 
     #[test]

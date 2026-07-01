@@ -91,16 +91,16 @@ peak_threshold = 1100
 onset_min_silence_ms = 180
 
 [voice_quality.endpoint]
-# Final endpoint trailing silence window.
-trailing_silence_ms = 750
+# Final endpoint trailing silence window. Latest no-barge-in Identity baseline uses 850 ms.
+trailing_silence_ms = 850
 # Minimum final-turn word count before committed dispatch.
 min_turn_words = 2
 # Minimum final-turn character count before committed dispatch.
 min_turn_chars = 6
 # Merge window for adjacent ASR finals from one spoken thought.
-merge_window_ms = 450
+merge_window_ms = 120
 # Hold window for structurally incomplete final fragments.
-final_settle_ms = 900
+final_settle_ms = 500
 # Punctuation suffixes that indicate a fragment should continue.
 final_settle_trailing_punctuation = [",", ":", ";"]
 # Leading words that commonly start a dependent fragment.
@@ -112,11 +112,13 @@ final_settle_dangling_suffixes = ["'", "-"]
 # Tail words that may hold conversation dispatch while prior playback is active.
 conversation_tail_words = ["a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "did", "do", "does", "for", "from", "had", "has", "have", "if", "in", "is", "may", "might", "must", "of", "on", "or", "should", "some", "that", "the", "this", "to", "was", "were", "where", "will", "with", "would"]
 # Max hold for incomplete conversation tails.
-conversation_incomplete_tail_hold_ms = 1800
+conversation_incomplete_tail_hold_ms = 250
 # Native ASR confidence threshold below which incomplete tails may hold.
 conversation_low_confidence_threshold_percent = 45
 # Poll cadence while waiting for active playback before dispatch.
-conversation_playback_hold_poll_ms = 50
+conversation_playback_hold_poll_ms = 10
+# Max active-playback hold before dispatch/deferred Say gives up; 0 lets the conversation policy own bounded pending output.
+conversation_playback_max_hold_ms = 0
 # Hard cap for committed turn words.
 max_turn_words = 80
 # Hard cap for committed turn duration.
@@ -151,8 +153,12 @@ chunking_enabled = true
 max_text_chunk_chars = 70
 # Maximum characters in the first TTS chunk; `0` disables the special first limit.
 first_chunk_max_chars = 40
-# Buffered-mode prebuffer chunks before playback starts.
+# Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
+# Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in pacing baseline uses 450 ms.
+streaming_start_buffer_ms = 450
+# Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 # Provisional early-response stage; committed finals still flow when false.
@@ -197,8 +203,39 @@ onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = false
 # Cancel on final ASR overlap.
 final_asr_cancel_enabled = false
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on length.
+transcript_min_chars = 6
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on word count.
+transcript_min_words = 2
+# Missing configured ASR score signals fail closed for non-compat barge-in cancellation.
+missing_signal_policy = "conservative"
+# Minimum partial-ASR confidence for active-playback cancellation.
+partial_min_confidence = 0.50
+# Minimum partial-ASR stability for active-playback cancellation.
+partial_min_stability = 0.50
+# Minimum final-ASR confidence for active-playback cancellation.
+final_min_confidence = 0.70
+# Optional final-ASR stability floor; leave unset until final ASR reports stability.
+# final_min_stability = 0.50
 # Time allowed for media clear/mark handling.
 clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+# Identity smoke tests keep barge-in off and drain a bounded FIFO repeat queue.
+mode = "no_barge_in_bounded_pending"
+# Diagnostic hold budget before recording retained max-hold telemetry.
+active_playback_hold_ms = 1000
+# Maximum completed processor outputs retained behind active playback.
+max_pending_outputs = 3
+# FIFO preserves deterministic repeat order for WER/smoke-test scripts.
+pending_output_order = "fifo"
+# Reserved for barge-in coalescing profiles; inactive for this no-barge-in mode.
+post_barge_in_silence_ms = 1200
+# Post-coalesced-dispatch guard window for active/recent playback echo fragments.
+post_barge_in_echo_guard_ms = 2000
+# Short guarded finals at or below these normalized sizes are suppressed.
+post_barge_in_fragment_max_chars = 12
+post_barge_in_fragment_max_words = 2
 
 [voice_quality.echo_suppression]
 # Suppress transcripts that match active assistant TTS, except same-source provisional audio.

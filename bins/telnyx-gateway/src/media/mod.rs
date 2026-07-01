@@ -26,20 +26,22 @@ use crate::adapter::{
 };
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::{self, ConversationRuntime};
+use crate::conversation_policy::BargeInTrigger;
 use crate::early_response::{
     spawn_early_response_pipeline, EarlyResponseCancelReason, EarlyResponseCommitBoundary,
     EarlyResponseCommitMember, EarlyResponseInput, EarlyResponsePartial,
     EarlyResponsePipelineHandle, EarlyResponsePipelineServices,
 };
+use crate::echo_match::{match_assistant_echo_signature, AssistantEchoMatch};
 use crate::operator::state::{
-    speech_echo_signature, CallSession, CallStatus, LogLevel, MediaMetadata, QualitySpanEmission,
+    CallSession, CallStatus, GatewayState, LogLevel, MediaMetadata, QualitySpanEmission,
     SharedState, StreamAttachOutcome, TranscriptKind, TtsPlaybackState, TtsPlaybackStatus,
 };
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
     insert_transcript_text_fields, transcript_plaintext_included, ActiveAsrQualitySession,
-    CallerTurnEventMetadata, EchoSuppressionQualityConfig, OnsetDuringPlaybackPolicy,
-    RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
+    CallerTurnEventMetadata, EchoCharacterizationQualityConfig, EchoSuppressionQualityConfig,
+    OnsetDuringPlaybackPolicy, RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
 };
 use crate::speech;
 use crate::text_calls::turns::{CallerSpeechState, PlaybackFinishedStatus};
@@ -128,6 +130,8 @@ pub struct OutboundFrameQualityContext {
     pub request_started_at: Instant,
     pub turn_finalized_at: Option<Instant>,
     pub latest_turn_finalized_at: Option<Instant>,
+    pub processor_visible_turn_at: Option<Instant>,
+    pub barge_in_cancel_terminal_at: Option<Instant>,
     pub turn_id: Option<String>,
     pub coalesced_turn_ids: Vec<String>,
     pub queued_at: Instant,
@@ -251,16 +255,35 @@ struct ActiveSpeechJob {
     cancel: SpeechCancelToken,
 }
 
+#[derive(Clone, Debug)]
+struct RecentSpeechPlayback {
+    playback_id: String,
+    terminal_at: Instant,
+}
+
 #[derive(Clone)]
 struct MediaRegistryEntry {
     tx: mpsc::Sender<OutboundMediaCommand>,
     active_speech: Option<ActiveSpeechJob>,
     pending_clears: VecDeque<PendingClear>,
+    recent_speech: VecDeque<RecentSpeechPlayback>,
 }
 
 #[derive(Clone, Default)]
 pub struct SharedMediaRegistry {
     inner: Arc<Mutex<HashMap<String, MediaRegistryEntry>>>,
+}
+
+const RECENT_SPEECH_PLAYBACK_LIMIT: usize = 8;
+
+fn record_recent_speech(entry: &mut MediaRegistryEntry, playback_id: String) {
+    entry.recent_speech.push_back(RecentSpeechPlayback {
+        playback_id,
+        terminal_at: Instant::now(),
+    });
+    while entry.recent_speech.len() > RECENT_SPEECH_PLAYBACK_LIMIT {
+        entry.recent_speech.pop_front();
+    }
 }
 
 impl SharedMediaRegistry {
@@ -275,6 +298,7 @@ impl SharedMediaRegistry {
                 tx,
                 active_speech: None,
                 pending_clears: VecDeque::new(),
+                recent_speech: VecDeque::new(),
             },
         );
     }
@@ -326,6 +350,7 @@ impl SharedMediaRegistry {
                 requested_at: Instant::now(),
                 reason: SpeechClearReason::CancelAndReplace,
             });
+            record_recent_speech(entry, active.playback_id.clone());
             active.playback_id
         });
         entry.active_speech = Some(ActiveSpeechJob {
@@ -359,6 +384,7 @@ impl SharedMediaRegistry {
             .take()
             .with_context(|| format!("no active speech job for call {gateway_call_id}"))?;
         active.cancel.cancel();
+        record_recent_speech(entry, active.playback_id.clone());
         entry.pending_clears.push_back(PendingClear {
             playback_id: active.playback_id.clone(),
             requested_at: Instant::now(),
@@ -387,6 +413,7 @@ impl SharedMediaRegistry {
             return Ok(false);
         };
         active.cancel.cancel();
+        record_recent_speech(entry, active.playback_id.clone());
         entry.pending_clears.push_back(PendingClear {
             playback_id: active.playback_id,
             requested_at: Instant::now(),
@@ -414,6 +441,28 @@ impl SharedMediaRegistry {
             .map(|active| active.playback_id.clone())
     }
 
+    pub async fn speech_playback_active_or_recent(
+        &self,
+        gateway_call_id: &str,
+        playback_id: &str,
+        recent_window: Duration,
+    ) -> bool {
+        let guard = self.inner.lock().await;
+        let Some(entry) = guard.get(gateway_call_id) else {
+            return false;
+        };
+        if entry
+            .active_speech
+            .as_ref()
+            .is_some_and(|active| active.playback_id == playback_id)
+        {
+            return true;
+        }
+        entry.recent_speech.iter().rev().any(|recent| {
+            recent.playback_id == playback_id && recent.terminal_at.elapsed() <= recent_window
+        })
+    }
+
     pub async fn finish_speech(&self, gateway_call_id: &str, playback_id: &str) {
         if let Some(entry) = self.inner.lock().await.get_mut(gateway_call_id) {
             if entry
@@ -421,7 +470,10 @@ impl SharedMediaRegistry {
                 .as_ref()
                 .is_some_and(|active| active.playback_id == playback_id)
             {
-                entry.active_speech = None;
+                let Some(active) = entry.active_speech.take() else {
+                    return;
+                };
+                record_recent_speech(entry, active.playback_id);
             }
         }
     }
@@ -545,6 +597,111 @@ impl OutboundPacingStats {
     }
 }
 
+#[derive(Clone, Debug)]
+struct EchoCharacterizationReferenceFrame {
+    playback_id: String,
+    sent_at: Instant,
+    sample_rate_hz: u32,
+    samples: Vec<i16>,
+}
+
+#[derive(Debug, Default)]
+struct EchoCharacterizationState {
+    outbound_reference: VecDeque<EchoCharacterizationReferenceFrame>,
+    last_emit_at: Option<Instant>,
+}
+
+impl EchoCharacterizationState {
+    fn observe_outbound_frame(
+        &mut self,
+        config: &EchoCharacterizationQualityConfig,
+        playback_id: &str,
+        sample_rate_hz: u32,
+        samples: Vec<i16>,
+        now: Instant,
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+        self.outbound_reference
+            .push_back(EchoCharacterizationReferenceFrame {
+                playback_id: playback_id.to_string(),
+                sent_at: now,
+                sample_rate_hz,
+                samples,
+            });
+        self.prune(now, config);
+    }
+
+    fn prune(&mut self, now: Instant, config: &EchoCharacterizationQualityConfig) {
+        let retention = echo_characterization_retention(config);
+        while self
+            .outbound_reference
+            .front()
+            .is_some_and(|frame| now.saturating_duration_since(frame.sent_at) > retention)
+        {
+            self.outbound_reference.pop_front();
+        }
+    }
+
+    fn should_emit(&self, now: Instant, config: &EchoCharacterizationQualityConfig) -> bool {
+        self.last_emit_at.is_none_or(|last_emit_at| {
+            now.duration_since(last_emit_at) >= Duration::from_millis(config.emit_interval_ms)
+        })
+    }
+
+    fn mark_emitted(&mut self, now: Instant) {
+        self.last_emit_at = Some(now);
+    }
+
+    fn latest_playback_id(&self) -> Option<&str> {
+        self.outbound_reference
+            .back()
+            .map(|frame| frame.playback_id.as_str())
+    }
+
+    fn reference_samples(
+        &self,
+        sample_rate_hz: u32,
+        config: &EchoCharacterizationQualityConfig,
+    ) -> Vec<i16> {
+        let max_samples = samples_for_ms(
+            config.window_ms.saturating_add(config.max_delay_ms),
+            sample_rate_hz,
+        );
+        let mut frames = Vec::new();
+        let mut sample_count = 0usize;
+        for frame in self.outbound_reference.iter().rev() {
+            if frame.sample_rate_hz != sample_rate_hz {
+                continue;
+            }
+            frames.push(frame);
+            sample_count = sample_count.saturating_add(frame.samples.len());
+            if sample_count >= max_samples {
+                break;
+            }
+        }
+        let mut samples = Vec::with_capacity(sample_count.min(max_samples));
+        for frame in frames.into_iter().rev() {
+            samples.extend_from_slice(&frame.samples);
+        }
+        if samples.len() > max_samples {
+            samples[samples.len().saturating_sub(max_samples)..].to_vec()
+        } else {
+            samples
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EchoCharacterizationMetrics {
+    correlation_peak: f32,
+    estimated_delay_ms: u64,
+    inbound_rms_dbfs: f32,
+    outbound_rms_dbfs: f32,
+    echo_return_db: f32,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct PlaybackPacingCounters {
     pre_audio_wait_ticks: usize,
@@ -633,6 +790,7 @@ struct MediaSocketState {
     outbound_pre_audio_wait_ticks: usize,
     outbound_post_mark_wait_ticks: usize,
     outbound_pacing: OutboundPacingStats,
+    echo_characterization: EchoCharacterizationState,
     playback_pacing_counters: HashMap<String, PlaybackPacingCounters>,
     last_outbound_frame_sent_at: Option<Instant>,
     first_frame_sent_playbacks: HashSet<String>,
@@ -678,6 +836,7 @@ impl MediaSocketState {
             outbound_pre_audio_wait_ticks: 0,
             outbound_post_mark_wait_ticks: 0,
             outbound_pacing: OutboundPacingStats::default(),
+            echo_characterization: EchoCharacterizationState::default(),
             playback_pacing_counters: HashMap::new(),
             last_outbound_frame_sent_at: None,
             first_frame_sent_playbacks: HashSet::new(),
@@ -969,6 +1128,7 @@ async fn send_outbound_command(
                 .await
                 .context("send outbound media frame to Telnyx")?;
             log_outbound_frame_sent(media_state, &call_id, &frame.playback_id);
+            capture_outbound_echo_reference(media_state, &frame);
             maybe_emit_first_frame_span(state, media_state, &call_id, &frame).await;
             state
                 .write()
@@ -1045,6 +1205,145 @@ async fn send_outbound_command(
     }
 }
 
+fn capture_outbound_echo_reference(media_state: &mut MediaSocketState, frame: &OutboundMediaFrame) {
+    let config = media_state.quality_config.echo_characterization.clone();
+    if !config.enabled {
+        return;
+    }
+    let Some(format) = media_state.media_format.as_ref() else {
+        return;
+    };
+    match decode_payload(format, &frame.payload) {
+        Ok(samples) => media_state.echo_characterization.observe_outbound_frame(
+            &config,
+            &frame.playback_id,
+            format.sample_rate_hz,
+            samples,
+            Instant::now(),
+        ),
+        Err(error) => tracing::debug!(
+            playback_id = frame.playback_id.as_str(),
+            error = %error,
+            "media.echo_characterization.outbound_decode_skipped"
+        ),
+    }
+}
+
+async fn maybe_emit_echo_characterization_span(
+    state: &SharedState,
+    media_state: &mut MediaSocketState,
+    gateway_call_id: &str,
+    stream_id: &str,
+    format: &MediaFormat,
+    samples: &[i16],
+    inbound_stats: &SampleStats,
+) {
+    let config = media_state.quality_config.echo_characterization.clone();
+    if !config.enabled {
+        return;
+    }
+    let now = Instant::now();
+    media_state.echo_characterization.prune(now, &config);
+    if !media_state.echo_characterization.should_emit(now, &config) {
+        return;
+    }
+    let Some(playback_id) = media_state
+        .echo_characterization
+        .latest_playback_id()
+        .map(str::to_string)
+    else {
+        return;
+    };
+
+    let media_registry = media_state.media_registry.clone();
+    let active_playback_id = media_registry
+        .active_speech_playback_id(gateway_call_id)
+        .await;
+    let is_active = active_playback_id.as_deref() == Some(playback_id.as_str());
+    let is_recent = !is_active
+        && media_registry
+            .speech_playback_active_or_recent(
+                gateway_call_id,
+                &playback_id,
+                echo_characterization_retention(&config),
+            )
+            .await;
+    if !is_active && !is_recent {
+        media_state.echo_characterization.mark_emitted(now);
+        return;
+    }
+
+    let outbound_reference = media_state
+        .echo_characterization
+        .reference_samples(format.sample_rate_hz, &config);
+    let Some(metrics) = characterize_echo(
+        samples,
+        &outbound_reference,
+        format.sample_rate_hz,
+        config.max_delay_ms,
+    ) else {
+        return;
+    };
+    media_state.echo_characterization.mark_emitted(now);
+
+    let (config_id, redaction_mode, asr_session_id, utterance_id) = media_state
+        .active_quality_asr
+        .as_ref()
+        .map(|session| {
+            (
+                session.config_id.clone(),
+                session.redaction_mode,
+                Some(session.asr_session_id.clone()),
+                Some(session.utterance_id.clone()),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                media_state.quality_config.config_id(),
+                media_state.quality_config.logging.redaction_mode,
+                None,
+                None,
+            )
+        });
+    let payload = map_from_value(json!({
+        "stream_id": stream_id,
+        "playback_id": playback_id,
+        "playback_state": if is_active { "active" } else { "recent" },
+        "active_playback_id": active_playback_id.as_deref(),
+        "asr_session_id": asr_session_id.as_deref(),
+        "utterance_id": utterance_id.as_deref(),
+        "codec": format.encoding.as_str(),
+        "sample_rate_hz": format.sample_rate_hz,
+        "inbound_samples": samples.len(),
+        "outbound_reference_samples": outbound_reference.len(),
+        "window_ms": config.window_ms,
+        "max_delay_ms": config.max_delay_ms,
+        "emit_interval_ms": config.emit_interval_ms,
+        "inbound_peak": inbound_stats.peak,
+        "inbound_rms": inbound_stats.rms,
+        "inbound_rms_dbfs": metrics.inbound_rms_dbfs,
+        "outbound_rms_dbfs": metrics.outbound_rms_dbfs,
+        "echo_return_db": metrics.echo_return_db,
+        "correlation_peak": metrics.correlation_peak,
+        "estimated_delay_ms": metrics.estimated_delay_ms,
+        "speech_rms_threshold": media_state.quality_config.speech.rms_threshold,
+        "speech_peak_threshold": media_state.quality_config.speech.peak_threshold,
+    }));
+    state.write().await.emit_quality_span_finished(
+        gateway_call_id,
+        QualitySpanEmission {
+            config_id,
+            redaction_mode,
+            span_name: "media.echo_characterization",
+            category: "echo_characterization",
+            duration: Duration::ZERO,
+            critical_path: false,
+            concurrent: true,
+            payload,
+        },
+    );
+}
+
 async fn maybe_emit_first_frame_span(
     state: &SharedState,
     media_state: &mut MediaSocketState,
@@ -1084,39 +1383,89 @@ async fn maybe_emit_first_frame_span(
             .saturating_duration_since(quality.request_started_at)
             .as_millis() as u64,
     }));
-    {
-        let mut guard = state.write().await;
-        guard.mark_tts_first_audio_latency_and_pacing(
-            call_id,
-            &frame.playback_id,
-            first_audio_latency_ms,
-            pacing.pre_audio_wait_ticks,
-            pacing.underrun_ticks,
-        );
+    let mut guard = state.write().await;
+    guard.mark_tts_first_audio_latency_and_pacing(
+        call_id,
+        &frame.playback_id,
+        first_audio_latency_ms,
+        pacing.pre_audio_wait_ticks,
+        pacing.underrun_ticks,
+    );
+    guard.emit_quality_span_finished(
+        call_id,
+        QualitySpanEmission {
+            config_id: quality.config_id.clone(),
+            redaction_mode: quality.redaction_mode,
+            span_name: "media.first_frame_send",
+            category: "playback_transport",
+            duration: quality.queued_at.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload: first_frame_payload,
+        },
+    );
+    guard.emit_quality_span_finished(
+        call_id,
+        QualitySpanEmission {
+            config_id: quality.config_id.clone(),
+            redaction_mode: quality.redaction_mode,
+            span_name: "tts.request_to_first_audio",
+            category: "tts_generation",
+            duration: quality.request_started_at.elapsed(),
+            critical_path: true,
+            concurrent: false,
+            payload: first_audio_payload,
+        },
+    );
+    if let Some(visible_at) = quality.processor_visible_turn_at {
+        let payload = map_from_value(json!({
+            "playback_id": frame.playback_id.as_str(),
+            "turn_id": quality.turn_id.as_deref(),
+            "queue_depth": queue_depth,
+            "processor_visible_to_request_ms": quality
+                .request_started_at
+                .saturating_duration_since(visible_at)
+                .as_millis() as u64,
+            "coalesced_turn_count": quality.coalesced_turn_ids.len(),
+            "coalesced_turn_ids": quality.coalesced_turn_ids.as_slice(),
+        }));
         guard.emit_quality_span_finished(
             call_id,
             QualitySpanEmission {
                 config_id: quality.config_id.clone(),
                 redaction_mode: quality.redaction_mode,
-                span_name: "media.first_frame_send",
-                category: "playback_transport",
-                duration: quality.queued_at.elapsed(),
+                span_name: "conversation.visible_turn_to_first_audio",
+                category: "turn_taking",
+                duration: visible_at.elapsed(),
                 critical_path: true,
                 concurrent: false,
-                payload: first_frame_payload,
+                payload,
             },
         );
+    }
+    if let Some(cancel_terminal_at) = quality.barge_in_cancel_terminal_at {
+        let payload = map_from_value(json!({
+            "playback_id": frame.playback_id.as_str(),
+            "turn_id": quality.turn_id.as_deref(),
+            "queue_depth": queue_depth,
+            "cancel_terminal_to_request_ms": quality
+                .request_started_at
+                .saturating_duration_since(cancel_terminal_at)
+                .as_millis() as u64,
+            "coalesced_turn_count": quality.coalesced_turn_ids.len(),
+            "coalesced_turn_ids": quality.coalesced_turn_ids.as_slice(),
+        }));
         guard.emit_quality_span_finished(
             call_id,
             QualitySpanEmission {
                 config_id: quality.config_id.clone(),
                 redaction_mode: quality.redaction_mode,
-                span_name: "tts.request_to_first_audio",
-                category: "tts_generation",
-                duration: quality.request_started_at.elapsed(),
+                span_name: "barge_in.cancel_terminal_to_replacement_first_audio",
+                category: "barge_in",
+                duration: cancel_terminal_at.elapsed(),
                 critical_path: true,
                 concurrent: false,
-                payload: first_audio_payload,
+                payload,
             },
         );
     }
@@ -1149,7 +1498,7 @@ async fn maybe_emit_first_frame_span(
                 )),
             );
         }
-        state.write().await.emit_quality_span_finished(
+        guard.emit_quality_span_finished(
             call_id,
             QualitySpanEmission {
                 config_id: quality.config_id.clone(),
@@ -1755,6 +2104,16 @@ async fn ingest_frame(
         &stats,
         samples.len(),
     );
+    maybe_emit_echo_characterization_span(
+        state,
+        media_state,
+        &gateway_call_id,
+        stream_id,
+        &format,
+        &samples,
+        &stats,
+    )
+    .await;
     let partial_speech_state = match media_state.asr_gate.accept(
         media_state.decoded_frame_count,
         stream_id,
@@ -1966,7 +2325,7 @@ async fn ensure_early_response_pipeline(
         let guard = state.read().await;
         let call = guard.calls.get(gateway_call_id);
         let processor = call
-            .map(|call| call.conversation.processor)
+            .map(|call| call.conversation.processor.clone())
             .unwrap_or_default();
         let speech_output = call.map(|call| call.speech_output).unwrap_or_else(|| {
             crate::operator::state::SpeechOutputConfig::from_quality(
@@ -2042,7 +2401,10 @@ struct SpeechOnsetEchoDecision {
 }
 
 fn speech_onset_barge_in_enabled(config: &VoiceQualityConfig) -> bool {
-    config.barge_in.enabled && config.barge_in.speech_onset_cancel_enabled
+    config
+        .conversation_policy
+        .decide_barge_in(&config.barge_in, BargeInTrigger::SpeechOnset)
+        .cancels_playback()
 }
 
 async fn speech_onset_echo_decision(
@@ -2149,6 +2511,9 @@ async fn cancel_text_call_speech_for_barge_in(
     if !text_calls.contains(gateway_call_id).await {
         return Ok(());
     }
+    let _ = text_calls
+        .send_turn_batch_reset(gateway_call_id, "barge_in")
+        .await;
     if media_registry
         .active_speech_playback_id(gateway_call_id)
         .await
@@ -2349,6 +2714,93 @@ fn sample_stats(samples: &[i16]) -> SampleStats {
         rms: (sum_squares / len).sqrt() as f32,
         mean: (sum / len) as f32,
     }
+}
+
+fn echo_characterization_retention(config: &EchoCharacterizationQualityConfig) -> Duration {
+    Duration::from_millis(
+        config
+            .window_ms
+            .saturating_add(config.max_delay_ms)
+            .saturating_add(config.emit_interval_ms),
+    )
+}
+
+fn samples_for_ms(duration_ms: u64, sample_rate_hz: u32) -> usize {
+    let samples = duration_ms
+        .saturating_mul(u64::from(sample_rate_hz))
+        .saturating_add(999)
+        / 1_000;
+    samples.min(usize::MAX as u64) as usize
+}
+
+fn rms_dbfs(samples: &[i16]) -> f32 {
+    let rms = sample_stats(samples).rms / 32_768.0;
+    if rms <= 0.000001 {
+        return -120.0;
+    }
+    (20.0 * rms.log10()).max(-120.0)
+}
+
+fn normalized_correlation(a: &[i16], b: &[i16]) -> Option<f32> {
+    if a.len() != b.len() || a.len() < 4 {
+        return None;
+    }
+    let mean_a = a.iter().map(|sample| f64::from(*sample)).sum::<f64>() / a.len() as f64;
+    let mean_b = b.iter().map(|sample| f64::from(*sample)).sum::<f64>() / b.len() as f64;
+    let mut dot = 0.0f64;
+    let mut energy_a = 0.0f64;
+    let mut energy_b = 0.0f64;
+    for (&sample_a, &sample_b) in a.iter().zip(b) {
+        let centered_a = f64::from(sample_a) - mean_a;
+        let centered_b = f64::from(sample_b) - mean_b;
+        dot += centered_a * centered_b;
+        energy_a += centered_a * centered_a;
+        energy_b += centered_b * centered_b;
+    }
+    if energy_a <= f64::EPSILON || energy_b <= f64::EPSILON {
+        return None;
+    }
+    Some((dot / (energy_a.sqrt() * energy_b.sqrt())).abs() as f32)
+}
+
+fn characterize_echo(
+    inbound: &[i16],
+    outbound_reference: &[i16],
+    sample_rate_hz: u32,
+    max_delay_ms: u64,
+) -> Option<EchoCharacterizationMetrics> {
+    if inbound.is_empty() || outbound_reference.is_empty() || sample_rate_hz == 0 {
+        return None;
+    }
+    let max_delay_samples = samples_for_ms(max_delay_ms, sample_rate_hz)
+        .min(outbound_reference.len().saturating_sub(inbound.len()));
+    let mut best: Option<(usize, f32, &[i16])> = None;
+    for delay_samples in 0..=max_delay_samples {
+        let end = outbound_reference.len().saturating_sub(delay_samples);
+        if end < inbound.len() {
+            continue;
+        }
+        let start = end - inbound.len();
+        let candidate = &outbound_reference[start..end];
+        let Some(correlation) = normalized_correlation(inbound, candidate) else {
+            continue;
+        };
+        if best.is_none_or(|(_, best_correlation, _)| correlation > best_correlation) {
+            best = Some((delay_samples, correlation, candidate));
+        }
+    }
+    let (delay_samples, correlation_peak, outbound_segment) = best?;
+    let estimated_delay_ms =
+        (delay_samples as u64).saturating_mul(1_000) / u64::from(sample_rate_hz);
+    let inbound_rms_dbfs = rms_dbfs(inbound);
+    let outbound_rms_dbfs = rms_dbfs(outbound_segment);
+    Some(EchoCharacterizationMetrics {
+        correlation_peak,
+        estimated_delay_ms,
+        inbound_rms_dbfs,
+        outbound_rms_dbfs,
+        echo_return_db: inbound_rms_dbfs - outbound_rms_dbfs,
+    })
 }
 
 #[derive(Default)]
@@ -3275,6 +3727,10 @@ async fn emit_asr_final_reconciliation(
 struct ConversationTranscriptEvent {
     event: TranscriptEvent,
     turn_id: Option<String>,
+    source_asr_session_ids: Vec<String>,
+    source_utterance_ids: Vec<String>,
+    confidence: Option<f32>,
+    stability: Option<f32>,
 }
 
 async fn forward_conversation_events(
@@ -3289,14 +3745,20 @@ async fn forward_conversation_events(
         return;
     };
     for event in events {
-        if let Err(error) = conversation::handle_transcript_event_with_turn(
+        if let Err(error) = conversation::handle_transcript_event_with_metadata(
             state,
             media_registry,
             conversation,
             gateway_call_id,
             event.event,
             quality_config,
-            event.turn_id.as_deref(),
+            conversation::ConversationTranscriptMetadata {
+                turn_id: event.turn_id.as_deref(),
+                source_asr_session_ids: Some(&event.source_asr_session_ids),
+                source_utterance_ids: Some(&event.source_utterance_ids),
+                confidence: event.confidence,
+                stability: event.stability,
+            },
         )
         .await
         {
@@ -3480,12 +3942,6 @@ fn new_local_turn_id() -> String {
     format!("turn_{}", uuid::Uuid::new_v4().simple())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AssistantEchoMatch {
-    token_coverage_percent: u64,
-    longest_token_run: usize,
-}
-
 fn tts_matches_asr_source(
     tts: &TtsPlaybackState,
     quality_session: Option<&ActiveAsrQualitySession>,
@@ -3508,53 +3964,201 @@ fn assistant_echo_match(
     transcript_text: &str,
     quality_session: Option<&ActiveAsrQualitySession>,
 ) -> Option<AssistantEchoMatch> {
-    if !config.enabled {
-        return None;
-    }
     let tts = call.tts.as_ref()?;
     if tts_matches_asr_source(tts, quality_session) {
         return None;
     }
-    if !tts_in_echo_window(tts, config.tail_window_ms as i64) || tts.echo_signature.is_empty() {
+    if !tts_in_echo_window(tts, config.tail_window_ms as i64) {
         return None;
     }
 
-    let candidate = speech_echo_signature(transcript_text);
-    if candidate.chars().count() < config.min_text_chars {
+    match_assistant_echo_signature(config, transcript_text, &tts.echo_signature)
+}
+
+fn trim_quarantined_echo_prefix(text: &str, prefix: &str) -> Option<String> {
+    let end = token_prefix_end(text, prefix)?;
+    let trimmed = text[end..]
+        .trim_start_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '.' | ',' | ':' | ';' | '!' | '?' | '-')
+        })
+        .trim();
+    Some(trimmed.to_string())
+}
+
+fn token_prefix_end(text: &str, prefix: &str) -> Option<usize> {
+    let prefix_tokens = normalized_tokens(prefix);
+    if prefix_tokens.is_empty() {
         return None;
     }
-    if tts.echo_signature.contains(&candidate) {
-        return Some(AssistantEchoMatch {
-            token_coverage_percent: 100,
-            longest_token_run: candidate.split_whitespace().count(),
-        });
-    }
-
-    let candidate_tokens = candidate.split_whitespace().collect::<Vec<_>>();
-    let assistant_tokens = tts.echo_signature.split_whitespace().collect::<Vec<_>>();
-    if candidate_tokens.len() < 2 || assistant_tokens.len() < 2 {
+    let text_tokens = normalized_tokens_with_ends(text);
+    if text_tokens.len() < prefix_tokens.len() {
         return None;
     }
+    for (index, prefix_token) in prefix_tokens.iter().enumerate() {
+        if text_tokens[index].0 != *prefix_token {
+            return None;
+        }
+    }
+    text_tokens
+        .get(prefix_tokens.len().saturating_sub(1))
+        .map(|(_, end)| *end)
+}
 
-    let assistant_token_set = assistant_tokens.iter().copied().collect::<HashSet<_>>();
-    let matching_tokens = candidate_tokens
-        .iter()
-        .filter(|token| assistant_token_set.contains(**token))
-        .count();
-    let token_coverage_percent = ((matching_tokens * 100) / candidate_tokens.len().max(1)) as u64;
-    let longest_token_run = longest_common_token_run(&candidate_tokens, &assistant_tokens);
-    let is_short_echo = candidate_tokens.len() < config.long_min_tokens
-        && matching_tokens >= 2
-        && token_coverage_percent >= config.short_token_coverage_percent
-        && longest_token_run >= config.short_longest_token_run;
-    let is_long_echo = candidate_tokens.len() >= config.long_min_tokens
-        && matching_tokens >= config.long_longest_token_run
-        && token_coverage_percent >= config.long_token_coverage_percent
-        && longest_token_run >= config.long_longest_token_run;
-    (is_short_echo || is_long_echo).then_some(AssistantEchoMatch {
-        token_coverage_percent,
-        longest_token_run,
-    })
+fn normalized_tokens(text: &str) -> Vec<String> {
+    normalized_tokens_with_ends(text)
+        .into_iter()
+        .map(|(token, _)| token)
+        .collect()
+}
+
+fn normalized_tokens_with_ends(text: &str) -> Vec<(String, usize)> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut token_end = 0usize;
+    for (index, ch) in text.char_indices() {
+        if ch.is_alphanumeric() || ch == '\'' {
+            token.extend(ch.to_lowercase());
+            token_end = index + ch.len_utf8();
+        } else if !token.is_empty() {
+            tokens.push((std::mem::take(&mut token), token_end));
+        }
+    }
+    if !token.is_empty() {
+        tokens.push((token, token_end));
+    }
+    tokens
+}
+
+fn sanitize_committed_echo_prefix(
+    guard: &mut GatewayState,
+    gateway_call_id: &str,
+    echo_config: &EchoSuppressionQualityConfig,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    redaction_mode: RedactionMode,
+    text: &mut String,
+) -> bool {
+    let Some((prefix, age_ms)) = take_echo_prefix_candidate(guard, gateway_call_id) else {
+        return false;
+    };
+    if age_ms < 0 || age_ms as u64 > echo_config.tail_window_ms {
+        return false;
+    }
+    let Some(sanitized) = trim_quarantined_echo_prefix(text, &prefix) else {
+        emit_committed_echo_prefix_span(
+            guard,
+            gateway_call_id,
+            quality_session,
+            redaction_mode,
+            CommittedEchoPrefixSpan {
+                action: "preserved",
+                removed_chars: prefix.chars().count(),
+                removed_words: prefix.split_whitespace().count(),
+                remaining_chars: text.chars().count(),
+                remaining_words: text.split_whitespace().count(),
+                prefix_age_ms: age_ms as u64,
+            },
+        );
+        return false;
+    };
+
+    let removed_chars = text
+        .chars()
+        .count()
+        .saturating_sub(sanitized.chars().count());
+    let removed_words = prefix.split_whitespace().count();
+    let remaining_chars = sanitized.chars().count();
+    let remaining_words = sanitized.split_whitespace().count();
+    *text = sanitized;
+    let dropped = text.trim().is_empty();
+    emit_committed_echo_prefix_span(
+        guard,
+        gateway_call_id,
+        quality_session,
+        redaction_mode,
+        CommittedEchoPrefixSpan {
+            action: if dropped {
+                "dropped_empty"
+            } else {
+                "trimmed_prefix"
+            },
+            removed_chars,
+            removed_words,
+            remaining_chars,
+            remaining_words,
+            prefix_age_ms: age_ms as u64,
+        },
+    );
+    dropped
+}
+
+fn take_echo_prefix_candidate(
+    guard: &mut GatewayState,
+    gateway_call_id: &str,
+) -> Option<(String, i64)> {
+    let call = guard.calls.get_mut(gateway_call_id)?;
+    let prefix = call.last_echo_suppressed_text.take()?;
+    let at = call.last_echo_suppressed_at.take()?;
+    let age_ms = Utc::now().signed_duration_since(at).num_milliseconds();
+    Some((prefix, age_ms))
+}
+
+struct CommittedEchoPrefixSpan {
+    action: &'static str,
+    removed_chars: usize,
+    removed_words: usize,
+    remaining_chars: usize,
+    remaining_words: usize,
+    prefix_age_ms: u64,
+}
+
+fn emit_committed_echo_prefix_span(
+    guard: &mut GatewayState,
+    gateway_call_id: &str,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    redaction_mode: RedactionMode,
+    span: CommittedEchoPrefixSpan,
+) {
+    let config_id = quality_session
+        .map(|session| session.config_id.clone())
+        .unwrap_or_else(|| guard.quality.config.config_id());
+    let payload = json!({
+        "action": span.action,
+        "removed_chars": span.removed_chars,
+        "removed_words": span.removed_words,
+        "remaining_chars": span.remaining_chars,
+        "remaining_words": span.remaining_words,
+        "prefix_age_ms": span.prefix_age_ms,
+    });
+    let payload = match payload {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    guard.emit_quality_span_finished(
+        gateway_call_id,
+        QualitySpanEmission {
+            config_id,
+            redaction_mode,
+            span_name: "conversation.committed_echo_prefix",
+            category: "echo_suppression",
+            duration: Duration::ZERO,
+            critical_path: true,
+            concurrent: false,
+            payload,
+        },
+    );
+}
+
+fn transcript_event_with_text(event: &TranscriptEvent, text: String) -> TranscriptEvent {
+    match event {
+        TranscriptEvent::Partial { update, .. } => TranscriptEvent::Partial {
+            text,
+            update: update.clone(),
+        },
+        TranscriptEvent::Final { update, .. } => TranscriptEvent::Final {
+            text,
+            update: update.clone(),
+        },
+    }
 }
 
 fn tts_in_echo_window(tts: &TtsPlaybackState, tail_window_ms: i64) -> bool {
@@ -3571,22 +4175,6 @@ fn tts_in_echo_window(tts: &TtsPlaybackState, tail_window_ms: i64) -> bool {
         }
         TtsPlaybackStatus::Failed => false,
     }
-}
-
-fn longest_common_token_run(left: &[&str], right: &[&str]) -> usize {
-    let mut previous = vec![0usize; right.len() + 1];
-    let mut longest = 0usize;
-    for left_token in left {
-        let mut current = vec![0usize; right.len() + 1];
-        for (index, right_token) in right.iter().enumerate() {
-            if left_token == right_token {
-                current[index + 1] = previous[index] + 1;
-                longest = longest.max(current[index + 1]);
-            }
-        }
-        previous = current;
-    }
-    longest
 }
 
 async fn record_transcript_events(
@@ -3615,7 +4203,7 @@ async fn record_transcript_events(
         } else {
             "transcript.partial"
         };
-        let text = event.event.text().to_string();
+        let mut text = event.event.text().to_string();
         let suppressed = event.is_suppressed();
         reset_requested |= event.requires_session_reset();
         let call = guard.calls.get(gateway_call_id);
@@ -3739,6 +4327,19 @@ async fn record_transcript_events(
             continue;
         }
 
+        if matches!(kind, TranscriptKind::Final)
+            && sanitize_committed_echo_prefix(
+                &mut guard,
+                gateway_call_id,
+                echo_config,
+                context.quality_session,
+                redaction_mode,
+                &mut text,
+            )
+        {
+            continue;
+        }
+
         let turn_id = matches!(kind, TranscriptKind::Final).then(new_local_turn_id);
         guard.add_transcript(gateway_call_id, kind.clone(), text.clone());
         if matches!(kind, TranscriptKind::Final) {
@@ -3788,9 +4389,21 @@ async fn record_transcript_events(
                 quality_session: session.clone(),
             });
         }
+        let source_asr_session_ids = context
+            .quality_session
+            .map(|session| vec![session.asr_session_id.clone()])
+            .unwrap_or_default();
+        let source_utterance_ids = context
+            .quality_session
+            .map(|session| vec![session.utterance_id.clone()])
+            .unwrap_or_default();
         conversation_events.push(ConversationTranscriptEvent {
-            event: event.event.clone(),
+            event: transcript_event_with_text(&event.event, text.clone()),
             turn_id,
+            source_asr_session_ids,
+            source_utterance_ids,
+            confidence: transcript_confidence,
+            stability: transcript_stability,
         });
         let transcript_text =
             transcript_plaintext_included(redaction_mode, include_transcript_text)
@@ -4082,6 +4695,31 @@ mod tests {
         .expect("l16 should decode");
 
         assert_eq!(decoded, vec![806, 528, 263, -204]);
+    }
+
+    #[test]
+    fn echo_characterization_estimates_reference_delay() {
+        let outbound: Vec<i16> = (0..320)
+            .map(|index| ((((index * 37) % 211) as i16) - 105) * 120)
+            .collect();
+        let delay_samples = 64usize;
+        let inbound_len = 120usize;
+        let end = outbound.len() - delay_samples;
+        let inbound = outbound[end - inbound_len..end].to_vec();
+
+        let metrics = characterize_echo(&inbound, &outbound, 8_000, 20)
+            .expect("delayed reference should characterize");
+
+        assert!(metrics.correlation_peak > 0.99);
+        assert_eq!(metrics.estimated_delay_ms, 8);
+    }
+
+    #[test]
+    fn echo_characterization_ignores_zero_energy_reference() {
+        let inbound = vec![0i16; 160];
+        let outbound = vec![0i16; 320];
+
+        assert!(characterize_echo(&inbound, &outbound, 8_000, 20).is_none());
     }
 
     #[test]
@@ -5677,6 +6315,146 @@ mod tests {
         assert!(call.transcripts.is_empty());
         assert_eq!(call.final_transcript, "");
         assert_eq!(call.echo_suppressed_transcripts, 1);
+    }
+
+    #[test]
+    fn quarantined_echo_prefix_trims_only_leading_tokens() {
+        assert_eq!(
+            trim_quarantined_echo_prefix(
+                "Gateway will begin. Stop now, please repeat this replacement sentence clearly",
+                "gateway will begin",
+            ),
+            Some("Stop now, please repeat this replacement sentence clearly".to_string())
+        );
+        assert_eq!(
+            trim_quarantined_echo_prefix(
+                "Stop now, gateway will begin should remain when it is not a prefix",
+                "gateway will begin",
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_echo_prefix_final_is_trimmed_before_forwarding() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let text_calls = SharedTextCallRegistry::default();
+        let mut text_rx = text_calls
+            .insert_test_session(gateway_call_id.clone())
+            .await;
+        let (quality_tx, mut quality_rx) = mpsc::channel(16);
+        {
+            let mut guard = state.write().await;
+            guard.set_quality_event_sink(
+                crate::quality::QualityEventSink::with_sender(quality_tx),
+                None,
+            );
+            guard.start_tts_job(
+                &gateway_call_id,
+                "tts_echo".to_string(),
+                LiveTtsBackend::Kokoro82m,
+                "The gateway will begin repeating this long sentence so I can interrupt it during playback.",
+            );
+            guard.mark_tts_frames_queued(&gateway_call_id, "tts_echo", 20);
+        }
+        let format = MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        };
+
+        let suppressed = record_transcript_events(
+            &state,
+            &gateway_call_id,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Partial {
+                text: "Gateway will begin".to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: Some(&text_calls),
+                early_response: None,
+                quality_session: None,
+                echo_config: None,
+                partial_speech_state: CallerSpeechState::Speaking,
+            },
+        )
+        .await;
+        assert!(suppressed.conversation_events.is_empty());
+
+        let outcome = record_transcript_events(
+            &state,
+            &gateway_call_id,
+            vec![AsrTranscriptEvent::emit(TranscriptEvent::Final {
+                text:
+                    "Gateway will begin. Stop now, please repeat this replacement sentence clearly"
+                        .to_string(),
+                update: motlie_model::TranscriptionUpdate::default(),
+            })],
+            TranscriptRecordContext {
+                stream_id: Some("stream-1"),
+                media_format: Some(&format),
+                capture: None,
+                text_calls: Some(&text_calls),
+                early_response: None,
+                quality_session: None,
+                echo_config: None,
+                partial_speech_state: CallerSpeechState::Speaking,
+            },
+        )
+        .await;
+
+        assert!(!outcome.reset_requested);
+        assert_eq!(outcome.conversation_events.len(), 1);
+        assert_eq!(
+            outcome.conversation_events[0].event.text(),
+            "Stop now, please repeat this replacement sentence clearly"
+        );
+        let frame = time::timeout(Duration::from_secs(1), text_rx.recv())
+            .await
+            .expect("caller.turn should be emitted")
+            .expect("text-call session should stay open");
+        assert!(matches!(
+            frame,
+            GatewayTextFrame::CallerTurn { text, .. }
+                if text == "Stop now, please repeat this replacement sentence clearly"
+        ));
+
+        let mut saw_suppressed = false;
+        let mut saw_trimmed = false;
+        while let Ok(Some(event)) =
+            time::timeout(Duration::from_millis(100), quality_rx.recv()).await
+        {
+            if event.event == "transcript.suppressed" {
+                saw_suppressed = true;
+            }
+            if event.event == "voice.span.finished"
+                && event.payload["span"] == json!("conversation.committed_echo_prefix")
+                && event.payload["action"] == json!("trimmed_prefix")
+            {
+                saw_trimmed = true;
+            }
+            if saw_suppressed && saw_trimmed {
+                break;
+            }
+        }
+        assert!(
+            saw_suppressed,
+            "assistant echo suppression event should be emitted"
+        );
+        assert!(saw_trimmed, "committed prefix trim span should be emitted");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(
+            call.final_transcript,
+            "Stop now, please repeat this replacement sentence clearly"
+        );
+        assert_eq!(call.echo_suppressed_transcripts, 1);
+        assert!(call.last_echo_suppressed_text.is_none());
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{fmt, str::FromStr};
 
@@ -484,17 +485,16 @@ pub fn split_speech_text_with_first_chunk_max_chars(
     first_chunk_max_chars: usize,
 ) -> Vec<String> {
     let max_chars = max_chars.max(1);
-    let segments = speech_segments(text);
+    let mut segments = VecDeque::from(speech_segments(text));
     let mut chunks = Vec::new();
-    let mut segment_index = 0;
 
-    if first_chunk_max_chars > 0 {
-        segment_index = push_first_speech_chunk(&mut chunks, &segments, first_chunk_max_chars);
+    if first_chunk_max_chars > 0 && !speech_segments_fit(&segments, max_chars) {
+        push_first_speech_chunk(&mut chunks, &mut segments, first_chunk_max_chars);
     }
 
     let mut pending_chunk = String::new();
-    for segment in segments.iter().skip(segment_index) {
-        push_speech_segment(&mut chunks, &mut pending_chunk, segment, max_chars);
+    for segment in segments {
+        push_speech_segment(&mut chunks, &mut pending_chunk, &segment, max_chars);
     }
     flush_speech_chunk(&mut chunks, &mut pending_chunk);
     chunks
@@ -543,17 +543,18 @@ impl StreamingSpeechTextPacker {
         if segments.is_empty() {
             return;
         }
-        let mut segment_index = 0;
-        if !self.emitted_first_chunk && self.first_chunk_max_chars > 0 {
-            segment_index = push_first_speech_chunk(chunks, segments, self.first_chunk_max_chars);
-            if segment_index > 0 {
-                self.emitted_first_chunk = true;
-            }
+        let mut pending_segments = VecDeque::from(segments.to_vec());
+        if !self.emitted_first_chunk
+            && self.first_chunk_max_chars > 0
+            && !speech_segments_fit(&pending_segments, self.max_chars)
+            && push_first_speech_chunk(chunks, &mut pending_segments, self.first_chunk_max_chars)
+        {
+            self.emitted_first_chunk = true;
         }
         let before = chunks.len();
         let mut pending = String::new();
-        for segment in segments.iter().skip(segment_index) {
-            push_speech_segment(chunks, &mut pending, segment, self.max_chars);
+        for segment in pending_segments {
+            push_speech_segment(chunks, &mut pending, &segment, self.max_chars);
         }
         flush_speech_chunk(chunks, &mut pending);
         if chunks.len() > before {
@@ -614,14 +615,28 @@ fn push_trimmed_segment(segments: &mut Vec<String>, segment: &mut String) {
     segment.clear();
 }
 
+fn speech_segments_fit(segments: &VecDeque<String>, max_chars: usize) -> bool {
+    let mut chars = 0usize;
+    for segment in segments {
+        let separator = usize::from(chars > 0);
+        chars = chars
+            .saturating_add(separator)
+            .saturating_add(segment.chars().count());
+        if chars > max_chars {
+            return false;
+        }
+    }
+    true
+}
+
 fn push_first_speech_chunk(
     chunks: &mut Vec<String>,
-    segments: &[String],
+    segments: &mut VecDeque<String>,
     first_chunk_max_chars: usize,
-) -> usize {
+) -> bool {
+    let first_chunk_max_chars = first_chunk_max_chars.max(1);
     let mut first_chunk = String::new();
-    let mut consumed = 0;
-    for segment in segments {
+    while let Some(segment) = segments.front().cloned() {
         let separator = usize::from(!first_chunk.is_empty());
         let next_chars = first_chunk
             .chars()
@@ -631,19 +646,73 @@ fn push_first_speech_chunk(
         if !first_chunk.is_empty() && next_chars > first_chunk_max_chars {
             break;
         }
+        segments.pop_front();
+        if first_chunk.is_empty() && segment.chars().count() > first_chunk_max_chars {
+            let (prefix, remainder) =
+                split_speech_prefix_at_word_boundary(&segment, first_chunk_max_chars);
+            if !remainder.is_empty() {
+                segments.push_front(remainder);
+            }
+            first_chunk.push_str(&prefix);
+            break;
+        }
         if !first_chunk.is_empty() {
             first_chunk.push(' ');
         }
-        first_chunk.push_str(segment);
-        consumed += 1;
+        first_chunk.push_str(&segment);
         if first_chunk.chars().count() >= first_chunk_max_chars {
             break;
         }
     }
-    if !first_chunk.is_empty() {
-        chunks.push(first_chunk);
+    if first_chunk.is_empty() {
+        return false;
     }
-    consumed
+    chunks.push(first_chunk);
+    true
+}
+
+fn split_speech_prefix_at_word_boundary(text: &str, max_chars: usize) -> (String, String) {
+    let max_chars = max_chars.max(1);
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return (String::new(), String::new());
+    }
+
+    let mut prefix_words = Vec::new();
+    let mut prefix_chars = 0usize;
+    for (index, word) in words.iter().enumerate() {
+        let word_chars = word.chars().count();
+        if prefix_words.is_empty() && word_chars > max_chars {
+            let prefix = word.chars().take(max_chars).collect::<String>();
+            let suffix = word.chars().skip(max_chars).collect::<String>();
+            let mut remainder_words = Vec::new();
+            if !suffix.is_empty() {
+                remainder_words.push(suffix);
+            }
+            remainder_words.extend(words.iter().skip(index + 1).map(|word| (*word).to_string()));
+            return (prefix, remainder_words.join(" "));
+        }
+
+        let separator = usize::from(!prefix_words.is_empty());
+        let next_chars = prefix_chars
+            .saturating_add(separator)
+            .saturating_add(word_chars);
+        if !prefix_words.is_empty() && next_chars > max_chars {
+            return (
+                prefix_words.join(" "),
+                words
+                    .iter()
+                    .skip(index)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        prefix_words.push(*word);
+        prefix_chars = next_chars;
+    }
+
+    (prefix_words.join(" "), String::new())
 }
 
 fn is_speech_segment_boundary(ch: char) -> bool {
@@ -921,16 +990,71 @@ mod tests {
     }
 
     #[test]
-    fn split_speech_text_first_chunk_ramp_flushes_complete_sentence() {
+    fn split_speech_text_first_chunk_ramp_skips_short_responses_that_fit_normal_chunk() {
+        assert_eq!(
+            split_speech_text_with_first_chunk_max_chars(
+                "The next phrase is short and easy to lose. Miss it.",
+                70,
+                40,
+            ),
+            vec!["The next phrase is short and easy to lose. Miss it."]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_first_chunk_ramp_honors_cap_for_long_responses() {
         assert_eq!(
             split_speech_text_with_first_chunk_max_chars(
                 "A complete first sentence. The second sentence follows quickly.",
-                90,
+                30,
                 12,
             ),
             vec![
-                "A complete first sentence.",
-                "The second sentence follows quickly."
+                "A complete",
+                "first sentence.",
+                "The second sentence follows",
+                "quickly."
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_speech_packer_keeps_short_final_response_in_one_chunk() {
+        let mut packer = StreamingSpeechTextPacker::new(true, 70, 40);
+        assert_eq!(
+            packer.push_fragment("The next phrase is short and easy to lose. Miss it.", true,),
+            vec!["The next phrase is short and easy to lose. Miss it."]
+        );
+    }
+
+    #[test]
+    fn split_speech_text_first_chunk_splits_long_unsentenced_text() {
+        assert_eq!(
+            split_speech_text_with_first_chunk_max_chars(
+                "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+                30,
+                18,
+            ),
+            vec![
+                "alpha beta gamma",
+                "delta epsilon zeta eta theta",
+                "iota kappa lambda mu",
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_speech_packer_first_chunk_splits_long_final_fragment() {
+        let mut packer = StreamingSpeechTextPacker::new(true, 30, 18);
+        assert_eq!(
+            packer.push_fragment(
+                "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+                true,
+            ),
+            vec![
+                "alpha beta gamma",
+                "delta epsilon zeta eta theta",
+                "iota kappa lambda mu",
             ]
         );
     }

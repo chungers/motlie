@@ -24,7 +24,8 @@ a local Unix-domain command socket. The checked-in canonical startup config is
 [`gateway.toml`](gateway.toml); it contains the full strict TOML surface with
 placeholder routing fields and `env:` secret references only. For continued
 local tuning, materialize live values in `$HOME/telnyx-test/gateway.toml` and
-pass that path with `--config`.
+pass that path with `--config`. The user-facing config reference is
+[`docs/CONFIGS.md`](docs/CONFIGS.md).
 
 ```sh
 cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie

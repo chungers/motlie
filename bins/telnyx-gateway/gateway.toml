@@ -109,6 +109,8 @@ conversation_incomplete_tail_hold_ms = 2500
 conversation_low_confidence_threshold_percent = 45
 # Poll cadence while waiting for active playback before dispatch.
 conversation_playback_hold_poll_ms = 100
+# Max active-playback hold before dispatch/deferred Say gives up; 0 preserves unbounded wait.
+conversation_playback_max_hold_ms = 0
 # Hard cap for committed turn words.
 max_turn_words = 80
 # Hard cap for committed turn duration.
@@ -143,8 +145,12 @@ chunking_enabled = true
 max_text_chunk_chars = 90
 # Maximum characters in the first TTS chunk; `0` disables the special first limit.
 first_chunk_max_chars = 40
-# Buffered-mode prebuffer chunks before playback starts.
+# Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
+# Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in pacing baseline uses 450 ms.
+streaming_start_buffer_ms = 450
+# Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
+tail_pad_ms = 200
 
 [voice_quality.early_response]
 # Provisional early-response stage; committed finals still flow when false.
@@ -189,8 +195,42 @@ onset_during_playback = "defer_to_partial"
 partial_asr_cancel_enabled = true
 # Cancel on final ASR overlap.
 final_asr_cancel_enabled = true
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on length.
+transcript_min_chars = 6
+# Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on word count.
+transcript_min_words = 2
+# Missing configured ASR score signals fail closed for non-compat barge-in cancellation.
+missing_signal_policy = "conservative"
+# Minimum partial-ASR confidence for active-playback cancellation.
+partial_min_confidence = 0.50
+# Minimum partial-ASR stability for active-playback cancellation.
+partial_min_stability = 0.50
+# Minimum final-ASR confidence for active-playback cancellation.
+final_min_confidence = 0.70
+# Optional final-ASR stability floor; leave unset until final ASR reports stability.
+# final_min_stability = 0.50
 # Time allowed for media clear/mark handling.
 clear_timeout_ms = 1000
+
+[voice_quality.conversation_policy]
+# Modes: current_compat, no_barge_in_bounded_pending, barge_in_cancel_only,
+# barge_in_coalesce_after_silence.
+# Barge-in coalescing now has a post-playback dispatch guard, but still needs #586 AEC/VAD validation before production use.
+mode = "current_compat"
+# Diagnostic hold budget for policy-managed pending output behind active playback.
+active_playback_hold_ms = 1000
+# Maximum assistant outputs retained by bounded pending policies.
+max_pending_outputs = 1
+# `latest_only` replaces pending output; `fifo` drains retained outputs in order.
+pending_output_order = "latest_only"
+# Sliding silence window used by barge_in_coalesce_after_silence before dispatching replacement speech.
+post_barge_in_silence_ms = 1200
+# Window after coalesced barge-in dispatch where active/recent playback finals are guarded.
+post_barge_in_echo_guard_ms = 2000
+# Suppress short active/recent playback finals at or below this normalized character count.
+post_barge_in_fragment_max_chars = 12
+# Suppress short active/recent playback finals at or below this normalized word count.
+post_barge_in_fragment_max_words = 2
 
 [voice_quality.echo_suppression]
 # Suppress transcripts that match active assistant TTS, except same-source provisional audio.
@@ -209,6 +249,16 @@ long_min_tokens = 4
 long_token_coverage_percent = 60
 # Longest common token run threshold for long echo candidates.
 long_longest_token_run = 3
+
+[voice_quality.echo_characterization]
+# Optional #586 measurement-only diagnostic; emits `media.echo_characterization` quality spans.
+enabled = false
+# Outbound TTS reference window to compare against inbound caller audio.
+window_ms = 240
+# Maximum inbound echo delay to scan when estimating playback leakage.
+max_delay_ms = 160
+# Minimum interval between emitted diagnostic spans per media stream.
+emit_interval_ms = 500
 
 [voice_quality.logging]
 # Enables JSONL quality events at `[quality_logging].path`.

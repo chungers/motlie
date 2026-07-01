@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::adapter::{AsrRegistry, EchoAsrFactory, LiveAsrBackend, SharedAsrRegistry};
 use crate::call_control::{
@@ -30,6 +30,7 @@ use crate::text_calls::{SharedTextCallRegistry, TextCallStreamServices};
 use crate::tts::{unavailable_registry, LiveTtsBackend, SharedTtsRegistry};
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig;
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +47,8 @@ impl OperatorSourceChannel {
         }
     }
 }
+
+const TELNYX_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct GatewayContext {
@@ -146,32 +149,31 @@ impl GatewayContext {
                 target.as_deref(),
                 self.session.selected_call.as_deref(),
             )?;
-            let (gateway_call_id, call_control_id) = {
-                let call = guard
-                    .calls
-                    .get_mut(&call_id)
-                    .ok_or_else(|| DriverError::NotFound {
-                        kind: "call",
-                        name: call_id.clone(),
-                    })?;
-                if call.status != CallStatus::PendingInbound {
-                    return Err(DriverError::message(format!(
-                        "call {} is {}, expected waiting",
-                        call.gateway_call_id,
-                        call.status.label()
-                    )));
-                }
-                call.asr_backend = Some(asr_backend);
-                call.status = CallStatus::Answering;
-                call.push_timeline("operator requested answer");
-                call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
-                (
-                    call.gateway_call_id.clone(),
-                    call.ids.call_control_id.clone(),
-                )
-            };
-            guard.attach_conversation(&gateway_call_id, ConversationMode::Auto);
-            (gateway_call_id, call_control_id, media_url, media)
+            let call = guard
+                .calls
+                .get_mut(&call_id)
+                .ok_or_else(|| DriverError::NotFound {
+                    kind: "call",
+                    name: call_id.clone(),
+                })?;
+            if call.status != CallStatus::PendingInbound {
+                return Err(DriverError::message(format!(
+                    "call {} is {}, expected waiting",
+                    call.gateway_call_id,
+                    call.status.label()
+                )));
+            }
+            call.asr_backend = Some(asr_backend);
+            call.last_error = None;
+            call.status = CallStatus::Answering;
+            call.push_timeline("operator requested answer");
+            call.push_timeline(format!("asr backend -> {}", asr_backend.model_label()));
+            (
+                call.gateway_call_id.clone(),
+                call.ids.call_control_id.clone(),
+                media_url,
+                media,
+            )
         };
         self.session.selected_call = Some(gateway_call_id.clone());
 
@@ -183,14 +185,69 @@ impl GatewayContext {
             );
         }
 
-        self.telnyx
-            .answer_call(&AnswerRequest {
+        let answer_result = tokio::time::timeout(
+            TELNYX_ANSWER_TIMEOUT,
+            self.telnyx.answer_call(&AnswerRequest {
                 call_control_id: &call_control_id,
                 stream_url: &stream_url,
                 media,
-            })
-            .await
-            .map_err(driver_anyhow)?;
+            }),
+        )
+        .await;
+        let answer_result = match answer_result {
+            Ok(result) => result.map_err(driver_anyhow),
+            Err(_) => Err(DriverError::message(format!(
+                "Telnyx answer timed out after {} ms",
+                TELNYX_ANSWER_TIMEOUT.as_millis()
+            ))),
+        };
+        if let Err(error) = answer_result {
+            let error_message = error.to_string();
+            let mut guard = self.state.write().await;
+            let mut should_detach = false;
+            if let Some(call) = guard.calls.get_mut(&gateway_call_id) {
+                call.last_error = Some(error_message.clone());
+                if call.status == CallStatus::Answering {
+                    call.status = CallStatus::PendingInbound;
+                    call.asr_backend = None;
+                    should_detach = call.conversation.attached;
+                    call.push_timeline(format!(
+                        "answer failed; returned to waiting: {error_message}"
+                    ));
+                } else {
+                    call.push_timeline(format!(
+                        "answer failed after state changed: {error_message}"
+                    ));
+                }
+            }
+            if should_detach {
+                guard.detach_conversation(&gateway_call_id);
+            }
+            guard.log(
+                LogLevel::Warn,
+                format!("answer failed for inbound call {gateway_call_id}: {error_message}"),
+            );
+            return Err(error);
+        }
+
+        {
+            let mut guard = self.state.write().await;
+            let should_attach = guard
+                .calls
+                .get(&gateway_call_id)
+                .map(|call| call.status == CallStatus::Answering)
+                .unwrap_or(false);
+            if should_attach {
+                guard.attach_conversation(&gateway_call_id, ConversationMode::Auto);
+            } else {
+                guard.log(
+                    LogLevel::Warn,
+                    format!(
+                        "answer accepted after inbound call {gateway_call_id} left answering state"
+                    ),
+                );
+            }
+        }
 
         tracing::info!(
             gateway_call_id,
@@ -399,6 +456,7 @@ pub enum ConversationModeArg {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ConversationProcessorArg {
     Identity,
+    TurnBatchedIdentity,
     ExternalTextStream,
 }
 
@@ -406,6 +464,9 @@ impl From<ConversationProcessorArg> for ConversationProcessorKind {
     fn from(processor: ConversationProcessorArg) -> Self {
         match processor {
             ConversationProcessorArg::Identity => Self::Identity,
+            ConversationProcessorArg::TurnBatchedIdentity => {
+                Self::turn_batched_identity(IdentityTurnBatcherConfig::default())
+            }
             ConversationProcessorArg::ExternalTextStream => Self::ExternalTextStream,
         }
     }
@@ -421,6 +482,85 @@ impl ConversationSmokeTestArg {
     fn enabled(self) -> bool {
         matches!(self, Self::On)
     }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConversationSmokeTestProcessorArg {
+    Identity,
+    TurnBatchedIdentity,
+}
+
+fn smoke_test_processor_from_args(
+    processor: Option<ConversationSmokeTestProcessorArg>,
+    fixed_batch_size: Option<usize>,
+    max_batch_turns: Option<usize>,
+    max_batch_wait_ms: Option<u64>,
+    max_idle_wait_ms: Option<u64>,
+    join_separator: Option<String>,
+) -> DriverResult<ConversationProcessorKind> {
+    let has_batcher_options = fixed_batch_size.is_some()
+        || max_batch_turns.is_some()
+        || max_batch_wait_ms.is_some()
+        || max_idle_wait_ms.is_some()
+        || join_separator.is_some();
+    let processor = processor.unwrap_or(if has_batcher_options {
+        ConversationSmokeTestProcessorArg::TurnBatchedIdentity
+    } else {
+        ConversationSmokeTestProcessorArg::Identity
+    });
+    match processor {
+        ConversationSmokeTestProcessorArg::Identity => {
+            if has_batcher_options {
+                return Err(DriverError::message(
+                    "identity smoke-test does not accept turn-batcher options",
+                ));
+            }
+            Ok(ConversationProcessorKind::Identity)
+        }
+        ConversationSmokeTestProcessorArg::TurnBatchedIdentity => {
+            let mut config = fixed_batch_size
+                .map(IdentityTurnBatcherConfig::fixed_batch_size)
+                .unwrap_or_default();
+            if let Some(max_batch_turns) = max_batch_turns {
+                config = config.with_max_batch_turns(max_batch_turns);
+            }
+            if let Some(max_batch_wait_ms) = max_batch_wait_ms {
+                config = config.with_max_batch_wait_ms(max_batch_wait_ms);
+            }
+            if let Some(max_idle_wait_ms) = max_idle_wait_ms {
+                config = config.with_max_idle_wait_ms(max_idle_wait_ms);
+            }
+            if let Some(join_separator) = join_separator {
+                config.join_separator = join_separator;
+            }
+            Ok(ConversationProcessorKind::turn_batched_identity(config))
+        }
+    }
+}
+
+fn identity_turn_batcher_config_lines(config: &IdentityTurnBatcherConfig) -> Vec<String> {
+    vec![
+        format!(
+            "identity-turn-batcher.fixed-batch-size: {}",
+            config.fixed_batch_size
+        ),
+        format!(
+            "identity-turn-batcher.max-batch-turns: {}",
+            config.max_batch_turns
+        ),
+        format!(
+            "identity-turn-batcher.max-batch-wait-ms: {}",
+            config.max_batch_wait_ms
+        ),
+        format!(
+            "identity-turn-batcher.max-idle-wait-ms: {}",
+            config.max_idle_wait_ms
+        ),
+        format!(
+            "identity-turn-batcher.join-separator: {:?}",
+            config.join_separator
+        ),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -459,6 +599,18 @@ pub enum ConversationCommand {
     SmokeTest {
         #[arg(value_enum)]
         state: ConversationSmokeTestArg,
+        #[arg(value_enum)]
+        processor: Option<ConversationSmokeTestProcessorArg>,
+        #[arg(long, value_name = "N")]
+        fixed_batch_size: Option<usize>,
+        #[arg(long, value_name = "N")]
+        max_batch_turns: Option<usize>,
+        #[arg(long, value_name = "MS")]
+        max_batch_wait_ms: Option<u64>,
+        #[arg(long, value_name = "MS")]
+        max_idle_wait_ms: Option<u64>,
+        #[arg(long, value_name = "TEXT")]
+        join_separator: Option<String>,
     },
     BargeIn {
         #[arg(value_enum)]
@@ -717,6 +869,7 @@ pub enum QualityEndpointCommand {
     ConversationIncompleteTailHoldMs { ms: u64 },
     ConversationLowConfidenceThresholdPercent { percent: u64 },
     ConversationPlaybackHoldPollMs { ms: u64 },
+    ConversationPlaybackMaxHoldMs { ms: u64 },
     MaxTurnWords { n: usize },
     MaxTurnDurationMs { ms: u64 },
 }
@@ -755,6 +908,8 @@ pub enum QualityTtsCommand {
     MaxTextChunkChars { n: usize },
     FirstChunkMaxChars { n: usize },
     PrebufferChunks { n: usize },
+    StreamingStartBufferMs { ms: u64 },
+    TailPadMs { ms: u64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1769,6 +1924,8 @@ async fn start_speech(
             conflict_policy: speech::SpeechConflictPolicy::Reject,
             turn_finalized_at: None,
             latest_turn_finalized_at: None,
+            processor_visible_turn_at: None,
+            barge_in_cancel_terminal_at: None,
             turn_id: None,
             coalesced_turn_ids: Vec::new(),
             source_asr_session_ids: Vec::new(),
@@ -2132,24 +2289,70 @@ async fn conversation_command(
                 effects: Vec::new(),
             })
         }
-        ConversationCommand::SmokeTest { state } => {
+        ConversationCommand::SmokeTest {
+            state,
+            processor,
+            fixed_batch_size,
+            max_batch_turns,
+            max_batch_wait_ms,
+            max_idle_wait_ms,
+            join_separator,
+        } => {
             let enabled = state.enabled();
+            let has_batcher_options = fixed_batch_size.is_some()
+                || max_batch_turns.is_some()
+                || max_batch_wait_ms.is_some()
+                || max_idle_wait_ms.is_some()
+                || join_separator.is_some();
+            if !enabled && (processor.is_some() || has_batcher_options) {
+                return Err(DriverError::message(
+                    "conversation smoke-test off does not accept processor or turn-batcher options",
+                ));
+            }
+            let processor_explicit = processor.is_some() || has_batcher_options;
+            let processor_kind = smoke_test_processor_from_args(
+                processor,
+                fixed_batch_size,
+                max_batch_turns,
+                max_batch_wait_ms,
+                max_idle_wait_ms,
+                join_separator,
+            )?;
             context.conversation.set_processor_enabled(enabled);
             let label = if enabled { "on" } else { "off" };
+            let selected_call = context.session.selected_call.clone();
             let barge_in_label = {
                 let mut guard = context.state.write().await;
                 guard.config.conversation_enabled = enabled;
                 guard.config.conversation_final_coalescing_enabled =
                     context.conversation.final_coalescing_enabled();
+                if enabled {
+                    guard.config.conversation_processor = processor_kind.clone();
+                    if let Some(id) = selected_call.as_deref() {
+                        if guard.calls.contains_key(id) {
+                            guard.set_conversation_processor(id, processor_kind.clone());
+                        }
+                    }
+                }
                 guard.log(LogLevel::Info, format!("conversation smoke-test {label}"));
                 quality_barge_in_label(&guard).to_string()
             };
             if enabled {
+                let mut lines = vec![
+                    format!("conversation smoke-test: {label}"),
+                    format!("conversation barge-in: {barge_in_label}"),
+                ];
+                if processor_explicit {
+                    lines.push(format!(
+                        "conversation processor: {}",
+                        processor_kind.label()
+                    ));
+                    if let Some(config) = processor_kind.identity_turn_batcher_config() {
+                        lines.extend(identity_turn_batcher_config_lines(config));
+                    }
+                }
                 Ok(CommandOutput {
-                    lines: vec![
-                        format!("conversation smoke-test: {label}"),
-                        format!("conversation barge-in: {barge_in_label}"),
-                    ],
+                    lines,
                     effects: Vec::new(),
                 })
             } else {
@@ -2182,11 +2385,11 @@ async fn conversation_command(
                     name: id,
                 });
             }
+            let label = processor.label();
             guard.set_conversation_processor(&id, processor);
             context.session.selected_call = Some(id.clone());
             Ok(CommandOutput::line(format!(
-                "conversation processor for {id}: {}",
-                processor.label()
+                "conversation processor for {id}: {label}"
             )))
         }
         ConversationCommand::Attach { call } => {
@@ -2355,6 +2558,8 @@ async fn approve_conversation_proposal(
             conflict_policy: speech::SpeechConflictPolicy::Reject,
             turn_finalized_at: None,
             latest_turn_finalized_at: None,
+            processor_visible_turn_at: None,
+            barge_in_cancel_terminal_at: None,
             turn_id: None,
             coalesced_turn_ids: Vec::new(),
             source_asr_session_ids: Vec::new(),
@@ -2420,6 +2625,42 @@ fn conversation_status_lines(
             conversation.last_playback_id.as_deref().unwrap_or("<none>")
         ),
     ];
+    if let Some(active) = &conversation.active_turn_batch {
+        let now = chrono::Utc::now();
+        let first_turn_age_ms = (now - active.first_turn_at).num_milliseconds().max(0) as u64;
+        let idle_age_ms = (now - active.last_turn_at).num_milliseconds().max(0) as u64;
+        let deadline_remaining_ms = active
+            .effective_deadline_at
+            .map(|deadline| (deadline - now).num_milliseconds().max(0) as u64);
+        lines.push("turn_batch.accumulating: true".to_string());
+        lines.push(format!("turn_batch.batch_id: {}", active.batch_id));
+        lines.push(format!("turn_batch.epoch: {}", active.epoch));
+        lines.push(format!(
+            "turn_batch.pending_turns: {}",
+            active.pending_turn_count
+        ));
+        lines.push(format!(
+            "turn_batch.target_turns: {}",
+            active.target_turn_count
+        ));
+        lines.push(format!("turn_batch.first_turn_age_ms: {first_turn_age_ms}"));
+        lines.push(format!("turn_batch.idle_age_ms: {idle_age_ms}"));
+        lines.push(format!(
+            "turn_batch.effective_deadline_source: {}",
+            active
+                .effective_deadline_source
+                .as_deref()
+                .unwrap_or("none")
+        ));
+        lines.push(format!(
+            "turn_batch.effective_deadline_remaining_ms: {}",
+            deadline_remaining_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        ));
+    } else {
+        lines.push("turn_batch.accumulating: false".to_string());
+    }
     if let Some(error) = &conversation.last_error {
         lines.push(format!("error: {error}"));
     }
@@ -2437,6 +2678,12 @@ fn call_conversation_status(call: &crate::operator::state::CallSession) -> Strin
     );
     if let Some(playback) = &conversation.last_playback_id {
         status.push_str(&format!(" playback={playback}"));
+    }
+    if let Some(active) = &conversation.active_turn_batch {
+        status.push_str(&format!(
+            " turn_batch={} pending={}",
+            active.batch_id, active.pending_turn_count
+        ));
     }
     if let Some(error) = &conversation.last_error {
         status.push_str(&format!(" error={error}"));
@@ -2664,6 +2911,11 @@ async fn quality_status(context: &GatewayContext) -> DriverResult<CommandOutput>
             quality.config.tts.prebuffer_chunks
         ),
         format!(
+            "tts.streaming_start_buffer_ms={}",
+            quality.config.tts.streaming_start_buffer_ms
+        ),
+        format!("tts.tail_pad_ms={}", quality.config.tts.tail_pad_ms),
+        format!(
             "early_response.enabled={}",
             quality.config.early_response.enabled
         ),
@@ -2695,7 +2947,7 @@ async fn quality_endpoint_command(
             let guard = context.state.read().await;
             let endpoint = &guard.quality.config.endpoint;
             Ok(CommandOutput::text(format!(
-                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nfinal_settle_ms={}\nconversation_incomplete_tail_hold_ms={}\nconversation_low_confidence_threshold_percent={}\nconversation_playback_hold_poll_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
+                "trailing_silence_ms={}\nmin_turn_words={}\nmin_turn_chars={}\nmerge_window_ms={}\nfinal_settle_ms={}\nconversation_incomplete_tail_hold_ms={}\nconversation_low_confidence_threshold_percent={}\nconversation_playback_hold_poll_ms={}\nconversation_playback_max_hold_ms={}\nmax_turn_words={}\nmax_turn_duration_ms={}",
                 endpoint.trailing_silence_ms,
                 endpoint.min_turn_words,
                 endpoint.min_turn_chars,
@@ -2704,6 +2956,7 @@ async fn quality_endpoint_command(
                 endpoint.conversation_incomplete_tail_hold_ms,
                 endpoint.conversation_low_confidence_threshold_percent,
                 endpoint.conversation_playback_hold_poll_ms,
+                endpoint.conversation_playback_max_hold_ms,
                 endpoint.max_turn_words,
                 endpoint.max_turn_duration_ms
             )))
@@ -2749,6 +3002,12 @@ async fn quality_endpoint_command(
         QualityEndpointCommand::ConversationPlaybackHoldPollMs { ms } => {
             mutate_quality_config(context, |config| {
                 Ok(config.set_endpoint_conversation_playback_hold_poll_ms(ms))
+            })
+            .await
+        }
+        QualityEndpointCommand::ConversationPlaybackMaxHoldMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_endpoint_conversation_playback_max_hold_ms(ms))
             })
             .await
         }
@@ -2898,6 +3157,8 @@ chunking_enabled={}
 max_text_chunk_chars={}
 first_chunk_max_chars={}
 prebuffer_chunks={}
+streaming_start_buffer_ms={}
+tail_pad_ms={}
 conversation_backend={}
 conversation_incremental={}
 streaming_compatible={}",
@@ -2906,6 +3167,8 @@ streaming_compatible={}",
                 tts.max_text_chunk_chars,
                 tts.first_chunk_max_chars,
                 tts.prebuffer_chunks,
+                tts.streaming_start_buffer_ms,
+                tts.tail_pad_ms,
                 backend.label(),
                 if factory.supports_incremental() {
                     "yes"
@@ -2962,6 +3225,15 @@ streaming_compatible={}",
         QualityTtsCommand::PrebufferChunks { n } => {
             mutate_quality_config(context, |config| Ok(config.set_tts_prebuffer_chunks(n))).await
         }
+        QualityTtsCommand::StreamingStartBufferMs { ms } => {
+            mutate_quality_config(context, |config| {
+                Ok(config.set_tts_streaming_start_buffer_ms(ms))
+            })
+            .await
+        }
+        QualityTtsCommand::TailPadMs { ms } => {
+            mutate_quality_config(context, |config| Ok(config.set_tts_tail_pad_ms(ms))).await
+        }
     }
 }
 
@@ -2981,9 +3253,7 @@ fn early_response_boundary_label(value: BoundaryRequirement) -> &'static str {
 }
 
 fn early_response_missing_signal_label(value: MissingSignalPolicy) -> &'static str {
-    match value {
-        MissingSignalPolicy::Conservative => "conservative",
-    }
+    value.label()
 }
 
 fn early_response_start_timing_label(value: EarlyResponseStartTiming) -> &'static str {
@@ -3205,12 +3475,19 @@ async fn quality_barge_in_command(
             let guard = context.state.read().await;
             let barge_in = &guard.quality.config.barge_in;
             Ok(CommandOutput::text(format!(
-                "enabled={}\nspeech_onset_cancel_enabled={}\nonset_during_playback={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\nclear_timeout_ms={}",
+                "enabled={}\nspeech_onset_cancel_enabled={}\nonset_during_playback={}\npartial_asr_cancel_enabled={}\nfinal_asr_cancel_enabled={}\ntranscript_min_chars={}\ntranscript_min_words={}\nmissing_signal_policy={}\npartial_min_confidence={}\npartial_min_stability={}\nfinal_min_confidence={}\nfinal_min_stability={}\nclear_timeout_ms={}",
                 barge_in.enabled,
                 barge_in.speech_onset_cancel_enabled,
                 barge_in.onset_during_playback.label(),
                 barge_in.partial_asr_cancel_enabled,
                 barge_in.final_asr_cancel_enabled,
+                barge_in.transcript_min_chars,
+                barge_in.transcript_min_words,
+                barge_in.missing_signal_policy.label(),
+                optional_score_label(barge_in.partial_min_confidence),
+                optional_score_label(barge_in.partial_min_stability),
+                optional_score_label(barge_in.final_min_confidence),
+                optional_score_label(barge_in.final_min_stability),
                 barge_in.clear_timeout_ms
             )))
         }
@@ -3592,9 +3869,9 @@ fn gateway_root_help() -> String {
         "  speak [call-id] <text...>      Inject manual speech; disabled while a text-call stream is attached",
         "  speak cancel [call-id]         Clear active TTS; allowed as an emergency control",
         "  conversation status [call-id]  Show attachment, mode, processor, and latest turns",
-        "  conversation smoke-test on|off Enable or disable test-only identity/repeat replies",
+        "  conversation smoke-test on|off [identity|turn-batched-identity] Enable gateway-only smoke replies",
         "  conversation barge-in on|off|status Enable or disable transcript-triggered TTS clear",
-        "  conversation processor identity|external-text-stream [call-id] Set per-call conversation processor",
+        "  conversation processor identity|turn-batched-identity|external-text-stream [call-id] Set per-call conversation processor",
         "  conversation disapprove [call-id] Stop TTS and detach conversation",
         "  reject [call-id]",
         "  hangup [call-id]",
@@ -3605,7 +3882,7 @@ fn gateway_root_help() -> String {
         "  quality endpoint trailing-silence-ms <ms>",
         "",
         "Testing:",
-        "  conversation smoke-test on    Enable test-only identity/repeat processor for M3 smoke tests",
+        "  conversation smoke-test on    Enable gateway-only identity/repeat smoke replies",
         "  test dial-transcribe <+e164> [--from +e164]",
         "",
         "Helpful topics:",
@@ -3629,6 +3906,7 @@ fn quality_help() -> String {
         "quality endpoint conversation-incomplete-tail-hold-ms <ms> range=0..10000 default=2500ms applies=new_turn",
         "quality endpoint conversation-low-confidence-threshold-percent <n> range=0..100 default=45 applies=new_turn",
         "quality endpoint conversation-playback-hold-poll-ms <ms> range=10..1000 default=100ms applies=new_turn",
+        "quality endpoint conversation-playback-max-hold-ms <ms> range=0..180000 default=0ms applies=new_turn",
         "quality endpoint max-turn-words <n>            range=1..500 default=80 report_only",
         "quality endpoint max-turn-duration-ms <ms>     range=1000..120000 default=12000ms report_only",
         "quality speech status",
@@ -3651,6 +3929,8 @@ fn quality_help() -> String {
         "quality tts max-text-chunk-chars <n>           range=40..500 default=90 applies=new_playback_request",
         "quality tts first-chunk-max-chars <n>          range=0|40..500 default=40 applies=new_playback_request",
         "quality tts prebuffer-chunks <n>               range=1..64 default=1 applies=new_playback_request",
+        "quality tts streaming-start-buffer-ms <ms>     range=0..2000 default=300ms applies=new_playback_request",
+        "quality tts tail-pad-ms <ms>                   range=0..2000 default=200ms applies=new_playback_request",
         "quality early-response status|on|off",
         "quality early-response boundary <none|clause|sentence> default=clause applies=new_call",
         "quality early-response start-timing <endpoint-candidate-only|while-speaking>",
@@ -3664,6 +3944,13 @@ fn quality_help() -> String {
         "quality barge-in onset-during-playback defer-to-partial|trust default=defer_to_partial applies=next_asr_session",
         "quality barge-in partial-asr on|off            bool default=true applies=next_asr_session",
         "quality barge-in final-asr on|off              bool default=true applies=next_asr_session",
+        "quality barge-in transcript_min_chars          TOML-only telemetry range=0..200 default=6 applies=new_turn",
+        "quality barge-in transcript_min_words          TOML-only telemetry range=0..50 default=2 applies=new_turn",
+        "quality barge-in missing_signal_policy         TOML-only conservative default=conservative applies=new_turn",
+        "quality barge-in partial_min_confidence        TOML-only range=0.0..1.0 default=none applies=new_turn",
+        "quality barge-in partial_min_stability         TOML-only range=0.0..1.0 default=none applies=new_turn",
+        "quality barge-in final_min_confidence          TOML-only range=0.0..1.0 default=none applies=new_turn",
+        "quality barge-in final_min_stability           TOML-only range=0.0..1.0 default=none applies=new_turn",
         "quality barge-in clear-timeout-ms <ms>         range=100..10000 default=1000ms applies=new_turn",
         "quality echo-suppression status|on|off         bool default=true applies=next_asr_session",
         "quality echo-suppression min-text-chars <n>    range=1..500 default=10 applies=next_asr_session",
@@ -3967,9 +4254,9 @@ fn conversation_help() -> String {
         "Usage:",
         "  conversation help",
         "  conversation status [call-id]",
-        "  conversation smoke-test <on|off>",
+        "  conversation smoke-test <on|off> [identity|turn-batched-identity] [--fixed-batch-size N] [--max-batch-turns N] [--max-batch-wait-ms MS] [--max-idle-wait-ms MS] [--join-separator TEXT]",
         "  conversation barge-in [on|off|status]",
-        "  conversation processor identity|external-text-stream [call-id]",
+        "  conversation processor identity|turn-batched-identity|external-text-stream [call-id]",
         "  conversation attach [call-id]",
         "  conversation detach [call-id]",
         "  conversation disapprove [call-id]",
@@ -3987,8 +4274,9 @@ fn conversation_help() -> String {
         "  conversation status",
         "",
         "Smoke-test two-way loop:",
-        "  conversation smoke-test on   # preserves current barge-in setting",
+        "  conversation smoke-test on   # identity/per-turn default; preserves current barge-in setting",
         "  conversation barge-in off    # deterministic identity/repeat baseline",
+        "  conversation smoke-test on turn-batched-identity --fixed-batch-size 2   # gateway-hosted turn batching",
         "  conversation barge-in on     # explicitly test interruption behavior",
         "  answer    # or: dial <callee-e164>",
         "  conversation status",
@@ -4063,7 +4351,8 @@ fn outbound_help() -> String {
         "`speak cancel` sends Telnyx clear and drops local queued outbound audio.",
         "",
         "Conversation smoke test:",
-        "  conversation smoke-test on enables the test-only identity/repeat reply loop.",
+        "  conversation smoke-test on enables the gateway-only identity/repeat reply loop.",
+        "  conversation smoke-test on turn-batched-identity --fixed-batch-size N validates in-gateway turn batching.",
         "  conversation smoke-test off returns attached calls to transcription-only behavior.",
         "",
         "Prerequisites:",
@@ -4189,9 +4478,9 @@ fn socket_help() -> String {
         "    speak cancel [call-id]        emergency clear remains available",
         "    conversation status [call-id]",
         "    conversation attach|detach [call-id]",
-        "    conversation smoke-test on|off",
+        "    conversation smoke-test on|off [identity|turn-batched-identity] [--fixed-batch-size N] [--max-batch-turns N] [--max-batch-wait-ms MS] [--max-idle-wait-ms MS] [--join-separator TEXT]",
         "    conversation barge-in [on|off|status]",
-        "    conversation processor identity|external-text-stream [call-id]",
+        "    conversation processor identity|turn-batched-identity|external-text-stream [call-id]",
         "    conversation approve [call-id]",
         "    conversation disapprove [call-id]",
         "    hangup [call-id]",
@@ -4201,7 +4490,7 @@ fn socket_help() -> String {
         "  `tts use` changes the source's next manual speech-injection backend and the gateway-wide",
         "  conversation reply backend, because media-triggered turns are not associated",
         "  with one TUI/socket command source.",
-        "  The smoke-test processor mode and barge-in mode are also gateway-wide.",
+        "  The smoke-test processor selection and barge-in mode are also gateway-wide.",
     ]
     .join("\n")
 }
@@ -4343,7 +4632,8 @@ mod tests {
         assert!(rendered.contains("tts list"));
         assert!(rendered.contains("tts use kokoro-82m|piper"));
         assert!(rendered.contains("conversation status [call-id]"));
-        assert!(rendered.contains("test-only identity/repeat processor"));
+        assert!(rendered.contains("gateway-only identity/repeat smoke replies"));
+        assert!(rendered.contains("turn-batched-identity"));
         assert!(rendered.contains("help socket"));
     }
 
@@ -4383,9 +4673,8 @@ mod tests {
         assert!(outbound.contains("conversation smoke-test on"));
         assert!(socket.contains("Receive one JSON object"));
         assert!(socket.contains("Agent workflows"));
-        assert!(
-            socket.contains("smoke-test processor mode and barge-in mode are also gateway-wide")
-        );
+        assert!(socket
+            .contains("smoke-test processor selection and barge-in mode are also gateway-wide"));
         assert!(conversation.contains("Default live behavior"));
         assert!(conversation_alias.contains("Default live behavior"));
         assert!(conversation.contains("Normal inbound TUI/socket flow"));
@@ -4745,6 +5034,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_answer_returns_call_to_waiting_for_retry() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+            guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: None,
+                },
+                None,
+                None,
+                CallStatus::PendingInbound,
+            )
+        };
+        let failing_telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, false);
+        let context = GatewayContext::new(state.clone(), failing_telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let error = engine
+            .run_line("answer")
+            .await
+            .expect_err("missing API key should fail answer");
+
+        assert!(error.to_string().contains("missing Telnyx API key"));
+        {
+            let guard = state.read().await;
+            let call = guard
+                .calls
+                .get(&gateway_call_id)
+                .expect("call remains tracked");
+            assert_eq!(call.status, CallStatus::PendingInbound);
+            assert_eq!(call.asr_backend, None);
+            assert!(!call.conversation.attached);
+            assert!(call
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("missing Telnyx API key")));
+            assert!(call
+                .timeline
+                .iter()
+                .any(|entry| entry.message.contains("answer failed; returned to waiting")));
+        }
+
+        let retry_telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let retry_context = GatewayContext::new(state.clone(), retry_telnyx);
+        let mut retry_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(retry_context);
+
+        let output = retry_engine.run_line("answer").await.expect("retry answer");
+
+        assert_eq!(
+            output.lines,
+            vec![format!("answer requested for {gateway_call_id}")]
+        );
+        let guard = state.read().await;
+        let call = guard
+            .calls
+            .get(&gateway_call_id)
+            .expect("call remains tracked after retry");
+        assert_eq!(call.status, CallStatus::Answering);
+        assert_eq!(call.asr_backend, Some(LiveAsrBackend::Kroko2025));
+        assert!(call.conversation.attached);
+        assert_eq!(call.last_error, None);
+    }
+
+    #[tokio::test]
     async fn answer_rejects_non_pending_call() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         {
@@ -4937,6 +5294,9 @@ mod tests {
         let call_id = {
             let mut guard = state.write().await;
             guard.set_quality_event_sink(QualityEventSink::with_sender(quality_tx), None);
+            guard.quality.config.set_tts_tail_pad_ms(0);
+            let config_id = guard.quality.config.config_id();
+            guard.quality.config_id = config_id;
             add_streaming_call(&mut guard, "call-1", "stream-1")
         };
         let media = SharedMediaRegistry::default();
@@ -5264,6 +5624,53 @@ mod tests {
         assert!(engine.context().conversation.processor_enabled());
         assert!(!engine.context().conversation.barge_in_enabled());
         assert!(!state.read().await.quality.config.barge_in.enabled);
+    }
+
+    #[tokio::test]
+    async fn conversation_smoke_test_selects_turn_batched_identity_for_selected_call() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = {
+            let mut guard = state.write().await;
+            add_streaming_call(&mut guard, "call-1", "stream-1")
+        };
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        engine
+            .run_line(&format!("call use {call_id}"))
+            .await
+            .expect("select call");
+        let output = engine
+            .run_line(
+                "conversation smoke-test on turn-batched-identity --fixed-batch-size 2 --max-batch-turns 4 --max-batch-wait-ms 250",
+            )
+            .await
+            .expect("enable turn-batched smoke test");
+
+        assert_eq!(
+            output.lines,
+            vec![
+                "conversation smoke-test: on",
+                "conversation barge-in: on",
+                "conversation processor: turn_batched_identity",
+                "identity-turn-batcher.fixed-batch-size: 2",
+                "identity-turn-batcher.max-batch-turns: 4",
+                "identity-turn-batcher.max-batch-wait-ms: 250",
+                "identity-turn-batcher.max-idle-wait-ms: 0",
+                "identity-turn-batcher.join-separator: \"\\n\"",
+            ]
+        );
+        assert!(engine.context().conversation.processor_enabled());
+        let expected_processor = ConversationProcessorKind::turn_batched_identity(
+            IdentityTurnBatcherConfig::fixed_batch_size(2)
+                .with_max_batch_turns(4)
+                .with_max_batch_wait_ms(250),
+        );
+        let guard = state.read().await;
+        assert_eq!(guard.config.conversation_processor, expected_processor);
+        let call = guard.calls.get(&call_id).expect("call exists");
+        assert_eq!(call.conversation.processor, expected_processor);
     }
 
     #[tokio::test]
@@ -5701,6 +6108,25 @@ mod tests {
                 .conversation_incomplete_tail_hold_ms,
             10_000
         );
+
+        let playback_max_hold_output = engine
+            .run_line("quality endpoint conversation-playback-max-hold-ms 999999")
+            .await
+            .expect("set conversation playback max hold");
+        assert!(playback_max_hold_output.lines[0]
+            .contains("key=endpoint.conversation_playback_max_hold_ms"));
+        assert!(playback_max_hold_output.lines[0].contains("applies=new_turn"));
+        assert!(playback_max_hold_output.lines[0].contains("clamped=true"));
+        assert_eq!(
+            state
+                .read()
+                .await
+                .quality
+                .config
+                .endpoint
+                .conversation_playback_max_hold_ms,
+            180_000
+        );
     }
 
     #[tokio::test]
@@ -5815,6 +6241,18 @@ mod tests {
             .expect("set prebuffer chunks");
         assert!(prebuffer_output.lines[0].contains("key=tts.prebuffer_chunks"));
         assert!(prebuffer_output.lines[0].contains("applies=new_playback_request"));
+        let start_buffer_output = engine
+            .run_line("quality tts streaming-start-buffer-ms 450")
+            .await
+            .expect("set streaming start buffer");
+        assert!(start_buffer_output.lines[0].contains("key=tts.streaming_start_buffer_ms"));
+        assert!(start_buffer_output.lines[0].contains("applies=new_playback_request"));
+        let tail_pad_output = engine
+            .run_line("quality tts tail-pad-ms 250")
+            .await
+            .expect("set tail pad");
+        assert!(tail_pad_output.lines[0].contains("key=tts.tail_pad_ms"));
+        assert!(tail_pad_output.lines[0].contains("applies=new_playback_request"));
 
         let status = engine
             .run_line("quality tts status")
@@ -5836,6 +6274,11 @@ mod tests {
         assert!(status
             .lines
             .iter()
+            .any(|line| line == "streaming_start_buffer_ms=450"));
+        assert!(status.lines.iter().any(|line| line == "tail_pad_ms=250"));
+        assert!(status
+            .lines
+            .iter()
             .any(|line| line == "conversation_incremental=yes"));
         assert!(status
             .lines
@@ -5850,6 +6293,8 @@ mod tests {
         assert_eq!(guard.quality.config.tts.max_text_chunk_chars, 40);
         assert_eq!(guard.quality.config.tts.first_chunk_max_chars, 45);
         assert_eq!(guard.quality.config.tts.prebuffer_chunks, 3);
+        assert_eq!(guard.quality.config.tts.streaming_start_buffer_ms, 450);
+        assert_eq!(guard.quality.config.tts.tail_pad_ms, 250);
     }
 
     #[tokio::test]
@@ -6015,6 +6460,7 @@ mod tests {
             config.set_endpoint_conversation_incomplete_tail_hold_ms(2_345);
             config.set_endpoint_conversation_low_confidence_threshold_percent(39);
             config.set_endpoint_conversation_playback_hold_poll_ms(77);
+            config.set_endpoint_conversation_playback_max_hold_ms(888);
             config.set_endpoint_max_turn_words(123);
             config.set_endpoint_max_turn_duration_ms(7_654);
             config.set_asr_repeated_token_run_threshold(42);

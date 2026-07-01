@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
 use motlie_agent::voice::telnyx::text::{
-    AcceptCallResponse, CallConnectedPayload, CallOfferPayload, TextCallAggregationPolicy,
+    AcceptCallResponse, CallConnectedPayload, CallOfferPayload, ResponseMode,
     TEXT_CALL_EARLY_TURNS_EXTENSION, TEXT_CALL_PARTIALS_EXTENSION, TEXT_CALL_PROTOCOL,
 };
 use sha2::{Digest, Sha256};
@@ -172,7 +172,7 @@ fn accept_response(state: &AgentState, call_id: &str) -> (StatusCode, Json<Accep
             .replace("http://", "ws://"),
         accept: true,
         extensions: accepted_text_call_extensions(),
-        aggregation: TextCallAggregationPolicy::GatewayOwned,
+        response_mode: ResponseMode::PerTurn,
     };
     (StatusCode::OK, Json(response))
 }

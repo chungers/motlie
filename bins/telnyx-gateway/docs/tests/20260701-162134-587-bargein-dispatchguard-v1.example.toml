@@ -1,7 +1,7 @@
 +++
-# Redacted Motlie Telnyx outbound identity smoke-test config/record example.
-# @codex-535 2026-06-17 PDT -- Copy this file to
-# $HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml, replace placeholders locally,
+# Local Motlie Telnyx inbound #587 barge-in dispatch-guard validation config/record.
+# @codex-541 2026-07-01 PDT -- Copy this file to
+# $HOME/telnyx-test/runs/20260701-162134-587-bargein-dispatchguard-v1/20260701-162134-587-bargein-dispatchguard-v1.toml, replace placeholders locally,
 # run telnyx-gateway with --config pointing at that copied file, then append
 # results below the closing +++ delimiter. Never commit the local copy after
 # replacing placeholders with live routing values.
@@ -18,11 +18,11 @@ bind = "127.0.0.1:8080"
 # Start the interactive TUI. Headless agent-driven runs usually keep this false.
 tui = false
 # Optional Unix-domain command socket for local operator/agent control.
-socket = "/tmp/motlie-telnyx-gateway.sock"
+socket = "/tmp/motlie-telnyx-gateway-20260701-162134-587-bargein-dispatchguard-v1.sock"
 # Shared ASR/TTS artifact root. `$HOME` and `~` are expanded by the loader.
 artifact_root = "$HOME/artifacts/hf-cache"
 # Structured process log target for live tuning sessions.
-log_file = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.log"
+log_file = "$HOME/telnyx-test/runs/20260701-162134-587-bargein-dispatchguard-v1/20260701-162134-587-bargein-dispatchguard-v1.log"
 
 [telnyx]
 # Telnyx API base; override only for mocks or future Telnyx environments.
@@ -48,23 +48,23 @@ media_codec = "PCMU"
 # Sample rate paired with the selected codec.
 media_sample_rate_hz = 8000
 # Capture root for raw media, decoded WAV, ASR input WAV, and transcripts.
-capture_dir = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/captures"
+capture_dir = "$HOME/telnyx-test/runs/20260701-162134-587-bargein-dispatchguard-v1/captures"
 # Default outbound caller ID; use the selected Telnyx number.
 from_number = "<telnyx-phone-number>"
 # Default destination for `state dump` / shutdown dumps.
-state_path = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>-state.toml"
+state_path = "$HOME/telnyx-test/runs/20260701-162134-587-bargein-dispatchguard-v1/20260701-162134-587-bargein-dispatchguard-v1-state.toml"
 
 [inbound]
 # Safe default: wait for explicit `answer`; use `auto-transcribe` only for trusted tests.
-mode = "manual"
+mode = "auto-transcribe"
 
 [conversation]
-# Keep identity/repeat detached until post-dial `conversation smoke-test on`.
-enabled = false
+# Gateway-local conversation processor enablement for new calls.
+enabled = true
 # Coalesce/debounce committed finals before processor dispatch when enabled.
 final_coalescing_enabled = true
 # Startup bridge for the runtime barge-in owner under `[voice_quality.barge_in]`.
-barge_in_enabled = false
+barge_in_enabled = true
 # Static dispatch boundary. `identity` is the current checked-in processor.
 processor = "identity"
 # Conversation/manual TTS backend. Streaming mode below requires an incremental backend.
@@ -76,7 +76,8 @@ warm_models = true
 
 [quality_logging]
 # Durable JSONL sink path used when `[voice_quality.logging] enabled = true`.
-path = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>-quality.jsonl"
+path = "$HOME/telnyx-test/runs/20260701-162134-587-bargein-dispatchguard-v1/20260701-162134-587-bargein-dispatchguard-v1-quality.jsonl"
+
 
 [voice_quality]
 # Baseline profile applied first; explicit tables below override individual knobs.
@@ -91,8 +92,8 @@ peak_threshold = 1100
 onset_min_silence_ms = 180
 
 [voice_quality.endpoint]
-# Final endpoint trailing silence window. Latest no-barge-in Identity baseline uses 850 ms.
-trailing_silence_ms = 850
+# Final endpoint trailing silence window. Current no-barge-in Identity experiment tests 1100 ms after 1000 ms improved tail retention but still split one turn.
+trailing_silence_ms = 1100
 # Minimum final-turn word count before committed dispatch.
 min_turn_words = 2
 # Minimum final-turn character count before committed dispatch.
@@ -130,7 +131,7 @@ repeated_token_run_threshold = 16
 # Repeated `Q` run length treated as hallucination/suppression.
 repeated_q_run_threshold = 8
 # Extra ASR flush padding after local endpoint.
-finish_pad_ms = 320
+finish_pad_ms = 600
 
 [voice_quality.text_call]
 # Maximum outstanding caller turns per text-call session.
@@ -155,7 +156,7 @@ max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 # Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
-# Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in pacing baseline uses 450 ms.
+# Normal streaming TTS frames to hold before first playback frame; 0 disables.
 streaming_start_buffer_ms = 450
 # Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
 tail_pad_ms = 200
@@ -194,15 +195,15 @@ provisional_max_prebuffer_frames = 1
 
 [voice_quality.barge_in]
 # Enable interruption/cancellation of active TTS from caller speech.
-enabled = false
+enabled = true
 # Cancel on frame-level speech onset when policy allows it.
-speech_onset_cancel_enabled = false
+speech_onset_cancel_enabled = true
 # `defer_to_partial` waits for partial ASR confirmation during playback.
 onset_during_playback = "defer_to_partial"
 # Cancel on meaningful partial ASR overlap.
-partial_asr_cancel_enabled = false
+partial_asr_cancel_enabled = true
 # Cancel on final ASR overlap.
-final_asr_cancel_enabled = false
+final_asr_cancel_enabled = true
 # Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on length.
 transcript_min_chars = 6
 # Telemetry-only transcript drift field for ASR switch comparisons; non-compat cancel policy does not gate on word count.
@@ -222,18 +223,16 @@ clear_timeout_ms = 1000
 
 [voice_quality.conversation_policy]
 # Identity smoke tests keep barge-in off and drain a bounded FIFO repeat queue.
-mode = "no_barge_in_bounded_pending"
+mode = "barge_in_coalesce_after_silence"
 # Diagnostic hold budget before recording retained max-hold telemetry.
 active_playback_hold_ms = 1000
 # Maximum completed processor outputs retained behind active playback.
-max_pending_outputs = 3
+max_pending_outputs = 1
 # FIFO preserves deterministic repeat order for WER/smoke-test scripts.
-pending_output_order = "fifo"
+pending_output_order = "latest_only"
 # Reserved for barge-in coalescing profiles; inactive for this no-barge-in mode.
 post_barge_in_silence_ms = 1200
-# Post-coalesced-dispatch guard window for active/recent playback echo fragments.
 post_barge_in_echo_guard_ms = 2000
-# Short guarded finals at or below these normalized sizes are suppressed.
 post_barge_in_fragment_max_chars = 12
 post_barge_in_fragment_max_words = 2
 
@@ -254,6 +253,13 @@ long_min_tokens = 4
 long_token_coverage_percent = 60
 # Longest common token run threshold for long echo candidates.
 long_longest_token_run = 3
+
+[voice_quality.echo_characterization]
+# #586 measurement-only diagnostic for active/recent playback echo correlation.
+enabled = true
+window_ms = 240
+max_delay_ms = 160
+emit_interval_ms = 500
 
 [voice_quality.logging]
 # Enables JSONL quality events at `[quality_logging].path`.
@@ -301,104 +307,92 @@ max_inappropriate_cancel_rate = 0.03
 +++
 
 
-## Run Metadata
+## Run Plan
 
-- Run ID: <outbound-identity-run-id>
-- Direction: outbound operator-dialed
-- Created: 2026-06-17 15:19 PDT
-- Created by: @codex-535
-- Config and result record: `$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml`
-- Source example: `bins/telnyx-gateway/docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml`
-- Privacy: placeholders only; the human destination number is entered with `getpass` at dial time and is not committed.
+- Identity: @codex-541
+- Created: 2026-07-01 16:21 PDT
+- PR: #588
+- Issue: #587
+- Config path: `$HOME/telnyx-test/runs/20260701-162134-587-bargein-dispatchguard-v1/20260701-162134-587-bargein-dispatchguard-v1.toml`
+- Mode: inbound Identity/repeat, barge-in enabled, no turn batching, `barge_in_coalesce_after_silence`, streaming Kokoro TTS, early response enabled, echo characterization enabled.
+- Runtime note: gateway started from this config, then manual inbound answer was enabled over the local operator socket for the live call.
+- Goal: validate the #587 post-barge-in dispatch guard so assistant echo/fragment finals from canceled playback do not reach the processor as new turns.
 
-## Procedure Snapshot
+## Reference
 
-- Gateway started with `--config $HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml`; `conversation.enabled=false` keeps identity/repeat detached during dialing.
-- Operator placed the outbound call with the privacy-preserving `getpass` dial helper.
-- After the selected call connected and before the caller read the script, operator ran `conversation smoke-test on`, explicitly ran `conversation barge-in off` for the deterministic baseline, and ran `conversation status`.
-- Expected conversation status: `processor=identity`, `mode=auto`, `barge_in=off`, `attached=true`.
-- Caller read the identity/repeat script, waited for playback, then gave qualitative feedback.
-
-## Caller Script
-
-```text
-This is a Motlie outbound identity smoke test.
-I will speak in one continuous turn so we can observe whether the gateway starts responding early, whether it overlaps me, and whether the transcript keeps enough context.
-The quick brown fox walked past the live gateway while I was still speaking, and I want the system to repeat this as soon as it can without waiting for a long silence.
-Now I am going to stop for a natural endpoint.
+```toml
+[reference]
+id = "20260701-162134-587-bargein-dispatchguard-v1-script-v1"
+normalization = "lowercase, strip punctuation except apostrophes, collapse whitespace"
+expected_processor_visible_turns = 2
+expected_stale_echo_processor_turns = 0
+lines = [
+  "The gateway will begin repeating this long sentence so I can interrupt it during playback. The dispatch guard should prevent stale echo fragments from becoming new turns.",
+  "Stop now. Please repeat this replacement sentence clearly after the interruption.",
+]
 ```
 
 ## Run Results
 
-### 2026-06-17 15:19 PDT, @codex-535 -- redacted outbound sample
-
-Status: sample completed record. Replace these values with real run metrics in the local copied file.
-
-Quantitative sample:
-
-- Outbound dial: connected; voicemail runs must be classified separately from human-quality samples.
-- Caller turns: 6 committed finals.
-- Identity playback: 5 queued, 5 started, 5 completed, 0 failed.
-- Endpoint trailing silence: p50 760 ms, p95 1100 ms.
-- TTS request-to-first-audio: p50 1900 ms, p95 3600 ms.
-- Echo suppression: 1 playback-like partial suppressed, 0 assistant-echo finals forwarded.
-- WER: optional; score only if a WER passage was read and identity repeat did not contaminate the transcript.
-
-Structured latency/quality sample:
+Recorded by @codex-541 on 2026-07-01 PDT.
 
 ```toml
-[result_latency]
-schema_version = 1
-source = "quality_jsonl"
-quality_events = 0
-caller_turns = 0
-raw_asr_final_events = 0
-attempted_playbacks = 0
-completed_playbacks = 0
-canceled_playbacks = 0
+[results.summary]
+verdict = "pass"
+rating = "A-"
+caller_turns = 2
+processor_visible_turns = 2
+raw_asr_final_events = 2
+attempted_playbacks = 2
+played_playbacks = 2
+completed_playbacks = 1
+canceled_playbacks = 1
+failed_playbacks = 0
+excluded_turns_without_playback = 0
 dropped_quality_events = 0
+suppressed_assistant_echo_transcripts = 3
+suppressed_assistant_echo_finals = 1
+stale_echo_or_fragment_processor_turns = 0
 
-[[result_latency.span]]
-name = "asr.endpoint_wait"
-n = 0
-min_ms = 0
-p50_ms = 0
-p95_ms = 0
-max_ms = 0
+[results.turn_alignment]
+turn_1_reference = "The gateway will begin repeating this long sentence so I can interrupt it during playback. The dispatch guard should prevent stale echo fragments from becoming new turns."
+turn_1_asr_final = "The gateway will begin repeating this long sentence, so I can interrupt it during playback. The dispatch guard should prevent stale echo fragments from becoming new turns."
+turn_1_processor_visible = true
+turn_1_playback_started = true
+turn_1_playback_terminal_status = "canceled"
+turn_1_playback_terminal_reason = "barge_in"
 
-[[result_latency.span]]
-name = "tts.request_to_first_audio"
-n = 0
-min_ms = 0
-p50_ms = 0
-p95_ms = 0
-max_ms = 0
+suppressed_echo_final = "A gateway will begin repeating this"
+suppressed_echo_reached_processor = false
+
+turn_2_reference = "Stop now. Please repeat this replacement sentence clearly after the interruption."
+turn_2_asr_final = "Stop now, please repeat this replacement sentence clearly after the interruption"
+turn_2_processor_visible = true
+turn_2_playback_terminal_status = "completed"
+
+[results.barge_in]
+cancel_count = 1
+replacement_playback_completed = true
+partial_to_cancel_request_ms = 0
+cancel_request_to_terminal_ms = 0
+cancel_terminal_to_replacement_first_audio_ms = 5632
+
+[results.transport]
+inbound_packets_total = 2012
+inbound_lost_packets = 0
+inbound_reordered_frames = 0
+outbound_frames_sent = 780
+outbound_underrun_count = 0
+outbound_inter_frame_gap_ms_p95 = 27
+outbound_inter_frame_gap_ms_max = 69
+
+[results.echo_characterization]
+span_count = 15
+policy_consumed = false
 ```
 
-Structured WER status:
+### Assessment
 
-```toml
-[wer_summary]
-schema_version = 1
-wer_passes = 0
-reason = "identity/repeat quality smoke test; no WER passage was scored"
-```
+The #587 dispatch guard passed this live Identity/repeat sample. Assistant echo appeared after the first playback started, including the final `A gateway will begin repeating this`, but those transcripts were suppressed before processor dispatch. Identity saw only the initial caller turn and the replacement caller turn. The original playback canceled on barge-in, the replacement playback completed, and outbound pacing had 0 underruns.
 
-Qualitative sample:
-
-- Caller heard repeat-back after each committed turn.
-- Caller reported the first response was late enough to notice, but later repeats were more natural.
-- Audio was clear; no clipping or packet-loss artifacts were reported.
-- No interruption occurred while barge-in was disabled.
-
-Analysis:
-
-- Outbound smoke testing verifies Telnyx call control, selected outbound caller ID, media WebSocket setup, ASR, identity dispatch, streaming TTS, and playback.
-- The post-dial `conversation smoke-test on` step is the activation boundary because the outbound template starts with `conversation.enabled=false`; it preserves barge-in, so the run must set `conversation barge-in on|off` explicitly.
-- If the callee reaches voicemail, keep the record as a media-pipeline smoke test and rerun for human qualitative feedback.
-
-Next-run tuning:
-
-- Keep `voice_quality.tts.first_chunk_max_chars = 40` unless a code change expands the runtime clamp range.
-- If response wait is still too long, compare `voice_quality.endpoint.final_settle_ms` and `conversation_incomplete_tail_hold_ms` changes one at a time.
-- If echo-like repeats appear, run a confirmation pass with `voice_quality.early_response.audio_mode = "prepare_only"` and caller silence after the script.
+Residual follow-up is #586: use the collected echo-characterization spans plus additional barge-in samples to decide AEC insertion vs an echo-aware onset gate. This run does not require additional #587 code changes.

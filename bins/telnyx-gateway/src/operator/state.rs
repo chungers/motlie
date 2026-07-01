@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,9 @@ use crate::adapter::LiveAsrBackend;
 use crate::call_control::TelnyxMediaConfig;
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
-    ActiveAsrQualitySession, CallerTurnEventMetadata, QualityEvent, QualityEventContext,
-    QualityEventSink, RedactionMode, TtsGenerationMode, TtsQualityConfig, VoiceQualityConfig,
+    ActiveAsrQualitySession, CallerTurnEventMetadata, ProcessorVisibleTurnEventMetadata,
+    QualityEvent, QualityEventContext, QualityEventSink, RedactionMode, TtsGenerationMode,
+    TtsQualityConfig, VoiceQualityConfig,
 };
 use crate::tts::LiveTtsBackend;
 
@@ -239,6 +240,10 @@ pub struct QualityPlaybackMetadata {
     pub source_channel: Option<String>,
     pub manual_injection: bool,
     pub related_turn_id: Option<String>,
+    pub turn_batch_id: Option<String>,
+    pub turn_batch_epoch: Option<u64>,
+    pub turn_batch_response_turn_id: Option<String>,
+    pub turn_batch_completion_reason: Option<String>,
 }
 
 impl QualityPlaybackMetadata {
@@ -248,6 +253,28 @@ impl QualityPlaybackMetadata {
             source_channel: Some(source_channel.into()),
             manual_injection: true,
             related_turn_id: None,
+            turn_batch_id: None,
+            turn_batch_epoch: None,
+            turn_batch_response_turn_id: None,
+            turn_batch_completion_reason: None,
+        }
+    }
+
+    pub fn turn_batch(
+        batch_id: impl Into<String>,
+        epoch: u64,
+        response_turn_id: impl Into<String>,
+        completion_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: Some("turn_batch_prompt_complete".to_string()),
+            source_channel: Some("conversation".to_string()),
+            manual_injection: false,
+            related_turn_id: None,
+            turn_batch_id: Some(batch_id.into()),
+            turn_batch_epoch: Some(epoch),
+            turn_batch_response_turn_id: Some(response_turn_id.into()),
+            turn_batch_completion_reason: Some(completion_reason.into()),
         }
     }
 }
@@ -260,6 +287,21 @@ pub struct QualityPlaybackLinkage {
     pub source_utterance_ids: Vec<String>,
     pub source_label: String,
     pub metadata: QualityPlaybackMetadata,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QualityConversationProcessorVisibleTurn<'a> {
+    pub config_id: &'a str,
+    pub redaction_mode: RedactionMode,
+    pub include_transcript_text: bool,
+    pub turn_id: Option<&'a str>,
+    pub text: &'a str,
+    pub coalesced_turn_ids: &'a [String],
+    pub source_asr_session_ids: &'a [String],
+    pub source_utterance_ids: &'a [String],
+    pub processor: &'a str,
+    pub response_mode: &'a str,
+    pub confidence: Option<f32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,6 +335,13 @@ pub struct QualityTurnReportState {
     canceled_after_call_end_turn_ids: BTreeSet<String>,
     canceled_after_call_end_playback_ids: BTreeSet<String>,
     playback_records: BTreeMap<String, QualityPlaybackRecord>,
+    turn_batch_turns_per_prompt: Vec<usize>,
+    turn_batch_accumulation_ms: Vec<u64>,
+    turn_batch_completion_reasons: BTreeMap<String, usize>,
+    turn_batch_resets_by_reason: BTreeMap<String, usize>,
+    turn_batch_reset_discarded_turns_total: usize,
+    turn_batch_reset_discarded_turns_by_reason: BTreeMap<String, usize>,
+    turn_batch_output_rejections_by_reason: BTreeMap<String, usize>,
 }
 
 impl QualityTurnReportState {
@@ -301,7 +350,11 @@ impl QualityTurnReportState {
     }
 
     fn record_caller_turn(&mut self, turn_id: &str, source_turn_ids: &[String]) {
-        self.caller_turn_ids.insert(turn_id.to_string());
+        if source_turn_ids.is_empty() {
+            self.caller_turn_ids.insert(turn_id.to_string());
+        } else {
+            self.caller_turn_ids.extend(source_turn_ids.iter().cloned());
+        }
         if source_turn_ids.len() > 1 {
             self.coalesced_selected_turn_ids.insert(turn_id.to_string());
             self.coalesced_source_turn_ids
@@ -317,9 +370,8 @@ impl QualityTurnReportState {
     ) -> QualityPlaybackRecord {
         let source_turn_ids =
             normalized_source_turn_ids(linkage.turn_id.as_deref(), linkage.coalesced_turn_ids);
-        if let Some(turn_id) = linkage.turn_id.as_ref() {
-            self.response_attempted_turn_ids.insert(turn_id.clone());
-        }
+        self.response_attempted_turn_ids
+            .extend(source_turn_ids.iter().cloned());
         self.response_attempted_playback_ids
             .insert(playback_id.clone());
         let record = QualityPlaybackRecord {
@@ -345,9 +397,8 @@ impl QualityTurnReportState {
             return None;
         }
         record.first_audio_sent = true;
-        if let Some(turn_id) = record.turn_id.as_ref() {
-            self.played_turn_ids.insert(turn_id.clone());
-        }
+        self.played_turn_ids
+            .extend(record.source_turn_ids.iter().cloned());
         self.played_playback_ids.insert(playback_id.to_string());
         Some(record.clone())
     }
@@ -382,12 +433,37 @@ impl QualityTurnReportState {
         if reason == Some("canceled_after_call_end") {
             self.canceled_after_call_end_playback_ids
                 .insert(playback_id.to_string());
-            if let Some(turn_id) = record.turn_id.as_ref() {
-                self.canceled_after_call_end_turn_ids
-                    .insert(turn_id.clone());
-            }
+            self.canceled_after_call_end_turn_ids
+                .extend(record.source_turn_ids.iter().cloned());
         }
         Some(record.clone())
+    }
+
+    pub fn record_turn_batch_prompt_complete(
+        &mut self,
+        source_turn_count: usize,
+        accumulation_ms: u64,
+        completion_reason: &str,
+    ) {
+        self.turn_batch_turns_per_prompt.push(source_turn_count);
+        self.turn_batch_accumulation_ms.push(accumulation_ms);
+        increment_counter(&mut self.turn_batch_completion_reasons, completion_reason);
+    }
+
+    pub fn record_turn_batch_reset(&mut self, reason: &str, discarded_turn_count: usize) {
+        increment_counter(&mut self.turn_batch_resets_by_reason, reason);
+        self.turn_batch_reset_discarded_turns_total = self
+            .turn_batch_reset_discarded_turns_total
+            .saturating_add(discarded_turn_count);
+        add_to_counter(
+            &mut self.turn_batch_reset_discarded_turns_by_reason,
+            reason,
+            discarded_turn_count,
+        );
+    }
+
+    pub fn record_turn_batch_output_rejected(&mut self, reason: &str) {
+        increment_counter(&mut self.turn_batch_output_rejections_by_reason, reason);
     }
 
     fn summary_payload(&self, summary_reason: &str, call: &CallSession) -> Map<String, Value> {
@@ -413,8 +489,99 @@ impl QualityTurnReportState {
             "canceled_after_call_end_turns": self.canceled_after_call_end_turn_ids.len(),
             "canceled_after_call_end_playbacks": self.canceled_after_call_end_playback_ids.len(),
             "excluded_turns_without_playback": turns_without_playback,
+            "turn_batch_batches_formed": self.turn_batch_turns_per_prompt.len(),
+            "turn_batch_turns_per_prompt_mean": mean_usize(&self.turn_batch_turns_per_prompt),
+            "turn_batch_turns_per_prompt_p95": percentile_usize(&self.turn_batch_turns_per_prompt, 95),
+            "turn_batch_accumulation_latency_ms_mean": mean_u64(&self.turn_batch_accumulation_ms),
+            "turn_batch_accumulation_latency_ms_p95": percentile_u64_local(&self.turn_batch_accumulation_ms, 95),
+            "turn_batch_completion_reason_histogram": &self.turn_batch_completion_reasons,
+            "turn_batch_resets_by_reason": &self.turn_batch_resets_by_reason,
+            "turn_batch_reset_discarded_turns_total": self.turn_batch_reset_discarded_turns_total,
+            "turn_batch_reset_discarded_turns_mean_per_reset": mean_reset_discarded_turns(
+                self.turn_batch_reset_discarded_turns_total,
+                &self.turn_batch_resets_by_reason,
+            ),
+            "turn_batch_reset_discarded_turns_by_reason": &self.turn_batch_reset_discarded_turns_by_reason,
+            "turn_batch_reset_discarded_turns_mean_per_reset_by_reason": mean_reset_discarded_turns_by_reason(
+                &self.turn_batch_reset_discarded_turns_by_reason,
+                &self.turn_batch_resets_by_reason,
+            ),
+            "turn_batch_output_rejections_by_reason": &self.turn_batch_output_rejections_by_reason,
+            "turn_batch_stale_rejections": self.turn_batch_output_rejections_by_reason.get("stale_epoch").copied().unwrap_or(0),
         }))
     }
+}
+
+fn increment_counter(counters: &mut BTreeMap<String, usize>, key: &str) {
+    add_to_counter(counters, key, 1);
+}
+
+fn add_to_counter(counters: &mut BTreeMap<String, usize>, key: &str, increment: usize) {
+    let counter = counters.entry(key.to_string()).or_insert(0);
+    *counter = counter.saturating_add(increment);
+}
+
+fn mean_reset_discarded_turns(
+    discarded_turn_count: usize,
+    resets_by_reason: &BTreeMap<String, usize>,
+) -> Option<f64> {
+    let reset_count = resets_by_reason.values().sum::<usize>();
+    if reset_count == 0 {
+        return None;
+    }
+    Some(discarded_turn_count as f64 / reset_count as f64)
+}
+
+fn mean_reset_discarded_turns_by_reason(
+    discarded_turns_by_reason: &BTreeMap<String, usize>,
+    resets_by_reason: &BTreeMap<String, usize>,
+) -> BTreeMap<String, f64> {
+    discarded_turns_by_reason
+        .iter()
+        .filter_map(|(reason, discarded_turn_count)| {
+            let reset_count = resets_by_reason.get(reason).copied().unwrap_or_default();
+            (reset_count > 0).then(|| {
+                (
+                    reason.clone(),
+                    *discarded_turn_count as f64 / reset_count as f64,
+                )
+            })
+        })
+        .collect()
+}
+
+fn mean_usize(values: &[usize]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<usize>() as f64 / values.len() as f64)
+}
+
+fn mean_u64(values: &[u64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<u64>() as f64 / values.len() as f64)
+}
+
+fn percentile_usize(values: &[usize], percentile: usize) -> Option<usize> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = ((sorted.len() - 1) * percentile) / 100;
+    sorted.get(index).copied()
+}
+
+fn percentile_u64_local(values: &[u64], percentile: usize) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = ((sorted.len() - 1) * percentile) / 100;
+    sorted.get(index).copied()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -492,7 +659,21 @@ pub struct ConversationState {
     pub last_assistant_text: Option<String>,
     pub last_playback_id: Option<String>,
     pub last_error: Option<String>,
+    pub active_turn_batch: Option<TurnBatchActiveState>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnBatchActiveState {
+    pub batch_id: String,
+    pub epoch: u64,
+    pub pending_turn_count: usize,
+    pub target_turn_count: usize,
+    pub source_turn_ids: Vec<String>,
+    pub first_turn_at: DateTime<Utc>,
+    pub last_turn_at: DateTime<Utc>,
+    pub effective_deadline_at: Option<DateTime<Utc>>,
+    pub effective_deadline_source: Option<String>,
 }
 
 impl Default for ConversationState {
@@ -507,6 +688,7 @@ impl Default for ConversationState {
             last_assistant_text: None,
             last_playback_id: None,
             last_error: None,
+            active_turn_batch: None,
             updated_at: Utc::now(),
         }
     }
@@ -520,6 +702,8 @@ pub struct SpeechOutputConfig {
     pub tts_max_text_chunk_chars: usize,
     pub tts_first_chunk_max_chars: usize,
     pub tts_prebuffer_chunks: usize,
+    pub tts_streaming_start_buffer_ms: u64,
+    pub tts_tail_pad_ms: u64,
 }
 
 impl SpeechOutputConfig {
@@ -531,6 +715,8 @@ impl SpeechOutputConfig {
             tts_max_text_chunk_chars: tts.max_text_chunk_chars,
             tts_first_chunk_max_chars: tts.first_chunk_max_chars,
             tts_prebuffer_chunks: tts.prebuffer_chunks,
+            tts_streaming_start_buffer_ms: tts.streaming_start_buffer_ms,
+            tts_tail_pad_ms: tts.tail_pad_ms,
         }
     }
 }
@@ -612,6 +798,9 @@ pub struct CallSession {
     pub tts: Option<TtsPlaybackState>,
     pub echo_suppressed_transcripts: usize,
     pub last_echo_suppressed_preview: Option<String>,
+    pub last_echo_suppressed_text: Option<String>,
+    pub last_echo_suppressed_at: Option<DateTime<Utc>>,
+    pub last_barge_in_cancel_terminal_at: Option<Instant>,
     pub conversation: ConversationState,
     pub speech_output: SpeechOutputConfig,
     pub quality_turns: QualityTurnReportState,
@@ -644,6 +833,9 @@ impl CallSession {
             tts: None,
             echo_suppressed_transcripts: 0,
             last_echo_suppressed_preview: None,
+            last_echo_suppressed_text: None,
+            last_echo_suppressed_at: None,
+            last_barge_in_cancel_terminal_at: None,
             conversation: ConversationState::default(),
             speech_output: SpeechOutputConfig::default(),
             quality_turns: QualityTurnReportState::default(),
@@ -871,14 +1063,38 @@ impl GatewayState {
         if !self.quality.event_sink.is_enabled() {
             return;
         }
+        let extra = self.conversation_config_snapshot_payload(gateway_call_id);
         let event = QualityEvent::config_snapshot(
             self.quality_event_context(Some(gateway_call_id.to_string())),
             &self.quality.config,
             snapshot_reason,
             effective_scope,
             effective_after_asr_session_id,
+            extra,
         );
         self.quality.event_sink.emit(event);
+    }
+
+    fn conversation_config_snapshot_payload(&self, gateway_call_id: &str) -> Map<String, Value> {
+        let mut payload = Map::new();
+        let Some(call) = self.calls.get(gateway_call_id) else {
+            return payload;
+        };
+        let processor = &call.conversation.processor;
+        payload.insert(
+            "conversation_processor".to_string(),
+            Value::String(processor.label().to_string()),
+        );
+        payload.insert(
+            "response_mode".to_string(),
+            Value::String(processor.response_mode_label().to_string()),
+        );
+        payload.insert(
+            "identity_turn_batcher".to_string(),
+            serde_json::to_value(processor.resolved_identity_turn_batcher_config())
+                .expect("identity turn batcher config serializes"),
+        );
+        payload
     }
 
     pub fn start_quality_asr_session(
@@ -986,6 +1202,35 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
+    pub fn emit_quality_conversation_processor_visible_turn(
+        &mut self,
+        gateway_call_id: &str,
+        visible_turn: QualityConversationProcessorVisibleTurn<'_>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::conversation_processor_visible_turn(
+            self.quality_event_context_with_config_and_redaction(
+                Some(gateway_call_id.to_string()),
+                visible_turn.config_id.to_string(),
+                visible_turn.redaction_mode,
+            ),
+            visible_turn.turn_id,
+            visible_turn.text,
+            visible_turn.include_transcript_text,
+            ProcessorVisibleTurnEventMetadata {
+                coalesced_turn_ids: visible_turn.coalesced_turn_ids,
+                source_asr_session_ids: visible_turn.source_asr_session_ids,
+                source_utterance_ids: visible_turn.source_utterance_ids,
+                processor: visible_turn.processor,
+                response_mode: visible_turn.response_mode,
+                confidence: visible_turn.confidence,
+            },
+        );
+        self.quality.event_sink.emit(event);
+    }
+
     pub fn emit_quality_caller_partial_sent(
         &mut self,
         gateway_call_id: &str,
@@ -1073,6 +1318,23 @@ impl GatewayState {
         self.quality.event_sink.emit(event);
     }
 
+    pub fn emit_quality_turn_batch_lifecycle(
+        &mut self,
+        gateway_call_id: &str,
+        lifecycle_event: &'static str,
+        payload: Map<String, Value>,
+    ) {
+        if !self.quality.event_sink.is_enabled() {
+            return;
+        }
+        let event = QualityEvent::turn_batch_lifecycle(
+            self.quality_event_context(Some(gateway_call_id.to_string())),
+            lifecycle_event,
+            payload,
+        );
+        self.quality.event_sink.emit(event);
+    }
+
     pub fn emit_quality_inbound_transport_rollup(
         &mut self,
         gateway_call_id: &str,
@@ -1123,6 +1385,9 @@ impl GatewayState {
         reason: Option<&str>,
     ) {
         let record = self.calls.get_mut(gateway_call_id).and_then(|call| {
+            if status == "canceled" && reason == Some("barge_in") {
+                call.last_barge_in_cancel_terminal_at = Some(Instant::now());
+            }
             call.quality_turns
                 .record_terminal(playback_id, status, reason)
         });
@@ -1216,7 +1481,7 @@ impl GatewayState {
         }
 
         let mut call = CallSession::pending_inbound(ids.clone(), from, to, status);
-        call.conversation.processor = self.config.conversation_processor;
+        call.conversation.processor = self.config.conversation_processor.clone();
         call.speech_output = SpeechOutputConfig::from_quality(
             self.conversation_tts_backend,
             &self.quality.config.tts,
@@ -1252,7 +1517,7 @@ impl GatewayState {
         }
 
         let mut call = CallSession::outbound(ids.clone(), from, to, status);
-        call.conversation.processor = self.config.conversation_processor;
+        call.conversation.processor = self.config.conversation_processor.clone();
         call.speech_output = SpeechOutputConfig::from_quality(
             self.conversation_tts_backend,
             &self.quality.config.tts,
@@ -1424,9 +1689,10 @@ impl GatewayState {
         processor: ConversationProcessorKind,
     ) {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            let label = processor.label();
             call.conversation.processor = processor;
             call.conversation.updated_at = Utc::now();
-            call.push_timeline(format!("conversation processor -> {}", processor.label()));
+            call.push_timeline(format!("conversation processor -> {label}"));
         }
     }
 
@@ -1438,6 +1704,71 @@ impl GatewayState {
             call.conversation.push_line(ConversationRole::User, text);
             call.push_timeline("conversation user turn");
         }
+    }
+
+    pub fn record_turn_batch_active(
+        &mut self,
+        gateway_call_id: &str,
+        active: TurnBatchActiveState,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.active_turn_batch = Some(active);
+            call.conversation.updated_at = Utc::now();
+        }
+    }
+
+    pub fn clear_turn_batch_active(&mut self, gateway_call_id: &str) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.conversation.active_turn_batch = None;
+            call.conversation.updated_at = Utc::now();
+        }
+    }
+
+    pub fn record_quality_turn_batch_prompt_complete(
+        &mut self,
+        gateway_call_id: &str,
+        source_turn_count: usize,
+        accumulation_ms: u64,
+        completion_reason: &str,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.quality_turns.record_turn_batch_prompt_complete(
+                source_turn_count,
+                accumulation_ms,
+                completion_reason,
+            );
+        }
+    }
+
+    pub fn record_quality_turn_batch_reset(
+        &mut self,
+        gateway_call_id: &str,
+        reason: &str,
+        discarded_turn_count: usize,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.quality_turns
+                .record_turn_batch_reset(reason, discarded_turn_count);
+        }
+    }
+
+    pub fn record_quality_turn_batch_output_rejected(
+        &mut self,
+        gateway_call_id: &str,
+        reason: &str,
+    ) {
+        if let Some(call) = self.calls.get_mut(gateway_call_id) {
+            call.quality_turns.record_turn_batch_output_rejected(reason);
+        }
+    }
+
+    pub fn take_last_barge_in_cancel_terminal_at(
+        &mut self,
+        gateway_call_id: &str,
+    ) -> Option<Instant> {
+        self.calls
+            .get_mut(gateway_call_id)
+            .and_then(|call| call.last_barge_in_cancel_terminal_at.take())
     }
 
     pub fn record_conversation_proposal(&mut self, gateway_call_id: &str, text: String) {
@@ -1776,6 +2107,8 @@ impl GatewayState {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.echo_suppressed_transcripts = call.echo_suppressed_transcripts.saturating_add(1);
             call.last_echo_suppressed_preview = Some(preview_text(text));
+            call.last_echo_suppressed_text = Some(text.trim().to_string());
+            call.last_echo_suppressed_at = Some(Utc::now());
             call.push_timeline("transcript suppressed assistant echo");
         }
     }
@@ -1887,6 +2220,10 @@ fn playback_link_payload(
         "source_channel": record.metadata.source_channel,
         "manual_injection": record.metadata.manual_injection,
         "related_turn_id": record.metadata.related_turn_id,
+        "turn_batch_id": record.metadata.turn_batch_id,
+        "turn_batch_epoch": record.metadata.turn_batch_epoch,
+        "turn_batch_response_turn_id": record.metadata.turn_batch_response_turn_id,
+        "turn_batch_completion_reason": record.metadata.turn_batch_completion_reason,
         "first_audio_sent": record.first_audio_sent,
         "terminal_status": terminal_status,
         "terminal_reason": terminal_reason,
@@ -1986,6 +2323,40 @@ mod tests {
     }
 
     #[test]
+    fn barge_in_cancel_terminal_timestamp_is_one_shot() {
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = state.add_or_update_outbound_call(
+            TelnyxIds {
+                call_control_id: "call-1".to_string(),
+                call_session_id: Some("session-1".to_string()),
+                call_leg_id: Some("leg-1".to_string()),
+                stream_id: Some("stream-1".to_string()),
+            },
+            None,
+            None,
+            CallStatus::MediaStarted,
+        );
+
+        state.record_quality_playback_terminal(&call_id, "tts_test", "finished", None);
+        assert!(state
+            .take_last_barge_in_cancel_terminal_at(&call_id)
+            .is_none());
+
+        state.record_quality_playback_terminal(&call_id, "tts_test", "canceled", Some("operator"));
+        assert!(state
+            .take_last_barge_in_cancel_terminal_at(&call_id)
+            .is_none());
+
+        state.record_quality_playback_terminal(&call_id, "tts_test", "canceled", Some("barge_in"));
+        assert!(state
+            .take_last_barge_in_cancel_terminal_at(&call_id)
+            .is_some());
+        assert!(state
+            .take_last_barge_in_cancel_terminal_at(&call_id)
+            .is_none());
+    }
+
+    #[test]
     fn quality_turn_report_counts_denominators_and_playback_linkage() {
         let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
@@ -2024,10 +2395,20 @@ mod tests {
                 source_asr_session_ids: Vec::new(),
                 source_utterance_ids: Vec::new(),
                 source_label: "test".to_string(),
-                metadata: QualityPlaybackMetadata::default(),
+                metadata: QualityPlaybackMetadata::turn_batch(
+                    "turn-batch-0-0",
+                    0,
+                    "turn_selected",
+                    "fixed_size_reached",
+                ),
             },
             Some("tts_replaced"),
         );
+        state.record_quality_turn_batch_prompt_complete(&call_id, 2, 123, "fixed_size_reached");
+        state.record_quality_turn_batch_reset(&call_id, "barge_in", 1);
+        state.record_quality_turn_batch_reset(&call_id, "barge_in", 3);
+        state.record_quality_turn_batch_reset(&call_id, "final_turn_superseded", 2);
+        state.record_quality_turn_batch_output_rejected(&call_id, "stale_epoch");
         state.mark_tts_first_audio_latency_and_pacing(&call_id, "tts_test", 42, 0, 0);
         state.mark_tts_canceled_with_reason(&call_id, "tts_test", Some("canceled_after_call_end"));
         state.emit_quality_report_summary(&call_id, "test");
@@ -2055,6 +2436,16 @@ mod tests {
         assert_eq!(queued.payload["source_turn_ids"][0], "turn_selected");
         assert_eq!(queued.payload["source_turn_ids"][1], "turn_next");
         assert_eq!(queued.payload["replaced_playback_id"], "tts_replaced");
+        assert_eq!(queued.payload["turn_batch_id"], "turn-batch-0-0");
+        assert_eq!(queued.payload["turn_batch_epoch"], 0);
+        assert_eq!(
+            queued.payload["turn_batch_response_turn_id"],
+            "turn_selected"
+        );
+        assert_eq!(
+            queued.payload["turn_batch_completion_reason"],
+            "fixed_size_reached"
+        );
 
         let terminal = events
             .iter()
@@ -2075,17 +2466,115 @@ mod tests {
             .find(|event| event.event == "quality.report.summary")
             .expect("summary event");
         assert_eq!(summary.payload["raw_asr_final_events"], 1);
-        assert_eq!(summary.payload["caller_turns"], 1);
-        assert_eq!(summary.payload["attempted_turns"], 1);
+        assert_eq!(summary.payload["caller_turns"], 2);
+        assert_eq!(summary.payload["attempted_turns"], 2);
         assert_eq!(summary.payload["attempted_playbacks"], 1);
         assert_eq!(summary.payload["coalesced_turns"], 2);
         assert_eq!(summary.payload["coalesced_response_turns"], 1);
-        assert_eq!(summary.payload["played_turns"], 1);
+        assert_eq!(summary.payload["played_turns"], 2);
         assert_eq!(summary.payload["played_playbacks"], 1);
         assert_eq!(summary.payload["canceled_playbacks"], 1);
-        assert_eq!(summary.payload["canceled_after_call_end_turns"], 1);
+        assert_eq!(summary.payload["canceled_after_call_end_turns"], 2);
         assert_eq!(summary.payload["canceled_after_call_end_playbacks"], 1);
         assert_eq!(summary.payload["excluded_turns_without_playback"], 0);
+        assert_eq!(summary.payload["turn_batch_batches_formed"], 1);
+        assert_eq!(summary.payload["turn_batch_turns_per_prompt_p95"], 2);
+        assert_eq!(
+            summary.payload["turn_batch_accumulation_latency_ms_p95"],
+            123
+        );
+        assert_eq!(
+            summary.payload["turn_batch_completion_reason_histogram"]["fixed_size_reached"],
+            1
+        );
+        assert_eq!(
+            summary.payload["turn_batch_resets_by_reason"]["barge_in"],
+            2
+        );
+        assert_eq!(
+            summary.payload["turn_batch_resets_by_reason"]["final_turn_superseded"],
+            1
+        );
+        assert_eq!(summary.payload["turn_batch_reset_discarded_turns_total"], 6);
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset"],
+            2.0
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_by_reason"]["barge_in"],
+            4
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_by_reason"]["final_turn_superseded"],
+            2
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset_by_reason"]
+                ["barge_in"],
+            2.0
+        );
+        assert_eq!(
+            summary.payload["turn_batch_reset_discarded_turns_mean_per_reset_by_reason"]
+                ["final_turn_superseded"],
+            2.0
+        );
+        assert_eq!(
+            summary.payload["turn_batch_output_rejections_by_reason"]["stale_epoch"],
+            1
+        );
+        assert_eq!(summary.payload["turn_batch_stale_rejections"], 1);
+    }
+
+    #[test]
+    fn config_snapshot_records_response_mode_and_resolved_turn_batcher_config() {
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state.set_quality_event_sink(QualityEventSink::with_sender(tx), None);
+        let call_id = state.add_or_update_outbound_call(
+            TelnyxIds {
+                call_control_id: "call-1".to_string(),
+                call_session_id: Some("session-1".to_string()),
+                call_leg_id: Some("leg-1".to_string()),
+                stream_id: Some("stream-1".to_string()),
+            },
+            None,
+            None,
+            CallStatus::MediaStarted,
+        );
+        let config =
+            motlie_agent::voice::turn_batching::IdentityTurnBatcherConfig::fixed_batch_size(3)
+                .with_max_batch_wait_ms(250)
+                .with_max_idle_wait_ms(75);
+        state.set_conversation_processor(
+            &call_id,
+            ConversationProcessorKind::turn_batched_identity(config),
+        );
+
+        state.emit_quality_config_snapshot(&call_id, "test", "call", None);
+
+        let event = rx.try_recv().expect("config snapshot event");
+        assert_eq!(event.event, "call.config.snapshot");
+        assert_eq!(
+            event.payload["conversation_processor"],
+            "turn_batched_identity"
+        );
+        assert_eq!(event.payload["response_mode"], "turn_batched");
+        assert_eq!(
+            event.payload["identity_turn_batcher"]["fixed_batch_size"],
+            3
+        );
+        assert_eq!(
+            event.payload["identity_turn_batcher"]["max_batch_wait_ms"],
+            250
+        );
+        assert_eq!(
+            event.payload["identity_turn_batcher"]["max_idle_wait_ms"],
+            75
+        );
+        assert_eq!(
+            event.payload["identity_turn_batcher"]["join_separator"],
+            "\n"
+        );
     }
 
     #[test]

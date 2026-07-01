@@ -1,7 +1,7 @@
 +++
-# Redacted Motlie Telnyx outbound identity smoke-test config/record example.
+# Redacted Motlie Telnyx inbound identity smoke-test config/record example.
 # @codex-535 2026-06-17 PDT -- Copy this file to
-# $HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml, replace placeholders locally,
+# $HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.toml, replace placeholders locally,
 # run telnyx-gateway with --config pointing at that copied file, then append
 # results below the closing +++ delimiter. Never commit the local copy after
 # replacing placeholders with live routing values.
@@ -22,7 +22,7 @@ socket = "/tmp/motlie-telnyx-gateway.sock"
 # Shared ASR/TTS artifact root. `$HOME` and `~` are expanded by the loader.
 artifact_root = "$HOME/artifacts/hf-cache"
 # Structured process log target for live tuning sessions.
-log_file = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.log"
+log_file = "$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.log"
 
 [telnyx]
 # Telnyx API base; override only for mocks or future Telnyx environments.
@@ -48,19 +48,19 @@ media_codec = "PCMU"
 # Sample rate paired with the selected codec.
 media_sample_rate_hz = 8000
 # Capture root for raw media, decoded WAV, ASR input WAV, and transcripts.
-capture_dir = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/captures"
+capture_dir = "$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/captures"
 # Default outbound caller ID; use the selected Telnyx number.
 from_number = "<telnyx-phone-number>"
 # Default destination for `state dump` / shutdown dumps.
-state_path = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>-state.toml"
+state_path = "$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1-state.toml"
 
 [inbound]
 # Safe default: wait for explicit `answer`; use `auto-transcribe` only for trusted tests.
 mode = "manual"
 
 [conversation]
-# Keep identity/repeat detached until post-dial `conversation smoke-test on`.
-enabled = false
+# Gateway-local conversation processor enablement for new calls.
+enabled = true
 # Coalesce/debounce committed finals before processor dispatch when enabled.
 final_coalescing_enabled = true
 # Startup bridge for the runtime barge-in owner under `[voice_quality.barge_in]`.
@@ -76,7 +76,7 @@ warm_models = true
 
 [quality_logging]
 # Durable JSONL sink path used when `[voice_quality.logging] enabled = true`.
-path = "$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>-quality.jsonl"
+path = "$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1-quality.jsonl"
 
 [voice_quality]
 # Baseline profile applied first; explicit tables below override individual knobs.
@@ -155,8 +155,8 @@ max_text_chunk_chars = 70
 first_chunk_max_chars = 40
 # Buffered-mode prepared text chunks before playback starts.
 prebuffer_chunks = 1
-# Normal streaming TTS frame prebuffer before first playback frame; current no-barge-in pacing baseline uses 450 ms.
-streaming_start_buffer_ms = 450
+# Normal streaming TTS frames to hold before first playback frame; 0 disables.
+streaming_start_buffer_ms = 300
 # Normal committed TTS silence appended before the final Telnyx mark; 0 disables.
 tail_pad_ms = 200
 
@@ -231,11 +231,6 @@ max_pending_outputs = 3
 pending_output_order = "fifo"
 # Reserved for barge-in coalescing profiles; inactive for this no-barge-in mode.
 post_barge_in_silence_ms = 1200
-# Post-coalesced-dispatch guard window for active/recent playback echo fragments.
-post_barge_in_echo_guard_ms = 2000
-# Short guarded finals at or below these normalized sizes are suppressed.
-post_barge_in_fragment_max_chars = 12
-post_barge_in_fragment_max_words = 2
 
 [voice_quality.echo_suppression]
 # Suppress transcripts that match active assistant TTS, except same-source provisional audio.
@@ -303,102 +298,182 @@ max_inappropriate_cancel_rate = 0.03
 
 ## Run Metadata
 
-- Run ID: <outbound-identity-run-id>
-- Direction: outbound operator-dialed
-- Created: 2026-06-17 15:19 PDT
-- Created by: @codex-535
-- Config and result record: `$HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml`
-- Source example: `bins/telnyx-gateway/docs/LIVE_RUN_OUTBOUND_IDENTITY.example.toml`
-- Privacy: placeholders only; the human destination number is entered with `getpass` at dial time and is not committed.
+- Run ID: 20260628-135818-336e9087-layera-nobarge-identity-v1
+- Direction: inbound manual-answer
+- Created: 2026-06-28 13:58 PDT
+- Created by: @codex-541
+- Git SHA: `336e908738cb887fcfda7065f38b0abb5f004d7e`
+- Config and result record: `$HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.toml`
+- Source example: `bins/telnyx-gateway/docs/LIVE_RUN_INBOUND_IDENTITY.example.toml`
+- Privacy: committed copy is redacted; live routing values remain only in the local `$HOME/telnyx-test` copy.
 
 ## Procedure Snapshot
 
-- Gateway started with `--config $HOME/telnyx-test/runs/<outbound-identity-run-id>/<outbound-identity-run-id>.toml`; `conversation.enabled=false` keeps identity/repeat detached during dialing.
-- Operator placed the outbound call with the privacy-preserving `getpass` dial helper.
-- After the selected call connected and before the caller read the script, operator ran `conversation smoke-test on`, explicitly ran `conversation barge-in off` for the deterministic baseline, and ran `conversation status`.
-- Expected conversation status: `processor=identity`, `mode=auto`, `barge_in=off`, `attached=true`.
-- Caller read the identity/repeat script, waited for playback, then gave qualitative feedback.
+- Gateway started with `--config $HOME/telnyx-test/runs/20260628-135818-336e9087-layera-nobarge-identity-v1/20260628-135818-336e9087-layera-nobarge-identity-v1.toml`.
+- Caller dialed the configured Telnyx number; operator answered the waiting inbound call manually.
+- Identity processor was enabled before the call through config: `conversation.enabled=true`, `processor="identity"`.
+- Streaming TTS, clause-gated early response, disabled barge-in, model warming, quality logging, and Layer A score telemetry were enabled.
+- Caller read the identity/repeat script once, then waited for playback before hanging up.
 
 ## Caller Script
 
 ```text
-This is a Motlie outbound identity smoke test.
-I will speak in one continuous turn so we can observe whether the gateway starts responding early, whether it overlaps me, and whether the transcript keeps enough context.
-The quick brown fox walked past the live gateway while I was still speaking, and I want the system to repeat this as soon as it can without waiting for a long silence.
-Now I am going to stop for a natural endpoint.
+This is a Motlie Layer A no-barge-in identity smoke test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker blue starts the measured sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now stop speaking and wait for the repeat playback. Marker blue ends the measured sentence.
 ```
 
 ## Run Results
 
-### 2026-06-17 15:19 PDT, @codex-535 -- redacted outbound sample
+### 2026-06-28 14:04 PDT, @codex-541 -- inbound no-barge-in Identity Layer A baseline
 
-Status: sample completed record. Replace these values with real run metrics in the local copied file.
+Status: completed. Caller hung up normally after repeat playback.
 
-Quantitative sample:
+Quantitative summary:
 
-- Outbound dial: connected; voicemail runs must be classified separately from human-quality samples.
-- Caller turns: 6 committed finals.
-- Identity playback: 5 queued, 5 started, 5 completed, 0 failed.
-- Endpoint trailing silence: p50 760 ms, p95 1100 ms.
-- TTS request-to-first-audio: p50 1900 ms, p95 3600 ms.
-- Echo suppression: 1 playback-like partial suppressed, 0 assistant-echo finals forwarded.
-- WER: optional; score only if a WER passage was read and identity repeat did not contaminate the transcript.
+- Calls answered: 1 inbound manual-answer call.
+- ASR backend: kroko-2025 / sherpa-zipformer-en-kroko-2025-08-06.
+- Media: PCMU 8 kHz mono.
+- Caller turns: 2 committed finals.
+- Raw ASR final events: 2.
+- Identity playback: 3 attempted turns/playbacks, 2 completed, 1 canceled by caller hangup, 0 failed.
+- Dropped quality events: 0.
+- Excluded turns without playback: 0 in final call-terminal summary.
+- Inbound transport: 4868 packets, 0 lost, 0 reordered, jitter p50 2 ms, p95 13 ms, max 252 ms.
+- Outbound pacing: 1211 frames, 58 underruns, inter-frame gap p50 20 ms, p95 23 ms, max 1180 ms, queue depth p50 148, p95 255.
+- `conversation.visible_turn_to_first_audio`: n=2, min 884 ms, p50/max 1612 ms.
+- `tts.request_to_first_audio`: n=2, min 884 ms, p50/max 1612 ms.
+- `turn.finalize_to_first_audio`: n=2, min 1765 ms, p50/max 8902 ms.
+- `conversation.final_debounce`: n=2, min 152 ms, max 8018 ms.
+- Strict script WER: 20.59% over 68 reference words (S=7, D=2, I=5).
+- Measured core sentence was recognized exactly, including `hang up`: `The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end.`
 
-Structured latency/quality sample:
+Assembled transcript:
 
-```toml
-[result_latency]
-schema_version = 1
-source = "quality_jsonl"
-quality_events = 0
-caller_turns = 0
-raw_asr_final_events = 0
-attempted_playbacks = 0
-completed_playbacks = 0
-canceled_playbacks = 0
-dropped_quality_events = 0
-
-[[result_latency.span]]
-name = "asr.endpoint_wait"
-n = 0
-min_ms = 0
-p50_ms = 0
-p95_ms = 0
-max_ms = 0
-
-[[result_latency.span]]
-name = "tts.request_to_first_audio"
-n = 0
-min_ms = 0
-p50_ms = 0
-p95_ms = 0
-max_ms = 0
+```text
+This is a Motley layer, a no bargin identity smote test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Blue starts to measure a sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now not I will now stop speaking and wait for the repeat playback. Marker blue and stemmeasure sentence
 ```
-
-Structured WER status:
-
-```toml
-[wer_summary]
-schema_version = 1
-wer_passes = 0
-reason = "identity/repeat quality smoke test; no WER passage was scored"
-```
-
-Qualitative sample:
-
-- Caller heard repeat-back after each committed turn.
-- Caller reported the first response was late enough to notice, but later repeats were more natural.
-- Audio was clear; no clipping or packet-loss artifacts were reported.
-- No interruption occurred while barge-in was disabled.
 
 Analysis:
 
-- Outbound smoke testing verifies Telnyx call control, selected outbound caller ID, media WebSocket setup, ASR, identity dispatch, streaming TTS, and playback.
-- The post-dial `conversation smoke-test on` step is the activation boundary because the outbound template starts with `conversation.enabled=false`; it preserves barge-in, so the run must set `conversation barge-in on|off` explicitly.
-- If the callee reaches voicemail, keep the record as a media-pipeline smoke test and rerun for human qualitative feedback.
+- No-barge-in policy behaved as configured: barge-in was off and no barge-in cancellation was expected.
+- The main recognition quality issue was not the core measured sentence; it was domain/marker wording and endpoint segmentation: `Motlie -> Motley`, `barge-in -> bargin`, `smoke -> smote`, `starts the measured sentence -> starts to measure a sentence`, and `ends the measured sentence -> and stemmeasure sentence`.
+- The first ASR final ended at `hang up`; the second final restarted with `near the end` and inserted `I will now not` before the intended `I will now stop`. This created two processor-visible turns and two repeat playbacks for what the script intended as one passage.
+- Playback delivery mostly worked but still shows a pacing problem: final summary recorded 2 completed playbacks and 1 hangup-canceled playback, and outbound pacing reported 58 underruns with one 1180 ms max gap. Treat this as a TTS/media pacing follow-up, not an ASR-only issue.
+- The Layer A score-gating knobs were present in the config snapshot, but cancellation was disabled for this run. This run primarily validates that the no-barge-in baseline still starts and records correctly after Layer A landed.
 
-Next-run tuning:
+Next-run tuning / fixes:
 
-- Keep `voice_quality.tts.first_chunk_max_chars = 40` unless a code change expands the runtime clamp range.
-- If response wait is still too long, compare `voice_quality.endpoint.final_settle_ms` and `conversation_incomplete_tail_hold_ms` changes one at a time.
-- If echo-like repeats appear, run a confirmation pass with `voice_quality.early_response.audio_mode = "prepare_only"` and caller silence after the script.
+- Keep this no-barge-in bounded FIFO profile as the best repeat-reliability baseline for inbound Identity.
+- For the next no-barge-in run, isolate endpoint segmentation by reading the same script as either one shorter measured sentence or by increasing final/merge patience in one controlled change: candidate `final_settle_ms = 650` or `merge_window_ms = 180`, not both.
+- Investigate outbound pacing underruns separately. The next config-only probe can raise `streaming_start_buffer_ms` from 300 to 450 or prebuffer the first two chunks, but that trades first-audio latency for smoother playback.
+- Keep domain biasing deferred; the `Motlie`/`barge-in` errors should be tracked as ASR model/runtime quality, not patched with smoke-test-specific keywords.
+
+[[wer_pass]]
+schema_version = 1
+reference_id = "layera-nobarge-identity-script-v1"
+reference_text = """This is a Motlie Layer A no-barge-in identity smoke test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker blue starts the measured sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now stop speaking and wait for the repeat playback. Marker blue ends the measured sentence."""
+reference_sha256 = "cd78ac929cf98ceb56aa48074a9673186e6acc8da82531a98f9d6cf5376b7588"
+raw_asr_text = """This is a Motley layer, a no bargin identity smote test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Blue starts to measure a sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now not I will now stop speaking and wait for the repeat playback. Marker blue and stemmeasure sentence"""
+scored_hypothesis_text = """This is a Motley layer, a no bargin identity smote test. I will read one steady passage, then stay quiet while the gateway repeats what it heard. Marker Blue starts to measure a sentence. The quiet gateway should preserve this whole sentence clearly, including the words hang up near the end. I will now not I will now stop speaking and wait for the repeat playback. Marker blue and stemmeasure sentence"""
+trim_policy = "strict_full"
+trim_start_marker = "Marker blue starts the measured sentence"
+trim_end_marker = "Marker blue ends the measured sentence"
+normalization_policy = "lowercase; replace hyphen with space; strip punctuation except apostrophes; collapse whitespace; score word tokens"
+wer_tool = "local levenshtein word scorer"
+wer_tool_commit = "336e908738cb887fcfda7065f38b0abb5f004d7e"
+reference_word_count = 68
+hypothesis_word_count = 71
+wer_percent = 20.59
+substitutions = 7
+deletions = 2
+insertions = 5
+alignment = [
+  { op = "sub", reference = "motlie", hypothesis = "motley" },
+  { op = "del", reference = "barge", hypothesis = "" },
+  { op = "sub", reference = "in", hypothesis = "bargin" },
+  { op = "sub", reference = "smoke", hypothesis = "smote" },
+  { op = "ins", reference = "", hypothesis = "to" },
+  { op = "sub", reference = "the", hypothesis = "measure" },
+  { op = "sub", reference = "measured", hypothesis = "a" },
+  { op = "ins", reference = "", hypothesis = "i" },
+  { op = "ins", reference = "", hypothesis = "will" },
+  { op = "ins", reference = "", hypothesis = "now" },
+  { op = "ins", reference = "", hypothesis = "not" },
+  { op = "del", reference = "ends", hypothesis = "" },
+  { op = "sub", reference = "the", hypothesis = "and" },
+  { op = "sub", reference = "measured", hypothesis = "stemmeasure" },
+]
+
+[result_latency]
+schema_version = 1
+source = "quality_jsonl"
+quality_events = 80
+caller_turns = 2
+raw_asr_final_events = 2
+attempted_playbacks = 3
+completed_playbacks = 2
+canceled_playbacks = 1
+failed_playbacks = 0
+dropped_quality_events = 0
+excluded_turns_without_playback = 0
+
+[[result_latency.span]]
+name = "asr.endpoint_wait"
+n = 1
+min_ms = 857
+p50_ms = 857
+p95_ms = 857
+max_ms = 857
+
+[[result_latency.span]]
+name = "tts.request_to_first_audio"
+n = 2
+min_ms = 884
+p50_ms = 1612
+p95_ms = 1612
+max_ms = 1612
+
+[[result_latency.span]]
+name = "conversation.visible_turn_to_first_audio"
+n = 2
+min_ms = 884
+p50_ms = 1612
+p95_ms = 1612
+max_ms = 1612
+
+[[result_latency.span]]
+name = "conversation.final_debounce"
+n = 2
+min_ms = 152
+p50_ms = 8018
+p95_ms = 8018
+max_ms = 8018
+
+[[result_latency.span]]
+name = "turn.finalize_to_first_audio"
+n = 2
+min_ms = 1765
+p50_ms = 8902
+p95_ms = 8902
+max_ms = 8902
+
+[result_transport.inbound]
+codec = "PCMU"
+sample_rate_hz = 8000
+packets_total = 4868
+lost_packets = 0
+reordered_frames = 0
+jitter_ms_p50 = 2
+jitter_ms_p95 = 13
+jitter_ms_max = 252
+
+[result_transport.outbound]
+frames_sent = 1211
+underrun_count = 58
+inter_frame_gap_ms_p50 = 20
+inter_frame_gap_ms_p95 = 23
+inter_frame_gap_ms_max = 1180
+queue_depth_p50 = 148
+queue_depth_p95 = 255
+pre_audio_wait_ms_estimate = 3680
+append_starvation_ms_estimate = 0
+post_mark_wait_ms_estimate = 260

@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::early_response::{BoundaryRequirement, EarlyResponsePolicy, EarlyResponseStartTiming};
+use crate::early_response::{
+    BoundaryRequirement, EarlyResponsePolicy, EarlyResponseStartTiming, MissingSignalPolicy,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -200,6 +202,10 @@ fn default_conversation_playback_hold_poll_ms() -> u64 {
     100
 }
 
+fn default_conversation_playback_max_hold_ms() -> u64 {
+    0
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EndpointQualityConfig {
     pub trailing_silence_ms: u64,
@@ -223,6 +229,8 @@ pub struct EndpointQualityConfig {
     pub conversation_low_confidence_threshold_percent: u64,
     #[serde(default = "default_conversation_playback_hold_poll_ms")]
     pub conversation_playback_hold_poll_ms: u64,
+    #[serde(default = "default_conversation_playback_max_hold_ms")]
+    pub conversation_playback_max_hold_ms: u64,
     pub max_turn_words: usize,
     pub max_turn_duration_ms: u64,
 }
@@ -244,6 +252,7 @@ impl Default for EndpointQualityConfig {
             conversation_low_confidence_threshold_percent:
                 default_conversation_low_confidence_threshold_percent(),
             conversation_playback_hold_poll_ms: default_conversation_playback_hold_poll_ms(),
+            conversation_playback_max_hold_ms: default_conversation_playback_max_hold_ms(),
             max_turn_words: 80,
             max_turn_duration_ms: 12_000,
         }
@@ -300,7 +309,18 @@ impl EndpointQualityConfig {
 
     pub fn conversation_low_confidence_hold_allowed(&self, text: &str) -> bool {
         let trimmed = text.trim();
-        !trimmed.is_empty() && !has_terminal_punctuation(trimmed)
+        if trimmed.is_empty() {
+            return false;
+        }
+        if !has_terminal_punctuation(trimmed) {
+            return true;
+        }
+        let word_count = trimmed
+            .split_whitespace()
+            .filter(|word| word.chars().any(char::is_alphanumeric))
+            .count();
+        let char_count = trimmed.chars().filter(|ch| ch.is_alphanumeric()).count();
+        word_count <= self.min_turn_words || char_count <= self.min_turn_chars
     }
 }
 
@@ -405,6 +425,8 @@ pub struct TtsQualityConfig {
     pub max_text_chunk_chars: usize,
     pub first_chunk_max_chars: usize,
     pub prebuffer_chunks: usize,
+    pub streaming_start_buffer_ms: u64,
+    pub tail_pad_ms: u64,
 }
 
 impl Default for TtsQualityConfig {
@@ -415,6 +437,8 @@ impl Default for TtsQualityConfig {
             max_text_chunk_chars: 90,
             first_chunk_max_chars: 40,
             prebuffer_chunks: 1,
+            streaming_start_buffer_ms: 300,
+            tail_pad_ms: 200,
         }
     }
 }
@@ -436,7 +460,7 @@ impl OnsetDuringPlaybackPolicy {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BargeInQualityConfig {
     pub enabled: bool,
     pub speech_onset_cancel_enabled: bool,
@@ -444,7 +468,19 @@ pub struct BargeInQualityConfig {
     pub onset_during_playback: OnsetDuringPlaybackPolicy,
     pub partial_asr_cancel_enabled: bool,
     pub final_asr_cancel_enabled: bool,
+    pub transcript_min_chars: usize,
+    pub transcript_min_words: usize,
+    #[serde(default = "default_missing_signal_policy")]
+    pub missing_signal_policy: MissingSignalPolicy,
+    pub partial_min_confidence: Option<f32>,
+    pub partial_min_stability: Option<f32>,
+    pub final_min_confidence: Option<f32>,
+    pub final_min_stability: Option<f32>,
     pub clear_timeout_ms: u64,
+}
+
+fn default_missing_signal_policy() -> MissingSignalPolicy {
+    MissingSignalPolicy::Conservative
 }
 
 impl Default for BargeInQualityConfig {
@@ -455,7 +491,111 @@ impl Default for BargeInQualityConfig {
             onset_during_playback: OnsetDuringPlaybackPolicy::DeferToPartial,
             partial_asr_cancel_enabled: true,
             final_asr_cancel_enabled: true,
+            transcript_min_chars: 6,
+            transcript_min_words: 2,
+            missing_signal_policy: MissingSignalPolicy::Conservative,
+            partial_min_confidence: None,
+            partial_min_stability: None,
+            final_min_confidence: None,
+            final_min_stability: None,
             clear_timeout_ms: 1_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationPolicyMode {
+    #[default]
+    CurrentCompat,
+    NoBargeInBoundedPending,
+    BargeInCancelOnly,
+    BargeInCoalesceAfterSilence,
+}
+
+impl ConversationPolicyMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CurrentCompat => "current_compat",
+            Self::NoBargeInBoundedPending => "no_barge_in_bounded_pending",
+            Self::BargeInCancelOnly => "barge_in_cancel_only",
+            Self::BargeInCoalesceAfterSilence => "barge_in_coalesce_after_silence",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingOutputOrder {
+    #[default]
+    LatestOnly,
+    Fifo,
+}
+
+impl PendingOutputOrder {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LatestOnly => "latest_only",
+            Self::Fifo => "fifo",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ConversationPolicyConfig {
+    #[serde(default)]
+    pub mode: ConversationPolicyMode,
+    #[serde(default = "default_conversation_policy_active_playback_hold_ms")]
+    pub active_playback_hold_ms: u64,
+    #[serde(default = "default_conversation_policy_max_pending_outputs")]
+    pub max_pending_outputs: usize,
+    #[serde(default)]
+    pub pending_output_order: PendingOutputOrder,
+    #[serde(default = "default_conversation_policy_post_barge_in_silence_ms")]
+    pub post_barge_in_silence_ms: u64,
+    #[serde(default = "default_conversation_policy_post_barge_in_echo_guard_ms")]
+    pub post_barge_in_echo_guard_ms: u64,
+    #[serde(default = "default_conversation_policy_post_barge_in_fragment_max_chars")]
+    pub post_barge_in_fragment_max_chars: usize,
+    #[serde(default = "default_conversation_policy_post_barge_in_fragment_max_words")]
+    pub post_barge_in_fragment_max_words: usize,
+}
+
+fn default_conversation_policy_active_playback_hold_ms() -> u64 {
+    ConversationPolicyConfig::default().active_playback_hold_ms
+}
+
+fn default_conversation_policy_max_pending_outputs() -> usize {
+    ConversationPolicyConfig::default().max_pending_outputs
+}
+
+fn default_conversation_policy_post_barge_in_silence_ms() -> u64 {
+    ConversationPolicyConfig::default().post_barge_in_silence_ms
+}
+
+fn default_conversation_policy_post_barge_in_echo_guard_ms() -> u64 {
+    ConversationPolicyConfig::default().post_barge_in_echo_guard_ms
+}
+
+fn default_conversation_policy_post_barge_in_fragment_max_chars() -> usize {
+    ConversationPolicyConfig::default().post_barge_in_fragment_max_chars
+}
+
+fn default_conversation_policy_post_barge_in_fragment_max_words() -> usize {
+    ConversationPolicyConfig::default().post_barge_in_fragment_max_words
+}
+
+impl Default for ConversationPolicyConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConversationPolicyMode::CurrentCompat,
+            active_playback_hold_ms: 1_000,
+            max_pending_outputs: 1,
+            pending_output_order: PendingOutputOrder::LatestOnly,
+            post_barge_in_silence_ms: 1_200,
+            post_barge_in_echo_guard_ms: 2_000,
+            post_barge_in_fragment_max_chars: 12,
+            post_barge_in_fragment_max_words: 2,
         }
     }
 }
@@ -483,6 +623,25 @@ impl Default for EchoSuppressionQualityConfig {
             long_min_tokens: 4,
             long_token_coverage_percent: 60,
             long_longest_token_run: 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EchoCharacterizationQualityConfig {
+    pub enabled: bool,
+    pub window_ms: u64,
+    pub max_delay_ms: u64,
+    pub emit_interval_ms: u64,
+}
+
+impl Default for EchoCharacterizationQualityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_ms: 240,
+            max_delay_ms: 160,
+            emit_interval_ms: 500,
         }
     }
 }
@@ -570,7 +729,11 @@ pub struct VoiceQualityConfig {
     pub early_response: EarlyResponsePolicy,
     pub barge_in: BargeInQualityConfig,
     #[serde(default)]
+    pub conversation_policy: ConversationPolicyConfig,
+    #[serde(default)]
     pub echo_suppression: EchoSuppressionQualityConfig,
+    #[serde(default)]
+    pub echo_characterization: EchoCharacterizationQualityConfig,
     pub logging: LoggingQualityConfig,
     pub quality_judge: QualityJudgeConfig,
     pub targets: QualityTargetsConfig,
@@ -602,7 +765,9 @@ impl VoiceQualityConfig {
             tts: TtsQualityConfig::default(),
             early_response: EarlyResponsePolicy::default(),
             barge_in: BargeInQualityConfig::default(),
+            conversation_policy: ConversationPolicyConfig::default(),
             echo_suppression: EchoSuppressionQualityConfig::default(),
+            echo_characterization: EchoCharacterizationQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
             quality_judge: QualityJudgeConfig::default(),
             targets: QualityTargetsConfig::default(),
@@ -736,6 +901,12 @@ impl VoiceQualityConfig {
             10,
             1_000,
         )?;
+        ensure_u64(
+            "endpoint.conversation_playback_max_hold_ms",
+            self.endpoint.conversation_playback_max_hold_ms,
+            0,
+            180_000,
+        )?;
         ensure_usize(
             "endpoint.max_turn_words",
             self.endpoint.max_turn_words,
@@ -800,6 +971,13 @@ impl VoiceQualityConfig {
             )?;
         }
         ensure_usize("tts.prebuffer_chunks", self.tts.prebuffer_chunks, 1, 64)?;
+        ensure_u64(
+            "tts.streaming_start_buffer_ms",
+            self.tts.streaming_start_buffer_ms,
+            0,
+            2_000,
+        )?;
+        ensure_u64("tts.tail_pad_ms", self.tts.tail_pad_ms, 0, 2_000)?;
         ensure_usize(
             "early_response.min_text_chars",
             self.early_response.min_text_chars,
@@ -836,11 +1014,71 @@ impl VoiceQualityConfig {
             1,
             1,
         )?;
+        ensure_usize(
+            "barge_in.transcript_min_chars",
+            self.barge_in.transcript_min_chars,
+            0,
+            200,
+        )?;
+        ensure_usize(
+            "barge_in.transcript_min_words",
+            self.barge_in.transcript_min_words,
+            0,
+            50,
+        )?;
+        if let Some(value) = self.barge_in.partial_min_confidence {
+            ensure_f32("barge_in.partial_min_confidence", value, 0.0, 1.0)?;
+        }
+        if let Some(value) = self.barge_in.partial_min_stability {
+            ensure_f32("barge_in.partial_min_stability", value, 0.0, 1.0)?;
+        }
+        if let Some(value) = self.barge_in.final_min_confidence {
+            ensure_f32("barge_in.final_min_confidence", value, 0.0, 1.0)?;
+        }
+        if let Some(value) = self.barge_in.final_min_stability {
+            ensure_f32("barge_in.final_min_stability", value, 0.0, 1.0)?;
+        }
         ensure_u64(
             "barge_in.clear_timeout_ms",
             self.barge_in.clear_timeout_ms,
             100,
             10_000,
+        )?;
+        ensure_u64(
+            "conversation_policy.active_playback_hold_ms",
+            self.conversation_policy.active_playback_hold_ms,
+            0,
+            180_000,
+        )?;
+        ensure_usize(
+            "conversation_policy.max_pending_outputs",
+            self.conversation_policy.max_pending_outputs,
+            1,
+            64,
+        )?;
+        ensure_u64(
+            "conversation_policy.post_barge_in_silence_ms",
+            self.conversation_policy.post_barge_in_silence_ms,
+            0,
+            30_000,
+        )?;
+        ensure_u64(
+            "conversation_policy.post_barge_in_echo_guard_ms",
+            self.conversation_policy.post_barge_in_echo_guard_ms,
+            0,
+            30_000,
+        )?;
+        ensure_usize(
+            "conversation_policy.post_barge_in_fragment_max_chars",
+            self.conversation_policy.post_barge_in_fragment_max_chars,
+            0,
+            200,
+        )?;
+        ensure_usize(
+            "conversation_policy.post_barge_in_fragment_max_words",
+            self.conversation_policy.post_barge_in_fragment_max_words,
+            0,
+            50,
         )?;
         ensure_usize(
             "echo_suppression.min_text_chars",
@@ -883,6 +1121,24 @@ impl VoiceQualityConfig {
             self.echo_suppression.long_longest_token_run,
             1,
             64,
+        )?;
+        ensure_u64(
+            "echo_characterization.window_ms",
+            self.echo_characterization.window_ms,
+            20,
+            2_000,
+        )?;
+        ensure_u64(
+            "echo_characterization.max_delay_ms",
+            self.echo_characterization.max_delay_ms,
+            0,
+            1_000,
+        )?;
+        ensure_u64(
+            "echo_characterization.emit_interval_ms",
+            self.echo_characterization.emit_interval_ms,
+            20,
+            60_000,
         )?;
         ensure_usize(
             "logging.queue_capacity",
@@ -1027,6 +1283,9 @@ impl VoiceQualityConfig {
             if let Some(value) = endpoint.conversation_playback_hold_poll_ms {
                 self.set_endpoint_conversation_playback_hold_poll_ms(value);
             }
+            if let Some(value) = endpoint.conversation_playback_max_hold_ms {
+                self.set_endpoint_conversation_playback_max_hold_ms(value);
+            }
             if let Some(value) = endpoint.max_turn_words {
                 self.set_endpoint_max_turn_words(value);
             }
@@ -1078,6 +1337,12 @@ impl VoiceQualityConfig {
             if let Some(value) = tts.prebuffer_chunks {
                 self.set_tts_prebuffer_chunks(value);
             }
+            if let Some(value) = tts.streaming_start_buffer_ms {
+                self.set_tts_streaming_start_buffer_ms(value);
+            }
+            if let Some(value) = tts.tail_pad_ms {
+                self.set_tts_tail_pad_ms(value);
+            }
         }
         if let Some(early_response) = patch.early_response {
             self.early_response = early_response;
@@ -1098,8 +1363,55 @@ impl VoiceQualityConfig {
             if let Some(value) = barge_in.final_asr_cancel_enabled {
                 self.set_barge_in_final_asr_cancel_enabled(value);
             }
+            if let Some(value) = barge_in.transcript_min_chars {
+                self.set_barge_in_transcript_min_chars(value);
+            }
+            if let Some(value) = barge_in.transcript_min_words {
+                self.set_barge_in_transcript_min_words(value);
+            }
+            if let Some(value) = barge_in.missing_signal_policy {
+                self.barge_in.missing_signal_policy = value;
+            }
+            if let Some(value) = barge_in.partial_min_confidence {
+                self.set_barge_in_partial_min_confidence(value)?;
+            }
+            if let Some(value) = barge_in.partial_min_stability {
+                self.set_barge_in_partial_min_stability(value)?;
+            }
+            if let Some(value) = barge_in.final_min_confidence {
+                self.set_barge_in_final_min_confidence(value)?;
+            }
+            if let Some(value) = barge_in.final_min_stability {
+                self.set_barge_in_final_min_stability(value)?;
+            }
             if let Some(value) = barge_in.clear_timeout_ms {
                 self.set_barge_in_clear_timeout_ms(value);
+            }
+        }
+        if let Some(policy) = patch.conversation_policy {
+            if let Some(value) = policy.mode {
+                self.set_conversation_policy_mode(value);
+            }
+            if let Some(value) = policy.active_playback_hold_ms {
+                self.set_conversation_policy_active_playback_hold_ms(value);
+            }
+            if let Some(value) = policy.max_pending_outputs {
+                self.set_conversation_policy_max_pending_outputs(value);
+            }
+            if let Some(value) = policy.pending_output_order {
+                self.set_conversation_policy_pending_output_order(value);
+            }
+            if let Some(value) = policy.post_barge_in_silence_ms {
+                self.set_conversation_policy_post_barge_in_silence_ms(value);
+            }
+            if let Some(value) = policy.post_barge_in_echo_guard_ms {
+                self.set_conversation_policy_post_barge_in_echo_guard_ms(value);
+            }
+            if let Some(value) = policy.post_barge_in_fragment_max_chars {
+                self.set_conversation_policy_post_barge_in_fragment_max_chars(value);
+            }
+            if let Some(value) = policy.post_barge_in_fragment_max_words {
+                self.set_conversation_policy_post_barge_in_fragment_max_words(value);
             }
         }
         if let Some(echo) = patch.echo_suppression {
@@ -1126,6 +1438,20 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = echo.long_longest_token_run {
                 self.set_echo_suppression_long_longest_token_run(value);
+            }
+        }
+        if let Some(echo) = patch.echo_characterization {
+            if let Some(value) = echo.enabled {
+                self.set_echo_characterization_enabled(value);
+            }
+            if let Some(value) = echo.window_ms {
+                self.set_echo_characterization_window_ms(value);
+            }
+            if let Some(value) = echo.max_delay_ms {
+                self.set_echo_characterization_max_delay_ms(value);
+            }
+            if let Some(value) = echo.emit_interval_ms {
+                self.set_echo_characterization_emit_interval_ms(value);
             }
         }
         if let Some(logging) = patch.logging {
@@ -1341,6 +1667,20 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_endpoint_conversation_playback_max_hold_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 180_000);
+        self.endpoint.conversation_playback_max_hold_ms = clamped.value;
+        self.outcome(
+            "endpoint.conversation_playback_max_hold_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
     pub fn set_endpoint_max_turn_words(&mut self, value: usize) -> QualityMutationOutcome {
         let clamped = clamp_usize(value, 1, 500);
         self.endpoint.max_turn_words = clamped.value;
@@ -1510,6 +1850,28 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_tts_streaming_start_buffer_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 2_000);
+        self.tts.streaming_start_buffer_ms = clamped.value;
+        self.outcome(
+            "tts.streaming_start_buffer_ms",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_tts_tail_pad_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 2_000);
+        self.tts.tail_pad_ms = clamped.value;
+        self.outcome(
+            "tts.tail_pad_ms",
+            clamped.value,
+            ApplyBoundary::NewPlaybackRequest,
+            clamped.clamped,
+        )
+    }
+
     pub fn set_early_response_enabled(&mut self, value: bool) -> QualityMutationOutcome {
         self.early_response.enabled = value;
         self.outcome(
@@ -1612,11 +1974,199 @@ impl VoiceQualityConfig {
         )
     }
 
+    pub fn set_barge_in_transcript_min_chars(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 200);
+        self.barge_in.transcript_min_chars = clamped.value;
+        self.outcome(
+            "barge_in.transcript_min_chars",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_barge_in_transcript_min_words(&mut self, value: usize) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 50);
+        self.barge_in.transcript_min_words = clamped.value;
+        self.outcome(
+            "barge_in.transcript_min_words",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_barge_in_partial_min_confidence(
+        &mut self,
+        value: f32,
+    ) -> Result<QualityMutationOutcome> {
+        ensure_f32("barge_in.partial_min_confidence", value, 0.0, 1.0)?;
+        self.barge_in.partial_min_confidence = Some(value);
+        Ok(self.outcome(
+            "barge_in.partial_min_confidence",
+            format!("{value:.2}"),
+            ApplyBoundary::NewTurn,
+            false,
+        ))
+    }
+
+    pub fn set_barge_in_partial_min_stability(
+        &mut self,
+        value: f32,
+    ) -> Result<QualityMutationOutcome> {
+        ensure_f32("barge_in.partial_min_stability", value, 0.0, 1.0)?;
+        self.barge_in.partial_min_stability = Some(value);
+        Ok(self.outcome(
+            "barge_in.partial_min_stability",
+            format!("{value:.2}"),
+            ApplyBoundary::NewTurn,
+            false,
+        ))
+    }
+
+    pub fn set_barge_in_final_min_confidence(
+        &mut self,
+        value: f32,
+    ) -> Result<QualityMutationOutcome> {
+        ensure_f32("barge_in.final_min_confidence", value, 0.0, 1.0)?;
+        self.barge_in.final_min_confidence = Some(value);
+        Ok(self.outcome(
+            "barge_in.final_min_confidence",
+            format!("{value:.2}"),
+            ApplyBoundary::NewTurn,
+            false,
+        ))
+    }
+
+    pub fn set_barge_in_final_min_stability(
+        &mut self,
+        value: f32,
+    ) -> Result<QualityMutationOutcome> {
+        ensure_f32("barge_in.final_min_stability", value, 0.0, 1.0)?;
+        self.barge_in.final_min_stability = Some(value);
+        Ok(self.outcome(
+            "barge_in.final_min_stability",
+            format!("{value:.2}"),
+            ApplyBoundary::NewTurn,
+            false,
+        ))
+    }
+
     pub fn set_barge_in_clear_timeout_ms(&mut self, value: u64) -> QualityMutationOutcome {
         let clamped = clamp_u64(value, 100, 10_000);
         self.barge_in.clear_timeout_ms = clamped.value;
         self.outcome(
             "barge_in.clear_timeout_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_mode(
+        &mut self,
+        value: ConversationPolicyMode,
+    ) -> QualityMutationOutcome {
+        self.conversation_policy.mode = value;
+        self.outcome(
+            "conversation_policy.mode",
+            value.label(),
+            ApplyBoundary::NewTurn,
+            false,
+        )
+    }
+
+    pub fn set_conversation_policy_active_playback_hold_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 180_000);
+        self.conversation_policy.active_playback_hold_ms = clamped.value;
+        self.outcome(
+            "conversation_policy.active_playback_hold_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_max_pending_outputs(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 1, 64);
+        self.conversation_policy.max_pending_outputs = clamped.value;
+        self.outcome(
+            "conversation_policy.max_pending_outputs",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_pending_output_order(
+        &mut self,
+        value: PendingOutputOrder,
+    ) -> QualityMutationOutcome {
+        self.conversation_policy.pending_output_order = value;
+        self.outcome(
+            "conversation_policy.pending_output_order",
+            value.label(),
+            ApplyBoundary::NewTurn,
+            false,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_silence_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 30_000);
+        self.conversation_policy.post_barge_in_silence_ms = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_silence_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_echo_guard_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 30_000);
+        self.conversation_policy.post_barge_in_echo_guard_ms = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_echo_guard_ms",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_fragment_max_chars(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 200);
+        self.conversation_policy.post_barge_in_fragment_max_chars = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_fragment_max_chars",
+            clamped.value,
+            ApplyBoundary::NewTurn,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_conversation_policy_post_barge_in_fragment_max_words(
+        &mut self,
+        value: usize,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_usize(value, 0, 50);
+        self.conversation_policy.post_barge_in_fragment_max_words = clamped.value;
+        self.outcome(
+            "conversation_policy.post_barge_in_fragment_max_words",
             clamped.value,
             ApplyBoundary::NewTurn,
             clamped.clamped,
@@ -1718,6 +2268,52 @@ impl VoiceQualityConfig {
             "echo_suppression.long_longest_token_run",
             clamped.value,
             ApplyBoundary::NextAsrSession,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_characterization_enabled(&mut self, value: bool) -> QualityMutationOutcome {
+        self.echo_characterization.enabled = value;
+        self.outcome(
+            "echo_characterization.enabled",
+            value,
+            ApplyBoundary::Immediate,
+            false,
+        )
+    }
+
+    pub fn set_echo_characterization_window_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 20, 2_000);
+        self.echo_characterization.window_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.window_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_characterization_max_delay_ms(&mut self, value: u64) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 0, 1_000);
+        self.echo_characterization.max_delay_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.max_delay_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
+            clamped.clamped,
+        )
+    }
+
+    pub fn set_echo_characterization_emit_interval_ms(
+        &mut self,
+        value: u64,
+    ) -> QualityMutationOutcome {
+        let clamped = clamp_u64(value, 20, 60_000);
+        self.echo_characterization.emit_interval_ms = clamped.value;
+        self.outcome(
+            "echo_characterization.emit_interval_ms",
+            clamped.value,
+            ApplyBoundary::Immediate,
             clamped.clamped,
         )
     }
@@ -1990,7 +2586,11 @@ pub struct QualityConfigPatch {
     #[serde(default)]
     pub barge_in: Option<BargeInQualityConfigPatch>,
     #[serde(default)]
+    pub conversation_policy: Option<ConversationPolicyConfigPatch>,
+    #[serde(default)]
     pub echo_suppression: Option<EchoSuppressionQualityConfigPatch>,
+    #[serde(default)]
+    pub echo_characterization: Option<EchoCharacterizationQualityConfigPatch>,
     #[serde(default)]
     pub logging: Option<LoggingQualityConfigPatch>,
     #[serde(default)]
@@ -2025,6 +2625,7 @@ pub struct EndpointQualityConfigPatch {
     pub conversation_incomplete_tail_hold_ms: Option<u64>,
     pub conversation_low_confidence_threshold_percent: Option<u64>,
     pub conversation_playback_hold_poll_ms: Option<u64>,
+    pub conversation_playback_max_hold_ms: Option<u64>,
     pub max_turn_words: Option<usize>,
     pub max_turn_duration_ms: Option<u64>,
 }
@@ -2055,6 +2656,8 @@ pub struct TtsQualityConfigPatch {
     pub max_text_chunk_chars: Option<usize>,
     pub first_chunk_max_chars: Option<usize>,
     pub prebuffer_chunks: Option<usize>,
+    pub streaming_start_buffer_ms: Option<u64>,
+    pub tail_pad_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2065,7 +2668,27 @@ pub struct BargeInQualityConfigPatch {
     pub onset_during_playback: Option<OnsetDuringPlaybackPolicy>,
     pub partial_asr_cancel_enabled: Option<bool>,
     pub final_asr_cancel_enabled: Option<bool>,
+    pub transcript_min_chars: Option<usize>,
+    pub transcript_min_words: Option<usize>,
+    pub missing_signal_policy: Option<MissingSignalPolicy>,
+    pub partial_min_confidence: Option<f32>,
+    pub partial_min_stability: Option<f32>,
+    pub final_min_confidence: Option<f32>,
+    pub final_min_stability: Option<f32>,
     pub clear_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConversationPolicyConfigPatch {
+    pub mode: Option<ConversationPolicyMode>,
+    pub active_playback_hold_ms: Option<u64>,
+    pub max_pending_outputs: Option<usize>,
+    pub pending_output_order: Option<PendingOutputOrder>,
+    pub post_barge_in_silence_ms: Option<u64>,
+    pub post_barge_in_echo_guard_ms: Option<u64>,
+    pub post_barge_in_fragment_max_chars: Option<usize>,
+    pub post_barge_in_fragment_max_words: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2079,6 +2702,15 @@ pub struct EchoSuppressionQualityConfigPatch {
     pub long_min_tokens: Option<usize>,
     pub long_token_coverage_percent: Option<u64>,
     pub long_longest_token_run: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EchoCharacterizationQualityConfigPatch {
+    pub enabled: Option<bool>,
+    pub window_ms: Option<u64>,
+    pub max_delay_ms: Option<u64>,
+    pub emit_interval_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2140,6 +2772,8 @@ mod tests {
         assert_eq!(config.tts.max_text_chunk_chars, 90);
         assert_eq!(config.tts.first_chunk_max_chars, 40);
         assert_eq!(config.tts.prebuffer_chunks, 1);
+        assert_eq!(config.tts.streaming_start_buffer_ms, 300);
+        assert_eq!(config.tts.tail_pad_ms, 200);
     }
 
     #[test]
@@ -2258,6 +2892,55 @@ mod tests {
     }
 
     #[test]
+    fn toml_accepts_barge_in_transcript_thresholds() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.barge_in]
+            transcript_min_chars = 8
+            transcript_min_words = 2
+            missing_signal_policy = "conservative"
+            partial_min_confidence = 0.50
+            partial_min_stability = 0.55
+            final_min_confidence = 0.70
+            final_min_stability = 0.75
+            "#,
+        )
+        .expect("quality config parses");
+
+        assert_eq!(config.barge_in.transcript_min_chars, 8);
+        assert_eq!(config.barge_in.transcript_min_words, 2);
+        assert_eq!(
+            config.barge_in.missing_signal_policy,
+            MissingSignalPolicy::Conservative
+        );
+        assert_eq!(config.barge_in.partial_min_confidence, Some(0.50));
+        assert_eq!(config.barge_in.partial_min_stability, Some(0.55));
+        assert_eq!(config.barge_in.final_min_confidence, Some(0.70));
+        assert_eq!(config.barge_in.final_min_stability, Some(0.75));
+    }
+
+    #[test]
+    fn barge_in_threshold_numeric_knobs_validate() {
+        let mut config = VoiceQualityConfig::default();
+        config.set_barge_in_transcript_min_chars(999);
+        config.set_barge_in_transcript_min_words(999);
+        assert_eq!(config.barge_in.transcript_min_chars, 200);
+        assert_eq!(config.barge_in.transcript_min_words, 50);
+
+        let error = config
+            .set_barge_in_partial_min_confidence(1.1)
+            .expect_err("confidence above one should be rejected");
+        assert!(error
+            .to_string()
+            .contains("barge_in.partial_min_confidence"));
+
+        let error = config
+            .set_barge_in_final_min_confidence(-0.1)
+            .expect_err("confidence below zero should be rejected");
+        assert!(error.to_string().contains("barge_in.final_min_confidence"));
+    }
+
+    #[test]
     fn toml_rejects_unknown_voice_quality_keys() {
         for raw in [
             r#"
@@ -2271,6 +2954,14 @@ mod tests {
             r#"
             [voice_quality.early_response]
             start_timng = "endpoint_candidate_only"
+            "#,
+            r#"
+            [voice_quality.conversation_policy]
+            max_pending_output = 3
+            "#,
+            r#"
+            [voice_quality.echo_characterization]
+            emit_intervals_ms = 500
             "#,
         ] {
             let error = VoiceQualityConfig::from_toml_str(raw)
@@ -2297,11 +2988,160 @@ mod tests {
 
             [voice_quality.tts]
             generation_mode = "streaming"
+            streaming_start_buffer_ms = 420
+            tail_pad_ms = 240
             "#,
         )
         .expect("quality parser should accept full gateway TOML metadata");
 
         assert_eq!(config.tts.generation_mode, TtsGenerationMode::Streaming);
+        assert_eq!(config.tts.streaming_start_buffer_ms, 420);
+        assert_eq!(config.tts.tail_pad_ms, 240);
+    }
+
+    #[test]
+    fn toml_accepts_partial_conversation_policy_config() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.conversation_policy]
+            mode = "barge_in_cancel_only"
+            "#,
+        )
+        .expect("parse partial conversation policy config");
+
+        assert_eq!(
+            config.conversation_policy.mode,
+            ConversationPolicyMode::BargeInCancelOnly
+        );
+        assert_eq!(config.conversation_policy.active_playback_hold_ms, 1_000);
+        assert_eq!(config.conversation_policy.max_pending_outputs, 1);
+        assert_eq!(
+            config.conversation_policy.pending_output_order,
+            PendingOutputOrder::LatestOnly
+        );
+        assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 1_200);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            2_000
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            12
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            2
+        );
+    }
+
+    #[test]
+    fn toml_accepts_conversation_policy_config() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.conversation_policy]
+            mode = "no_barge_in_bounded_pending"
+            active_playback_hold_ms = 1000
+            max_pending_outputs = 3
+            pending_output_order = "fifo"
+            post_barge_in_silence_ms = 1200
+            post_barge_in_echo_guard_ms = 1800
+            post_barge_in_fragment_max_chars = 10
+            post_barge_in_fragment_max_words = 2
+            "#,
+        )
+        .expect("conversation policy config parses");
+
+        assert_eq!(
+            config.conversation_policy.mode,
+            ConversationPolicyMode::NoBargeInBoundedPending
+        );
+        assert_eq!(config.conversation_policy.active_playback_hold_ms, 1_000);
+        assert_eq!(config.conversation_policy.max_pending_outputs, 3);
+        assert_eq!(
+            config.conversation_policy.pending_output_order,
+            PendingOutputOrder::Fifo
+        );
+        assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 1_200);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            1_800
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            10
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            2
+        );
+    }
+
+    #[test]
+    fn conversation_policy_numeric_toml_knobs_clamp() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.conversation_policy]
+            active_playback_hold_ms = 999999
+            max_pending_outputs = 0
+            post_barge_in_silence_ms = 999999
+            post_barge_in_echo_guard_ms = 999999
+            post_barge_in_fragment_max_chars = 999999
+            post_barge_in_fragment_max_words = 999999
+            "#,
+        )
+        .expect("conversation policy numeric knobs clamp");
+
+        assert_eq!(config.conversation_policy.active_playback_hold_ms, 180_000);
+        assert_eq!(config.conversation_policy.max_pending_outputs, 1);
+        assert_eq!(config.conversation_policy.post_barge_in_silence_ms, 30_000);
+        assert_eq!(
+            config.conversation_policy.post_barge_in_echo_guard_ms,
+            30_000
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_chars,
+            200
+        );
+        assert_eq!(
+            config.conversation_policy.post_barge_in_fragment_max_words,
+            50
+        );
+    }
+
+    #[test]
+    fn toml_accepts_echo_characterization_config() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.echo_characterization]
+            enabled = true
+            window_ms = 320
+            max_delay_ms = 180
+            emit_interval_ms = 250
+            "#,
+        )
+        .expect("echo characterization config parses");
+
+        assert!(config.echo_characterization.enabled);
+        assert_eq!(config.echo_characterization.window_ms, 320);
+        assert_eq!(config.echo_characterization.max_delay_ms, 180);
+        assert_eq!(config.echo_characterization.emit_interval_ms, 250);
+    }
+
+    #[test]
+    fn echo_characterization_numeric_toml_knobs_clamp() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.echo_characterization]
+            window_ms = 1
+            max_delay_ms = 999999
+            emit_interval_ms = 1
+            "#,
+        )
+        .expect("echo characterization numeric knobs clamp");
+
+        assert_eq!(config.echo_characterization.window_ms, 20);
+        assert_eq!(config.echo_characterization.max_delay_ms, 1_000);
+        assert_eq!(config.echo_characterization.emit_interval_ms, 20);
     }
 
     #[test]
