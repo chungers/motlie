@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-01 PDT | @codex-541 | Linked the #586 audio-first barge-in boundary design and clarified that `echo_characterization` remains measurement-only until media can produce typed caller-onset evidence. |
 | 2026-07-01 PDT | @codex-541 | Updated the current no-barge-in Identity baseline and recorded the #587 live barge-in validation pass: 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, bounded FIFO Identity for no-barge-in, and #586 AEC/VAD as the remaining follow-up. |
 | 2026-06-29 PDT | @codex-541 | Added opt-in #586 `echo_characterization` diagnostic knobs for measuring inbound/outbound echo correlation before the AEC/VAD follow-up. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs for suppressing active/recent-playback echo fragments before they cancel or reach the processor. |
@@ -429,9 +430,11 @@ spans while that playback is active or recently completed.
 | `emit_interval_ms` | `500` | Minimum interval between diagnostic spans on a media stream. |
 
 Use this only in per-run configs when characterizing barge-in false onsets or
-post-playback leakage. Post-merge #586 follow-up should analyze correlation
-peak, estimated delay, and echo return level across live barge-in samples before
-choosing the AEC path or an echo-aware onset gate.
+post-playback leakage. The #586 design in
+[`DESIGN-586-aec-vad-boundary.md`](DESIGN-586-aec-vad-boundary.md) keeps this
+measurement separate from behavior changes: policy should not consume the
+diagnostic until media can produce typed caller-onset evidence with freshness,
+confidence, echo margin, and graceful fallback semantics.
 
 ### Quality Logging And Judge
 

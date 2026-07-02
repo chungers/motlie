@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-01 PDT | @codex-541 | Added #586 design cross-link: Layer B should use media-owned audio evidence for active-playback caller onset, with ASR text as fallback rather than the primary boundary. |
 | 2026-07-01 PDT | @codex-541 | Recorded the #587 live barge-in validation pass: PR #588 dispatch guard prevented assistant echo from reaching Identity; #586 remains the AEC/VAD boundary follow-up using echo-characterization measurements. |
 | 2026-06-29 PDT | @codex-541 | Added #586 measurement-only echo-characterization note: PR #588 records media correlation data, while AEC/VAD policy remains follow-up. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard design notes: guarded finals are evaluated before cancellation and processor dispatch; #586 remains the AEC/VAD boundary. |
@@ -117,7 +118,7 @@ Media still owns frame-level speech onset and echo-guard classification. When ec
 
 Layer A, implemented in PR #565, reduces ASR-tokenization fragility for non-`current_compat` transcript-triggered barge-in. The cancel decision uses a normalization floor (reject empty, whitespace-only, and punctuation-only text), echo-suppressed upstream transcript eligibility, and conservative ASR score evidence. `barge_in.transcript_min_chars` and `barge_in.transcript_min_words` remain in config for telemetry and ASR-runtime-switch drift comparison only; they are not correctness gates for non-compat modes. Missing or unconfigured required ASR score signals fail closed under `barge_in.missing_signal_policy = "conservative"`. Partial ASR cancellation requires configured and present confidence plus stability. Final ASR cancellation requires configured and present confidence; `final_min_stability` remains optional because current final ASR does not consistently report stability. `current_compat` keeps the legacy short partial/final behavior for compatibility.
 
-Layer B is the intended long-term boundary for caller interruption: VAD/onset-anchored barge-in with echo-robust audio evidence. PR #588 adds measurement-only `voice_quality.echo_characterization` instrumentation that emits `media.echo_characterization` spans with inbound/outbound RMS, correlation peak, estimated delay, and active/recent playback state. No policy consumes those spans yet. Post-merge #586 follow-up must run live barge-in probes with this diagnostic enabled, characterize echo delay/return level, then choose either AEC insertion or an echo-aware onset gate before changing cancellation behavior.
+Layer B is the intended long-term boundary for caller interruption: VAD/onset-anchored barge-in with echo-robust audio evidence. PR #588 adds measurement-only `voice_quality.echo_characterization` instrumentation that emits `media.echo_characterization` spans with inbound/outbound RMS, correlation peak, estimated delay, and active/recent playback state. No policy consumes those spans yet. [`DESIGN-586-aec-vad-boundary.md`](DESIGN-586-aec-vad-boundary.md) defines the follow-up boundary: media should produce typed caller-onset evidence from inbound audio plus outbound reference audio, while conversation policy consumes that state and keeps ASR text as fallback/corroboration.
 
 ## Global TOML Surface
 

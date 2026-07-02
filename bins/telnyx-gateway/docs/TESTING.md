@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-01 PDT | @codex-541 | Linked the #586 AEC/VAD design to the live-test protocol and kept upcoming barge-in validation focused on audio evidence instead of Identity or transcript-token heuristics. |
 | 2026-07-01 PDT | @codex-541 | Recorded the #587 live barge-in dispatch-guard validation pass and current continuation protocol: no-barge-in baseline is 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, and bounded FIFO Identity; remaining follow-up is #586 echo/AEC measurement plus short-terminal-phrase TTS audio inspection. |
 | 2026-06-29 PDT | @codex-541 | Added #586 echo-characterization live-run protocol: enable the diagnostic per run, record `media.echo_characterization` metrics, and leave AEC/VAD behavior changes to follow-up after PR #588. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs to the live-test protocol; the next barge-in run should verify one clean replacement turn before #586 AEC/VAD work. |
@@ -596,10 +597,12 @@ Next hypotheses, one per run:
 - Barge-in regression: keep the #587 validation profile available for repeated
   sampling if reviewers request it, but the 2026-07-01 live sample passed the
   dispatch-guard acceptance check.
-- #586 AEC/VAD boundary: use the collected `media.echo_characterization` spans
-  and additional barge-in samples to choose AEC insertion or an echo-aware onset
-  gate. Do not make policy consume the diagnostic until the correlation, delay,
-  and echo-return evidence supports the boundary.
+- #586 AEC/VAD boundary: follow
+  [`DESIGN-586-aec-vad-boundary.md`](DESIGN-586-aec-vad-boundary.md). Use the
+  collected `media.echo_characterization` spans and additional barge-in samples
+  to choose AEC insertion or an echo-aware onset gate. Do not make policy consume
+  the diagnostic until media can emit typed caller-onset evidence with freshness,
+  confidence, echo margin, and fail-closed fallback semantics.
 - Turn-batching validation: after barge-in is revalidated, run
   `processor = "turn_batched_identity"` with fixed N=2 and confirm the prompt
   handler sees one joined prompt with two source turns, not two separate
