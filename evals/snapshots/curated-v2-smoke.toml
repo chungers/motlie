@@ -509,6 +509,193 @@ max_wall_time_secs = 1200
 cpu_depth_allowed = ["smoke"]
 
 [[cells]]
+id = "ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m"
+bundle_id = "ornith_1_0_35b_gguf"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "ornith"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-ornith-1-0-35b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["ornith-1.0-35b-Q4_K_M.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m"
+bundle_id = "ornith_1_0_35b_gguf"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "ornith"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-ornith-1-0-35b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["ornith-1.0-35b-Q4_K_M.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+
+[[cells]]
+id = "ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m"
+bundle_id = "ornith_1_0_35b_gguf"
+scenario = "chat_completion_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "ornith"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-ornith-1-0-35b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["ornith-1.0-35b-Q4_K_M.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m"
+bundle_id = "ornith_1_0_35b_gguf"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "ornith"
+checkpoint_format = "gguf"
+quantization = "q4_k_m"
+backend = "llama_cpp"
+features = ["model-ornith-1-0-35b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["ornith-1.0-35b-Q4_K_M.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0"
+bundle_id = "ornith_1_0_35b_gguf"
+scenario = "chat_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "ornith"
+checkpoint_format = "gguf"
+quantization = "q8_0"
+backend = "llama_cpp"
+features = ["model-ornith-1-0-35b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["ornith-1.0-35b-Q8_0.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0"
+bundle_id = "ornith_1_0_35b_gguf"
+scenario = "bench_chat_startup"
+capability = "perf"
+depth = "smoke"
+model_family = "ornith"
+checkpoint_format = "gguf"
+quantization = "q8_0"
+backend = "llama_cpp"
+features = ["model-ornith-1-0-35b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["ornith-1.0-35b-Q8_0.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+
+[[cells]]
+id = "ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0"
+bundle_id = "ornith_1_0_35b_gguf"
+scenario = "chat_completion_smoke"
+capability = "chat"
+depth = "smoke"
+model_family = "ornith"
+checkpoint_format = "gguf"
+quantization = "q8_0"
+backend = "llama_cpp"
+features = ["model-ornith-1-0-35b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["ornith-1.0-35b-Q8_0.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+[[cells]]
+id = "ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q8_0"
+bundle_id = "ornith_1_0_35b_gguf"
+scenario = "tool_use_weather_cel_smoke"
+capability = "tool_use"
+depth = "smoke"
+model_family = "ornith"
+checkpoint_format = "gguf"
+quantization = "q8_0"
+backend = "llama_cpp"
+features = ["model-ornith-1-0-35b-gguf"]
+profiles = ["local-cpu-x86_64", "local-cpu-aarch64", "apple-metal", "dgx-spark", "cuda-workstation"]
+[cells.profile_features]
+"apple-metal" = ["metal", "accelerate"]
+"dgx-spark" = ["cuda", "llama-cpp-cuda"]
+"cuda-workstation" = ["cuda", "llama-cpp-cuda"]
+[cells.artifact]
+requires_hf_token = false
+patterns = ["ornith-1.0-35b-Q8_0.gguf"]
+[cells.budgets]
+max_wall_time_secs = 1200
+cpu_depth_allowed = ["smoke"]
+
+
+[[cells]]
 id = "gemma4_e2b_gguf__chat_smoke__smoke__gguf_q4_k_m"
 bundle_id = "gemma4_e2b_gguf"
 scenario = "chat_smoke"

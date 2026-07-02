@@ -886,6 +886,10 @@ fn active_features() -> Vec<String> {
             cfg!(feature = "model-qwen3-6-27b-gguf"),
         ),
         (
+            "model-ornith-1-0-35b-gguf",
+            cfg!(feature = "model-ornith-1-0-35b-gguf"),
+        ),
+        (
             "model-piper-en-us-ljspeech-medium",
             cfg!(feature = "model-piper-en-us-ljspeech-medium"),
         ),

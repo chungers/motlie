@@ -8,6 +8,7 @@
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
 ))]
 use std::fmt;
 use std::str::FromStr;
@@ -22,6 +23,7 @@ use std::str::FromStr;
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
 ))]
 use crate::{BundleFamily, BundleRequirements, PlatformConstraint};
 #[cfg(any(
@@ -34,6 +36,7 @@ use crate::{BundleFamily, BundleRequirements, PlatformConstraint};
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
 ))]
 use motlie_model::eval::EvalTrack;
 #[cfg(any(
@@ -46,6 +49,7 @@ use motlie_model::eval::EvalTrack;
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
 ))]
 use motlie_model::BundleId;
 
@@ -58,6 +62,7 @@ pub const QWEN3_4B_GGUF_SELECTOR: &str = "qwen/qwen3_4b_gguf";
 pub const GEMMA4_E2B_GGUF_SELECTOR: &str = "google/gemma4_e2b_gguf";
 pub const GEMMA4_E4B_GGUF_SELECTOR: &str = "google/gemma4_e4b_gguf";
 pub const QWEN3_6_27B_GGUF_SELECTOR: &str = "qwen/qwen3_6_27b_gguf";
+pub const ORNITH_1_0_35B_GGUF_SELECTOR: &str = "deepreinforce-ai/ornith_1_0_35b_gguf";
 
 #[cfg(any(feature = "model-qwen3-4b", feature = "model-qwen3-4b-gguf"))]
 pub(crate) fn qwen3_4b_identity() -> motlie_model::ModelIdentity {
@@ -86,6 +91,26 @@ pub(crate) fn qwen3_6_27b_identity() -> motlie_model::ModelIdentity {
         display_name: "Qwen3.6 27B".into(),
         family: BundleFamily::Qwen,
         capabilities: motlie_model::Capabilities::chat_and_completion(),
+        eval_tracks: vec![
+            EvalTrack::Chat,
+            EvalTrack::Reasoning,
+            EvalTrack::Summarization,
+            EvalTrack::Classification,
+        ],
+        requirements: BundleRequirements {
+            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            build: vec![],
+        },
+    }
+}
+
+#[cfg(feature = "model-ornith-1-0-35b-gguf")]
+pub(crate) fn ornith_1_0_35b_identity() -> motlie_model::ModelIdentity {
+    motlie_model::ModelIdentity {
+        id: BundleId::new("ornith_1_0_35b"),
+        display_name: "Ornith 1.0 35B".into(),
+        family: BundleFamily::Other("Ornith".into()),
+        capabilities: motlie_model::Capabilities::chat_completion_and_tool_use(),
         eval_tracks: vec![
             EvalTrack::Chat,
             EvalTrack::Reasoning,
@@ -174,6 +199,8 @@ pub mod gemma4_e2b_gguf;
 pub mod gemma4_e4b;
 #[cfg(feature = "model-gemma4-e4b-gguf")]
 pub mod gemma4_e4b_gguf;
+#[cfg(feature = "model-ornith-1-0-35b-gguf")]
+pub mod ornith_1_0_35b_gguf;
 #[cfg(feature = "model-qwen3-4b")]
 pub mod qwen3_4b;
 #[cfg(feature = "model-qwen3-4b-gguf")]
@@ -203,6 +230,8 @@ pub enum ChatModels {
     Qwen3_4B_Gguf,
     #[cfg(feature = "model-qwen3-6-27b-gguf")]
     Qwen3_6_27B_Gguf,
+    #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+    Ornith_1_0_35B_Gguf,
 }
 
 #[cfg(any(
@@ -215,6 +244,7 @@ pub enum ChatModels {
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
 ))]
 impl ChatModels {
     pub fn as_str(&self) -> &'static str {
@@ -237,6 +267,8 @@ impl ChatModels {
             Self::Qwen3_4B_Gguf => qwen3_4b_gguf::SELECTOR,
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf => qwen3_6_27b_gguf::SELECTOR,
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf => ornith_1_0_35b_gguf::SELECTOR,
         }
     }
 
@@ -260,6 +292,8 @@ impl ChatModels {
             Self::Qwen3_4B_Gguf => qwen3_4b_gguf::descriptor().id,
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf => qwen3_6_27b_gguf::descriptor().id,
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf => ornith_1_0_35b_gguf::descriptor().id,
         }
     }
 
@@ -283,6 +317,8 @@ impl ChatModels {
             Self::Qwen3_4B_Gguf => qwen3_4b_gguf::descriptor(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf => qwen3_6_27b_gguf::descriptor(),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf => ornith_1_0_35b_gguf::descriptor(),
         }
     }
 
@@ -306,6 +342,8 @@ impl ChatModels {
             Self::Qwen3_4B_Gguf => qwen3_4b_gguf::bundle(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf => qwen3_6_27b_gguf::bundle(),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf => ornith_1_0_35b_gguf::bundle(),
         }
     }
 }
@@ -320,6 +358,7 @@ impl ChatModels {
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
 ))]
 impl fmt::Display for ChatModels {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -384,6 +423,12 @@ impl FromStr for ChatModels {
             qwen3_6_27b_gguf::SELECTOR => Ok(Self::Qwen3_6_27B_Gguf),
             #[cfg(not(feature = "model-qwen3-6-27b-gguf"))]
             QWEN3_6_27B_GGUF_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
+                selector: value.to_owned(),
+            }),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            ornith_1_0_35b_gguf::SELECTOR => Ok(Self::Ornith_1_0_35B_Gguf),
+            #[cfg(not(feature = "model-ornith-1-0-35b-gguf"))]
+            ORNITH_1_0_35B_GGUF_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
                 selector: value.to_owned(),
             }),
             other => Err(crate::ModelsError::UnknownChatModel {

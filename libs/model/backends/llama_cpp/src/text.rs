@@ -205,6 +205,26 @@ impl LlamaCppTextSpec {
             recommended_system_prompt: None,
         }
     }
+
+    pub fn ornith_1_0_35b() -> Self {
+        Self {
+            id: BundleId::new("ornith_1_0_35b_gguf"),
+            display_name: "Ornith 1.0 35B (GGUF)",
+            model_prefix: "ornith-1.0-35b",
+            file_layout: GgufFileLayout::QuantizedSuffix,
+            arch: LlamaCppTextArch::Qwen3,
+            thinking: ThinkingMode::Auto,
+            capabilities: Capabilities::chat_completion_and_tool_use(),
+            quantization: curated_q4_q8_support(),
+            default_context_length: 32768,
+            recommended_generation_params: GenerationParams {
+                temperature: Some(0.6),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: None,
+        }
+    }
 }
 
 /// Backend adapter for `llama.cpp` text-generation over GGUF checkpoints.
@@ -1691,6 +1711,27 @@ mod tests {
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
         assert!(!spec.capabilities.supports(CapabilityKind::Vision));
+    }
+
+    #[test]
+    fn ornith_spec_has_expected_identity_quantization_and_tool_use() {
+        let spec = LlamaCppTextSpec::ornith_1_0_35b();
+
+        assert_eq!(spec.id.as_str(), "ornith_1_0_35b_gguf");
+        assert_eq!(spec.display_name, "Ornith 1.0 35B (GGUF)");
+        assert_eq!(spec.model_prefix, "ornith-1.0-35b");
+        assert_eq!(spec.arch, LlamaCppTextArch::Qwen3);
+        assert_eq!(spec.thinking, ThinkingMode::Auto);
+        assert_eq!(
+            spec.quantization.recommended(),
+            Some(QuantizationScheme::GgufQ4_K_M)
+        );
+        assert!(spec.quantization.supports(QuantizationScheme::GgufQ4_K_M));
+        assert!(spec.quantization.supports(QuantizationScheme::GgufQ8_0));
+        assert!(!spec.quantization.supports(QuantizationScheme::GgufQ5_K_M));
+        assert!(spec.capabilities.supports(CapabilityKind::Chat));
+        assert!(spec.capabilities.supports(CapabilityKind::Completion));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
     }
 
     #[test]
