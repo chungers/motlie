@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-02 PDT | @codex-541 | Added #596 implementation-review fixes: behavior-mode-only audio cancel trigger, calibrated-delay residual evidence, poisoning-resistant calibration, and configurable jitter/correlation/EMA bounds. |
 | 2026-07-02 PDT | @codex-541 | Added the implemented #586 `audio_barge_in` strict config surface: media-owned typed evidence bounds, policy-owned uncertain arbitration, and behavior-neutral `measure_only` default. |
 | 2026-07-01 PDT | @codex-541 | Linked the #586 audio-first barge-in boundary design and clarified that `echo_characterization` remains measurement-only until media can produce typed caller-onset evidence. |
 | 2026-07-01 PDT | @codex-541 | Updated the current no-barge-in Identity baseline and recorded the #587 live barge-in validation pass: 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, bounded FIFO Identity for no-barge-in, and #586 AEC/VAD as the remaining follow-up. |
@@ -467,6 +468,18 @@ reserved and currently rejected until a production AEC backend is selected.
 | `min_echo_margin_db_floor` | `3.0` | Minimum calibrated positive margin above predicted echo for trusted onset. |
 | `min_echo_margin_db_ceiling` | `18.0` | Upper sanity bound for confidence scaling; not a global acoustic-path threshold. |
 | `max_invalid_frame_ratio` | `0.05` | Loss/reorder/stale-frame ratio above which a window fails safe. |
+| `max_jitter_ms` | `100` | Windowed jitter bound above which evidence fails safe. |
+| `min_speechlike_correlation` | `0.05` | Minimum correlation for speech/echo-like calibrated-delay evidence; low-correlation speech remains fail-safe unless residual speech is established. |
+| `calibration_min_correlation` | `0.65` | Minimum correlation required before a playback-only window updates per-call ERL/delay calibration. |
+| `calibration_ema_alpha` | `0.20` | Slow EMA factor for ERL/delay calibration; lower values resist caller-speech poisoning. |
+| `calibrated_delay_tolerance_ms` | `40` | Allowed drift between current best-lag and calibrated delay before evidence is marked ambiguous. |
+
+The current Telnyx media frame model exposes loss, reorder, stale-frame, and
+arrival-jitter signals. It does not expose explicit DTX, PLC, comfort-noise, or
+synthetic-frame markers in decoded inbound frames; those conditions therefore
+fail safe only when represented by the available transport signals. The
+`synthetic_frame` invalidation label is reserved for a future upstream marker and
+must not be inferred from ordinary silence samples.
 
 | Policy key | Default | Purpose |
 | --- | --- | --- |

@@ -284,6 +284,16 @@ min_echo_margin_db_floor = 3.0
 min_echo_margin_db_ceiling = 18.0
 # Per-window invalid transport ratio above which evidence becomes ambiguous/unavailable.
 max_invalid_frame_ratio = 0.05
+# Per-window jitter bound; evidence fails safe when observed jitter exceeds this value.
+max_jitter_ms = 100
+# Minimum correlation used to treat calibrated-delay evidence as speech/echo-like rather than uncorrelated noise.
+min_speechlike_correlation = 0.05
+# Minimum correlation required to update playback-only ERL/delay calibration.
+calibration_min_correlation = 0.65
+# Slow EMA factor for per-call ERL/delay calibration updates.
+calibration_ema_alpha = 0.20
+# Allowed drift between current best-lag and calibrated delay before active-playback evidence fails safe.
+calibrated_delay_tolerance_ms = 40
 
 [voice_quality.audio_barge_in.policy]
 # `defer_to_layer_a` lets conservative ASR transcript gates act when audio evidence is ambiguous/unavailable.

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-02 PDT | @codex-541 | Addressed implementation review: behavior-mode-only audio cancel trigger, edge-triggered trusted onset, calibrated-delay residual evidence, poisoning-resistant calibration, produced tail/gap evidence states, and documented unavailable DTX/PLC/synthetic markers. |
 | 2026-07-02 PDT | @codex-541 | Started implementation in PR #596: added strict `audio_barge_in` config, typed `CallerOnsetEvidence`, online ERL/delay calibration, playback ID/epoch arbitration, and fail-safe Layer A fallback for Option B. |
 | 2026-07-01 23:43 PDT | @codex-541 | Addressed PR #596 review: added Layer A/B arbitration precedence, per-call ERL/delay calibration, evidence state machine, DSP/transport invalidation, playback epoch matching, and non-Identity prompt-handler acceptance cases. |
 | 2026-07-01 PDT | @codex-541 | Initial #586 design: keep barge-in boundary audio-first, general across processors and ASR engines, with AEC/VAD evidence produced in media and consumed by conversation policy only as typed state. |
@@ -123,6 +124,12 @@ The media layer owns a pure discriminator that receives:
 - packet sequence/timestamp continuity, loss/reorder/jitter markers, comfort
   noise/DTX markers, and PLC/synthetic-frame markers when available;
 - configured bounds for measurement or policy mode.
+
+Implementation note: the current Telnyx inbound media frame model exposes loss,
+reorder, stale-frame, and arrival-jitter signals. It does not expose explicit
+DTX, PLC, comfort-noise, or synthetic-frame markers in decoded frames, so those
+conditions can only fail safe when represented by the available transport
+signals until upstream metadata exists.
 
 It produces typed evidence, not a conversation decision:
 
@@ -532,7 +539,9 @@ Automated tests:
   or a later prompt-handler utterance;
 - config strictness: unknown audio-barge-in keys fail once the new surface
   lands, and invalid mode cross-products fail parse/validation;
-- `current_compat`: behavior remains unchanged.
+- `current_compat`: behavior remains unchanged except for deliberate playback
+  ID/epoch race-hardening: a cancel decision no longer cancels replacement audio
+  if active playback changed before the clear request is applied.
 
 Replay tests:
 

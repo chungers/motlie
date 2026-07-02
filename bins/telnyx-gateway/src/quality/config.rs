@@ -699,6 +699,11 @@ pub struct AudioBargeInMediaQualityConfig {
     pub min_echo_margin_db_floor: f32,
     pub min_echo_margin_db_ceiling: f32,
     pub max_invalid_frame_ratio: f32,
+    pub max_jitter_ms: u64,
+    pub min_speechlike_correlation: f32,
+    pub calibration_min_correlation: f32,
+    pub calibration_ema_alpha: f32,
+    pub calibrated_delay_tolerance_ms: u64,
 }
 
 impl Default for AudioBargeInMediaQualityConfig {
@@ -715,6 +720,11 @@ impl Default for AudioBargeInMediaQualityConfig {
             min_echo_margin_db_floor: 3.0,
             min_echo_margin_db_ceiling: 18.0,
             max_invalid_frame_ratio: 0.05,
+            max_jitter_ms: 100,
+            min_speechlike_correlation: 0.05,
+            calibration_min_correlation: 0.65,
+            calibration_ema_alpha: 0.20,
+            calibrated_delay_tolerance_ms: 40,
         }
     }
 }
@@ -1304,6 +1314,36 @@ impl VoiceQualityConfig {
             0.0,
             1.0,
         )?;
+        ensure_u64(
+            "audio_barge_in.media.max_jitter_ms",
+            self.audio_barge_in.media.max_jitter_ms,
+            0,
+            5_000,
+        )?;
+        ensure_f32(
+            "audio_barge_in.media.min_speechlike_correlation",
+            self.audio_barge_in.media.min_speechlike_correlation,
+            0.0,
+            1.0,
+        )?;
+        ensure_f32(
+            "audio_barge_in.media.calibration_min_correlation",
+            self.audio_barge_in.media.calibration_min_correlation,
+            0.0,
+            1.0,
+        )?;
+        ensure_f32(
+            "audio_barge_in.media.calibration_ema_alpha",
+            self.audio_barge_in.media.calibration_ema_alpha,
+            0.0,
+            1.0,
+        )?;
+        ensure_u64(
+            "audio_barge_in.media.calibrated_delay_tolerance_ms",
+            self.audio_barge_in.media.calibrated_delay_tolerance_ms,
+            0,
+            2_000,
+        )?;
         if self.audio_barge_in.media.mode == AudioBargeInMode::Aec {
             anyhow::bail!(
                 "audio_barge_in.media.mode=aec requires a configured AEC backend; use echo_aware_onset for the implemented Option B path"
@@ -1674,6 +1714,21 @@ impl VoiceQualityConfig {
                 }
                 if let Some(value) = media.max_invalid_frame_ratio {
                     self.audio_barge_in.media.max_invalid_frame_ratio = value;
+                }
+                if let Some(value) = media.max_jitter_ms {
+                    self.audio_barge_in.media.max_jitter_ms = value;
+                }
+                if let Some(value) = media.min_speechlike_correlation {
+                    self.audio_barge_in.media.min_speechlike_correlation = value;
+                }
+                if let Some(value) = media.calibration_min_correlation {
+                    self.audio_barge_in.media.calibration_min_correlation = value;
+                }
+                if let Some(value) = media.calibration_ema_alpha {
+                    self.audio_barge_in.media.calibration_ema_alpha = value;
+                }
+                if let Some(value) = media.calibrated_delay_tolerance_ms {
+                    self.audio_barge_in.media.calibrated_delay_tolerance_ms = value;
                 }
             }
             if let Some(policy) = audio_barge_in.policy {
@@ -2964,6 +3019,11 @@ pub struct AudioBargeInMediaQualityConfigPatch {
     pub min_echo_margin_db_floor: Option<f32>,
     pub min_echo_margin_db_ceiling: Option<f32>,
     pub max_invalid_frame_ratio: Option<f32>,
+    pub max_jitter_ms: Option<u64>,
+    pub min_speechlike_correlation: Option<f32>,
+    pub calibration_min_correlation: Option<f32>,
+    pub calibration_ema_alpha: Option<f32>,
+    pub calibrated_delay_tolerance_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -3419,6 +3479,11 @@ mod tests {
             min_echo_margin_db_floor = 4.0
             min_echo_margin_db_ceiling = 16.0
             max_invalid_frame_ratio = 0.10
+            max_jitter_ms = 80
+            min_speechlike_correlation = 0.06
+            calibration_min_correlation = 0.70
+            calibration_ema_alpha = 0.15
+            calibrated_delay_tolerance_ms = 30
 
             [voice_quality.audio_barge_in.policy]
             uncertain_policy = "continue_playback"
@@ -3432,6 +3497,12 @@ mod tests {
         );
         assert_eq!(config.audio_barge_in.media.max_evidence_age_ms, 140);
         assert_eq!(config.audio_barge_in.media.trusted_onset_min_windows, 3);
+        assert_eq!(config.audio_barge_in.media.max_jitter_ms, 80);
+        assert_eq!(config.audio_barge_in.media.calibration_ema_alpha, 0.15);
+        assert_eq!(
+            config.audio_barge_in.media.calibrated_delay_tolerance_ms,
+            30
+        );
         assert_eq!(
             config.audio_barge_in.policy.uncertain_policy,
             AudioBargeInUncertainPolicy::ContinuePlayback

@@ -229,9 +229,12 @@ pub enum AudioEvidenceInvalidation {
     TransportInvalid,
     ShortReference,
     StalePlaybackEpoch,
+    PreAudioPlayback,
     CalibrationUnavailable,
     DelayOutOfRange,
     LowCorrelationNonSpeech,
+    LowCorrelationSpeech,
+    SyntheticFrame,
 }
 
 impl AudioEvidenceInvalidation {
@@ -240,9 +243,12 @@ impl AudioEvidenceInvalidation {
             Self::TransportInvalid => "transport_invalid",
             Self::ShortReference => "short_reference",
             Self::StalePlaybackEpoch => "stale_playback_epoch",
+            Self::PreAudioPlayback => "pre_audio_playback",
             Self::CalibrationUnavailable => "calibration_unavailable",
             Self::DelayOutOfRange => "delay_out_of_range",
             Self::LowCorrelationNonSpeech => "low_correlation_non_speech",
+            Self::LowCorrelationSpeech => "low_correlation_speech",
+            Self::SyntheticFrame => "synthetic_frame",
         }
     }
 }
