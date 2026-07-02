@@ -12,9 +12,9 @@ system_prompt = "Be concise. Answer in one paragraph."
 prompt = "In one sentence, explain what Motlie model bundles are for."
 followup_prompt = "Now say that more simply."
 # High cap preserves thinking-model smoke coverage while bounding no-EOS samples.
-# Current curated thinking traces answer within ~2k generated tokens; cap-induced
+# Current curated thinking traces answer within ~2k-4k generated tokens; cap-induced
 # truncation still fails the min-response assertions instead of blocking the matrix.
-max_tokens = 2048
+max_tokens = 4096
 temperature = 0.2
 
 [assertions]
