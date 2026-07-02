@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-02 PDT | @codex-541 | Added the implemented #586 `audio_barge_in` strict config surface: media-owned typed evidence bounds, policy-owned uncertain arbitration, and behavior-neutral `measure_only` default. |
 | 2026-07-01 PDT | @codex-541 | Linked the #586 audio-first barge-in boundary design and clarified that `echo_characterization` remains measurement-only until media can produce typed caller-onset evidence. |
 | 2026-07-01 PDT | @codex-541 | Updated the current no-barge-in Identity baseline and recorded the #587 live barge-in validation pass: 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, bounded FIFO Identity for no-barge-in, and #586 AEC/VAD as the remaining follow-up. |
 | 2026-06-29 PDT | @codex-541 | Added opt-in #586 `echo_characterization` diagnostic knobs for measuring inbound/outbound echo correlation before the AEC/VAD follow-up. |
@@ -416,11 +417,13 @@ turns.
 
 ### Echo Characterization
 
-`[voice_quality.echo_characterization]` is an opt-in, measurement-only #586
+`[voice_quality.echo_characterization]` is an opt-in diagnostic #586
 instrumentation surface. It does not change ASR, barge-in, cancellation, or
 conversation policy decisions. When enabled, the media layer keeps a short
 rolling outbound TTS reference and emits `media.echo_characterization` quality
-spans while that playback is active or recently completed.
+spans while that playback is active or recently completed. The implemented
+`audio_barge_in` surface below emits typed evidence and can optionally consume
+that evidence for barge-in behavior when explicitly configured.
 
 | Key | Typical value | Purpose |
 | --- | --- | --- |
@@ -429,12 +432,56 @@ spans while that playback is active or recently completed.
 | `max_delay_ms` | `160` | Maximum delayed-playback alignment searched for echo correlation. |
 | `emit_interval_ms` | `500` | Minimum interval between diagnostic spans on a media stream. |
 
-Use this only in per-run configs when characterizing barge-in false onsets or
+Use this in per-run configs when characterizing barge-in false onsets or
 post-playback leakage. The #586 design in
 [`DESIGN-586-aec-vad-boundary.md`](DESIGN-586-aec-vad-boundary.md) keeps this
-measurement separate from behavior changes: policy should not consume the
-diagnostic until media can produce typed caller-onset evidence with freshness,
-confidence, echo margin, and graceful fallback semantics.
+diagnostic separate from behavior changes: policy consumes only typed
+`CallerOnsetEvidence` from `[voice_quality.audio_barge_in]`, never raw
+correlation or RMS fields.
+
+### Audio Barge-In
+
+`[voice_quality.audio_barge_in.media]` owns DSP/evidence bounds. It produces
+fresh, playback-ID/epoch-scoped `CallerOnsetEvidence` from normalized inbound
+PCM, the rolling outbound TTS reference, per-call ERL/delay calibration, and
+transport invalidation. `[voice_quality.audio_barge_in.policy]` owns only how
+conversation policy treats ambiguous/unavailable audio evidence when Layer A
+ASR transcript gates pass.
+
+Keep `mode = "measure_only"` for default and live measurement runs. Behavior
+modes are explicit opt-in and strict validation rejects silent inertness:
+`echo_aware_onset` requires `[voice_quality.barge_in] enabled = true` and a
+cancel-capable `[voice_quality.conversation_policy] mode` such as
+`barge_in_cancel_only` or `barge_in_coalesce_after_silence`; behavior mode is
+rejected with `current_compat` and `no_barge_in_bounded_pending`. `aec` is
+reserved and currently rejected until a production AEC backend is selected.
+
+| Media key | Default | Purpose |
+| --- | --- | --- |
+| `mode` | `"measure_only"` | `measure_only` or `echo_aware_onset`. `aec` is reserved and currently rejected until an AEC backend is selected. |
+| `max_evidence_age_ms` | `120` | Freshness window for policy consumption and echo-veto expiry. |
+| `trusted_onset_min_windows` | `2` | Consecutive valid speech-like media windows required for `TrustedCallerOnset`. |
+| `calibration_min_playback_only_ms` | `400` | Per-call playback-only ERL/delay calibration required before trusted audio cancel. |
+| `delay_search_min_ms` / `delay_search_max_ms` | `0` / `240` | Plausible echo-delay search bounds. |
+| `erl_min_db` / `erl_max_db` | `-60.0` / `0.0` | Plausible per-call echo return loss bounds for calibration sanity checks. |
+| `min_echo_margin_db_floor` | `3.0` | Minimum calibrated positive margin above predicted echo for trusted onset. |
+| `min_echo_margin_db_ceiling` | `18.0` | Upper sanity bound for confidence scaling; not a global acoustic-path threshold. |
+| `max_invalid_frame_ratio` | `0.05` | Loss/reorder/stale-frame ratio above which a window fails safe. |
+
+| Policy key | Default | Purpose |
+| --- | --- | --- |
+| `uncertain_policy` | `"defer_to_layer_a"` | Allows conservative Layer A ASR transcript gates when audio evidence is ambiguous/unavailable. Use `"continue_playback"` for stricter long-response validation. |
+
+Implementation notes:
+
+- `current_compat` does not consume Layer B audio evidence.
+- `LikelyAssistantEcho` vetoes a Layer A cancel only for the fresh evidence
+  window and matching playback epoch.
+- Stale playback IDs/epochs are ignored; they cannot cancel replacement audio.
+- Short outbound references, invalid transport, missing calibration, and
+  out-of-range delay produce `Unavailable`/`Ambiguous` and fall back according
+  to `uncertain_policy`.
+- `mode = "aec"` is fail-closed until a production AEC backend is selected; it must not silently run the echo-aware heuristic path under an AEC label.
 
 ### Quality Logging And Judge
 

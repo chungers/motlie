@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 use crate::call_control::TelnyxMediaConfig;
 use crate::media::{
-    packetize_tts_samples, percentile_u64, CallMediaHandle, OutboundFrameQualityContext,
-    OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry, SpeechCancelToken,
-    SpeechClearReason, TtsFramePacketizer,
+    packetize_tts_samples, percentile_u64, ActiveSpeechPlaybackRef, CallMediaHandle,
+    OutboundFrameQualityContext, OutboundMediaCommand, OutboundMediaFrame, SharedMediaRegistry,
+    SpeechCancelToken, SpeechClearReason, TtsFramePacketizer,
 };
 use crate::operator::state::{
     CallStatus, LogLevel, QualityPlaybackLinkage, QualityPlaybackMetadata, QualitySpanEmission,
@@ -537,6 +537,32 @@ pub async fn cancel_speech_with_reason(
         );
     }
     Ok(playback_id)
+}
+
+pub async fn cancel_speech_playback_ref_with_reason(
+    state: &SharedState,
+    media_registry: &SharedMediaRegistry,
+    gateway_call_id: &str,
+    playback: &ActiveSpeechPlaybackRef,
+    source_label: &str,
+    reason: SpeechClearReason,
+) -> anyhow::Result<Option<String>> {
+    let canceled = media_registry
+        .cancel_speech_playback_ref_for_reason(gateway_call_id, playback, reason)
+        .await?;
+    if !canceled {
+        return Ok(None);
+    }
+    let playback_id = playback.playback_id.clone();
+    {
+        let mut guard = state.write().await;
+        guard.mark_tts_canceling(gateway_call_id, &playback_id);
+        guard.log(
+            LogLevel::Info,
+            format!("{source_label} cancel requested for {gateway_call_id}: {playback_id}"),
+        );
+    }
+    Ok(Some(playback_id))
 }
 
 struct SpeechJob {

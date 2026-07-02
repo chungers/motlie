@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | 2026-07-01 PDT | @codex-541 | Linked the #586 AEC/VAD design to the live-test protocol and kept upcoming barge-in validation focused on audio evidence instead of Identity or transcript-token heuristics. |
 | 2026-07-01 PDT | @codex-541 | Recorded the #587 live barge-in dispatch-guard validation pass and current continuation protocol: no-barge-in baseline is 1100 ms endpoint trailing silence, 600 ms ASR finish pad, 450 ms TTS start buffer, and bounded FIFO Identity; remaining follow-up is #586 echo/AEC measurement plus short-terminal-phrase TTS audio inspection. |
+| 2026-07-02 PDT | @codex-541 | Updated #586 live-run protocol for implemented `audio_barge_in` typed evidence: record `media.audio_barge_in.evidence`, keep `measure_only` as default, and require a non-Identity prompt-handler/turn-batched acceptance case before behavior promotion. |
 | 2026-06-29 PDT | @codex-541 | Added #586 echo-characterization live-run protocol: enable the diagnostic per run, record `media.echo_characterization` metrics, and leave AEC/VAD behavior changes to follow-up after PR #588. |
 | 2026-06-28 PDT | @codex-541 | Added #587 post-barge-in dispatch guard knobs to the live-test protocol; the next barge-in run should verify one clean replacement turn before #586 AEC/VAD work. |
 | 2026-06-28 PDT | @codex-541 | Recorded the failed barge-in Identity 450 ms run: post-playback ASR fragments escaped as new turns, so the next barge-in step is a code fix rather than knob-only tuning. |
@@ -1125,7 +1126,7 @@ PY
 Redact phone numbers, live public hosts, connection IDs, call IDs, and unrelated
 personal data before copying logs into issues or PR comments.
 
-For #586 echo-characterization probes, enable this block in the per-run config:
+For #586 audio-boundary probes, start with measurement-only typed evidence:
 
 ```toml
 [voice_quality.echo_characterization]
@@ -1133,13 +1134,62 @@ enabled = true
 window_ms = 240
 max_delay_ms = 160
 emit_interval_ms = 500
+
+[voice_quality.audio_barge_in.media]
+mode = "measure_only"
+max_evidence_age_ms = 120
+trusted_onset_min_windows = 2
+calibration_min_playback_only_ms = 400
+delay_search_min_ms = 0
+delay_search_max_ms = 240
+erl_min_db = -60.0
+erl_max_db = 0.0
+min_echo_margin_db_floor = 3.0
+min_echo_margin_db_ceiling = 18.0
+max_invalid_frame_ratio = 0.05
+
+[voice_quality.audio_barge_in.policy]
+uncertain_policy = "defer_to_layer_a"
 ```
 
-During analysis, extract `media.echo_characterization` quality spans and record
-at least event count, max/p95 `correlation_peak`, observed `estimated_delay_ms`
-range, `echo_return_db` range, and whether spans occurred during `active` or
-`recent` playback. These spans are diagnostic only in PR #588; post-merge #586
-work uses them to choose AEC insertion vs. echo-aware onset gating.
+During analysis, extract `media.echo_characterization` and
+`media.audio_barge_in.evidence` quality spans. Record at least event count,
+active playback ID/epoch match rate, audio decision counts, invalidation counts,
+calibration update count, calibrated ERL/delay range, `correlation_peak` p50/p95,
+`estimated_delay_ms` range, `echo_return_db` range, `echo_margin_db` range, and
+whether spans occurred during active playback, recent tail, or no playback.
+
+Behavior validation is a separate run and must opt in explicitly:
+
+```toml
+[voice_quality.barge_in]
+enabled = true
+speech_onset_cancel_enabled = true
+partial_asr_cancel_enabled = true
+final_asr_cancel_enabled = true
+missing_signal_policy = "conservative"
+partial_min_confidence = 0.50
+partial_min_stability = 0.50
+final_min_confidence = 0.70
+
+[voice_quality.conversation_policy]
+mode = "barge_in_coalesce_after_silence"
+
+[voice_quality.audio_barge_in.media]
+mode = "echo_aware_onset"
+
+[voice_quality.audio_barge_in.policy]
+uncertain_policy = "defer_to_layer_a"
+```
+
+Before promoting behavior, run at least one non-Identity acceptance sample: use a
+real prompt handler when available, or `turn_batched_identity` as the fallback,
+with variable assistant utterance length, streaming/provisional and committed TTS
+chunks, cancel-and-replace churn, a tool-use-style pause or inter-segment gap,
+early and late barge-in, and turn-batch reset. The pass criterion is media
+evidence separating caller interruption from assistant echo without relying on
+script keywords, Identity repeat semantics, caller/assistant text comparison, or
+one ASR engine's partial behavior.
 
 Append the structured WER and latency/quality blocks, quantitative metrics,
 qualitative caller feedback, bugs/gaps, and proposed tuning changes to the same
@@ -1169,6 +1219,10 @@ Quantitative:
 - Echo characterization when enabled: `media.echo_characterization` event count,
   correlation peak distribution, estimated delay range, echo return level, and
   active-vs-recent playback state.
+- Audio barge-in evidence when enabled: `media.audio_barge_in.evidence` decision
+  counts, invalidation reasons, playback ID/epoch match rate, calibration update
+  count, calibrated ERL/delay range, echo margin range, and onset-to-clear
+  latency for trusted-caller-onset windows.
 - Quality events: malformed events, missing timestamps, or gaps that prevent
   measurement.
 - Layer 3 turn batching: accumulation count matches k of N, `batch_id` and

@@ -15,12 +15,13 @@ use tokio::time::{sleep, Duration};
 
 use crate::call_control::TelnyxClient;
 use crate::conversation_policy::{
-    AssistantOutputPolicyAction, BargeInPolicyDecision, BargeInTranscriptEvidence, BargeInTrigger,
+    ActivePlaybackTarget, AssistantOutputPolicyAction, AudioBargeInDecisionInput,
+    BargeInPolicyDecision, BargeInTranscriptEvidence, BargeInTrigger, CallerOnsetEvidence,
     ConversationPolicyQueue, FinalTranscriptDispatchDecision, FinalTranscriptDispatchEvidence,
-    GenerationPolicyAction, PendingPolicyOutput,
+    GenerationPolicyAction, PendingPolicyOutput, TranscriptBargeInDecisionInput,
 };
 use crate::early_response::{EarlyResponseCancelReason, EarlyResponseEvent};
-use crate::media::{SharedMediaRegistry, SpeechClearReason};
+use crate::media::{ActiveSpeechPlaybackRef, SharedMediaRegistry, SpeechClearReason};
 use crate::operator::state::{
     CallStatus, ConversationMode, LogLevel, QualityConversationProcessorVisibleTurn,
     QualityPlaybackMetadata, QualitySpanEmission, SharedState, TurnBatchActiveState,
@@ -594,10 +595,16 @@ pub async fn handle_transcript_event_with_metadata(
         return Ok(());
     }
 
-    let active_playback_id = media_registry
-        .active_speech_playback_id(gateway_call_id)
+    let active_playback_ref = media_registry
+        .active_speech_playback_ref(gateway_call_id)
         .await;
-    let active_playback = active_playback_id.is_some();
+    let active_playback_id = active_playback_ref
+        .as_ref()
+        .map(|active| active.playback_id.clone());
+    let active_playback = active_playback_ref.is_some();
+    let audio_evidence = media_registry
+        .latest_caller_onset_evidence(gateway_call_id)
+        .await;
     let transcript_confidence = metadata
         .confidence
         .or_else(|| latest_transcript_confidence(&event));
@@ -612,16 +619,27 @@ pub async fn handle_transcript_event_with_metadata(
         let decision = snapshot
             .quality_config
             .conversation_policy
-            .decide_transcript_barge_in(&snapshot.barge_in, BargeInTrigger::Partial, evidence);
+            .decide_transcript_barge_in_with_audio(TranscriptBargeInDecisionInput {
+                barge_in: &snapshot.barge_in,
+                audio_barge_in: &snapshot.quality_config.audio_barge_in,
+                trigger: BargeInTrigger::Partial,
+                transcript: evidence,
+                audio: audio_evidence.as_ref(),
+                active_playback: active_playback_target(active_playback_ref.as_ref()),
+                now: Instant::now(),
+            });
         if decision.cancels_playback() {
             cancel_active_speech_for_barge_in(
                 state,
                 media_registry,
                 runtime,
                 gateway_call_id,
-                decision,
-                snapshot.config_id.clone(),
-                snapshot.redaction_mode,
+                BargeInCancelRequest {
+                    decision,
+                    config_id: snapshot.config_id.clone(),
+                    redaction_mode: snapshot.redaction_mode,
+                    expected_playback: active_playback_ref.as_ref(),
+                },
             )
             .await?;
         } else if !decision.forwards_caller_transcript() {
@@ -678,16 +696,27 @@ pub async fn handle_transcript_event_with_metadata(
     let final_barge_in_decision = snapshot
         .quality_config
         .conversation_policy
-        .decide_transcript_barge_in(&snapshot.barge_in, BargeInTrigger::Final, evidence);
+        .decide_transcript_barge_in_with_audio(TranscriptBargeInDecisionInput {
+            barge_in: &snapshot.barge_in,
+            audio_barge_in: &snapshot.quality_config.audio_barge_in,
+            trigger: BargeInTrigger::Final,
+            transcript: evidence,
+            audio: audio_evidence.as_ref(),
+            active_playback: active_playback_target(active_playback_ref.as_ref()),
+            now: Instant::now(),
+        });
     if final_barge_in_decision.cancels_playback() {
         cancel_active_speech_for_barge_in(
             state,
             media_registry,
             runtime,
             gateway_call_id,
-            final_barge_in_decision,
-            snapshot.config_id.clone(),
-            snapshot.redaction_mode,
+            BargeInCancelRequest {
+                decision: final_barge_in_decision,
+                config_id: snapshot.config_id.clone(),
+                redaction_mode: snapshot.redaction_mode,
+                expected_playback: active_playback_ref.as_ref(),
+            },
         )
         .await?;
     } else if !final_barge_in_decision.forwards_caller_transcript() {
@@ -1762,6 +1791,7 @@ pub async fn handle_speech_onset(
     _runtime: &ConversationRuntime,
     gateway_call_id: &str,
     quality_config: Option<&VoiceQualityConfig>,
+    audio_evidence: Option<&CallerOnsetEvidence>,
 ) -> anyhow::Result<()> {
     let Some(snapshot) = conversation_snapshot(state, gateway_call_id, quality_config).await else {
         return Ok(());
@@ -1769,10 +1799,27 @@ pub async fn handle_speech_onset(
     if !snapshot.attached {
         return Ok(());
     }
-    let decision = snapshot
-        .quality_config
-        .conversation_policy
-        .decide_barge_in(&snapshot.barge_in, BargeInTrigger::SpeechOnset);
+    let active_playback_ref = media_registry
+        .active_speech_playback_ref(gateway_call_id)
+        .await;
+    let decision = if let Some(audio_evidence) = audio_evidence {
+        snapshot
+            .quality_config
+            .conversation_policy
+            .decide_audio_barge_in(AudioBargeInDecisionInput {
+                barge_in: &snapshot.barge_in,
+                audio_barge_in: &snapshot.quality_config.audio_barge_in,
+                trigger: BargeInTrigger::SpeechOnset,
+                evidence: audio_evidence,
+                active_playback: active_playback_target(active_playback_ref.as_ref()),
+                now: Instant::now(),
+            })
+    } else {
+        snapshot
+            .quality_config
+            .conversation_policy
+            .decide_barge_in(&snapshot.barge_in, BargeInTrigger::SpeechOnset)
+    };
     if !decision.cancels_playback() {
         return Ok(());
     }
@@ -1782,9 +1829,12 @@ pub async fn handle_speech_onset(
         media_registry,
         _runtime,
         gateway_call_id,
-        decision,
-        snapshot.config_id.clone(),
-        snapshot.redaction_mode,
+        BargeInCancelRequest {
+            decision,
+            config_id: snapshot.config_id.clone(),
+            redaction_mode: snapshot.redaction_mode,
+            expected_playback: active_playback_ref.as_ref(),
+        },
     )
     .await
 }
@@ -1835,15 +1885,28 @@ fn log_final_transcript_dispatch_suppressed(
     );
 }
 
+fn active_playback_target(playback: Option<&ActiveSpeechPlaybackRef>) -> ActivePlaybackTarget<'_> {
+    ActivePlaybackTarget {
+        playback_id: playback.map(|active| active.playback_id.as_str()),
+        playback_epoch: playback.map(|active| active.playback_epoch),
+    }
+}
+
+struct BargeInCancelRequest<'a> {
+    decision: BargeInPolicyDecision,
+    config_id: String,
+    redaction_mode: RedactionMode,
+    expected_playback: Option<&'a ActiveSpeechPlaybackRef>,
+}
+
 async fn cancel_active_speech_for_barge_in(
     state: &SharedState,
     media_registry: &SharedMediaRegistry,
     runtime: &ConversationRuntime,
     gateway_call_id: &str,
-    decision: BargeInPolicyDecision,
-    config_id: String,
-    redaction_mode: RedactionMode,
+    request: BargeInCancelRequest<'_>,
 ) -> anyhow::Result<()> {
+    let decision = request.decision;
     let trigger = decision.trigger;
     if media_registry
         .active_speech_playback_id(gateway_call_id)
@@ -1854,18 +1917,34 @@ async fn cancel_active_speech_for_barge_in(
     }
 
     let cancel_started_at = Instant::now();
-    let playback_id = match speech::cancel_speech_with_reason(
-        state,
-        media_registry,
-        gateway_call_id,
-        trigger.source_label(),
-        SpeechClearReason::BargeIn,
-    )
-    .await
-    {
-        Ok(playback_id) => playback_id,
-        Err(error) if format!("{error:#}").contains("no active speech job") => return Ok(()),
-        Err(error) => return Err(error),
+    let playback_id = if let Some(expected_playback) = request.expected_playback {
+        match speech::cancel_speech_playback_ref_with_reason(
+            state,
+            media_registry,
+            gateway_call_id,
+            expected_playback,
+            trigger.source_label(),
+            SpeechClearReason::BargeIn,
+        )
+        .await?
+        {
+            Some(playback_id) => playback_id,
+            None => return Ok(()),
+        }
+    } else {
+        match speech::cancel_speech_with_reason(
+            state,
+            media_registry,
+            gateway_call_id,
+            trigger.source_label(),
+            SpeechClearReason::BargeIn,
+        )
+        .await
+        {
+            Ok(playback_id) => playback_id,
+            Err(error) if format!("{error:#}").contains("no active speech job") => return Ok(()),
+            Err(error) => return Err(error),
+        }
     };
 
     {
@@ -1887,8 +1966,8 @@ async fn cancel_active_speech_for_barge_in(
         state.write().await.emit_quality_span_finished(
             gateway_call_id,
             QualitySpanEmission {
-                config_id,
-                redaction_mode,
+                config_id: request.config_id,
+                redaction_mode: request.redaction_mode,
                 span_name: trigger.cancel_span_name(),
                 category: "barge_in",
                 duration: cancel_started_at.elapsed(),
@@ -3793,9 +3872,16 @@ second"
             .expect("register active speech");
         let runtime = test_runtime();
 
-        handle_speech_onset(&state, &media_registry, &runtime, &gateway_call_id, None)
-            .await
-            .expect("speech onset barge-in should cancel active speech");
+        handle_speech_onset(
+            &state,
+            &media_registry,
+            &runtime,
+            &gateway_call_id,
+            None,
+            None,
+        )
+        .await
+        .expect("speech onset barge-in should cancel active speech");
 
         assert!(cancel.is_canceled());
         assert!(media_registry

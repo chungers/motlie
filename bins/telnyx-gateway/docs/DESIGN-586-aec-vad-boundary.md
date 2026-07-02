@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-07-02 PDT | @codex-541 | Started implementation in PR #596: added strict `audio_barge_in` config, typed `CallerOnsetEvidence`, online ERL/delay calibration, playback ID/epoch arbitration, and fail-safe Layer A fallback for Option B. |
 | 2026-07-01 23:43 PDT | @codex-541 | Addressed PR #596 review: added Layer A/B arbitration precedence, per-call ERL/delay calibration, evidence state machine, DSP/transport invalidation, playback epoch matching, and non-Identity prompt-handler acceptance cases. |
 | 2026-07-01 PDT | @codex-541 | Initial #586 design: keep barge-in boundary audio-first, general across processors and ASR engines, with AEC/VAD evidence produced in media and consumed by conversation policy only as typed state. |
 
@@ -452,16 +453,17 @@ max_delay_ms = 160
 emit_interval_ms = 500
 ```
 
-Future behavior knobs should keep media DSP bounds separate from policy
-arbitration. The values below are illustrative placeholders, not proposed
-shipping defaults. Phase 1 measurement and per-call calibration should choose
-actual bounds.
+Behavior knobs keep media DSP bounds separate from policy arbitration. The
+checked-in defaults are behavior-neutral (`measure_only`) and the numeric values
+are conservative initial bounds for validation, not acoustic constants tuned to
+one handset, speakerphone, carrier route, or ASR engine. Per-call calibration
+chooses the operative ERL/delay values.
 
 Media-owned bounds:
 
 ```toml
 [voice_quality.audio_barge_in.media]
-mode = "measure_only" # measure_only, echo_aware_onset, aec
+mode = "measure_only" # measure_only, echo_aware_onset; aec reserved until backend selection
 max_evidence_age_ms = 120
 trusted_onset_min_windows = 2
 calibration_min_playback_only_ms = 400
@@ -481,8 +483,9 @@ Policy-owned arbitration:
 uncertain_policy = "defer_to_layer_a" # defer_to_layer_a, continue_playback
 ```
 
-If Option A is selected, add backend-specific knobs only after dependency
-selection:
+If Option A is selected for production AEC, add backend-specific knobs only
+after dependency selection. The current implementation rejects `mode = "aec"`
+fail-closed until such a backend exists:
 
 ```toml
 [voice_quality.audio_barge_in.aec]
@@ -494,10 +497,11 @@ Strict config validation should enforce the cross-product:
 
 - `mode = "measure_only"` is accepted with any conversation policy mode because
   it is observational only.
-- `mode = "echo_aware_onset"` or `mode = "aec"` requires
-  `[voice_quality.barge_in] enabled = true` and a conversation policy mode that
-  can cancel playback, such as `barge_in_cancel_only` or
-  `barge_in_coalesce_after_silence`.
+- `mode = "echo_aware_onset"` requires `[voice_quality.barge_in] enabled = true`
+  and a conversation policy mode that can cancel playback, such as
+  `barge_in_cancel_only` or `barge_in_coalesce_after_silence`.
+- `mode = "aec"` is reserved and currently rejected until a production AEC
+  backend is selected.
 - Behavior-changing audio modes are rejected with `current_compat` and
   `no_barge_in_bounded_pending`; they must not become silently inert or silently
   alter compatibility behavior.
@@ -563,9 +567,12 @@ This is fail-safe, but it may add ASR-latency fallback for short agentic replies
 - Phase 0: docs and measurement protocol only.
 - Phase 1: collect and summarize echo-characterization spans from real calls.
 - Phase 2: implement the `CallerOnsetEvidence` boundary with
-  `mode = "measure_only"` and no behavior change.
-- Phase 3: enable `echo_aware_onset` or `aec` behind explicit config for live
-  validation.
+  `mode = "measure_only"` and no behavior change. Implemented in PR #596 with
+  `media.audio_barge_in.evidence` quality spans and strict config parsing.
+- Phase 3: enable `echo_aware_onset` behind explicit config for live validation.
+  `echo_aware_onset` is implemented as Option B; production use still requires
+  the live acceptance matrix, including a non-Identity prompt-handler or
+  turn-batched sample. Keep `aec` rejected until an AEC backend is selected.
 - Phase 4: after repeated live validation, consider promoting a non-compat
   barge-in profile. Do not change `current_compat`.
 

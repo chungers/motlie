@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::echo_match::match_assistant_echo_signature;
 
 use crate::early_response::MissingSignalPolicy;
 use crate::quality::{
-    BargeInQualityConfig, ConversationPolicyConfig, ConversationPolicyMode,
-    EchoSuppressionQualityConfig, PendingOutputOrder,
+    AudioBargeInMode, AudioBargeInQualityConfig, AudioBargeInUncertainPolicy, BargeInQualityConfig,
+    ConversationPolicyConfig, ConversationPolicyMode, EchoSuppressionQualityConfig,
+    PendingOutputOrder,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,6 +187,134 @@ pub struct BargeInTranscriptEvidence<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioOnsetDecision {
+    TrustedCallerOnset,
+    LikelyAssistantEcho,
+    Ambiguous,
+    Unavailable,
+}
+
+impl AudioOnsetDecision {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TrustedCallerOnset => "trusted_caller_onset",
+            Self::LikelyAssistantEcho => "likely_assistant_echo",
+            Self::Ambiguous => "ambiguous",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaybackEchoState {
+    Idle,
+    ActivePlayback,
+    RecentTail,
+    InterSegmentGap,
+}
+
+impl PlaybackEchoState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::ActivePlayback => "active_playback",
+            Self::RecentTail => "recent_tail",
+            Self::InterSegmentGap => "inter_segment_gap",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioEvidenceInvalidation {
+    TransportInvalid,
+    ShortReference,
+    StalePlaybackEpoch,
+    CalibrationUnavailable,
+    DelayOutOfRange,
+    LowCorrelationNonSpeech,
+}
+
+impl AudioEvidenceInvalidation {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TransportInvalid => "transport_invalid",
+            Self::ShortReference => "short_reference",
+            Self::StalePlaybackEpoch => "stale_playback_epoch",
+            Self::CalibrationUnavailable => "calibration_unavailable",
+            Self::DelayOutOfRange => "delay_out_of_range",
+            Self::LowCorrelationNonSpeech => "low_correlation_non_speech",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallerOnsetEvidence {
+    pub decision: AudioOnsetDecision,
+    pub confidence: f32,
+    pub playback_state: PlaybackEchoState,
+    pub playback_id: Option<String>,
+    pub playback_epoch: Option<u64>,
+    pub caller_active_since: Option<Instant>,
+    pub evidence_at: Instant,
+    pub evidence_age_ms: u64,
+    pub window_ms: u32,
+    pub input_codec: String,
+    pub input_sample_rate_hz: u32,
+    pub evidence_sample_rate_hz: u32,
+    pub inbound_rms_dbfs: f32,
+    pub outbound_rms_dbfs: Option<f32>,
+    pub estimated_delay_ms: Option<u32>,
+    pub correlation_peak: Option<f32>,
+    pub echo_return_db: Option<f32>,
+    pub echo_margin_db: Option<f32>,
+    pub invalidation: Option<AudioEvidenceInvalidation>,
+}
+
+impl CallerOnsetEvidence {
+    pub fn fresh_at(&self, now: Instant, max_age_ms: u64) -> bool {
+        now.saturating_duration_since(self.evidence_at) <= Duration::from_millis(max_age_ms)
+    }
+
+    pub fn matches_active_playback(
+        &self,
+        active_playback_id: Option<&str>,
+        active_playback_epoch: Option<u64>,
+    ) -> bool {
+        self.playback_id.as_deref() == active_playback_id
+            && self.playback_epoch == active_playback_epoch
+            && active_playback_id.is_some()
+            && active_playback_epoch.is_some()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ActivePlaybackTarget<'a> {
+    pub playback_id: Option<&'a str>,
+    pub playback_epoch: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AudioBargeInDecisionInput<'a> {
+    pub barge_in: &'a BargeInQualityConfig,
+    pub audio_barge_in: &'a AudioBargeInQualityConfig,
+    pub trigger: BargeInTrigger,
+    pub evidence: &'a CallerOnsetEvidence,
+    pub active_playback: ActivePlaybackTarget<'a>,
+    pub now: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TranscriptBargeInDecisionInput<'a> {
+    pub barge_in: &'a BargeInQualityConfig,
+    pub audio_barge_in: &'a AudioBargeInQualityConfig,
+    pub trigger: BargeInTrigger,
+    pub transcript: BargeInTranscriptEvidence<'a>,
+    pub audio: Option<&'a CallerOnsetEvidence>,
+    pub active_playback: ActivePlaybackTarget<'a>,
+    pub now: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FinalTranscriptDispatchAction {
     Forward,
     SuppressPostPlaybackEcho,
@@ -302,6 +431,90 @@ impl ConversationPolicyConfig {
         }
 
         self.allowed_barge_in_decision(trigger)
+    }
+
+    pub fn decide_audio_barge_in(
+        &self,
+        input: AudioBargeInDecisionInput<'_>,
+    ) -> BargeInPolicyDecision {
+        if !input.trigger.enabled_by(input.barge_in) {
+            return BargeInPolicyDecision::inactive(input.trigger, self.mode);
+        }
+        if !self.consumes_layer_b_audio(input.audio_barge_in) {
+            return self.decide_barge_in(input.barge_in, input.trigger);
+        }
+        if !input
+            .evidence
+            .fresh_at(input.now, input.audio_barge_in.media.max_evidence_age_ms)
+            || !input.evidence.matches_active_playback(
+                input.active_playback.playback_id,
+                input.active_playback.playback_epoch,
+            )
+        {
+            return BargeInPolicyDecision::inactive(input.trigger, self.mode);
+        }
+
+        match input.evidence.decision {
+            AudioOnsetDecision::TrustedCallerOnset => self.allowed_barge_in_decision(input.trigger),
+            AudioOnsetDecision::LikelyAssistantEcho
+            | AudioOnsetDecision::Ambiguous
+            | AudioOnsetDecision::Unavailable => {
+                BargeInPolicyDecision::inactive(input.trigger, self.mode)
+            }
+        }
+    }
+
+    pub fn decide_transcript_barge_in_with_audio(
+        &self,
+        input: TranscriptBargeInDecisionInput<'_>,
+    ) -> BargeInPolicyDecision {
+        let layer_a =
+            self.decide_transcript_barge_in(input.barge_in, input.trigger, input.transcript);
+        if !input.transcript.active_playback || !self.consumes_layer_b_audio(input.audio_barge_in) {
+            return layer_a;
+        }
+        let Some(audio) = input.audio else {
+            return layer_a;
+        };
+        if !audio.fresh_at(input.now, input.audio_barge_in.media.max_evidence_age_ms)
+            || !audio.matches_active_playback(
+                input.active_playback.playback_id,
+                input.active_playback.playback_epoch,
+            )
+        {
+            return layer_a;
+        }
+
+        match audio.decision {
+            AudioOnsetDecision::TrustedCallerOnset => self.allowed_barge_in_decision(input.trigger),
+            AudioOnsetDecision::LikelyAssistantEcho => {
+                if layer_a.cancels_playback() {
+                    BargeInPolicyDecision::ignored_transcript(input.trigger, self.mode)
+                } else {
+                    layer_a
+                }
+            }
+            AudioOnsetDecision::Ambiguous => match input.audio_barge_in.policy.uncertain_policy {
+                AudioBargeInUncertainPolicy::DeferToLayerA => layer_a,
+                AudioBargeInUncertainPolicy::ContinuePlayback => {
+                    if layer_a.cancels_playback() {
+                        BargeInPolicyDecision::ignored_transcript(input.trigger, self.mode)
+                    } else {
+                        layer_a
+                    }
+                }
+            },
+            AudioOnsetDecision::Unavailable => layer_a,
+        }
+    }
+
+    fn consumes_layer_b_audio(&self, audio_barge_in: &AudioBargeInQualityConfig) -> bool {
+        audio_barge_in.media.mode != AudioBargeInMode::MeasureOnly
+            && matches!(
+                self.mode,
+                ConversationPolicyMode::BargeInCancelOnly
+                    | ConversationPolicyMode::BargeInCoalesceAfterSilence
+            )
     }
 
     fn allowed_barge_in_decision(&self, trigger: BargeInTrigger) -> BargeInPolicyDecision {
@@ -995,6 +1208,232 @@ mod tests {
         );
         assert!(final_decision.cancels_playback());
         assert!(final_decision.forwards_caller_transcript());
+    }
+
+    fn audio_barge_in_config(
+        mode: AudioBargeInMode,
+        uncertain_policy: AudioBargeInUncertainPolicy,
+    ) -> AudioBargeInQualityConfig {
+        AudioBargeInQualityConfig {
+            media: crate::quality::AudioBargeInMediaQualityConfig {
+                mode,
+                max_evidence_age_ms: 120,
+                ..crate::quality::AudioBargeInMediaQualityConfig::default()
+            },
+            policy: crate::quality::config::AudioBargeInPolicyQualityConfig { uncertain_policy },
+        }
+    }
+
+    fn audio_evidence(
+        decision: AudioOnsetDecision,
+        playback_id: &str,
+        playback_epoch: u64,
+        evidence_age_ms: u64,
+    ) -> CallerOnsetEvidence {
+        let now = Instant::now();
+        CallerOnsetEvidence {
+            decision,
+            confidence: 0.91,
+            playback_state: PlaybackEchoState::ActivePlayback,
+            playback_id: Some(playback_id.to_string()),
+            playback_epoch: Some(playback_epoch),
+            caller_active_since: Some(now),
+            evidence_at: now - Duration::from_millis(evidence_age_ms),
+            evidence_age_ms,
+            window_ms: 20,
+            input_codec: "PCMU".to_string(),
+            input_sample_rate_hz: 8_000,
+            evidence_sample_rate_hz: 8_000,
+            inbound_rms_dbfs: -20.0,
+            outbound_rms_dbfs: Some(-35.0),
+            estimated_delay_ms: Some(40),
+            correlation_peak: Some(0.30),
+            echo_return_db: Some(-20.0),
+            echo_margin_db: Some(10.0),
+            invalidation: None,
+        }
+    }
+
+    #[test]
+    fn trusted_audio_onset_cancels_without_waiting_for_transcript() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let audio = audio_barge_in_config(
+            AudioBargeInMode::EchoAwareOnset,
+            AudioBargeInUncertainPolicy::DeferToLayerA,
+        );
+        let evidence = audio_evidence(AudioOnsetDecision::TrustedCallerOnset, "playback-1", 7, 20);
+
+        let barge_in = BargeInQualityConfig::default();
+        let decision = policy.decide_audio_barge_in(AudioBargeInDecisionInput {
+            barge_in: &barge_in,
+            audio_barge_in: &audio,
+            trigger: BargeInTrigger::SpeechOnset,
+            evidence: &evidence,
+            active_playback: ActivePlaybackTarget {
+                playback_id: Some("playback-1"),
+                playback_epoch: Some(7),
+            },
+            now: Instant::now(),
+        });
+
+        assert!(decision.cancels_playback());
+    }
+
+    #[test]
+    fn likely_assistant_echo_vetoes_layer_a_transcript_cancel_for_fresh_epoch() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let audio = audio_barge_in_config(
+            AudioBargeInMode::EchoAwareOnset,
+            AudioBargeInUncertainPolicy::DeferToLayerA,
+        );
+        let barge_in = BargeInQualityConfig {
+            partial_min_confidence: Some(0.50),
+            partial_min_stability: Some(0.50),
+            ..BargeInQualityConfig::default()
+        };
+        let evidence = audio_evidence(AudioOnsetDecision::LikelyAssistantEcho, "playback-1", 7, 20);
+
+        let decision =
+            policy.decide_transcript_barge_in_with_audio(TranscriptBargeInDecisionInput {
+                barge_in: &barge_in,
+                audio_barge_in: &audio,
+                trigger: BargeInTrigger::Partial,
+                transcript: BargeInTranscriptEvidence {
+                    text: "stop now",
+                    active_playback: true,
+                    confidence: Some(0.91),
+                    stability: Some(0.91),
+                },
+                audio: Some(&evidence),
+                active_playback: ActivePlaybackTarget {
+                    playback_id: Some("playback-1"),
+                    playback_epoch: Some(7),
+                },
+                now: Instant::now(),
+            });
+
+        assert!(!decision.cancels_playback());
+        assert!(!decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn stale_audio_epoch_is_ignored_and_layer_a_may_act_independently() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let audio = audio_barge_in_config(
+            AudioBargeInMode::EchoAwareOnset,
+            AudioBargeInUncertainPolicy::DeferToLayerA,
+        );
+        let barge_in = BargeInQualityConfig {
+            final_min_confidence: Some(0.70),
+            ..BargeInQualityConfig::default()
+        };
+        let evidence = audio_evidence(
+            AudioOnsetDecision::LikelyAssistantEcho,
+            "old-playback",
+            1,
+            20,
+        );
+
+        let decision =
+            policy.decide_transcript_barge_in_with_audio(TranscriptBargeInDecisionInput {
+                barge_in: &barge_in,
+                audio_barge_in: &audio,
+                trigger: BargeInTrigger::Final,
+                transcript: BargeInTranscriptEvidence {
+                    text: "stop now",
+                    active_playback: true,
+                    confidence: Some(0.91),
+                    stability: None,
+                },
+                audio: Some(&evidence),
+                active_playback: ActivePlaybackTarget {
+                    playback_id: Some("new-playback"),
+                    playback_epoch: Some(2),
+                },
+                now: Instant::now(),
+            });
+
+        assert!(decision.cancels_playback());
+    }
+
+    #[test]
+    fn ambiguous_audio_can_continue_playback_when_policy_is_strict() {
+        let policy = ConversationPolicyConfig {
+            mode: ConversationPolicyMode::BargeInCancelOnly,
+            ..ConversationPolicyConfig::default()
+        };
+        let audio = audio_barge_in_config(
+            AudioBargeInMode::EchoAwareOnset,
+            AudioBargeInUncertainPolicy::ContinuePlayback,
+        );
+        let barge_in = BargeInQualityConfig {
+            final_min_confidence: Some(0.70),
+            ..BargeInQualityConfig::default()
+        };
+        let evidence = audio_evidence(AudioOnsetDecision::Ambiguous, "playback-1", 7, 20);
+
+        let decision =
+            policy.decide_transcript_barge_in_with_audio(TranscriptBargeInDecisionInput {
+                barge_in: &barge_in,
+                audio_barge_in: &audio,
+                trigger: BargeInTrigger::Final,
+                transcript: BargeInTranscriptEvidence {
+                    text: "stop now",
+                    active_playback: true,
+                    confidence: Some(0.91),
+                    stability: None,
+                },
+                audio: Some(&evidence),
+                active_playback: ActivePlaybackTarget {
+                    playback_id: Some("playback-1"),
+                    playback_epoch: Some(7),
+                },
+                now: Instant::now(),
+            });
+
+        assert!(!decision.cancels_playback());
+        assert!(!decision.forwards_caller_transcript());
+    }
+
+    #[test]
+    fn current_compat_does_not_consume_layer_b_audio_evidence() {
+        let policy = ConversationPolicyConfig::default();
+        let audio = audio_barge_in_config(
+            AudioBargeInMode::EchoAwareOnset,
+            AudioBargeInUncertainPolicy::ContinuePlayback,
+        );
+        let evidence = audio_evidence(AudioOnsetDecision::LikelyAssistantEcho, "playback-1", 7, 20);
+
+        let barge_in = BargeInQualityConfig::default();
+        let decision =
+            policy.decide_transcript_barge_in_with_audio(TranscriptBargeInDecisionInput {
+                barge_in: &barge_in,
+                audio_barge_in: &audio,
+                trigger: BargeInTrigger::Partial,
+                transcript: BargeInTranscriptEvidence {
+                    text: "stop",
+                    active_playback: true,
+                    confidence: Some(0.91),
+                    stability: Some(0.91),
+                },
+                audio: Some(&evidence),
+                active_playback: ActivePlaybackTarget {
+                    playback_id: Some("playback-1"),
+                    playback_epoch: Some(7),
+                },
+                now: Instant::now(),
+            });
+
+        assert!(decision.cancels_playback());
     }
 
     #[test]
