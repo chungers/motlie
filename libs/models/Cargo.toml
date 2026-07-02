@@ -27,6 +27,7 @@ all-curated = [
     "model-gemma4-e2b-gguf",
     "model-gemma4-e4b-gguf",
     "model-qwen3-6-27b-gguf",
+    "model-ornith-1-0-35b-gguf",
     "model-piper-en-us-ljspeech-medium",
     "model-kokoro-82m",
     "model-qwen3-tts-cpp",
@@ -45,6 +46,7 @@ model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-qwen3-6-27b-gguf = ["dep:motlie-model-llama-cpp"]
+model-ornith-1-0-35b-gguf = ["dep:motlie-model-llama-cpp"]
 model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
 model-kokoro-82m = ["dep:motlie-model-kokoro"]
 model-qwen3-tts-cpp = ["dep:motlie-model-qwen3-tts-cpp"]

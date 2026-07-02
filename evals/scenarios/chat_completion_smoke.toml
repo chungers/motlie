@@ -12,7 +12,8 @@ backend = ["MistralRs", "LlamaCpp"]
 system_prompt = "Be concise."
 prompt = "Answer with the word ready."
 completion_prompt = "Complete this sentence: A curated Motlie eval checks"
-max_tokens = 64
+# No fixed token cap: thinking models may spend more than 64 tokens before
+# emitting the first answer token.
 temperature = 0.2
 
 [assertions]

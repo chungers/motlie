@@ -3,6 +3,7 @@
 # Eval Coverage Ontology — DESIGN
 
 ## Changelog
+- 2026-07-01 -593-ornith -- add Ornith 1.0 35B to the curated bundle count and coverage matrix scope.
 - 2026-06-14 @ops48-orchestrator — initial cut. (bundle, capability, accelerator) tuple + full-accounting rule. Outgrowth of #399/#486/#513/#514/#518.
 - 2026-06-14 @onto-impl — v1: accelerator→Profile rename + enum schema.
 - 2026-06-14 @onto-impl — v2: David-approved two-layer (compile vs runtime) design; declaration on `BackendKind`; 4-state taxonomy.
@@ -26,7 +27,7 @@ The reconciliation of the two layers — **declaration must agree with runtime, 
 
 ### Dimensions — four canonical closed label sets (no freetext; code==evals)
 Every dimension is a single canonical closed set, identical in code and in eval data (David's naming-consistency rule). Parse strings to the typed value at the data boundary; stay typed internally.
-- **bundle**: `CuratedBundle` (18, `CANONICAL_IDS`, #518) — motlie-models.
+- **bundle**: `CuratedBundle` (19, `CANONICAL_IDS`, #518) — motlie-models.
 - **quant**: **`motlie_model::QuantizationScheme`** (the closed enum from **#526**, 10 variants) — the canonical, sliceable quant identity. #521 **consumes** it; #526 owns it (no parallel `Quant` set). Recorded in `coverage.quantization` as the enum value (e.g. `gguf_q4_0`, `gguf_q4_k_m`, `bf16`), migrated from today's freetext label — the field is *already* scheme-distinct in data (`gemma4_12b_gguf`→`q4_k_m` vs `gemma4_12b_qat…`→`q4_0`), so migration is a label→variant remap, not a re-measurement. Bits are a derived rollup (`QuantizationScheme::approx_bits()`), **not** a tuple member; the `driver.rs:1324` bits-collapse stays confined to the coarse `StartOptions` input knob and never feeds the dimension. 1:1 with `bundle_id` today (decoupling for same-model-multi-quant is a flagged future option; #526's per-bundle table lists the effective schemes).
 - **capability**: **`motlie_model::CapabilityKind`** (`libs/model/src/lib.rs:156`). Eval-relevant subset `{Chat, ToolUse, Transcription(=asr), Speech(=tts), Embeddings}`; advertised set read from `descriptor().capabilities` — no hand-listing. (`perf` is a scenario over Chat, not a `CapabilityKind`; §E.)
 - **Profile**: a **closed `Profile` enum/registry in `bins/evals`** (the runtime layer) — canonical labels `{local-cpu-x86_64, local-cpu-aarch64, apple-metal, dgx-spark, cuda-workstation}`, `CANONICAL_PROFILES` + `from_id`/`canonical_id`/`arch`/`accel` + round-trip test. Replaces the raw profile strings drifting through `snapshot.rs`/`accelerator.rs` (parse at the edges). **No Profile enum in motlie-models** — Profile is an eval concern; the model layer only knows `Accelerator`, reached via the `accelerator.rs` `Profile→AcceleratorClass` bridge (§B).

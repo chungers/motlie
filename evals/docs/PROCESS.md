@@ -12,7 +12,7 @@ Coverage publication is PR-based. Per-host raw records are committed through res
 
 ## 2. Artifacts And Provenance
 
-The `motlie-models` curated bundle registry is the source of truth for artifacts. The generated provenance document covers all 18 `CuratedBundle` descriptors and must stay in sync through the all-curated provenance `#[test]`: [../artifacts/provenance.md](../artifacts/provenance.md).
+The `motlie-models` curated bundle registry is the source of truth for artifacts. The generated provenance document covers all 19 `CuratedBundle` descriptors and must stay in sync through the all-curated provenance `#[test]`: [../artifacts/provenance.md](../artifacts/provenance.md).
 
 Every artifact is either downloaded or derived. Downloaded artifacts declare an HF repo, snapshot, and file rule. Derived artifacts declare the producing recipe and source artifact. Mystery local files, mislabeled files, and unprovenanced cache mutations are not accepted; switch to a known published source or add a reproducible derivation recipe before declaring the artifact provisionable.
 

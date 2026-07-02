@@ -128,6 +128,9 @@ async fn run_scenario(command_line: Vec<String>, args: &[String]) -> Result<()> 
             CapabilityName::Chat => {
                 ChatRunner.run(context).await?;
             }
+            CapabilityName::Completion => {
+                bail!("completion is a coverage capability; use a chat-backed scenario");
+            }
             CapabilityName::ToolUse => {
                 crate::runner::tool_use::ToolUseRunner.run(context).await?;
             }
@@ -207,6 +210,7 @@ struct RunOptions {
     snapshot_id: Option<String>,
     cell_id: Option<String>,
     depth: Option<EvalDepth>,
+    coverage_capability: Option<scenario::CapabilityName>,
     checkpoint_format: Option<String>,
     artifact_quantization: Option<String>,
     model_family: Option<String>,
@@ -235,6 +239,7 @@ impl RunOptions {
         let mut snapshot_id = None;
         let mut cell_id = None;
         let mut depth = None;
+        let mut coverage_capability = None;
         let mut checkpoint_format = None;
         let mut artifact_quantization = None;
         let mut model_family = None;
@@ -291,6 +296,13 @@ impl RunOptions {
                 }
                 "--depth" => {
                     depth = Some(parse_depth(&take_value(args, &mut index, "--depth")?)?);
+                }
+                "--coverage-capability" => {
+                    coverage_capability = Some(parse_capability_name(&take_value(
+                        args,
+                        &mut index,
+                        "--coverage-capability",
+                    )?)?);
                 }
                 "--checkpoint-format" => {
                     checkpoint_format = Some(take_value(args, &mut index, "--checkpoint-format")?);
@@ -372,6 +384,7 @@ impl RunOptions {
             snapshot_id,
             cell_id,
             depth,
+            coverage_capability,
             checkpoint_format,
             artifact_quantization,
             model_family,
@@ -433,11 +446,14 @@ impl RunOptions {
             .clone()
             .unwrap_or_else(|| artifact_quantization.clone());
         let backend = self.backend.clone().unwrap_or_else(|| "unknown".to_owned());
+        let coverage_capability = self
+            .coverage_capability
+            .unwrap_or_else(|| scenario.capability());
         let mut grouping_keys = std::collections::BTreeMap::new();
         grouping_keys.insert("bundle".to_owned(), self.bundle.clone());
         grouping_keys.insert(
             "capability".to_owned(),
-            scenario.capability().as_str().to_owned(),
+            coverage_capability.as_str().to_owned(),
         );
         grouping_keys.insert("depth".to_owned(), depth.as_str().to_owned());
         grouping_keys.insert("backend".to_owned(), backend.clone());
@@ -458,7 +474,7 @@ impl RunOptions {
                 .clone()
                 .unwrap_or_else(|| format!("{}__{}", self.bundle, scenario.id)),
             depth,
-            capability: scenario.capability().as_str().to_owned(),
+            capability: coverage_capability.as_str().to_owned(),
             scenario_id: scenario.id.clone(),
             bundle_id: self.bundle.clone(),
             model_family: self
@@ -532,6 +548,19 @@ fn parse_accelerator(raw: &str) -> Result<AcceleratorClass> {
         "any" => Ok(AcceleratorClass::Any),
         "unavailable" => Ok(AcceleratorClass::Unavailable),
         other => bail!("unknown accelerator `{other}`"),
+    }
+}
+
+fn parse_capability_name(raw: &str) -> Result<scenario::CapabilityName> {
+    match raw {
+        "embeddings" => Ok(scenario::CapabilityName::Embeddings),
+        "chat" => Ok(scenario::CapabilityName::Chat),
+        "completion" => Ok(scenario::CapabilityName::Completion),
+        "tool_use" => Ok(scenario::CapabilityName::ToolUse),
+        "asr" => Ok(scenario::CapabilityName::Asr),
+        "tts" => Ok(scenario::CapabilityName::Tts),
+        "perf" => Ok(scenario::CapabilityName::Perf),
+        other => bail!("unknown capability `{other}`"),
     }
 }
 
@@ -660,6 +689,49 @@ mod tests {
                 .get("quantization")
                 .map(String::as_str),
             Some("isq_q4")
+        );
+    }
+
+    #[test]
+    fn coverage_capability_can_differ_from_runner_capability() {
+        let options = RunOptions::parse(&[
+            "--bundle".to_owned(),
+            "ornith_1_0_35b_gguf".to_owned(),
+            "--scenario".to_owned(),
+            "chat_completion_smoke".to_owned(),
+            "--profile".to_owned(),
+            "dgx-spark".to_owned(),
+            "--snapshot-id".to_owned(),
+            "snap".to_owned(),
+            "--coverage-capability".to_owned(),
+            "completion".to_owned(),
+        ])
+        .unwrap();
+        let scenario =
+            scenario::load_scenario(&default_eval_root(), "chat_completion_smoke").unwrap();
+        let platform = crate::platform::PlatformSnapshot {
+            os: Some("linux".to_owned()),
+            arch: Some("aarch64".to_owned()),
+            target_triple: None,
+            hostname: Some("DGX Spark".to_owned()),
+            host_id: Some("DGX Spark".to_owned()),
+            host_slug: Some("dgx-spark".to_owned()),
+            total_memory_bytes: None,
+            available_memory_bytes: None,
+            total_swap_bytes: None,
+            free_swap_bytes: None,
+            gpu_backend: Some("nvidia".to_owned()),
+            gpus: Vec::new(),
+            accelerator_metadata: std::collections::BTreeMap::new(),
+            unavailable: Vec::new(),
+        };
+        let coverage = options.coverage(&scenario, None, &platform).unwrap();
+
+        assert_eq!(scenario.capability(), scenario::CapabilityName::Chat);
+        assert_eq!(coverage.capability, "completion");
+        assert_eq!(
+            coverage.grouping_keys.get("capability").map(String::as_str),
+            Some("completion")
         );
     }
 

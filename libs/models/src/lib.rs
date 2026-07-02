@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
@@ -41,6 +42,7 @@ use motlie_model_kokoro::KokoroHandle;
 #[cfg(any(
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
     feature = "model-gemma4-12b-gguf",
@@ -291,6 +293,7 @@ pub fn resolve_hf_gguf_snapshot(
 #[cfg(any(
     feature = "model-gemma4-12b-gguf",
     feature = "model-gemma4-12b-qat-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
 ))]
 pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
     model_id: &str,
@@ -318,6 +321,7 @@ pub(crate) fn resolve_hf_gguf_snapshot_with_any_file(
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b",
@@ -375,6 +379,8 @@ pub enum CuratedBundle {
     Qwen3_4B_Gguf,
     #[cfg(feature = "model-qwen3-6-27b-gguf")]
     Qwen3_6_27B_Gguf,
+    #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+    Ornith_1_0_35B_Gguf,
     #[cfg(feature = "model-gemma4-e2b-gguf")]
     Gemma4E2B_Gguf,
     #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -416,6 +422,7 @@ impl CuratedBundle {
         "gemma4_e4b",
         "qwen3_4b_gguf",
         "qwen3_6_27b_gguf",
+        "ornith_1_0_35b_gguf",
         "gemma4_e2b_gguf",
         "gemma4_e4b_gguf",
         "gemma4_12b_gguf",
@@ -451,6 +458,8 @@ impl CuratedBundle {
             Self::Qwen3_4B_Gguf => "qwen3_4b_gguf",
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf => "qwen3_6_27b_gguf",
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf => "ornith_1_0_35b_gguf",
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf => "gemma4_e2b_gguf",
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -496,6 +505,8 @@ impl CuratedBundle {
             Self::Qwen3_4B_Gguf => chat::qwen3_4b_gguf::descriptor(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf => chat::qwen3_6_27b_gguf::descriptor(),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf => chat::ornith_1_0_35b_gguf::descriptor(),
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf => chat::gemma4_e2b_gguf::descriptor(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -558,6 +569,10 @@ impl CuratedBundle {
             Self::Qwen3_6_27B_Gguf => chat::qwen3_6_27b_gguf::start(options)
                 .await
                 .map(CuratedHandle::Qwen3_6_27B_Gguf),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf => chat::ornith_1_0_35b_gguf::start(options)
+                .await
+                .map(CuratedHandle::Ornith_1_0_35B_Gguf),
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf => chat::gemma4_e2b_gguf::start(options)
                 .await
@@ -633,6 +648,8 @@ pub enum CuratedHandle {
     Qwen3_4B_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-qwen3-6-27b-gguf")]
     Qwen3_6_27B_Gguf(LlamaCppTextHandle),
+    #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+    Ornith_1_0_35B_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-gemma4-e2b-gguf")]
     Gemma4E2B_Gguf(LlamaCppTextHandle),
     #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -680,6 +697,8 @@ impl BundleHandle for CuratedHandle {
             Self::Qwen3_4B_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(handle) => handle.descriptor(),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(handle) => handle.descriptor(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -723,6 +742,8 @@ impl BundleHandle for CuratedHandle {
             Self::Qwen3_4B_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(handle) => handle.capabilities(),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(handle) => handle.capabilities(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -766,6 +787,8 @@ impl BundleHandle for CuratedHandle {
             Self::Qwen3_4B_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -809,6 +832,8 @@ impl BundleHandle for CuratedHandle {
             Self::Qwen3_4B_Gguf(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(handle) => handle.accelerator_observation(),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(handle) => handle.accelerator_observation(),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -854,6 +879,8 @@ impl BundleHandle for CuratedHandle {
             Self::Qwen3_4B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -875,6 +902,8 @@ impl BundleHandle for CuratedHandle {
             Self::Qwen3_4B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(_) => Ok(self),
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -914,6 +943,8 @@ impl BundleHandle for CuratedHandle {
             Self::Qwen3_4B_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(handle) => handle.shutdown().await,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -962,6 +993,8 @@ impl ChatModel for CuratedHandle {
             Self::Qwen3_4B_Gguf(handle) => handle.generate(request).await,
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(handle) => handle.generate(request).await,
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(handle) => handle.generate(request).await,
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(handle) => handle.generate(request).await,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -989,6 +1022,8 @@ impl CompletionModel for CuratedHandle {
             Self::Qwen3_4B_Gguf(handle) => handle.complete(request).await,
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             Self::Qwen3_6_27B_Gguf(handle) => handle.complete(request).await,
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            Self::Ornith_1_0_35B_Gguf(handle) => handle.complete(request).await,
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             Self::Gemma4E2B_Gguf(handle) => handle.complete(request).await,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -1448,6 +1483,7 @@ pub enum ModelSelector {
         feature = "model-qwen3-4b",
         feature = "model-qwen3-4b-gguf",
         feature = "model-qwen3-6-27b-gguf",
+        feature = "model-ornith-1-0-35b-gguf",
         feature = "model-gemma4-e2b",
         feature = "model-gemma4-e2b-gguf",
         feature = "model-gemma4-e4b",
@@ -1467,6 +1503,7 @@ pub enum ModelSelector {
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
@@ -1501,6 +1538,7 @@ impl ModelSelector {
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
                 feature = "model-qwen3-6-27b-gguf",
+                feature = "model-ornith-1-0-35b-gguf",
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
@@ -1535,6 +1573,7 @@ impl ModelSelector {
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
                 feature = "model-qwen3-6-27b-gguf",
+                feature = "model-ornith-1-0-35b-gguf",
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
@@ -1569,6 +1608,7 @@ impl ModelSelector {
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
                 feature = "model-qwen3-6-27b-gguf",
+                feature = "model-ornith-1-0-35b-gguf",
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
@@ -1603,6 +1643,7 @@ impl ModelSelector {
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
                 feature = "model-qwen3-6-27b-gguf",
+                feature = "model-ornith-1-0-35b-gguf",
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
@@ -1624,6 +1665,7 @@ impl ModelSelector {
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
+    feature = "model-ornith-1-0-35b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
@@ -1739,10 +1781,17 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-ornith-1-0-35b-gguf"))]
+            if raw == chat::ORNITH_1_0_35B_GGUF_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(any(
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
                 feature = "model-qwen3-6-27b-gguf",
+                feature = "model-ornith-1-0-35b-gguf",
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
@@ -1755,6 +1804,7 @@ impl FromStr for ModelSelector {
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
                 feature = "model-qwen3-6-27b-gguf",
+                feature = "model-ornith-1-0-35b-gguf",
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
                 feature = "model-gemma4-e4b",
@@ -1853,6 +1903,8 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "qwen3_4b_gguf" => Some(CuratedBundle::Qwen3_4B_Gguf),
         #[cfg(feature = "model-qwen3-6-27b-gguf")]
         "qwen3_6_27b_gguf" => Some(CuratedBundle::Qwen3_6_27B_Gguf),
+        #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+        "ornith_1_0_35b_gguf" => Some(CuratedBundle::Ornith_1_0_35B_Gguf),
         #[cfg(feature = "model-gemma4-e2b-gguf")]
         "gemma4_e2b_gguf" => Some(CuratedBundle::Gemma4E2B_Gguf),
         #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -1910,6 +1962,10 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         #[cfg(feature = "model-qwen3-6-27b-gguf")]
         ("qwen3_6_27b", BackendKind::LlamaCpp, CheckpointFormat::Gguf) => {
             Some(CuratedBundle::Qwen3_6_27B_Gguf)
+        }
+        #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+        ("ornith_1_0_35b", BackendKind::LlamaCpp, CheckpointFormat::Gguf) => {
+            Some(CuratedBundle::Ornith_1_0_35B_Gguf)
         }
         #[cfg(feature = "model-gemma4-e2b-gguf")]
         ("gemma4_e2b", BackendKind::LlamaCpp, CheckpointFormat::Gguf) => {
@@ -1997,6 +2053,8 @@ impl Catalog {
         chat::qwen3_4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-qwen3-6-27b-gguf")]
         chat::qwen3_6_27b_gguf::register(&mut catalog);
+        #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+        chat::ornith_1_0_35b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e2b-gguf")]
         chat::gemma4_e2b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -2151,8 +2209,8 @@ mod tests {
         }
         assert_eq!(
             CuratedBundle::CANONICAL_IDS.len(),
-            18,
-            "expected 18 curated bundles; update CANONICAL_IDS and the enum together"
+            19,
+            "expected 19 curated bundles; update CANONICAL_IDS and the enum together"
         );
     }
 
@@ -2161,7 +2219,7 @@ mod tests {
         // Each compiled variant's canonical_id() must equal its descriptor
         // bundle_id() and be a member of CANONICAL_IDS, and must round-trip
         // through bundle_from_id(). Run with all model features (CI) to cover
-        // all 18 variants; with fewer features this covers the compiled subset.
+        // all 19 variants; with fewer features this covers the compiled subset.
         let variants: Vec<CuratedBundle> = vec![
             #[cfg(feature = "model-qwen3-4b")]
             CuratedBundle::Qwen3_4B,
@@ -2173,6 +2231,8 @@ mod tests {
             CuratedBundle::Qwen3_4B_Gguf,
             #[cfg(feature = "model-qwen3-6-27b-gguf")]
             CuratedBundle::Qwen3_6_27B_Gguf,
+            #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+            CuratedBundle::Ornith_1_0_35B_Gguf,
             #[cfg(feature = "model-gemma4-e2b-gguf")]
             CuratedBundle::Gemma4E2B_Gguf,
             #[cfg(feature = "model-gemma4-e4b-gguf")]
@@ -2487,6 +2547,22 @@ mod tests {
             assert!(artifacts.includes("Qwen3.6-27B-Q5_K_M.gguf"));
             assert!(!artifacts.includes("Qwen3.6-27B-FP8.gguf"));
         }
+
+        #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+        {
+            let bundle_id = BundleId::new("ornith_1_0_35b_gguf");
+            assert!(catalog.instantiate(&bundle_id).is_some());
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|bundle| bundle.id == bundle_id));
+
+            let artifacts = catalog
+                .artifacts(&bundle_id)
+                .expect("Ornith GGUF bundle should expose artifact control");
+            assert_eq!(artifacts.control_name, "ornith_1_0_35b_gguf");
+            assert!(artifacts.includes("ornith-1.0-35b-Q4_K_M.gguf"));
+            assert!(artifacts.includes("ornith-1.0-35b-Q8_0.gguf"));
+        }
     }
 
     #[test]
@@ -2639,6 +2715,16 @@ mod tests {
             assert_eq!(model, ChatModels::Qwen3_6_27B_Gguf);
             assert_eq!(model.to_string(), "qwen/qwen3_6_27b_gguf");
         }
+
+        #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+        {
+            let model: ChatModels = "deepreinforce-ai/ornith_1_0_35b_gguf"
+                .parse()
+                .expect("known Ornith GGUF chat selector should parse");
+
+            assert_eq!(model, ChatModels::Ornith_1_0_35B_Gguf);
+            assert_eq!(model.to_string(), "deepreinforce-ai/ornith_1_0_35b_gguf");
+        }
     }
 
     #[test]
@@ -2671,6 +2757,22 @@ mod tests {
 
             assert_eq!(selector, ModelSelector::Chat(ChatModels::Qwen3_6_27B_Gguf));
             assert_eq!(selector.to_string(), "chat:qwen/qwen3_6_27b_gguf");
+        }
+
+        #[cfg(feature = "model-ornith-1-0-35b-gguf")]
+        {
+            let selector: ModelSelector = "chat:deepreinforce-ai/ornith_1_0_35b_gguf"
+                .parse()
+                .expect("known Ornith GGUF chat model selector should parse");
+
+            assert_eq!(
+                selector,
+                ModelSelector::Chat(ChatModels::Ornith_1_0_35B_Gguf)
+            );
+            assert_eq!(
+                selector.to_string(),
+                "chat:deepreinforce-ai/ornith_1_0_35b_gguf"
+            );
         }
     }
 
@@ -2737,6 +2839,20 @@ mod tests {
             err,
             ModelsError::ModelUnavailable { selector }
             if selector == "chat:qwen/qwen3_6_27b_gguf"
+        ));
+    }
+
+    #[cfg(not(feature = "model-ornith-1-0-35b-gguf"))]
+    #[test]
+    fn ornith_gguf_chat_selector_reports_unavailable_when_disabled() {
+        let err = "chat:deepreinforce-ai/ornith_1_0_35b_gguf"
+            .parse::<ModelSelector>()
+            .expect_err("disabled Ornith GGUF selector should be unavailable");
+
+        assert!(matches!(
+            err,
+            ModelsError::ModelUnavailable { selector }
+            if selector == "chat:deepreinforce-ai/ornith_1_0_35b_gguf"
         ));
     }
 

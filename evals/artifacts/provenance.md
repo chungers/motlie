@@ -13,6 +13,7 @@ Snapshot hashes are resolved by `evals preflight` from the local Hugging Face ca
 | `gemma4_e4b` | Chat<br>Vision<br>ToolUse | primary: `google/gemma-4-E4B-it` | primary: `apache-2.0`/`public` | primary:<br>chat_template.jinja<br>config.json<br>generation_config.json<br>tokenizer.json<br>tokenizer_config.json<br>processor_config.json<br>*.safetensors | none |
 | `qwen3_4b_gguf` | Chat<br>Completion<br>ToolUse | primary: `Qwen/Qwen3-4B-GGUF` | primary: `apache-2.0`/`public` | primary:<br>*-Q4_K_M.gguf<br>*-Q8_0.gguf | none |
 | `qwen3_6_27b_gguf` | Chat<br>Completion | primary: `unsloth/Qwen3.6-27B-GGUF` | primary: `apache-2.0`/`public` | primary:<br>Qwen3.6-27B-Q4_K_M.gguf<br>Qwen3.6-27B-Q5_K_M.gguf<br>Qwen3.6-27B-Q8_0.gguf | none |
+| `ornith_1_0_35b_gguf` | Chat<br>Completion<br>ToolUse | primary: `deepreinforce-ai/Ornith-1.0-35B-GGUF` | primary: `mit`/`public` | primary:<br>ornith-1.0-35b-Q4_K_M.gguf<br>ornith-1.0-35b-Q8_0.gguf | none |
 | `gemma4_e2b_gguf` | Chat<br>Completion<br>ToolUse | primary: `unsloth/gemma-4-E2B-it-GGUF` | primary: `apache-2.0`/`public` | primary:<br>*-Q4_K_M.gguf<br>*-Q8_0.gguf | none |
 | `gemma4_e4b_gguf` | Chat<br>Completion<br>ToolUse | primary: `unsloth/gemma-4-E4B-it-GGUF` | primary: `apache-2.0`/`public` | primary:<br>*-Q8_0.gguf<br>*-Q4_K_M.gguf | none |
 | `gemma4_12b_gguf` | Chat<br>Completion<br>ToolUse | primary: `unsloth/gemma-4-12b-it-GGUF` | primary: `apache-2.0`/`public` | primary:<br>gemma-4-12b-it-Q4_K_M.gguf<br>gemma-4-12b-it-Q8_0.gguf | none |

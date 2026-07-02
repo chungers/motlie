@@ -60,7 +60,7 @@ The canonical per-host Hugging Face cache for evals is
 `models--<owner>--<repo>/refs/main` plus `snapshots/<sha>/<files>`.
 
 `cargo run -p evals --features all-curated -- preflight` is the permanent
-artifact gate. It derives all 18 curated artifact requirements from the
+artifact gate. It derives all 19 curated artifact requirements from the
 `motlie-models` registry, reports each HF source and resolved snapshot hash, and
 exits non-zero if any required artifact is absent. Use
 `cargo run -p evals --features all-curated -- artifacts sync` to populate gaps
