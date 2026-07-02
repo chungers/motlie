@@ -11,10 +11,10 @@ backend = ["MistralRs", "LlamaCpp"]
 system_prompt = "Be concise. Answer in one paragraph."
 prompt = "In one sentence, explain what Motlie model bundles are for."
 followup_prompt = "Now say that more simply."
-# No a-priori max_tokens cap (#492): generation runs to the model's natural EOS.
-# A guessed cap produces false think-token-exhaustion failures and cannot be
-# known a priori when curating a new model. Natural token usage is recorded as
-# metrics for empirical cross-model discovery instead.
+# High cap preserves thinking-model smoke coverage while bounding no-EOS samples.
+# Current curated thinking traces answer within ~2k generated tokens; cap-induced
+# truncation still fails the min-response assertions instead of blocking the matrix.
+max_tokens = 2048
 temperature = 0.2
 
 [assertions]
