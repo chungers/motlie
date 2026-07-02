@@ -26,7 +26,10 @@ use crate::adapter::{
 };
 use crate::call_control::{TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::conversation::{self, ConversationRuntime};
-use crate::conversation_policy::BargeInTrigger;
+use crate::conversation_policy::{
+    ActivePlaybackTarget, AudioBargeInDecisionInput, AudioEvidenceInvalidation, AudioOnsetDecision,
+    BargeInTrigger, CallerOnsetEvidence, PlaybackEchoState,
+};
 use crate::early_response::{
     spawn_early_response_pipeline, EarlyResponseCancelReason, EarlyResponseCommitBoundary,
     EarlyResponseCommitMember, EarlyResponseInput, EarlyResponsePartial,
@@ -40,7 +43,8 @@ use crate::operator::state::{
 use crate::processors::ConversationProcessorKind;
 use crate::quality::{
     insert_transcript_text_fields, transcript_plaintext_included, ActiveAsrQualitySession,
-    CallerTurnEventMetadata, EchoCharacterizationQualityConfig, EchoSuppressionQualityConfig,
+    AudioBargeInMediaQualityConfig, AudioBargeInMode, CallerTurnEventMetadata,
+    ConversationPolicyMode, EchoCharacterizationQualityConfig, EchoSuppressionQualityConfig,
     OnsetDuringPlaybackPolicy, RedactionMode, SpeechQualityConfig, VoiceQualityConfig,
 };
 use crate::speech;
@@ -249,9 +253,16 @@ impl CallMediaHandle {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveSpeechPlaybackRef {
+    pub playback_id: String,
+    pub playback_epoch: u64,
+}
+
 #[derive(Clone, Debug)]
 struct ActiveSpeechJob {
     playback_id: String,
+    playback_epoch: u64,
     cancel: SpeechCancelToken,
 }
 
@@ -264,9 +275,11 @@ struct RecentSpeechPlayback {
 #[derive(Clone)]
 struct MediaRegistryEntry {
     tx: mpsc::Sender<OutboundMediaCommand>,
+    next_playback_epoch: u64,
     active_speech: Option<ActiveSpeechJob>,
     pending_clears: VecDeque<PendingClear>,
     recent_speech: VecDeque<RecentSpeechPlayback>,
+    latest_caller_onset_evidence: Option<CallerOnsetEvidence>,
 }
 
 #[derive(Clone, Default)]
@@ -296,9 +309,11 @@ impl SharedMediaRegistry {
             gateway_call_id,
             MediaRegistryEntry {
                 tx,
+                next_playback_epoch: 1,
                 active_speech: None,
                 pending_clears: VecDeque::new(),
                 recent_speech: VecDeque::new(),
+                latest_caller_onset_evidence: None,
             },
         );
     }
@@ -324,8 +339,11 @@ impl SharedMediaRegistry {
                 gateway_call_id
             );
         }
+        let playback_epoch = entry.next_playback_epoch;
+        entry.next_playback_epoch = entry.next_playback_epoch.saturating_add(1);
         entry.active_speech = Some(ActiveSpeechJob {
             playback_id,
+            playback_epoch,
             cancel,
         });
         Ok(CallMediaHandle {
@@ -353,8 +371,11 @@ impl SharedMediaRegistry {
             record_recent_speech(entry, active.playback_id.clone());
             active.playback_id
         });
+        let playback_epoch = entry.next_playback_epoch;
+        entry.next_playback_epoch = entry.next_playback_epoch.saturating_add(1);
         entry.active_speech = Some(ActiveSpeechJob {
             playback_id,
+            playback_epoch,
             cancel,
         });
         Ok((
@@ -422,6 +443,37 @@ impl SharedMediaRegistry {
         Ok(true)
     }
 
+    pub async fn cancel_speech_playback_ref_for_reason(
+        &self,
+        gateway_call_id: &str,
+        playback: &ActiveSpeechPlaybackRef,
+        reason: SpeechClearReason,
+    ) -> anyhow::Result<bool> {
+        let mut guard = self.inner.lock().await;
+        let entry = guard
+            .get_mut(gateway_call_id)
+            .with_context(|| format!("media stream is not ready for call {gateway_call_id}"))?;
+        let Some(active) = entry.active_speech.as_ref() else {
+            return Ok(false);
+        };
+        if active.playback_id != playback.playback_id
+            || active.playback_epoch != playback.playback_epoch
+        {
+            return Ok(false);
+        }
+        let Some(active) = entry.active_speech.take() else {
+            return Ok(false);
+        };
+        active.cancel.cancel();
+        record_recent_speech(entry, active.playback_id.clone());
+        entry.pending_clears.push_back(PendingClear {
+            playback_id: active.playback_id,
+            requested_at: Instant::now(),
+            reason,
+        });
+        Ok(true)
+    }
+
     async fn take_pending_clear(&self, gateway_call_id: &str) -> Option<PendingClear> {
         self.inner
             .lock()
@@ -432,13 +484,60 @@ impl SharedMediaRegistry {
     }
 
     pub async fn active_speech_playback_id(&self, gateway_call_id: &str) -> Option<String> {
+        self.active_speech_playback_ref(gateway_call_id)
+            .await
+            .map(|active| active.playback_id)
+    }
+
+    pub async fn active_speech_playback_ref(
+        &self,
+        gateway_call_id: &str,
+    ) -> Option<ActiveSpeechPlaybackRef> {
         self.inner
             .lock()
             .await
             .get(gateway_call_id)?
             .active_speech
             .as_ref()
-            .map(|active| active.playback_id.clone())
+            .map(|active| ActiveSpeechPlaybackRef {
+                playback_id: active.playback_id.clone(),
+                playback_epoch: active.playback_epoch,
+            })
+    }
+
+    pub async fn record_caller_onset_evidence(
+        &self,
+        gateway_call_id: &str,
+        evidence: CallerOnsetEvidence,
+    ) {
+        if let Some(entry) = self.inner.lock().await.get_mut(gateway_call_id) {
+            entry.latest_caller_onset_evidence = Some(evidence);
+        }
+    }
+
+    pub async fn latest_caller_onset_evidence(
+        &self,
+        gateway_call_id: &str,
+    ) -> Option<CallerOnsetEvidence> {
+        self.inner
+            .lock()
+            .await
+            .get(gateway_call_id)?
+            .latest_caller_onset_evidence
+            .clone()
+    }
+
+    async fn recent_speech_playback_age(
+        &self,
+        gateway_call_id: &str,
+        recent_window: Duration,
+    ) -> Option<Duration> {
+        let guard = self.inner.lock().await;
+        let entry = guard.get(gateway_call_id)?;
+        entry.recent_speech.iter().rev().find_map(|recent| {
+            let age = recent.terminal_at.elapsed();
+            (age <= recent_window).then_some(age)
+        })
     }
 
     pub async fn speech_playback_active_or_recent(
@@ -490,6 +589,15 @@ struct InboundTransportStats {
     jitter_samples_ms: Vec<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct InboundTransportSnapshot {
+    packets_total: u64,
+    lost_packets: u64,
+    stale_frames: u64,
+    reordered_frames: u64,
+    jitter_samples: usize,
+}
+
 impl InboundTransportStats {
     fn observe_packet(&mut self, sequence: u64, expected_frame_ms: u64) {
         self.packets_total = self.packets_total.saturating_add(1);
@@ -517,6 +625,25 @@ impl InboundTransportStats {
 
     fn observe_stale(&mut self) {
         self.stale_frames = self.stale_frames.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> InboundTransportSnapshot {
+        InboundTransportSnapshot {
+            packets_total: self.packets_total,
+            lost_packets: self.lost_packets,
+            stale_frames: self.stale_frames,
+            reordered_frames: self.reordered_frames,
+            jitter_samples: self.jitter_samples_ms.len(),
+        }
+    }
+
+    fn max_jitter_since(&self, sample_index: usize) -> u64 {
+        let start = sample_index.min(self.jitter_samples_ms.len());
+        self.jitter_samples_ms[start..]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
     }
 
     fn rollup_payload(
@@ -612,13 +739,13 @@ struct EchoCharacterizationState {
 }
 
 impl EchoCharacterizationState {
-    fn observe_outbound_frame(
+    fn observe_outbound_frame_with_retention(
         &mut self,
-        config: &EchoCharacterizationQualityConfig,
         playback_id: &str,
         sample_rate_hz: u32,
         samples: Vec<i16>,
         now: Instant,
+        retention: Duration,
     ) {
         if samples.is_empty() {
             return;
@@ -630,11 +757,10 @@ impl EchoCharacterizationState {
                 sample_rate_hz,
                 samples,
             });
-        self.prune(now, config);
+        self.prune_to_retention(now, retention);
     }
 
-    fn prune(&mut self, now: Instant, config: &EchoCharacterizationQualityConfig) {
-        let retention = echo_characterization_retention(config);
+    fn prune_to_retention(&mut self, now: Instant, retention: Duration) {
         while self
             .outbound_reference
             .front()
@@ -665,10 +791,16 @@ impl EchoCharacterizationState {
         sample_rate_hz: u32,
         config: &EchoCharacterizationQualityConfig,
     ) -> Vec<i16> {
-        let max_samples = samples_for_ms(
-            config.window_ms.saturating_add(config.max_delay_ms),
+        self.reference_samples_for(
             sample_rate_hz,
-        );
+            samples_for_ms(
+                config.window_ms.saturating_add(config.max_delay_ms),
+                sample_rate_hz,
+            ),
+        )
+    }
+
+    fn reference_samples_for(&self, sample_rate_hz: u32, max_samples: usize) -> Vec<i16> {
         let mut frames = Vec::new();
         let mut sample_count = 0usize;
         for frame in self.outbound_reference.iter().rev() {
@@ -700,6 +832,339 @@ struct EchoCharacterizationMetrics {
     inbound_rms_dbfs: f32,
     outbound_rms_dbfs: f32,
     echo_return_db: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AudioEchoCalibration {
+    erl_baseline_db: f32,
+    delay_ms: f32,
+    playback_only_ms: u64,
+    update_count: u64,
+}
+
+#[derive(Debug, Default)]
+struct AudioBargeInEvidenceState {
+    calibration: Option<AudioEchoCalibration>,
+    consecutive_trusted_windows: usize,
+    caller_active_since: Option<Instant>,
+    last_trusted_onset: Option<(String, u64)>,
+    last_transport_snapshot: InboundTransportSnapshot,
+}
+
+#[derive(Clone, Copy)]
+struct ActivePlaybackWindow<'a> {
+    config: &'a AudioBargeInMediaQualityConfig,
+    playback_ref: &'a ActiveSpeechPlaybackRef,
+    format: &'a MediaFormat,
+    samples: &'a [i16],
+    stats: &'a SampleStats,
+    speech: &'a SpeechQualityConfig,
+    outbound_reference: &'a [i16],
+    transport_invalidation: Option<AudioEvidenceInvalidation>,
+    frame_duration_ms: u64,
+    now: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResidualEchoMetrics {
+    residual_rms_dbfs: f32,
+    residual_peak: i16,
+    residual_rms: f32,
+}
+
+impl ResidualEchoMetrics {
+    fn has_speech_energy(self, speech: &SpeechQualityConfig) -> bool {
+        self.residual_rms >= speech.rms_threshold
+            || i32::from(self.residual_peak) >= speech.peak_threshold
+    }
+}
+
+struct CallerOnsetEvidenceSeed<'a> {
+    decision: AudioOnsetDecision,
+    confidence: f32,
+    playback_state: PlaybackEchoState,
+    playback_ref: Option<&'a ActiveSpeechPlaybackRef>,
+    caller_active_since: Option<Instant>,
+    now: Instant,
+    window_ms: u32,
+    format: &'a MediaFormat,
+    inbound_rms_dbfs: f32,
+    outbound_rms_dbfs: Option<f32>,
+    invalidation: Option<AudioEvidenceInvalidation>,
+}
+
+struct AudioBargeInFrame<'a> {
+    gateway_call_id: &'a str,
+    stream_id: &'a str,
+    format: &'a MediaFormat,
+    samples: &'a [i16],
+    stats: &'a SampleStats,
+    frame_duration_ms: u64,
+    caller_candidate_active: bool,
+}
+
+impl AudioBargeInEvidenceState {
+    fn transport_invalidation(
+        &mut self,
+        transport: &InboundTransportStats,
+        config: &AudioBargeInMediaQualityConfig,
+    ) -> Option<AudioEvidenceInvalidation> {
+        let snapshot = transport.snapshot();
+        let packets = snapshot
+            .packets_total
+            .saturating_sub(self.last_transport_snapshot.packets_total)
+            .max(1);
+        let invalid_frames = snapshot
+            .lost_packets
+            .saturating_sub(self.last_transport_snapshot.lost_packets)
+            .saturating_add(
+                snapshot
+                    .reordered_frames
+                    .saturating_sub(self.last_transport_snapshot.reordered_frames),
+            )
+            .saturating_add(
+                snapshot
+                    .stale_frames
+                    .saturating_sub(self.last_transport_snapshot.stale_frames),
+            );
+        let window_max_jitter_ms =
+            transport.max_jitter_since(self.last_transport_snapshot.jitter_samples);
+        self.last_transport_snapshot = snapshot;
+        let invalid_ratio = invalid_frames as f32 / packets as f32;
+        if invalid_ratio > config.max_invalid_frame_ratio
+            || window_max_jitter_ms > config.max_jitter_ms
+        {
+            Some(AudioEvidenceInvalidation::TransportInvalid)
+        } else {
+            None
+        }
+    }
+
+    fn observe_playback_only_calibration(
+        &mut self,
+        config: &AudioBargeInMediaQualityConfig,
+        frame_duration_ms: u64,
+        metrics: EchoCharacterizationMetrics,
+    ) {
+        if metrics.echo_return_db < config.erl_min_db || metrics.echo_return_db > config.erl_max_db
+        {
+            return;
+        }
+        if metrics.estimated_delay_ms < config.delay_search_min_ms
+            || metrics.estimated_delay_ms > config.delay_search_max_ms
+        {
+            return;
+        }
+        let alpha = config.calibration_ema_alpha;
+        let next = if let Some(current) = self.calibration {
+            AudioEchoCalibration {
+                erl_baseline_db: current
+                    .erl_baseline_db
+                    .mul_add(1.0 - alpha, metrics.echo_return_db * alpha),
+                delay_ms: current
+                    .delay_ms
+                    .mul_add(1.0 - alpha, metrics.estimated_delay_ms as f32 * alpha),
+                playback_only_ms: current.playback_only_ms.saturating_add(frame_duration_ms),
+                update_count: current.update_count.saturating_add(1),
+            }
+        } else {
+            AudioEchoCalibration {
+                erl_baseline_db: metrics.echo_return_db,
+                delay_ms: metrics.estimated_delay_ms as f32,
+                playback_only_ms: frame_duration_ms,
+                update_count: 1,
+            }
+        };
+        self.calibration = Some(next);
+    }
+
+    fn classify_active_playback_window(
+        &mut self,
+        window: ActivePlaybackWindow<'_>,
+    ) -> CallerOnsetEvidence {
+        let window_ms = window.frame_duration_ms.min(u64::from(u32::MAX)) as u32;
+        let mut evidence = base_caller_onset_evidence(CallerOnsetEvidenceSeed {
+            decision: AudioOnsetDecision::Unavailable,
+            confidence: 0.0,
+            playback_state: PlaybackEchoState::ActivePlayback,
+            playback_ref: Some(window.playback_ref),
+            caller_active_since: None,
+            now: window.now,
+            window_ms,
+            format: window.format,
+            inbound_rms_dbfs: rms_dbfs(window.samples),
+            outbound_rms_dbfs: None,
+            invalidation: window.transport_invalidation,
+        });
+        if evidence.invalidation.is_some() {
+            self.consecutive_trusted_windows = 0;
+            evidence.decision = AudioOnsetDecision::Ambiguous;
+            return evidence;
+        }
+        let min_reference = window.samples.len().saturating_add(samples_for_ms(
+            window.config.delay_search_max_ms,
+            window.format.sample_rate_hz,
+        ));
+        if window.outbound_reference.len() < min_reference {
+            self.consecutive_trusted_windows = 0;
+            evidence.invalidation = Some(AudioEvidenceInvalidation::ShortReference);
+            return evidence;
+        }
+        let Some(metrics) = characterize_echo(
+            window.samples,
+            window.outbound_reference,
+            window.format.sample_rate_hz,
+            window.config.delay_search_max_ms,
+        ) else {
+            self.consecutive_trusted_windows = 0;
+            evidence.invalidation = Some(AudioEvidenceInvalidation::ShortReference);
+            return evidence;
+        };
+        evidence.estimated_delay_ms =
+            Some(metrics.estimated_delay_ms.min(u64::from(u32::MAX)) as u32);
+        evidence.correlation_peak = Some(metrics.correlation_peak);
+        if metrics.estimated_delay_ms < window.config.delay_search_min_ms
+            || metrics.estimated_delay_ms > window.config.delay_search_max_ms
+        {
+            self.consecutive_trusted_windows = 0;
+            evidence.decision = AudioOnsetDecision::Ambiguous;
+            evidence.invalidation = Some(AudioEvidenceInvalidation::DelayOutOfRange);
+            return evidence;
+        }
+        let Some(calibration) = self.calibration else {
+            self.consecutive_trusted_windows = 0;
+            evidence.invalidation = Some(AudioEvidenceInvalidation::CalibrationUnavailable);
+            return evidence;
+        };
+        if calibration.playback_only_ms < window.config.calibration_min_playback_only_ms {
+            self.consecutive_trusted_windows = 0;
+            evidence.invalidation = Some(AudioEvidenceInvalidation::CalibrationUnavailable);
+            return evidence;
+        }
+        let Some(calibrated_segment) = reference_segment_at_delay(
+            window.samples.len(),
+            window.outbound_reference,
+            window.format.sample_rate_hz,
+            calibration.delay_ms,
+        ) else {
+            self.consecutive_trusted_windows = 0;
+            evidence.invalidation = Some(AudioEvidenceInvalidation::DelayOutOfRange);
+            return evidence;
+        };
+        let delay_drift_ms = (metrics.estimated_delay_ms as f32 - calibration.delay_ms).abs();
+        if metrics.correlation_peak >= window.config.min_speechlike_correlation
+            && delay_drift_ms > window.config.calibrated_delay_tolerance_ms as f32
+        {
+            self.consecutive_trusted_windows = 0;
+            evidence.decision = AudioOnsetDecision::Ambiguous;
+            evidence.invalidation = Some(AudioEvidenceInvalidation::DelayOutOfRange);
+            return evidence;
+        }
+        let calibrated_outbound_rms_dbfs = rms_dbfs(calibrated_segment);
+        let calibrated_correlation = normalized_correlation(window.samples, calibrated_segment)
+            .unwrap_or(metrics.correlation_peak);
+        let echo_return_db = metrics.inbound_rms_dbfs - calibrated_outbound_rms_dbfs;
+        evidence.outbound_rms_dbfs = Some(calibrated_outbound_rms_dbfs);
+        evidence.correlation_peak = Some(calibrated_correlation);
+        evidence.echo_return_db = Some(echo_return_db);
+        let predicted_echo_dbfs = calibrated_outbound_rms_dbfs + calibration.erl_baseline_db;
+        let echo_margin_db = metrics.inbound_rms_dbfs - predicted_echo_dbfs;
+        evidence.echo_margin_db = Some(echo_margin_db);
+        if echo_margin_db < window.config.min_echo_margin_db_floor {
+            self.consecutive_trusted_windows = 0;
+            evidence.decision = AudioOnsetDecision::LikelyAssistantEcho;
+            evidence.confidence = calibrated_correlation.clamp(0.0, 1.0);
+            return evidence;
+        }
+        let Some(residual) = residual_echo_metrics(window.samples, calibrated_segment) else {
+            self.consecutive_trusted_windows = 0;
+            evidence.decision = AudioOnsetDecision::Ambiguous;
+            evidence.invalidation = Some(AudioEvidenceInvalidation::LowCorrelationSpeech);
+            return evidence;
+        };
+        if !window.stats.has_speech_energy(window.speech)
+            || !residual.has_speech_energy(window.speech)
+        {
+            self.consecutive_trusted_windows = 0;
+            if calibrated_correlation >= window.config.min_speechlike_correlation {
+                evidence.decision = AudioOnsetDecision::LikelyAssistantEcho;
+                evidence.confidence = calibrated_correlation.clamp(0.0, 1.0);
+            } else {
+                evidence.decision = AudioOnsetDecision::Ambiguous;
+                evidence.invalidation = if window.stats.has_speech_energy(window.speech) {
+                    Some(AudioEvidenceInvalidation::LowCorrelationSpeech)
+                } else {
+                    Some(AudioEvidenceInvalidation::LowCorrelationNonSpeech)
+                };
+            }
+            return evidence;
+        }
+        self.consecutive_trusted_windows = self.consecutive_trusted_windows.saturating_add(1);
+        self.caller_active_since.get_or_insert(window.now);
+        evidence.caller_active_since = self.caller_active_since;
+        let residual_margin_db = (residual.residual_rms_dbfs - predicted_echo_dbfs).max(0.0);
+        evidence.confidence = (echo_margin_db.max(residual_margin_db)
+            / window.config.min_echo_margin_db_ceiling)
+            .clamp(0.0, 1.0)
+            .max(0.01);
+        if self.consecutive_trusted_windows >= window.config.trusted_onset_min_windows {
+            evidence.decision = AudioOnsetDecision::TrustedCallerOnset;
+        } else {
+            evidence.decision = AudioOnsetDecision::Ambiguous;
+        }
+        evidence
+    }
+
+    fn take_trusted_onset_edge(&mut self, evidence: &CallerOnsetEvidence) -> bool {
+        if evidence.decision != AudioOnsetDecision::TrustedCallerOnset
+            || evidence.playback_state != PlaybackEchoState::ActivePlayback
+        {
+            return false;
+        }
+        let Some(playback_id) = evidence.playback_id.as_ref() else {
+            return false;
+        };
+        let Some(playback_epoch) = evidence.playback_epoch else {
+            return false;
+        };
+        let key = (playback_id.clone(), playback_epoch);
+        if self.last_trusted_onset.as_ref() == Some(&key) {
+            return false;
+        }
+        self.last_trusted_onset = Some(key);
+        true
+    }
+
+    fn reset_caller_active(&mut self) {
+        self.consecutive_trusted_windows = 0;
+        self.caller_active_since = None;
+    }
+}
+
+fn base_caller_onset_evidence(seed: CallerOnsetEvidenceSeed<'_>) -> CallerOnsetEvidence {
+    CallerOnsetEvidence {
+        decision: seed.decision,
+        confidence: seed.confidence,
+        playback_state: seed.playback_state,
+        playback_id: seed
+            .playback_ref
+            .map(|playback| playback.playback_id.clone()),
+        playback_epoch: seed.playback_ref.map(|playback| playback.playback_epoch),
+        caller_active_since: seed.caller_active_since,
+        evidence_at: seed.now,
+        evidence_age_ms: 0,
+        window_ms: seed.window_ms,
+        input_codec: seed.format.encoding.clone(),
+        input_sample_rate_hz: seed.format.sample_rate_hz,
+        evidence_sample_rate_hz: seed.format.sample_rate_hz,
+        inbound_rms_dbfs: seed.inbound_rms_dbfs,
+        outbound_rms_dbfs: seed.outbound_rms_dbfs,
+        estimated_delay_ms: None,
+        correlation_peak: None,
+        echo_return_db: None,
+        echo_margin_db: None,
+        invalidation: seed.invalidation,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -791,6 +1256,7 @@ struct MediaSocketState {
     outbound_post_mark_wait_ticks: usize,
     outbound_pacing: OutboundPacingStats,
     echo_characterization: EchoCharacterizationState,
+    audio_barge_in: AudioBargeInEvidenceState,
     playback_pacing_counters: HashMap<String, PlaybackPacingCounters>,
     last_outbound_frame_sent_at: Option<Instant>,
     first_frame_sent_playbacks: HashSet<String>,
@@ -837,6 +1303,7 @@ impl MediaSocketState {
             outbound_post_mark_wait_ticks: 0,
             outbound_pacing: OutboundPacingStats::default(),
             echo_characterization: EchoCharacterizationState::default(),
+            audio_barge_in: AudioBargeInEvidenceState::default(),
             playback_pacing_counters: HashMap::new(),
             last_outbound_frame_sent_at: None,
             first_frame_sent_playbacks: HashSet::new(),
@@ -1206,21 +1673,25 @@ async fn send_outbound_command(
 }
 
 fn capture_outbound_echo_reference(media_state: &mut MediaSocketState, frame: &OutboundMediaFrame) {
-    let config = media_state.quality_config.echo_characterization.clone();
-    if !config.enabled {
+    let echo_config = media_state.quality_config.echo_characterization.clone();
+    let audio_config = media_state.quality_config.audio_barge_in.media.clone();
+    if !echo_config.enabled && audio_config.mode == AudioBargeInMode::MeasureOnly {
         return;
     }
     let Some(format) = media_state.media_format.as_ref() else {
         return;
     };
+    let retention = outbound_reference_retention(&media_state.quality_config);
     match decode_payload(format, &frame.payload) {
-        Ok(samples) => media_state.echo_characterization.observe_outbound_frame(
-            &config,
-            &frame.playback_id,
-            format.sample_rate_hz,
-            samples,
-            Instant::now(),
-        ),
+        Ok(samples) => media_state
+            .echo_characterization
+            .observe_outbound_frame_with_retention(
+                &frame.playback_id,
+                format.sample_rate_hz,
+                samples,
+                Instant::now(),
+                retention,
+            ),
         Err(error) => tracing::debug!(
             playback_id = frame.playback_id.as_str(),
             error = %error,
@@ -1243,7 +1714,10 @@ async fn maybe_emit_echo_characterization_span(
         return;
     }
     let now = Instant::now();
-    media_state.echo_characterization.prune(now, &config);
+    media_state.echo_characterization.prune_to_retention(
+        now,
+        outbound_reference_retention(&media_state.quality_config),
+    );
     if !media_state.echo_characterization.should_emit(now, &config) {
         return;
     }
@@ -2114,6 +2588,27 @@ async fn ingest_frame(
         &stats,
     )
     .await;
+    let audio_onset_evidence = update_audio_barge_in_evidence(
+        state,
+        media_state,
+        AudioBargeInFrame {
+            gateway_call_id: &gateway_call_id,
+            stream_id,
+            format: &format,
+            samples: &samples,
+            stats: &stats,
+            frame_duration_ms,
+            caller_candidate_active: media_state.asr_gate.speech_started,
+        },
+    )
+    .await;
+    let audio_trusted_onset = audio_onset_evidence.as_ref().is_some_and(|evidence| {
+        take_audio_trusted_onset_trigger(
+            &media_state.quality_config,
+            &mut media_state.audio_barge_in,
+            evidence,
+        )
+    });
     let partial_speech_state = match media_state.asr_gate.accept(
         media_state.decoded_frame_count,
         stream_id,
@@ -2137,13 +2632,15 @@ async fn ingest_frame(
                     );
                 }
             }
-            if speech_onset && speech_onset_barge_in_enabled(&media_state.quality_config) {
+            if (speech_onset || audio_trusted_onset)
+                && speech_onset_barge_in_enabled(&media_state.quality_config)
+            {
                 let echo_decision = speech_onset_echo_decision(
                     state,
                     media_state.media_registry.clone(),
                     media_state.first_frame_sent_playbacks.clone(),
-                    media_state.quality_config.barge_in.onset_during_playback,
-                    media_state.quality_config.echo_suppression.clone(),
+                    media_state.quality_config.clone(),
+                    audio_onset_evidence.as_ref(),
                     &gateway_call_id,
                 )
                 .await;
@@ -2181,6 +2678,7 @@ async fn ingest_frame(
                             runtime,
                             &gateway_call_id,
                             Some(&media_state.quality_config),
+                            audio_onset_evidence.as_ref(),
                         )
                         .await?;
                     }
@@ -2407,14 +2905,317 @@ fn speech_onset_barge_in_enabled(config: &VoiceQualityConfig) -> bool {
         .cancels_playback()
 }
 
+fn audio_barge_in_evidence_enabled(config: &VoiceQualityConfig) -> bool {
+    config.echo_characterization.enabled
+        || config.audio_barge_in.media.mode.consumes_audio_evidence()
+}
+
+fn take_audio_trusted_onset_trigger(
+    config: &VoiceQualityConfig,
+    audio_state: &mut AudioBargeInEvidenceState,
+    evidence: &CallerOnsetEvidence,
+) -> bool {
+    config.audio_barge_in.media.mode.consumes_audio_evidence()
+        && evidence.playback_state == PlaybackEchoState::ActivePlayback
+        && audio_state.take_trusted_onset_edge(evidence)
+}
+
+fn playback_state_without_active(
+    recent_playback_age: Option<Duration>,
+    outbound_queue_depth: usize,
+) -> PlaybackEchoState {
+    if recent_playback_age.is_none() {
+        PlaybackEchoState::Idle
+    } else if outbound_queue_depth > 0 {
+        PlaybackEchoState::InterSegmentGap
+    } else {
+        PlaybackEchoState::RecentTail
+    }
+}
+
+async fn update_audio_barge_in_evidence(
+    state: &SharedState,
+    media_state: &mut MediaSocketState,
+    frame: AudioBargeInFrame<'_>,
+) -> Option<CallerOnsetEvidence> {
+    let gateway_call_id = frame.gateway_call_id;
+    let stream_id = frame.stream_id;
+    let format = frame.format;
+    let samples = frame.samples;
+    let stats = frame.stats;
+    let frame_duration_ms = frame.frame_duration_ms;
+    if !audio_barge_in_evidence_enabled(&media_state.quality_config) {
+        return None;
+    }
+    let now = Instant::now();
+    let media_config = media_state.quality_config.audio_barge_in.media.clone();
+    let transport_invalidation = media_state
+        .audio_barge_in
+        .transport_invalidation(&media_state.inbound_transport, &media_config);
+    let speech_active = stats.has_speech_energy(&media_state.quality_config.speech);
+    let active_ref = media_state
+        .media_registry
+        .active_speech_playback_ref(gateway_call_id)
+        .await;
+
+    let Some(active_ref) = active_ref else {
+        media_state.audio_barge_in.reset_caller_active();
+        if !speech_active {
+            return None;
+        }
+        let recent_window =
+            Duration::from_millis(media_state.quality_config.echo_suppression.tail_window_ms);
+        let recent_playback_age = media_state
+            .media_registry
+            .recent_speech_playback_age(gateway_call_id, recent_window)
+            .await;
+        let playback_state =
+            playback_state_without_active(recent_playback_age, outbound_queue_depth(media_state));
+        let decision = if playback_state == PlaybackEchoState::Idle {
+            AudioOnsetDecision::TrustedCallerOnset
+        } else {
+            AudioOnsetDecision::Ambiguous
+        };
+        let evidence = base_caller_onset_evidence(CallerOnsetEvidenceSeed {
+            decision,
+            confidence: if decision == AudioOnsetDecision::TrustedCallerOnset {
+                1.0
+            } else {
+                0.0
+            },
+            playback_state,
+            playback_ref: None,
+            caller_active_since: (decision == AudioOnsetDecision::TrustedCallerOnset)
+                .then_some(now),
+            now,
+            window_ms: frame_duration_ms.min(u64::from(u32::MAX)) as u32,
+            format,
+            inbound_rms_dbfs: rms_dbfs(samples),
+            outbound_rms_dbfs: None,
+            invalidation: None,
+        });
+        media_state
+            .media_registry
+            .record_caller_onset_evidence(gateway_call_id, evidence.clone())
+            .await;
+        emit_audio_barge_in_evidence_span(
+            state,
+            media_state.active_quality_asr.as_ref(),
+            gateway_call_id,
+            stream_id,
+            &evidence,
+            None,
+        )
+        .await;
+        return Some(evidence);
+    };
+
+    if !media_state
+        .first_frame_sent_playbacks
+        .contains(active_ref.playback_id.as_str())
+    {
+        media_state.audio_barge_in.reset_caller_active();
+        if !speech_active {
+            return None;
+        }
+        let evidence = base_caller_onset_evidence(CallerOnsetEvidenceSeed {
+            decision: AudioOnsetDecision::Unavailable,
+            confidence: 0.0,
+            playback_state: PlaybackEchoState::ActivePlayback,
+            playback_ref: Some(&active_ref),
+            caller_active_since: None,
+            now,
+            window_ms: frame_duration_ms.min(u64::from(u32::MAX)) as u32,
+            format,
+            inbound_rms_dbfs: rms_dbfs(samples),
+            outbound_rms_dbfs: None,
+            invalidation: Some(AudioEvidenceInvalidation::PreAudioPlayback),
+        });
+        media_state
+            .media_registry
+            .record_caller_onset_evidence(gateway_call_id, evidence.clone())
+            .await;
+        emit_audio_barge_in_evidence_span(
+            state,
+            media_state.active_quality_asr.as_ref(),
+            gateway_call_id,
+            stream_id,
+            &evidence,
+            None,
+        )
+        .await;
+        return Some(evidence);
+    }
+
+    let reference_len = samples.len().saturating_add(samples_for_ms(
+        media_config.delay_search_max_ms,
+        format.sample_rate_hz,
+    ));
+    let outbound_reference = media_state
+        .echo_characterization
+        .reference_samples_for(format.sample_rate_hz, reference_len);
+
+    if transport_invalidation.is_none() {
+        if let Some(metrics) = playback_only_calibration_metrics(
+            &media_config,
+            format,
+            samples,
+            &media_state.quality_config.speech,
+            &outbound_reference,
+            frame.caller_candidate_active,
+        ) {
+            media_state
+                .audio_barge_in
+                .observe_playback_only_calibration(&media_config, frame_duration_ms, metrics);
+        }
+    }
+
+    if !speech_active {
+        media_state.audio_barge_in.reset_caller_active();
+        return None;
+    }
+
+    let evidence =
+        media_state
+            .audio_barge_in
+            .classify_active_playback_window(ActivePlaybackWindow {
+                config: &media_config,
+                playback_ref: &active_ref,
+                format,
+                samples,
+                stats,
+                speech: &media_state.quality_config.speech,
+                outbound_reference: &outbound_reference,
+                transport_invalidation,
+                frame_duration_ms,
+                now,
+            });
+    media_state
+        .media_registry
+        .record_caller_onset_evidence(gateway_call_id, evidence.clone())
+        .await;
+    emit_audio_barge_in_evidence_span(
+        state,
+        media_state.active_quality_asr.as_ref(),
+        gateway_call_id,
+        stream_id,
+        &evidence,
+        media_state.audio_barge_in.calibration,
+    )
+    .await;
+    Some(evidence)
+}
+
+async fn emit_audio_barge_in_evidence_span(
+    state: &SharedState,
+    quality_session: Option<&ActiveAsrQualitySession>,
+    gateway_call_id: &str,
+    stream_id: &str,
+    evidence: &CallerOnsetEvidence,
+    calibration: Option<AudioEchoCalibration>,
+) {
+    let Some(session) = quality_session else {
+        return;
+    };
+    let payload = map_from_value(json!({
+        "asr_session_id": session.asr_session_id.as_str(),
+        "utterance_id": session.utterance_id.as_str(),
+        "stream_id": stream_id,
+        "decision": evidence.decision.label(),
+        "confidence": evidence.confidence,
+        "playback_state": evidence.playback_state.label(),
+        "playback_id": evidence.playback_id.as_deref(),
+        "playback_epoch": evidence.playback_epoch,
+        "window_ms": evidence.window_ms,
+        "input_codec": evidence.input_codec.as_str(),
+        "input_sample_rate_hz": evidence.input_sample_rate_hz,
+        "evidence_sample_rate_hz": evidence.evidence_sample_rate_hz,
+        "inbound_rms_dbfs": evidence.inbound_rms_dbfs,
+        "outbound_rms_dbfs": evidence.outbound_rms_dbfs,
+        "estimated_delay_ms": evidence.estimated_delay_ms,
+        "correlation_peak": evidence.correlation_peak,
+        "echo_return_db": evidence.echo_return_db,
+        "echo_margin_db": evidence.echo_margin_db,
+        "invalidation": evidence.invalidation.map(AudioEvidenceInvalidation::label),
+        "calibrated_erl_baseline_db": calibration.map(|value| value.erl_baseline_db),
+        "calibrated_delay_ms": calibration.map(|value| value.delay_ms),
+        "calibrated_playback_only_ms": calibration.map(|value| value.playback_only_ms),
+        "calibration_update_count": calibration.map(|value| value.update_count),
+    }));
+    state.write().await.emit_quality_span_finished(
+        gateway_call_id,
+        QualitySpanEmission {
+            config_id: session.config_id.clone(),
+            redaction_mode: session.redaction_mode,
+            span_name: "media.audio_barge_in.evidence",
+            category: "barge_in",
+            duration: Duration::ZERO,
+            critical_path: false,
+            concurrent: true,
+            payload,
+        },
+    );
+}
+
 async fn speech_onset_echo_decision(
     state: &SharedState,
     media_registry: SharedMediaRegistry,
     first_frame_sent_playbacks: HashSet<String>,
-    onset_policy: OnsetDuringPlaybackPolicy,
-    echo_config: EchoSuppressionQualityConfig,
+    quality_config: VoiceQualityConfig,
+    audio_evidence: Option<&CallerOnsetEvidence>,
     gateway_call_id: &str,
 ) -> SpeechOnsetEchoDecision {
+    if quality_config
+        .audio_barge_in
+        .media
+        .mode
+        .consumes_audio_evidence()
+        && quality_config.conversation_policy.mode != ConversationPolicyMode::CurrentCompat
+    {
+        let active_ref = media_registry
+            .active_speech_playback_ref(gateway_call_id)
+            .await;
+        let Some(active_ref) = active_ref else {
+            return SpeechOnsetEchoDecision {
+                defer_to_partial: false,
+                playback_id: None,
+                reason: "no_active_playback",
+            };
+        };
+        let Some(audio_evidence) = audio_evidence else {
+            return SpeechOnsetEchoDecision {
+                defer_to_partial: true,
+                playback_id: Some(active_ref.playback_id),
+                reason: "audio_evidence_unavailable",
+            };
+        };
+        let policy_decision =
+            quality_config
+                .conversation_policy
+                .decide_audio_barge_in(AudioBargeInDecisionInput {
+                    barge_in: &quality_config.barge_in,
+                    audio_barge_in: &quality_config.audio_barge_in,
+                    trigger: BargeInTrigger::SpeechOnset,
+                    evidence: audio_evidence,
+                    active_playback: ActivePlaybackTarget {
+                        playback_id: Some(active_ref.playback_id.as_str()),
+                        playback_epoch: Some(active_ref.playback_epoch),
+                    },
+                    now: Instant::now(),
+                });
+        return SpeechOnsetEchoDecision {
+            defer_to_partial: !policy_decision.cancels_playback(),
+            playback_id: Some(active_ref.playback_id),
+            reason: if policy_decision.cancels_playback() {
+                "audio_trusted_caller_onset"
+            } else {
+                audio_evidence.decision.label()
+            },
+        };
+    }
+
+    let onset_policy = quality_config.barge_in.onset_during_playback;
+    let echo_config = quality_config.echo_suppression.clone();
     if onset_policy == OnsetDuringPlaybackPolicy::Trust {
         return SpeechOnsetEchoDecision {
             defer_to_partial: false,
@@ -2725,6 +3526,30 @@ fn echo_characterization_retention(config: &EchoCharacterizationQualityConfig) -
     )
 }
 
+fn audio_barge_in_reference_retention(config: &AudioBargeInMediaQualityConfig) -> Duration {
+    Duration::from_millis(
+        config
+            .calibration_min_playback_only_ms
+            .saturating_add(config.delay_search_max_ms)
+            .saturating_add(config.max_evidence_age_ms)
+            .saturating_add(500),
+    )
+}
+
+fn outbound_reference_retention(config: &VoiceQualityConfig) -> Duration {
+    let echo_retention = if config.echo_characterization.enabled {
+        echo_characterization_retention(&config.echo_characterization)
+    } else {
+        Duration::ZERO
+    };
+    let audio_retention = if config.audio_barge_in.media.mode.consumes_audio_evidence() {
+        audio_barge_in_reference_retention(&config.audio_barge_in.media)
+    } else {
+        Duration::ZERO
+    };
+    echo_retention.max(audio_retention)
+}
+
 fn samples_for_ms(duration_ms: u64, sample_rate_hz: u32) -> usize {
     let samples = duration_ms
         .saturating_mul(u64::from(sample_rate_hz))
@@ -2761,6 +3586,103 @@ fn normalized_correlation(a: &[i16], b: &[i16]) -> Option<f32> {
         return None;
     }
     Some((dot / (energy_a.sqrt() * energy_b.sqrt())).abs() as f32)
+}
+
+fn samples_for_delay_ms(delay_ms: f32, sample_rate_hz: u32) -> Option<usize> {
+    if !delay_ms.is_finite() || delay_ms < 0.0 || sample_rate_hz == 0 {
+        return None;
+    }
+    Some(((delay_ms * sample_rate_hz as f32) / 1_000.0).round() as usize)
+}
+
+fn reference_segment_at_delay(
+    inbound_len: usize,
+    outbound_reference: &[i16],
+    sample_rate_hz: u32,
+    delay_ms: f32,
+) -> Option<&[i16]> {
+    if inbound_len == 0 {
+        return None;
+    }
+    let delay_samples = samples_for_delay_ms(delay_ms, sample_rate_hz)?;
+    let end = outbound_reference.len().checked_sub(delay_samples)?;
+    let start = end.checked_sub(inbound_len)?;
+    Some(&outbound_reference[start..end])
+}
+
+fn residual_echo_metrics(inbound: &[i16], outbound_segment: &[i16]) -> Option<ResidualEchoMetrics> {
+    if inbound.len() != outbound_segment.len() || inbound.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0f64;
+    let mut outbound_energy = 0.0f64;
+    for (&in_sample, &out_sample) in inbound.iter().zip(outbound_segment) {
+        let inbound_value = f64::from(in_sample);
+        let outbound_value = f64::from(out_sample);
+        dot += inbound_value * outbound_value;
+        outbound_energy += outbound_value * outbound_value;
+    }
+    if outbound_energy <= f64::EPSILON {
+        return None;
+    }
+    let scale = dot / outbound_energy;
+    let mut peak = 0i16;
+    let mut sum_squares = 0.0f64;
+    for (&in_sample, &out_sample) in inbound.iter().zip(outbound_segment) {
+        let residual = f64::from(in_sample) - scale * f64::from(out_sample);
+        let bounded = residual.clamp(f64::from(i16::MIN), f64::from(i16::MAX));
+        let abs = bounded.abs().min(f64::from(i16::MAX)) as i16;
+        if abs > peak {
+            peak = abs;
+        }
+        sum_squares += residual * residual;
+    }
+    let rms = (sum_squares / inbound.len() as f64).sqrt() as f32;
+    let residual_rms_dbfs = if rms <= 0.000001 {
+        -120.0
+    } else {
+        (20.0 * (rms / 32_768.0).log10()).max(-120.0)
+    };
+    Some(ResidualEchoMetrics {
+        residual_rms_dbfs,
+        residual_peak: peak,
+        residual_rms: rms,
+    })
+}
+
+fn playback_only_calibration_metrics(
+    config: &AudioBargeInMediaQualityConfig,
+    format: &MediaFormat,
+    samples: &[i16],
+    speech: &SpeechQualityConfig,
+    outbound_reference: &[i16],
+    caller_candidate_active: bool,
+) -> Option<EchoCharacterizationMetrics> {
+    if caller_candidate_active {
+        return None;
+    }
+    let metrics = characterize_echo(
+        samples,
+        outbound_reference,
+        format.sample_rate_hz,
+        config.delay_search_max_ms,
+    )?;
+    if metrics.estimated_delay_ms < config.delay_search_min_ms
+        || metrics.estimated_delay_ms > config.delay_search_max_ms
+        || metrics.correlation_peak < config.calibration_min_correlation
+    {
+        return None;
+    }
+    let segment = reference_segment_at_delay(
+        samples.len(),
+        outbound_reference,
+        format.sample_rate_hz,
+        metrics.estimated_delay_ms as f32,
+    )?;
+    if residual_echo_metrics(samples, segment)?.has_speech_energy(speech) {
+        return None;
+    }
+    Some(metrics)
 }
 
 fn characterize_echo(
@@ -4720,6 +5642,348 @@ mod tests {
         let outbound = vec![0i16; 320];
 
         assert!(characterize_echo(&inbound, &outbound, 8_000, 20).is_none());
+    }
+
+    fn audio_classifier_test_config() -> AudioBargeInMediaQualityConfig {
+        AudioBargeInMediaQualityConfig {
+            mode: AudioBargeInMode::EchoAwareOnset,
+            trusted_onset_min_windows: 1,
+            calibration_min_playback_only_ms: 20,
+            delay_search_min_ms: 0,
+            delay_search_max_ms: 20,
+            erl_min_db: -80.0,
+            erl_max_db: 10.0,
+            min_echo_margin_db_floor: 3.0,
+            min_echo_margin_db_ceiling: 18.0,
+            ..AudioBargeInMediaQualityConfig::default()
+        }
+    }
+
+    fn audio_classifier_test_format() -> MediaFormat {
+        MediaFormat {
+            encoding: "PCMU".to_string(),
+            sample_rate_hz: 8_000,
+            channels: 1,
+        }
+    }
+
+    fn audio_classifier_reference() -> Vec<i16> {
+        (0..360)
+            .map(|index| ((((index * 37) % 211) as i16) - 105) * 120)
+            .collect()
+    }
+
+    fn active_playback_evidence_for_trigger() -> CallerOnsetEvidence {
+        let format = audio_classifier_test_format();
+        base_caller_onset_evidence(CallerOnsetEvidenceSeed {
+            decision: AudioOnsetDecision::TrustedCallerOnset,
+            confidence: 1.0,
+            playback_state: PlaybackEchoState::ActivePlayback,
+            playback_ref: Some(&ActiveSpeechPlaybackRef {
+                playback_id: "playback-1".to_string(),
+                playback_epoch: 1,
+            }),
+            caller_active_since: Some(Instant::now()),
+            now: Instant::now(),
+            window_ms: 20,
+            format: &format,
+            inbound_rms_dbfs: -20.0,
+            outbound_rms_dbfs: Some(-30.0),
+            invalidation: None,
+        })
+    }
+
+    #[test]
+    fn audio_trusted_onset_trigger_is_opt_in_and_edge_triggered() {
+        let mut config = VoiceQualityConfig::default();
+        let evidence = active_playback_evidence_for_trigger();
+        let mut state = AudioBargeInEvidenceState::default();
+
+        assert!(!take_audio_trusted_onset_trigger(
+            &config, &mut state, &evidence
+        ));
+
+        config.barge_in.enabled = true;
+        config.conversation_policy.mode = ConversationPolicyMode::BargeInCancelOnly;
+        config.audio_barge_in.media.mode = AudioBargeInMode::EchoAwareOnset;
+        assert!(take_audio_trusted_onset_trigger(
+            &config, &mut state, &evidence
+        ));
+        assert!(!take_audio_trusted_onset_trigger(
+            &config, &mut state, &evidence
+        ));
+    }
+
+    #[test]
+    fn audio_trusted_onset_trigger_ignores_idle_evidence() {
+        let mut config = VoiceQualityConfig::default();
+        config.barge_in.enabled = true;
+        config.conversation_policy.mode = ConversationPolicyMode::BargeInCancelOnly;
+        config.audio_barge_in.media.mode = AudioBargeInMode::EchoAwareOnset;
+        let format = audio_classifier_test_format();
+        let evidence = base_caller_onset_evidence(CallerOnsetEvidenceSeed {
+            decision: AudioOnsetDecision::TrustedCallerOnset,
+            confidence: 1.0,
+            playback_state: PlaybackEchoState::Idle,
+            playback_ref: None,
+            caller_active_since: Some(Instant::now()),
+            now: Instant::now(),
+            window_ms: 20,
+            format: &format,
+            inbound_rms_dbfs: -20.0,
+            outbound_rms_dbfs: None,
+            invalidation: None,
+        });
+
+        assert!(!take_audio_trusted_onset_trigger(
+            &config,
+            &mut AudioBargeInEvidenceState::default(),
+            &evidence
+        ));
+    }
+
+    #[test]
+    fn playback_state_without_active_labels_tail_and_inter_segment_gap() {
+        assert_eq!(
+            playback_state_without_active(None, 0),
+            PlaybackEchoState::Idle
+        );
+        assert_eq!(
+            playback_state_without_active(Some(Duration::from_millis(20)), 0),
+            PlaybackEchoState::RecentTail
+        );
+        assert_eq!(
+            playback_state_without_active(Some(Duration::from_millis(20)), 1),
+            PlaybackEchoState::InterSegmentGap
+        );
+    }
+
+    #[test]
+    fn playback_only_calibration_accepts_audible_echo_without_residual_caller() {
+        let config = audio_classifier_test_config();
+        let format = audio_classifier_test_format();
+        let outbound = audio_classifier_reference();
+        let echo = outbound[outbound.len() - 160..].to_vec();
+        assert!(sample_stats(&echo).has_speech_energy(&SpeechQualityConfig::default()));
+
+        let metrics = playback_only_calibration_metrics(
+            &config,
+            &format,
+            &echo,
+            &SpeechQualityConfig::default(),
+            &outbound,
+            false,
+        );
+
+        assert!(metrics.is_some());
+    }
+
+    #[test]
+    fn playback_only_calibration_rejects_residual_caller_candidate() {
+        let config = audio_classifier_test_config();
+        let format = audio_classifier_test_format();
+        let outbound = audio_classifier_reference();
+        let echo = outbound[outbound.len() - 160..].to_vec();
+        let caller_mix: Vec<i16> = echo
+            .iter()
+            .enumerate()
+            .map(|(index, echo_sample)| {
+                let caller_sample = if index % 17 < 8 {
+                    14_000i16
+                } else {
+                    -14_000i16
+                };
+                echo_sample.saturating_add(caller_sample)
+            })
+            .collect();
+
+        let metrics = playback_only_calibration_metrics(
+            &config,
+            &format,
+            &caller_mix,
+            &SpeechQualityConfig::default(),
+            &outbound,
+            false,
+        );
+
+        assert!(metrics.is_none());
+        assert!(playback_only_calibration_metrics(
+            &config,
+            &format,
+            &echo,
+            &SpeechQualityConfig::default(),
+            &outbound,
+            true,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn audio_transport_invalidation_uses_configured_window_jitter() {
+        let mut config = audio_classifier_test_config();
+        config.max_jitter_ms = 30;
+        let mut transport = InboundTransportStats {
+            packets_total: 1,
+            ..InboundTransportStats::default()
+        };
+        transport.jitter_samples_ms.push(45);
+        let mut state = AudioBargeInEvidenceState::default();
+
+        assert_eq!(
+            state.transport_invalidation(&transport, &config),
+            Some(AudioEvidenceInvalidation::TransportInvalid)
+        );
+    }
+
+    #[test]
+    fn audio_barge_in_classifier_vetoes_calibrated_playback_echo() {
+        let config = audio_classifier_test_config();
+        let format = audio_classifier_test_format();
+        let outbound = audio_classifier_reference();
+        let inbound = outbound[outbound.len() - 160..].to_vec();
+        let metrics = characterize_echo(
+            &inbound,
+            &outbound,
+            format.sample_rate_hz,
+            config.delay_search_max_ms,
+        )
+        .expect("echo should characterize");
+        let mut state = AudioBargeInEvidenceState::default();
+        state.observe_playback_only_calibration(&config, 20, metrics);
+
+        let evidence = state.classify_active_playback_window(ActivePlaybackWindow {
+            config: &config,
+            playback_ref: &ActiveSpeechPlaybackRef {
+                playback_id: "playback-1".to_string(),
+                playback_epoch: 3,
+            },
+            format: &format,
+            samples: &inbound,
+            stats: &sample_stats(&inbound),
+            speech: &SpeechQualityConfig::default(),
+            outbound_reference: &outbound,
+            transport_invalidation: None,
+            frame_duration_ms: 20,
+            now: Instant::now(),
+        });
+
+        assert_eq!(evidence.decision, AudioOnsetDecision::LikelyAssistantEcho);
+        assert_eq!(evidence.playback_epoch, Some(3));
+    }
+
+    #[test]
+    fn audio_barge_in_classifier_rejects_amplified_echo_without_residual_speech() {
+        let config = audio_classifier_test_config();
+        let format = audio_classifier_test_format();
+        let outbound = audio_classifier_reference();
+        let echo = outbound[outbound.len() - 160..].to_vec();
+        let metrics = characterize_echo(
+            &echo,
+            &outbound,
+            format.sample_rate_hz,
+            config.delay_search_max_ms,
+        )
+        .expect("echo should characterize");
+        let mut state = AudioBargeInEvidenceState::default();
+        state.observe_playback_only_calibration(&config, 20, metrics);
+        let amplified_echo: Vec<i16> = echo.iter().map(|sample| sample.saturating_mul(2)).collect();
+
+        let evidence = state.classify_active_playback_window(ActivePlaybackWindow {
+            config: &config,
+            playback_ref: &ActiveSpeechPlaybackRef {
+                playback_id: "playback-1".to_string(),
+                playback_epoch: 3,
+            },
+            format: &format,
+            samples: &amplified_echo,
+            stats: &sample_stats(&amplified_echo),
+            speech: &SpeechQualityConfig::default(),
+            outbound_reference: &outbound,
+            transport_invalidation: None,
+            frame_duration_ms: 20,
+            now: Instant::now(),
+        });
+
+        assert_eq!(evidence.decision, AudioOnsetDecision::LikelyAssistantEcho);
+        assert!(evidence.echo_margin_db.is_some_and(|margin| margin >= 3.0));
+    }
+
+    #[test]
+    fn audio_barge_in_classifier_trusts_calibrated_residual_caller_speech() {
+        let config = audio_classifier_test_config();
+        let format = audio_classifier_test_format();
+        let outbound = audio_classifier_reference();
+        let echo = outbound[outbound.len() - 160..].to_vec();
+        let metrics = characterize_echo(
+            &echo,
+            &outbound,
+            format.sample_rate_hz,
+            config.delay_search_max_ms,
+        )
+        .expect("echo should characterize");
+        let mut state = AudioBargeInEvidenceState::default();
+        state.observe_playback_only_calibration(&config, 20, metrics);
+        let caller_onset: Vec<i16> = echo
+            .iter()
+            .enumerate()
+            .map(|(index, echo_sample)| {
+                let caller_sample = if index % 17 < 8 {
+                    14_000i16
+                } else {
+                    -14_000i16
+                };
+                echo_sample.saturating_add(caller_sample)
+            })
+            .collect();
+
+        let evidence = state.classify_active_playback_window(ActivePlaybackWindow {
+            config: &config,
+            playback_ref: &ActiveSpeechPlaybackRef {
+                playback_id: "playback-1".to_string(),
+                playback_epoch: 3,
+            },
+            format: &format,
+            samples: &caller_onset,
+            stats: &sample_stats(&caller_onset),
+            speech: &SpeechQualityConfig::default(),
+            outbound_reference: &outbound,
+            transport_invalidation: None,
+            frame_duration_ms: 20,
+            now: Instant::now(),
+        });
+
+        assert_eq!(evidence.decision, AudioOnsetDecision::TrustedCallerOnset);
+        assert!(evidence.echo_margin_db.is_some_and(|margin| margin >= 3.0));
+    }
+
+    #[test]
+    fn audio_barge_in_classifier_fails_safe_on_short_reference() {
+        let config = audio_classifier_test_config();
+        let format = audio_classifier_test_format();
+        let inbound = vec![1_500i16; 160];
+        let mut state = AudioBargeInEvidenceState::default();
+
+        let evidence = state.classify_active_playback_window(ActivePlaybackWindow {
+            config: &config,
+            playback_ref: &ActiveSpeechPlaybackRef {
+                playback_id: "short-playback".to_string(),
+                playback_epoch: 1,
+            },
+            format: &format,
+            samples: &inbound,
+            stats: &sample_stats(&inbound),
+            speech: &SpeechQualityConfig::default(),
+            outbound_reference: &[1_500i16; 10],
+            transport_invalidation: None,
+            frame_duration_ms: 20,
+            now: Instant::now(),
+        });
+
+        assert_eq!(evidence.decision, AudioOnsetDecision::Unavailable);
+        assert_eq!(
+            evidence.invalidation,
+            Some(AudioEvidenceInvalidation::ShortReference)
+        );
     }
 
     #[test]
@@ -6682,8 +7946,8 @@ mod tests {
             &state,
             media_state.media_registry.clone(),
             media_state.first_frame_sent_playbacks.clone(),
-            media_state.quality_config.barge_in.onset_during_playback,
-            media_state.quality_config.echo_suppression.clone(),
+            media_state.quality_config.clone(),
+            None,
             &gateway_call_id,
         )
         .await;
@@ -6698,8 +7962,8 @@ mod tests {
             &state,
             media_state.media_registry.clone(),
             media_state.first_frame_sent_playbacks.clone(),
-            media_state.quality_config.barge_in.onset_during_playback,
-            media_state.quality_config.echo_suppression.clone(),
+            media_state.quality_config.clone(),
+            None,
             &gateway_call_id,
         )
         .await;
@@ -6713,8 +7977,8 @@ mod tests {
             &state,
             media_state.media_registry.clone(),
             media_state.first_frame_sent_playbacks.clone(),
-            media_state.quality_config.barge_in.onset_during_playback,
-            media_state.quality_config.echo_suppression.clone(),
+            media_state.quality_config.clone(),
+            None,
             &gateway_call_id,
         )
         .await;

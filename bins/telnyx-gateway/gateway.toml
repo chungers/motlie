@@ -260,6 +260,46 @@ max_delay_ms = 160
 # Minimum interval between emitted diagnostic spans per media stream.
 emit_interval_ms = 500
 
+[voice_quality.audio_barge_in.media]
+# @codex-541 2026-07-02 PDT -- Layer B typed audio evidence mode.
+# `measure_only` is behavior-neutral; behavior modes require barge-in enabled and a cancel-capable conversation_policy.mode.
+mode = "measure_only"
+# Maximum age of media-produced CallerOnsetEvidence accepted by policy.
+max_evidence_age_ms = 120
+# Consecutive valid speech-like windows required before media classifies caller onset as trusted.
+trusted_onset_min_windows = 2
+# Minimum playback-only calibration before echo margin can drive trusted onset.
+calibration_min_playback_only_ms = 400
+# Minimum plausible echo delay searched during per-call calibration/classification.
+delay_search_min_ms = 0
+# Maximum plausible echo delay searched during per-call calibration/classification.
+delay_search_max_ms = 240
+# Plausible per-call echo return loss lower bound; bounds calibration only.
+erl_min_db = -60.0
+# Plausible per-call echo return loss upper bound; bounds calibration only.
+erl_max_db = 0.0
+# Minimum calibrated positive margin above predicted echo required for trusted caller onset.
+min_echo_margin_db_floor = 3.0
+# Upper sanity bound used for confidence scaling; not a global acoustic threshold.
+min_echo_margin_db_ceiling = 18.0
+# Per-window invalid transport ratio above which evidence becomes ambiguous/unavailable.
+max_invalid_frame_ratio = 0.05
+# Per-window jitter bound; evidence fails safe when observed jitter exceeds this value.
+max_jitter_ms = 100
+# Minimum correlation used to treat calibrated-delay evidence as speech/echo-like rather than uncorrelated noise.
+min_speechlike_correlation = 0.05
+# Minimum correlation required to update playback-only ERL/delay calibration.
+calibration_min_correlation = 0.65
+# Slow EMA factor for per-call ERL/delay calibration updates.
+calibration_ema_alpha = 0.20
+# Allowed drift between current best-lag and calibrated delay before active-playback evidence fails safe.
+calibrated_delay_tolerance_ms = 40
+
+[voice_quality.audio_barge_in.policy]
+# `defer_to_layer_a` lets conservative ASR transcript gates act when audio evidence is ambiguous/unavailable.
+# `continue_playback` is stricter and refuses Layer A cancels while audio evidence is ambiguous.
+uncertain_policy = "defer_to_layer_a"
+
 [voice_quality.logging]
 # Enables JSONL quality events at `[quality_logging].path`.
 enabled = true

@@ -646,6 +646,100 @@ impl Default for EchoCharacterizationQualityConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioBargeInMode {
+    #[default]
+    MeasureOnly,
+    EchoAwareOnset,
+    Aec,
+}
+
+impl AudioBargeInMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MeasureOnly => "measure_only",
+            Self::EchoAwareOnset => "echo_aware_onset",
+            Self::Aec => "aec",
+        }
+    }
+
+    pub fn consumes_audio_evidence(self) -> bool {
+        matches!(self, Self::EchoAwareOnset)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioBargeInUncertainPolicy {
+    #[default]
+    DeferToLayerA,
+    ContinuePlayback,
+}
+
+impl AudioBargeInUncertainPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DeferToLayerA => "defer_to_layer_a",
+            Self::ContinuePlayback => "continue_playback",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioBargeInMediaQualityConfig {
+    pub mode: AudioBargeInMode,
+    pub max_evidence_age_ms: u64,
+    pub trusted_onset_min_windows: usize,
+    pub calibration_min_playback_only_ms: u64,
+    pub delay_search_min_ms: u64,
+    pub delay_search_max_ms: u64,
+    pub erl_min_db: f32,
+    pub erl_max_db: f32,
+    pub min_echo_margin_db_floor: f32,
+    pub min_echo_margin_db_ceiling: f32,
+    pub max_invalid_frame_ratio: f32,
+    pub max_jitter_ms: u64,
+    pub min_speechlike_correlation: f32,
+    pub calibration_min_correlation: f32,
+    pub calibration_ema_alpha: f32,
+    pub calibrated_delay_tolerance_ms: u64,
+}
+
+impl Default for AudioBargeInMediaQualityConfig {
+    fn default() -> Self {
+        Self {
+            mode: AudioBargeInMode::MeasureOnly,
+            max_evidence_age_ms: 120,
+            trusted_onset_min_windows: 2,
+            calibration_min_playback_only_ms: 400,
+            delay_search_min_ms: 0,
+            delay_search_max_ms: 240,
+            erl_min_db: -60.0,
+            erl_max_db: 0.0,
+            min_echo_margin_db_floor: 3.0,
+            min_echo_margin_db_ceiling: 18.0,
+            max_invalid_frame_ratio: 0.05,
+            max_jitter_ms: 100,
+            min_speechlike_correlation: 0.05,
+            calibration_min_correlation: 0.65,
+            calibration_ema_alpha: 0.20,
+            calibrated_delay_tolerance_ms: 40,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AudioBargeInPolicyQualityConfig {
+    pub uncertain_policy: AudioBargeInUncertainPolicy,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioBargeInQualityConfig {
+    pub media: AudioBargeInMediaQualityConfig,
+    pub policy: AudioBargeInPolicyQualityConfig,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LoggingQualityConfig {
     pub enabled: bool,
@@ -734,6 +828,8 @@ pub struct VoiceQualityConfig {
     pub echo_suppression: EchoSuppressionQualityConfig,
     #[serde(default)]
     pub echo_characterization: EchoCharacterizationQualityConfig,
+    #[serde(default)]
+    pub audio_barge_in: AudioBargeInQualityConfig,
     pub logging: LoggingQualityConfig,
     pub quality_judge: QualityJudgeConfig,
     pub targets: QualityTargetsConfig,
@@ -768,6 +864,7 @@ impl VoiceQualityConfig {
             conversation_policy: ConversationPolicyConfig::default(),
             echo_suppression: EchoSuppressionQualityConfig::default(),
             echo_characterization: EchoCharacterizationQualityConfig::default(),
+            audio_barge_in: AudioBargeInQualityConfig::default(),
             logging: LoggingQualityConfig::default(),
             quality_judge: QualityJudgeConfig::default(),
             targets: QualityTargetsConfig::default(),
@@ -1140,6 +1237,135 @@ impl VoiceQualityConfig {
             20,
             60_000,
         )?;
+        ensure_u64(
+            "audio_barge_in.media.max_evidence_age_ms",
+            self.audio_barge_in.media.max_evidence_age_ms,
+            20,
+            5_000,
+        )?;
+        ensure_usize(
+            "audio_barge_in.media.trusted_onset_min_windows",
+            self.audio_barge_in.media.trusted_onset_min_windows,
+            1,
+            20,
+        )?;
+        ensure_u64(
+            "audio_barge_in.media.calibration_min_playback_only_ms",
+            self.audio_barge_in.media.calibration_min_playback_only_ms,
+            20,
+            10_000,
+        )?;
+        ensure_u64(
+            "audio_barge_in.media.delay_search_min_ms",
+            self.audio_barge_in.media.delay_search_min_ms,
+            0,
+            2_000,
+        )?;
+        ensure_u64(
+            "audio_barge_in.media.delay_search_max_ms",
+            self.audio_barge_in.media.delay_search_max_ms,
+            0,
+            2_000,
+        )?;
+        if self.audio_barge_in.media.delay_search_min_ms
+            > self.audio_barge_in.media.delay_search_max_ms
+        {
+            anyhow::bail!(
+                "audio_barge_in.media.delay_search_min_ms must be <= delay_search_max_ms"
+            );
+        }
+        ensure_f32(
+            "audio_barge_in.media.erl_min_db",
+            self.audio_barge_in.media.erl_min_db,
+            -120.0,
+            60.0,
+        )?;
+        ensure_f32(
+            "audio_barge_in.media.erl_max_db",
+            self.audio_barge_in.media.erl_max_db,
+            -120.0,
+            60.0,
+        )?;
+        if self.audio_barge_in.media.erl_min_db > self.audio_barge_in.media.erl_max_db {
+            anyhow::bail!("audio_barge_in.media.erl_min_db must be <= erl_max_db");
+        }
+        ensure_f32(
+            "audio_barge_in.media.min_echo_margin_db_floor",
+            self.audio_barge_in.media.min_echo_margin_db_floor,
+            0.0,
+            60.0,
+        )?;
+        ensure_f32(
+            "audio_barge_in.media.min_echo_margin_db_ceiling",
+            self.audio_barge_in.media.min_echo_margin_db_ceiling,
+            0.0,
+            60.0,
+        )?;
+        if self.audio_barge_in.media.min_echo_margin_db_floor
+            > self.audio_barge_in.media.min_echo_margin_db_ceiling
+        {
+            anyhow::bail!(
+                "audio_barge_in.media.min_echo_margin_db_floor must be <= min_echo_margin_db_ceiling"
+            );
+        }
+        ensure_f32(
+            "audio_barge_in.media.max_invalid_frame_ratio",
+            self.audio_barge_in.media.max_invalid_frame_ratio,
+            0.0,
+            1.0,
+        )?;
+        ensure_u64(
+            "audio_barge_in.media.max_jitter_ms",
+            self.audio_barge_in.media.max_jitter_ms,
+            0,
+            5_000,
+        )?;
+        ensure_f32(
+            "audio_barge_in.media.min_speechlike_correlation",
+            self.audio_barge_in.media.min_speechlike_correlation,
+            0.0,
+            1.0,
+        )?;
+        ensure_f32(
+            "audio_barge_in.media.calibration_min_correlation",
+            self.audio_barge_in.media.calibration_min_correlation,
+            0.0,
+            1.0,
+        )?;
+        ensure_f32(
+            "audio_barge_in.media.calibration_ema_alpha",
+            self.audio_barge_in.media.calibration_ema_alpha,
+            0.0,
+            1.0,
+        )?;
+        ensure_u64(
+            "audio_barge_in.media.calibrated_delay_tolerance_ms",
+            self.audio_barge_in.media.calibrated_delay_tolerance_ms,
+            0,
+            2_000,
+        )?;
+        if self.audio_barge_in.media.mode == AudioBargeInMode::Aec {
+            anyhow::bail!(
+                "audio_barge_in.media.mode=aec requires a configured AEC backend; use echo_aware_onset for the implemented Option B path"
+            );
+        }
+        if self.audio_barge_in.media.mode.consumes_audio_evidence() {
+            if !self.barge_in.enabled {
+                anyhow::bail!(
+                    "audio_barge_in.media.mode={} requires barge_in.enabled=true",
+                    self.audio_barge_in.media.mode.label()
+                );
+            }
+            match self.conversation_policy.mode {
+                ConversationPolicyMode::BargeInCancelOnly
+                | ConversationPolicyMode::BargeInCoalesceAfterSilence => {}
+                ConversationPolicyMode::CurrentCompat
+                | ConversationPolicyMode::NoBargeInBoundedPending => anyhow::bail!(
+                    "audio_barge_in.media.mode={} requires a barge-in conversation_policy.mode",
+                    self.audio_barge_in.media.mode.label()
+                ),
+            }
+        }
         ensure_usize(
             "logging.queue_capacity",
             self.logging.queue_capacity,
@@ -1452,6 +1678,63 @@ impl VoiceQualityConfig {
             }
             if let Some(value) = echo.emit_interval_ms {
                 self.set_echo_characterization_emit_interval_ms(value);
+            }
+        }
+        if let Some(audio_barge_in) = patch.audio_barge_in {
+            if let Some(media) = audio_barge_in.media {
+                if let Some(value) = media.mode {
+                    self.audio_barge_in.media.mode = value;
+                }
+                if let Some(value) = media.max_evidence_age_ms {
+                    self.audio_barge_in.media.max_evidence_age_ms = value;
+                }
+                if let Some(value) = media.trusted_onset_min_windows {
+                    self.audio_barge_in.media.trusted_onset_min_windows = value;
+                }
+                if let Some(value) = media.calibration_min_playback_only_ms {
+                    self.audio_barge_in.media.calibration_min_playback_only_ms = value;
+                }
+                if let Some(value) = media.delay_search_min_ms {
+                    self.audio_barge_in.media.delay_search_min_ms = value;
+                }
+                if let Some(value) = media.delay_search_max_ms {
+                    self.audio_barge_in.media.delay_search_max_ms = value;
+                }
+                if let Some(value) = media.erl_min_db {
+                    self.audio_barge_in.media.erl_min_db = value;
+                }
+                if let Some(value) = media.erl_max_db {
+                    self.audio_barge_in.media.erl_max_db = value;
+                }
+                if let Some(value) = media.min_echo_margin_db_floor {
+                    self.audio_barge_in.media.min_echo_margin_db_floor = value;
+                }
+                if let Some(value) = media.min_echo_margin_db_ceiling {
+                    self.audio_barge_in.media.min_echo_margin_db_ceiling = value;
+                }
+                if let Some(value) = media.max_invalid_frame_ratio {
+                    self.audio_barge_in.media.max_invalid_frame_ratio = value;
+                }
+                if let Some(value) = media.max_jitter_ms {
+                    self.audio_barge_in.media.max_jitter_ms = value;
+                }
+                if let Some(value) = media.min_speechlike_correlation {
+                    self.audio_barge_in.media.min_speechlike_correlation = value;
+                }
+                if let Some(value) = media.calibration_min_correlation {
+                    self.audio_barge_in.media.calibration_min_correlation = value;
+                }
+                if let Some(value) = media.calibration_ema_alpha {
+                    self.audio_barge_in.media.calibration_ema_alpha = value;
+                }
+                if let Some(value) = media.calibrated_delay_tolerance_ms {
+                    self.audio_barge_in.media.calibrated_delay_tolerance_ms = value;
+                }
+            }
+            if let Some(policy) = audio_barge_in.policy {
+                if let Some(value) = policy.uncertain_policy {
+                    self.audio_barge_in.policy.uncertain_policy = value;
+                }
             }
         }
         if let Some(logging) = patch.logging {
@@ -2592,6 +2875,8 @@ pub struct QualityConfigPatch {
     #[serde(default)]
     pub echo_characterization: Option<EchoCharacterizationQualityConfigPatch>,
     #[serde(default)]
+    pub audio_barge_in: Option<AudioBargeInQualityConfigPatch>,
+    #[serde(default)]
     pub logging: Option<LoggingQualityConfigPatch>,
     #[serde(default)]
     pub quality_judge: Option<QualityJudgeConfigPatch>,
@@ -2711,6 +2996,40 @@ pub struct EchoCharacterizationQualityConfigPatch {
     pub window_ms: Option<u64>,
     pub max_delay_ms: Option<u64>,
     pub emit_interval_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioBargeInQualityConfigPatch {
+    pub media: Option<AudioBargeInMediaQualityConfigPatch>,
+    pub policy: Option<AudioBargeInPolicyQualityConfigPatch>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioBargeInMediaQualityConfigPatch {
+    pub mode: Option<AudioBargeInMode>,
+    pub max_evidence_age_ms: Option<u64>,
+    pub trusted_onset_min_windows: Option<usize>,
+    pub calibration_min_playback_only_ms: Option<u64>,
+    pub delay_search_min_ms: Option<u64>,
+    pub delay_search_max_ms: Option<u64>,
+    pub erl_min_db: Option<f32>,
+    pub erl_max_db: Option<f32>,
+    pub min_echo_margin_db_floor: Option<f32>,
+    pub min_echo_margin_db_ceiling: Option<f32>,
+    pub max_invalid_frame_ratio: Option<f32>,
+    pub max_jitter_ms: Option<u64>,
+    pub min_speechlike_correlation: Option<f32>,
+    pub calibration_min_correlation: Option<f32>,
+    pub calibration_ema_alpha: Option<f32>,
+    pub calibrated_delay_tolerance_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioBargeInPolicyQualityConfigPatch {
+    pub uncertain_policy: Option<AudioBargeInUncertainPolicy>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -3142,6 +3461,130 @@ mod tests {
         assert_eq!(config.echo_characterization.window_ms, 20);
         assert_eq!(config.echo_characterization.max_delay_ms, 1_000);
         assert_eq!(config.echo_characterization.emit_interval_ms, 20);
+    }
+
+    #[test]
+    fn toml_accepts_audio_barge_in_measure_only_config() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.audio_barge_in.media]
+            mode = "measure_only"
+            max_evidence_age_ms = 140
+            trusted_onset_min_windows = 3
+            calibration_min_playback_only_ms = 420
+            delay_search_min_ms = 10
+            delay_search_max_ms = 260
+            erl_min_db = -70.0
+            erl_max_db = 3.0
+            min_echo_margin_db_floor = 4.0
+            min_echo_margin_db_ceiling = 16.0
+            max_invalid_frame_ratio = 0.10
+            max_jitter_ms = 80
+            min_speechlike_correlation = 0.06
+            calibration_min_correlation = 0.70
+            calibration_ema_alpha = 0.15
+            calibrated_delay_tolerance_ms = 30
+
+            [voice_quality.audio_barge_in.policy]
+            uncertain_policy = "continue_playback"
+            "#,
+        )
+        .expect("valid config");
+
+        assert_eq!(
+            config.audio_barge_in.media.mode,
+            AudioBargeInMode::MeasureOnly
+        );
+        assert_eq!(config.audio_barge_in.media.max_evidence_age_ms, 140);
+        assert_eq!(config.audio_barge_in.media.trusted_onset_min_windows, 3);
+        assert_eq!(config.audio_barge_in.media.max_jitter_ms, 80);
+        assert_eq!(config.audio_barge_in.media.calibration_ema_alpha, 0.15);
+        assert_eq!(
+            config.audio_barge_in.media.calibrated_delay_tolerance_ms,
+            30
+        );
+        assert_eq!(
+            config.audio_barge_in.policy.uncertain_policy,
+            AudioBargeInUncertainPolicy::ContinuePlayback
+        );
+    }
+
+    #[test]
+    fn toml_rejects_unknown_audio_barge_in_keys() {
+        let error = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.audio_barge_in.media]
+            mode = "measure_only"
+            generation_mod = "streaming"
+            "#,
+        )
+        .expect_err("unknown audio-barge-in keys should fail closed");
+
+        assert!(error.to_string().contains("generation_mod"));
+    }
+
+    #[test]
+    fn audio_barge_in_behavior_modes_require_cancel_capable_policy() {
+        let error = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.barge_in]
+            enabled = true
+
+            [voice_quality.conversation_policy]
+            mode = "current_compat"
+
+            [voice_quality.audio_barge_in.media]
+            mode = "echo_aware_onset"
+            "#,
+        )
+        .expect_err("behavior mode must reject current_compat");
+
+        assert!(error
+            .to_string()
+            .contains("requires a barge-in conversation_policy.mode"));
+    }
+
+    #[test]
+    fn audio_barge_in_behavior_mode_accepts_cancel_only_policy() {
+        let config = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.barge_in]
+            enabled = true
+
+            [voice_quality.conversation_policy]
+            mode = "barge_in_cancel_only"
+
+            [voice_quality.audio_barge_in.media]
+            mode = "echo_aware_onset"
+            "#,
+        )
+        .expect("cancel-capable policy should accept behavior mode");
+
+        assert_eq!(
+            config.audio_barge_in.media.mode,
+            AudioBargeInMode::EchoAwareOnset
+        );
+    }
+
+    #[test]
+    fn audio_barge_in_aec_mode_is_reserved_until_backend_exists() {
+        let error = VoiceQualityConfig::from_toml_str(
+            r#"
+            [voice_quality.barge_in]
+            enabled = true
+
+            [voice_quality.conversation_policy]
+            mode = "barge_in_cancel_only"
+
+            [voice_quality.audio_barge_in.media]
+            mode = "aec"
+            "#,
+        )
+        .expect_err("AEC mode should fail closed until a backend exists");
+
+        assert!(error
+            .to_string()
+            .contains("requires a configured AEC backend"));
     }
 
     #[test]
