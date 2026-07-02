@@ -184,6 +184,7 @@ pub enum TupleParseError {
 fn capability_from_eval(token: &str) -> Option<CapabilityKind> {
     match token {
         "chat" | "perf" => Some(CapabilityKind::Chat),
+        "completion" => Some(CapabilityKind::Completion),
         "tool_use" => Some(CapabilityKind::ToolUse),
         "asr" => Some(CapabilityKind::Transcription),
         "tts" => Some(CapabilityKind::Speech),

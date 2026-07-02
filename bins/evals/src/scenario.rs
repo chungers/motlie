@@ -144,6 +144,7 @@ impl ScenarioKind {
 pub enum CapabilityName {
     Embeddings,
     Chat,
+    Completion,
     ToolUse,
     Asr,
     Tts,
@@ -155,6 +156,7 @@ impl CapabilityName {
         match self {
             Self::Embeddings => "embeddings",
             Self::Chat => "chat",
+            Self::Completion => "completion",
             Self::ToolUse => "tool_use",
             Self::Asr => "asr",
             Self::Tts => "tts",

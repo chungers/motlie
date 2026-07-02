@@ -203,6 +203,7 @@ pub fn bundle_filter_capability_kind(capability: CapabilityName) -> CapabilityKi
     match capability {
         CapabilityName::Embeddings => CapabilityKind::Embeddings,
         CapabilityName::Chat => CapabilityKind::Chat,
+        CapabilityName::Completion => CapabilityKind::Completion,
         CapabilityName::ToolUse => CapabilityKind::ToolUse,
         CapabilityName::Asr => CapabilityKind::Transcription,
         CapabilityName::Tts => CapabilityKind::Speech,
@@ -555,6 +556,8 @@ pub fn build_record(
         );
     }
 
+    let selection_capability = coverage.capability.clone();
+
     ResultRecord {
         schema_version: RESULT_SCHEMA_VERSION,
         identity: IdentitySection {
@@ -579,7 +582,7 @@ pub fn build_record(
             ),
             artifact_files: prepared.downloaded_artifacts.clone(),
             scenario: context.scenario.id.clone(),
-            capability: context.scenario.capability().as_str().to_owned(),
+            capability: selection_capability,
         },
         profile: ProfileSection {
             name: context.profile.name.clone(),

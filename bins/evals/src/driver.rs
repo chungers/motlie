@@ -653,6 +653,7 @@ fn run_child_cell(
     run_command.args(["--snapshot-id", &snapshot.id]);
     run_command.args(["--cell-id", &cell.id]);
     run_command.args(["--depth", cell.depth.as_str()]);
+    run_command.args(["--coverage-capability", cell.capability.as_str()]);
     let artifact_quantization = cell_artifact_quantization_scheme(cell)?.as_str().to_owned();
     run_command.args(["--checkpoint-format", &cell.checkpoint_format]);
     run_command.args(["--artifact-quantization", &artifact_quantization]);
