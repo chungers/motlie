@@ -1,16 +1,15 @@
 # Curated Eval Coverage Report
 
 - input files: `3`
-- records: `33`
-- overall: `fail`
+- records: `37`
+- overall: `blocked`
 
 ## Outcome Summary
 
 | outcome | count |
 |---|---:|
 | `blocked` | 10 |
-| `failed` | 4 |
-| `passed` | 19 |
+| `passed` | 27 |
 
 ## Platform Notes
 
@@ -26,6 +25,8 @@ Decode throughput (tok/s) and TTFT (ms) per LLM bundle and quantization scheme, 
 | `gemma4_e2b` | `isq_q8` | mistralrs/HF | 9.6 | 20755 | — | — | — | — |
 | `gemma4_e4b` | `isq_q4` | mistralrs/HF | 7.3 | 26774 | — | — | — | — |
 | `gemma4_e4b` | `isq_q8` | mistralrs/HF | 6.3 | 41900 | — | — | — | — |
+| `ornith_1_0_35b_gguf` | `gguf_q4_k_m` | llama.cpp/GGUF | 19.7 | 12748 | 66.6 | 389 | — | — |
+| `ornith_1_0_35b_gguf` | `gguf_q8_0` | llama.cpp/GGUF | 16.7 | 12315 | 46.4 | 436 | — | — |
 | `qwen3_4b` | `isq_q4` | mistralrs/HF | 14.4 | 21227 | — | — | — | — |
 | `qwen3_4b` | `isq_q8` | mistralrs/HF | 11.2 | 34934 | — | — | — | — |
 | `qwen3_4b_gguf` | `gguf_q4_k_m` | llama.cpp/GGUF | 17.5 | 16836 | — | — | — | — |
@@ -36,8 +37,8 @@ Decode throughput (tok/s) and TTFT (ms) per LLM bundle and quantization scheme, 
 
 | family | accelerator | cells | passed | on_target | blocked | failed | mean decode tok/s |
 |---|---|---:|---:|---:|---:|---:|---:|
-| llama.cpp/GGUF | `cpu` | 10 | 8 | 8 | 0 | 2 | 17.5 |
-| llama.cpp/GGUF | `cuda` | 6 | 4 | 4 | 0 | 2 | — |
+| llama.cpp/GGUF | `cpu` | 10 | 10 | 10 | 0 | 0 | 18.0 |
+| llama.cpp/GGUF | `cuda` | 6 | 6 | 6 | 0 | 0 | 56.5 |
 | mistralrs/HF | `cpu` | 15 | 6 | 6 | 9 | 0 | 9.9 |
 
 ### Build provenance
@@ -46,8 +47,8 @@ Distinct build SHAs (`identity.git_sha`) of the on-target passing records backin
 
 | accelerator | build SHAs |
 |---|---|
-| `cpu` | `5a990b58`, `e350a09b` |
-| `cuda` | `e350a09b` |
+| `cpu` | `5a990b58`, `8079ae7b` |
+| `cuda` | `8079ae7b` |
 | `metal` | — |
 
 ## Coverage Accounting Matrix
@@ -62,6 +63,7 @@ Distinct build SHAs (`identity.git_sha`) of the on-target passing records backin
 | `gemma4_e4b` | `isq_q4` | `chat` | — | ⏳ | — | — | — |
 | `gemma4_e4b` | `bf16` | `tool_use` | — | ⏳ | — | — | — |
 | `ornith_1_0_35b_gguf` | `gguf_q4_k_m` | `chat` | — | ✅ | — | ✅ | — |
+| `ornith_1_0_35b_gguf` | `gguf_q4_k_m` | `completion` | — | ✅ | — | ✅ | — |
 | `ornith_1_0_35b_gguf` | `gguf_q4_k_m` | `tool_use` | — | ✅ | — | ✅ | — |
 | `qwen3_4b` | `isq_q4` | `chat` | — | ⏳ | — | — | — |
 | `qwen3_4b` | `bf16` | `tool_use` | — | ⏳ | — | — | — |
@@ -95,18 +97,22 @@ Distinct build SHAs (`identity.git_sha`) of the on-target passing records backin
 | `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782949898890-80870-5a990b58-spark-2f6e-aarch64-cpu` | `qwen3_4b_gguf` | `perf` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
 | `qwen3_4b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782949898890-80870-5a990b58-spark-2f6e-aarch64-cpu` | `qwen3_4b_gguf` | `tool_use` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
 | `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782949898890-80870-5a990b58-spark-2f6e-aarch64-cpu` | `qwen3_6_27b_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
-| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782959238266-236531-e350a09b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782959238266-236531-e350a09b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `failed` | `behavior_assertion_failed` |
-| `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782959238266-236531-e350a09b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
-| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782959238266-236531-e350a09b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782959238266-236531-e350a09b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `failed` | `behavior_assertion_failed` |
-| `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782959238266-236531-e350a09b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
-| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782960036816-254165-e350a09b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782960036816-254165-e350a09b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `failed` | `behavior_assertion_failed` |
-| `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782960036816-254165-e350a09b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
-| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782960036816-254165-e350a09b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782960036816-254165-e350a09b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `failed` | `behavior_assertion_failed` |
-| `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782960036816-254165-e350a09b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `local-cpu-aarch64` | `cpu` | `cpu` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
+| `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `aarch64` | `curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `dgx-spark` | `cuda` | `cuda` | `passed` | `none` |
 
 ## Latency Metrics
 
@@ -123,14 +129,14 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 | `qwen3_4b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 1291 | 14636 | 273 | 299 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_4b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 16836.00 | 16851.00 | 35487.00 | 36303.00 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | `qwen3_6_27b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 10100 | 638814 | 1954 | 1985 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 766 | 17413 | 1095 | 1130 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 344 | null | null | 64 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `chat` | 362 | 20122 | 911 | 948 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `chat` | 333 | null | null | 64 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 1092 | 103539 | 1826 | 1851 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 802 | null | null | 64 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `chat` | 1125 | 81371 | 1379 | 1429 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `chat` | 845 | null | null | 64 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 1080 | 66983 | 1270 | 1299 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 12747.67 | 12788.00 | 88608.33 | 91332.00 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `chat` | 1102 | 70530 | 1171 | 1213 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `spark-2f6e` | `perf` | null | null | null | null | 12314.67 | 12372.00 | 79608.00 | 87329.00 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `spark-2f6e` | `chat` | 335 | 30801 | 1987 | 2049 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `spark-2f6e` | `perf` | null | null | null | null | 388.67 | 393.00 | 12573.67 | 12603.00 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `spark-2f6e` | `chat` | 397 | 22813 | 1029 | 1069 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
+| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `spark-2f6e` | `perf` | null | null | null | null | 436.00 | 442.00 | 36737.67 | 36964.00 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 
 ## Model x Capability
 
@@ -140,7 +146,9 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 | `gemma` | `embeddings` | 1 | 0 | 0 | 0 |
 | `gemma` | `perf` | 4 | 0 | 2 | 0 |
 | `gemma` | `tool_use` | 0 | 0 | 2 | 0 |
-| `ornith` | `chat` | 4 | 4 | 0 | 0 |
+| `ornith` | `chat` | 4 | 0 | 0 | 0 |
+| `ornith` | `completion` | 4 | 0 | 0 | 0 |
+| `ornith` | `perf` | 4 | 0 | 0 | 0 |
 | `ornith` | `tool_use` | 4 | 0 | 0 | 0 |
 | `qwen3` | `chat` | 2 | 0 | 1 | 0 |
 | `qwen3` | `embeddings` | 0 | 0 | 1 | 0 |
@@ -151,10 +159,13 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 
 | capability | profile | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
-| `chat` | `dgx-spark` | 2 | 2 | 0 | 0 |
-| `chat` | `local-cpu-aarch64` | 4 | 2 | 3 | 0 |
+| `chat` | `dgx-spark` | 2 | 0 | 0 | 0 |
+| `chat` | `local-cpu-aarch64` | 4 | 0 | 3 | 0 |
+| `completion` | `dgx-spark` | 2 | 0 | 0 | 0 |
+| `completion` | `local-cpu-aarch64` | 2 | 0 | 0 | 0 |
 | `embeddings` | `local-cpu-aarch64` | 1 | 0 | 1 | 0 |
-| `perf` | `local-cpu-aarch64` | 7 | 0 | 3 | 0 |
+| `perf` | `dgx-spark` | 2 | 0 | 0 | 0 |
+| `perf` | `local-cpu-aarch64` | 9 | 0 | 3 | 0 |
 | `tool_use` | `dgx-spark` | 2 | 0 | 0 | 0 |
 | `tool_use` | `local-cpu-aarch64` | 3 | 0 | 3 | 0 |
 
@@ -162,17 +173,18 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 
 | capability | depth | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
-| `chat` | `smoke` | 6 | 4 | 3 | 0 |
+| `chat` | `smoke` | 6 | 0 | 3 | 0 |
+| `completion` | `smoke` | 4 | 0 | 0 | 0 |
 | `embeddings` | `smoke` | 1 | 0 | 1 | 0 |
-| `perf` | `smoke` | 7 | 0 | 3 | 0 |
+| `perf` | `smoke` | 11 | 0 | 3 | 0 |
 | `tool_use` | `smoke` | 5 | 0 | 3 | 0 |
 
 ## Backend x Profile
 
 | backend | profile | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
-| `llama_cpp` | `dgx-spark` | 4 | 2 | 0 | 0 |
-| `llama_cpp` | `local-cpu-aarch64` | 8 | 2 | 0 | 0 |
+| `llama_cpp` | `dgx-spark` | 8 | 0 | 0 | 0 |
+| `llama_cpp` | `local-cpu-aarch64` | 12 | 0 | 0 | 0 |
 | `mistralrs` | `local-cpu-aarch64` | 7 | 0 | 10 | 0 |
 
 ## Model x Quantization x Backend/Profile/Depth
@@ -183,10 +195,10 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 | `gemma` | `fp32` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 0 | 0 |
 | `gemma` | `isq_q4` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 2 | 0 | 0 | 0 |
 | `gemma` | `isq_q8` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 2 | 0 | 0 | 0 |
-| `ornith` | `gguf_q4_k_m` | `llama_cpp` | `dgx-spark` | `smoke` | 2 | 1 | 0 | 0 |
-| `ornith` | `gguf_q4_k_m` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 2 | 1 | 0 | 0 |
-| `ornith` | `gguf_q8_0` | `llama_cpp` | `dgx-spark` | `smoke` | 2 | 1 | 0 | 0 |
-| `ornith` | `gguf_q8_0` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 2 | 1 | 0 | 0 |
+| `ornith` | `gguf_q4_k_m` | `llama_cpp` | `dgx-spark` | `smoke` | 4 | 0 | 0 | 0 |
+| `ornith` | `gguf_q4_k_m` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 4 | 0 | 0 | 0 |
+| `ornith` | `gguf_q8_0` | `llama_cpp` | `dgx-spark` | `smoke` | 4 | 0 | 0 | 0 |
+| `ornith` | `gguf_q8_0` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 4 | 0 | 0 | 0 |
 | `qwen3` | `bf16` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 0 | 0 | 4 | 0 |
 | `qwen3` | `gguf_q4_k_m` | `llama_cpp` | `local-cpu-aarch64` | `smoke` | 4 | 0 | 0 | 0 |
 | `qwen3` | `isq_q4` | `mistralrs` | `local-cpu-aarch64` | `smoke` | 1 | 0 | 0 | 0 |
@@ -196,15 +208,13 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 
 | requested | resolved | passed | failed | blocked | skipped |
 |---|---|---:|---:|---:|---:|
-| `cpu` | `cpu` | 15 | 2 | 10 | 0 |
-| `cuda` | `cuda` | 4 | 2 | 0 | 0 |
+| `cpu` | `cpu` | 19 | 0 | 10 | 0 |
+| `cuda` | `cuda` | 8 | 0 | 0 | 0 |
 
 ## Blocker Rollups
 
 | reason | profile | count |
 |---|---|---:|
-| `behavior_assertion_failed` | `dgx-spark` | 2 |
-| `behavior_assertion_failed` | `local-cpu-aarch64` | 2 |
 | `child_run_failed` | `local-cpu-aarch64` | 10 |
 
 ## Missing Coverage
@@ -304,13 +314,11 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 | `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `apple-metal` | `no_record` |
 | `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
 | `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `no_record` |
-| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `local-cpu-aarch64` | `no_record` |
 | `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `apple-metal` | `no_record` |
-| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `dgx-spark` | `no_record` |
 | `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `no_record` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `apple-metal` | `no_record` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `local-cpu-x86_64` | `no_record` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `apple-metal` | `no_record` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `cuda-workstation` | `no_record` |
 | `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `no_record` |
 | `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `apple-metal` | `no_record` |
 | `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q4_k_m` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
@@ -318,13 +326,11 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 | `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `apple-metal` | `no_record` |
 | `ornith_1_0_35b_gguf__chat_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
 | `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `local-cpu-x86_64` | `no_record` |
-| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `local-cpu-aarch64` | `no_record` |
 | `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `apple-metal` | `no_record` |
-| `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `dgx-spark` | `no_record` |
 | `ornith_1_0_35b_gguf__bench_chat_startup__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `perf` | `smoke` | `cuda-workstation` | `no_record` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `local-cpu-x86_64` | `no_record` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `apple-metal` | `no_record` |
-| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `chat` | `smoke` | `cuda-workstation` | `no_record` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `local-cpu-x86_64` | `no_record` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `apple-metal` | `no_record` |
+| `ornith_1_0_35b_gguf__chat_completion_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `completion` | `smoke` | `cuda-workstation` | `no_record` |
 | `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `local-cpu-x86_64` | `no_record` |
 | `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `apple-metal` | `no_record` |
 | `ornith_1_0_35b_gguf__tool_use_weather_cel_smoke__smoke__gguf_q8_0` | `ornith_1_0_35b_gguf` | `tool_use` | `smoke` | `cuda-workstation` | `no_record` |
@@ -432,13 +438,11 @@ Streaming TTS note: `first_pcm_before_synth_complete` is meaningful as a streami
 
 | metric | reason | source | count |
 |---|---|---|---:|
-| `gpu_memory_peak_bytes` | `metric_not_instrumented` | `accelerator_sampler` | 23 |
-| `thinking_tokens_to_answer` | `metric_not_reported_by_backend` | `chat_response.timing.tokens_before_answer` | 4 |
-| `ttft_first_answer_token_ms` | `metric_not_reported_by_backend` | `chat_response.timing.first_answer_token_at` | 4 |
+| `gpu_memory_peak_bytes` | `metric_not_instrumented` | `accelerator_sampler` | 27 |
 | `warmup_ms` | `metric_not_instrumented` | `chat_runner` | 10 |
 
 ## Inputs
 
 - `evals/results/ornith-2026-07-01/curated-v2-smoke/curated-v2-smoke-1782949898890-80870-5a990b58-spark-2f6e-aarch64-cpu/results.jsonl`
-- `evals/results/ornith-2026-07-01/curated-v2-smoke/curated-v2-smoke-1782959238266-236531-e350a09b-spark-2f6e-aarch64-cuda/results.jsonl`
-- `evals/results/ornith-2026-07-01/curated-v2-smoke/curated-v2-smoke-1782960036816-254165-e350a09b-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/ornith-2026-07-01/curated-v2-smoke/curated-v2-smoke-1782970098195-439707-8079ae7b-spark-2f6e-aarch64-cpu/results.jsonl`
+- `evals/results/ornith-2026-07-01/curated-v2-smoke/curated-v2-smoke-1782971578478-486133-8079ae7b-spark-2f6e-aarch64-cuda/results.jsonl`

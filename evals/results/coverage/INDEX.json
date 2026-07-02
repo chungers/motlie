@@ -692,6 +692,26 @@
   {
     "bundle_id": "ornith_1_0_35b_gguf",
     "quant": "gguf_q4_k_m",
+    "capability": "completion",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "ornith_1_0_35b_gguf",
+    "quant": "gguf_q4_k_m",
+    "capability": "completion",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "ornith_1_0_35b_gguf",
+    "quant": "gguf_q4_k_m",
     "capability": "tool_use",
     "speech_mode": null,
     "profile": "dgx-spark",
@@ -723,6 +743,26 @@
     "bundle_id": "ornith_1_0_35b_gguf",
     "quant": "gguf_q8_0",
     "capability": "chat",
+    "speech_mode": null,
+    "profile": "local-cpu-aarch64",
+    "accelerator": "cpu",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "ornith_1_0_35b_gguf",
+    "quant": "gguf_q8_0",
+    "capability": "completion",
+    "speech_mode": null,
+    "profile": "dgx-spark",
+    "accelerator": "cuda",
+    "state": "validated",
+    "reason": null
+  },
+  {
+    "bundle_id": "ornith_1_0_35b_gguf",
+    "quant": "gguf_q8_0",
+    "capability": "completion",
     "speech_mode": null,
     "profile": "local-cpu-aarch64",
     "accelerator": "cpu",
